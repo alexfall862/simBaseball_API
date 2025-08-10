@@ -24,6 +24,20 @@ except Exception:
 
 
 # ----------------------------
+# Pull local env or Railway
+# ----------------------------
+
+try:
+    # Only load .env if present and we're not on Railway
+    on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    if not on_railway:
+        from dotenv import load_dotenv
+        load_dotenv()  # loads .env into os.environ
+except Exception:
+    pass
+
+
+# ----------------------------
 # Config
 # ----------------------------
 class Config:
@@ -206,33 +220,34 @@ def create_app(config_object=Config):
         # Use the current DB from the connection so you don't hardcode it
         sql_all = text("""
             SELECT
-                c.table_name,
-                c.column_name,
-                c.data_type,
-                c.is_nullable,
-                c.column_default,
-                c.character_maximum_length AS char_len,
-                c.numeric_precision AS num_precision,
-                c.numeric_scale AS num_scale
-            FROM information_schema.columns c
-            WHERE c.table_schema = DATABASE()
-            ORDER BY c.table_name, c.ordinal_position
+                c.TABLE_NAME  AS table_name,
+                c.COLUMN_NAME AS column_name,
+                c.DATA_TYPE   AS data_type,
+                c.IS_NULLABLE AS is_nullable,
+                c.COLUMN_DEFAULT AS column_default,
+                c.CHARACTER_MAXIMUM_LENGTH AS char_len,
+                c.NUMERIC_PRECISION AS num_precision,
+                c.NUMERIC_SCALE     AS num_scale
+            FROM information_schema.COLUMNS c
+            WHERE c.TABLE_SCHEMA = DATABASE()
+            ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
         """)
-    
+
+        # ONE TABLE
         sql_one = text("""
             SELECT
-                c.table_name,
-                c.column_name,
-                c.data_type,
-                c.is_nullable,
-                c.column_default,
-                c.character_maximum_length AS char_len,
-                c.numeric_precision AS num_precision,
-                c.numeric_scale AS num_scale
-            FROM information_schema.columns c
-            WHERE c.table_schema = DATABASE()
-              AND c.table_name = :table
-            ORDER BY c.ordinal_position
+                c.TABLE_NAME  AS table_name,
+                c.COLUMN_NAME AS column_name,
+                c.DATA_TYPE   AS data_type,
+                c.IS_NULLABLE AS is_nullable,
+                c.COLUMN_DEFAULT AS column_default,
+                c.CHARACTER_MAXIMUM_LENGTH AS char_len,
+                c.NUMERIC_PRECISION AS num_precision,
+                c.NUMERIC_SCALE     AS num_scale
+            FROM information_schema.COLUMNS c
+            WHERE c.TABLE_SCHEMA = DATABASE()
+            AND c.TABLE_NAME = :table
+            ORDER BY c.ORDINAL_POSITION
         """)
     
         rows = []
@@ -251,6 +266,24 @@ def create_app(config_object=Config):
             schema_map.setdefault(t, []).append(r)
         return jsonify(schema=schema_map, table_count=len(schema_map))
 
+    @app.get("/debug/db")
+    def debug_db():
+        if engine is None:
+            return jsonify(status="no_engine")
+        try:
+            with engine.connect() as conn:
+                db = conn.execute(text("SELECT DATABASE()")).scalar()
+                ver = conn.execute(text("SELECT VERSION()")).scalar()
+            return jsonify(status="ok", database=db, version=ver)
+        except Exception as e:
+            logging.exception("debug_db_failed")
+            return jsonify(status="error", message=str(e)), 500
+
+
+
+
+
+    return app
 
 # ----------------------------
 # Helpers
@@ -259,11 +292,7 @@ def _build_engine(app):
     db_url = app.config["DATABASE_URL"]
     if not db_url:
         return None
-
-    if "postgres" in db_url:
-        # (existing Postgres branch) ...
-        ...
-    elif "mysql" in db_url:
+    if "mysql" in db_url:
         # Enforce SELECT statement timeout at session level (MySQL 5.7.8+ / 8.0+)
         connect_args = {
             "init_command": f"SET SESSION MAX_EXECUTION_TIME={app.config['DB_STATEMENT_TIMEOUT_MS']}"
