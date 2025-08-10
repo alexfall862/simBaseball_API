@@ -1,6 +1,7 @@
 import os, json, logging, time, uuid, datetime
 from functools import wraps
 
+from flask import has_request_context
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException, BadRequest
@@ -171,10 +172,10 @@ def create_app(config_object=Config):
     def handle_http_ex(e: HTTPException):
         return jsonify(error=e.name, message=e.description), e.code
 
-    @app.errorhandler((SQLAlchemyError, DBAPIError))
-    def handle_db_ex(e):
-        logging.exception("Database error")
-        return jsonify(error="database_error", message=str(e.__cause__ or e)), 500
+@app.errorhandler(SQLAlchemyError)
+def handle_db_ex(e):
+    logging.exception("Database error")
+    return jsonify(error="database_error", message=str(getattr(e, "__cause__", e))), 500
 
     @app.errorhandler(Exception)
     def handle_generic_ex(e):
