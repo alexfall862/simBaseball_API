@@ -68,29 +68,40 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            "pid": os.getpid(),
         }
-        # attach request id if present
-        rid = getattr(g, "request_id", None)
-        if rid:
-            payload["request_id"] = rid
-        # include path/method if in request context
-        try:
-            payload["path"] = request.path
-            payload["method"] = request.method
-        except Exception:
-            pass
-        # add extras
+
+        # Only touch request/g if we actually have a request context
+        if has_request_context():
+            try:
+                payload["path"] = request.path
+                payload["method"] = request.method
+            except Exception:
+                pass
+            try:
+                rid = getattr(g, "request_id", None)
+                if rid:
+                    payload["request_id"] = rid
+            except Exception:
+                pass
+
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload)
-
 
 def setup_logging():
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
-    root.handlers = [handler]
+    # don't blow away existing gunicorn handlers; just add ours if none similar present
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        root.addHandler(handler)
+    else:
+        # replace formatters on existing stream handlers
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.setFormatter(JsonFormatter())
 
 
 # ----------------------------
