@@ -197,65 +197,59 @@ def create_app(config_object=Config):
             return jsonify(status="degraded", error=str(e)), 503
 
     # -------- Example: parameterized raw SQL endpoint --------
-    # GET /users?since=2025-01-01&limit=50
-    @app.get("/users")
+    @app.get("/schema")
     @soft_timeout(app)
-    def list_users():
-        """
-        Example template endpoint showing safe parameterized SQL with a connection
-        from the pool. Replace table/columns for your schema.
-
-        Query params:
-          - since: ISO date (defaults to 30 days ago)
-          - limit: max rows (defaults 50, max 500)
-        """
-        since_param = request.args.get("since")
-        limit_param = request.args.get("limit", "50")
-
-        # validate inputs
-        try:
-            if since_param:
-                since = datetime.datetime.fromisoformat(since_param).date()
-            else:
-                since = (datetime.date.today() - datetime.timedelta(days=30))
-            limit = max(1, min(500, int(limit_param)))
-        except Exception:
-            raise BadRequest("Invalid query params: use ISO date for 'since' and integer for 'limit'")
-
-        sql = text("""
-            SELECT id, name, email, created_at
-            FROM users
-            WHERE created_at >= :since
-            ORDER BY created_at DESC
-            LIMIT :limit
+    def schema():
+        table = request.args.get("table")
+        params = {"db": None, "table": None}
+    
+        # Use the current DB from the connection so you don't hardcode it
+        sql_all = text("""
+            SELECT
+                c.table_name,
+                c.column_name,
+                c.data_type,
+                c.is_nullable,
+                c.column_default,
+                c.character_maximum_length AS char_len,
+                c.numeric_precision AS num_precision,
+                c.numeric_scale AS num_scale
+            FROM information_schema.columns c
+            WHERE c.table_schema = DATABASE()
+            ORDER BY c.table_name, c.ordinal_position
         """)
-
+    
+        sql_one = text("""
+            SELECT
+                c.table_name,
+                c.column_name,
+                c.data_type,
+                c.is_nullable,
+                c.column_default,
+                c.character_maximum_length AS char_len,
+                c.numeric_precision AS num_precision,
+                c.numeric_scale AS num_scale
+            FROM information_schema.columns c
+            WHERE c.table_schema = DATABASE()
+              AND c.table_name = :table
+            ORDER BY c.ordinal_position
+        """)
+    
         rows = []
-        start = time.time()
-        try:
-            with engine.connect() as conn:
-                # Tip: for large responses, stream via server-side cursors.
-                result = conn.execute(sql, {"since": since, "limit": limit})
-                for r in result.mappings():
-                    rows.append({
-                        "id": r["id"],
-                        "name": r["name"],
-                        "email": r["email"],
-                        "created_at": r["created_at"].isoformat() if r["created_at"] else None
-                    })
-        except OperationalError as e:
-            # transient connection issue? Basic retry guidance:
-            raise e
-
-        latency_ms = int((time.time() - start) * 1000)
-        return jsonify(
-            request_id=g.request_id,
-            count=len(rows),
-            latency_ms=latency_ms,
-            data=rows
-        )
-
-    return app
+        with engine.connect() as conn:
+            if table:
+                params["table"] = table
+                result = conn.execute(sql_one, params)
+            else:
+                result = conn.execute(sql_all, params)
+            rows = [dict(r._mapping) for r in result]
+    
+        # Fold into {table_name: [ {column...}, ... ], ...}
+        schema_map = {}
+        for r in rows:
+            t = r.pop("table_name")
+            schema_map.setdefault(t, []).append(r)
+        return jsonify(schema=schema_map, table_count=len(schema_map))
 
 
 # ----------------------------
