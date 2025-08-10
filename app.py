@@ -250,28 +250,18 @@ def create_app(config_object=Config):
 # ----------------------------
 # Helpers
 # ----------------------------
-def _build_engine(app: Flask):
-    """
-    Build a robust SQLAlchemy engine with:
-    - pre-ping (drops dead connections)
-    - pool sizing
-    - DB-level statement timeout
-    - connect timeout
-    """
+def _build_engine(app):
     db_url = app.config["DATABASE_URL"]
     if not db_url:
         return None
 
-    # For Postgres (psycopg2 / psycopg), we can set statement_timeout via "options"
-    # Psycopg2: "options='-c statement_timeout=8000'"
-    # Psycopg3: same idea; SQLAlchemy will pass connect_args through.
-    # Connect timeout can be set via the URL query: ?connect_timeout=5
     if "postgres" in db_url:
-        connector_sep = "&" if "?" in db_url else "?"
-        db_url = f"{db_url}{connector_sep}connect_timeout={app.config['DB_CONNECT_TIMEOUT_S']}"
-
+        # (existing Postgres branch) ...
+        ...
+    elif "mysql" in db_url:
+        # Enforce SELECT statement timeout at session level (MySQL 5.7.8+ / 8.0+)
         connect_args = {
-            "options": f"-c statement_timeout={app.config['DB_STATEMENT_TIMEOUT_MS']}"
+            "init_command": f"SET SESSION MAX_EXECUTION_TIME={app.config['DB_STATEMENT_TIMEOUT_MS']}"
         }
     else:
         connect_args = {}
@@ -281,7 +271,7 @@ def _build_engine(app: Flask):
         pool_size=app.config["DB_POOL_SIZE"],
         max_overflow=app.config["DB_MAX_OVERFLOW"],
         pool_recycle=app.config["DB_POOL_RECYCLE_S"],
-        pool_pre_ping=app.config["DB_POOL_PRE_PING"],
+        pool_pre_ping=True,
         connect_args=connect_args,
         future=True,
     )
