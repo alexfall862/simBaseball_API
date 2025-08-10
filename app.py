@@ -92,17 +92,16 @@ class JsonFormatter(logging.Formatter):
 
 def setup_logging():
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
-    # don't blow away existing gunicorn handlers; just add ours if none similar present
+    root.setLevel(logging.INFO)  # ensure it's exactly INFO
+    formatter = JsonFormatter()
     if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
-        root.addHandler(handler)
+        h = logging.StreamHandler()
+        h.setFormatter(formatter)
+        root.addHandler(h)
     else:
-        # replace formatters on existing stream handlers
         for h in root.handlers:
             if isinstance(h, logging.StreamHandler):
-                h.setFormatter(JsonFormatter())
+                h.setFormatter(formatter)
 
 
 # ----------------------------
@@ -172,10 +171,10 @@ def create_app(config_object=Config):
     def handle_http_ex(e: HTTPException):
         return jsonify(error=e.name, message=e.description), e.code
 
-@app.errorhandler(SQLAlchemyError)
-def handle_db_ex(e):
-    logging.exception("Database error")
-    return jsonify(error="database_error", message=str(getattr(e, "__cause__", e))), 500
+    @app.errorhandler(SQLAlchemyError)
+    def handle_db_ex(e):
+        logging.exception("Database error")
+        return jsonify(error="database_error", message=str(getattr(e, "__cause__", e))), 500
 
     @app.errorhandler(Exception)
     def handle_generic_ex(e):
