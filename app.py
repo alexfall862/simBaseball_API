@@ -146,6 +146,11 @@ def create_app(config_object=Config):
     setup_logging()
     app = Flask(__name__)
     app.config.from_object(config_object)
+    app.config["DATABASE_URL"] = app.config.get("DATABASE_URL") or os.getenv("DATABASE_URL")
+
+    # (optional: hard-fail in prod)
+    if os.getenv("RAILWAY_ENVIRONMENT") and not app.config["DATABASE_URL"]:
+        raise RuntimeError("DATABASE_URL not set at runtime on Railway")
 
     from admin import admin_bp
     # Secure session cookie
@@ -336,7 +341,7 @@ def create_app(config_object=Config):
 # Helpers
 # ----------------------------
 def _build_engine(app):
-    db_url = app.config.get("DATABASE_URL")
+    db_url = app.config.get("DATABASE_URL") or os.getenv("DATABASE_URL")
     if not db_url:
         logging.getLogger("app").warning("DATABASE_URL missing at runtime")
         return None
