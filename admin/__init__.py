@@ -2,6 +2,7 @@
 import os, re, logging, time
 from flask import Blueprint, request, jsonify, session, render_template
 from sqlalchemy import text
+from flask import current_app
 
 # This module expects your app.py to create an `engine` in create_app()
 # We'll get the engine via current_app in handlers.
@@ -134,11 +135,7 @@ def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
         sql = f"{sql.rstrip(';')} LIMIT {limit}"
 
     try:
-        # Grab the engine created in your app factory
-        engine = cap.extensions.get("sqlalchemy_engine") if hasattr(cap, "extensions") else None
-        if engine is None:
-            # fallback: you stored it in `create_app`; attach it here if not already
-            engine = getattr(cap, "engine", None)
+        engine = getattr(current_app, "engine", None)
         if engine is None:
             return jsonify(error="db_not_configured"), 503
 

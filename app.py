@@ -200,6 +200,12 @@ def create_app(config_object=Config):
         logging.getLogger("app").warning("DATABASE_URL not set. /readyz will fail.")
     engine = _build_engine(app)
 
+    # make the engine visible to blueprints
+    app.engine = engine
+    # (optional) also register in extensions for frameworks/tools that expect it there
+    app.extensions = getattr(app, "extensions", {})
+    app.extensions["sqlalchemy_engine"] = engine
+
     # Prometheus metrics
     if app.config["ENABLE_PROMETHEUS"] and PROMETHEUS_AVAILABLE:
         PrometheusMetrics(app, group_by='endpoint')
