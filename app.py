@@ -144,13 +144,17 @@ class SimpleRateLimiter:
 # ----------------------------
 def create_app(config_object=Config):
     setup_logging()
+    log = logging.getLogger("app")
+    log.info("stage: flask_start")
+
     app = Flask(__name__)
     app.config.from_object(config_object)
     app.config["DATABASE_URL"] = app.config.get("DATABASE_URL") or os.getenv("DATABASE_URL")
+    log.info("stage: config_loaded")
 
     # (optional: hard-fail in prod)
     if os.getenv("RAILWAY_ENVIRONMENT") and not app.config["DATABASE_URL"]:
-        raise RuntimeError("DATABASE_URL not set at runtime on Railway")
+        log.warning("DATABASE_URL not set at runtime on Railway")
 
     from admin import admin_bp
     # Secure session cookie
@@ -163,7 +167,7 @@ def create_app(config_object=Config):
 
     # Mount the admin UI/API under /admin
     app.register_blueprint(admin_bp)
-
+    log.info("stage: admin_bp_ok") 
     # Optional: a tiny root + favicon to keep logs clean
     @app.get("/")
     def root():
@@ -176,6 +180,7 @@ def create_app(config_object=Config):
 
     # CORS
     CORS(app, resources={r"/*": {"origins": app.config["CORS_ORIGINS"]}})
+    log.info("stage: cors_ok")
 
     # Request ID middleware
     @app.before_request
@@ -201,7 +206,7 @@ def create_app(config_object=Config):
     if not app.config["DATABASE_URL"]:
         logging.getLogger("app").warning("DATABASE_URL not set. /readyz will fail.")
     engine = _build_engine(app)
-
+    log.info("stage: engine_ok")
     logging.getLogger("app").info(
         "Boot: PORT=%s DBURL_present=%s",
         os.getenv("PORT"),
@@ -229,8 +234,13 @@ def create_app(config_object=Config):
 
     # Prometheus metrics
     if app.config["ENABLE_PROMETHEUS"] and PROMETHEUS_AVAILABLE:
-        PrometheusMetrics(app, group_by='endpoint')
-        logging.getLogger("app").info("Prometheus metrics enabled at /metrics")
+        try:
+            PrometheusMetrics(app, group_by="endpoint")
+            log.info("Prometheus metrics enabled at /metrics")
+            log.info("stage: prometheus_ok")
+
+        except Exception:
+            log.exception("prometheus_init_failed")
 
     # -------- Error Handlers --------
     @app.errorhandler(HTTPException)
@@ -261,6 +271,7 @@ def create_app(config_object=Config):
             return jsonify(status="ready")
         except Exception as e:
             return jsonify(status="degraded", error=str(e)), 503
+    log.info("stage: handlers_ok")
 
     # -------- Example: parameterized raw SQL endpoint --------
     @app.get("/schema")
@@ -317,26 +328,8 @@ def create_app(config_object=Config):
             t = r.pop("table_name")
             schema_map.setdefault(t, []).append(r)
         return jsonify(schema=schema_map, table_count=len(schema_map))
-
-    @app.get("/debug/db")
-    def debug_db():
-        if engine is None:
-            return jsonify(status="no_engine")
-        try:
-            with engine.connect() as conn:
-                db = conn.execute(text("SELECT DATABASE()")).scalar()
-                ver = conn.execute(text("SELECT VERSION()")).scalar()
-            return jsonify(status="ok", database=db, version=ver)
-        except Exception as e:
-            logging.exception("debug_db_failed")
-            return jsonify(status="error", message=str(e)), 500
-
-
-
-
-
+    log.info("stage: routes_ok") 
     return app
-
 # ----------------------------
 # Helpers
 # ----------------------------
