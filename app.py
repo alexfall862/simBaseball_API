@@ -28,11 +28,9 @@ except Exception:
 # ----------------------------
 
 try:
-    # Only load .env if present and we're not on Railway
-    on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    if not on_railway:
+    if os.path.exists(".env"):
         from dotenv import load_dotenv
-        load_dotenv(override=False)  # loads .env into os.environ
+        load_dotenv(override=False)  # NEVER override Railway runtime env
 except Exception:
     pass
 
@@ -171,8 +169,6 @@ def create_app(config_object=Config):
         return ("", 204)
 
 
-
-
     # CORS
     CORS(app, resources={r"/*": {"origins": app.config["CORS_ORIGINS"]}})
 
@@ -200,6 +196,25 @@ def create_app(config_object=Config):
     if not app.config["DATABASE_URL"]:
         logging.getLogger("app").warning("DATABASE_URL not set. /readyz will fail.")
     engine = _build_engine(app)
+
+    logging.getLogger("app").info(
+        "Boot: PORT=%s DBURL_present=%s",
+        os.getenv("PORT"),
+        bool(os.getenv("DATABASE_URL")),
+    )
+
+    @app.get("/debug/db")
+    def debug_db():
+        if app.engine is None:
+            return jsonify(status="no_engine"), 503
+        try:
+            with app.engine.connect() as conn:
+                db = conn.execute(text("SELECT DATABASE()")).scalar()
+                ver = conn.execute(text("SELECT VERSION()")).scalar()
+            return jsonify(status="ok", database=db, version=ver)
+        except Exception as e:
+            logging.exception("debug_db_failed")
+            return jsonify(status="error", message=str(e)), 500
 
     # make the engine visible to blueprints
     app.engine = engine
@@ -321,8 +336,9 @@ def create_app(config_object=Config):
 # Helpers
 # ----------------------------
 def _build_engine(app):
-    db_url = app.config["DATABASE_URL"]
+    db_url = app.config.get("DATABASE_URL")
     if not db_url:
+        logging.getLogger("app").warning("DATABASE_URL missing at runtime")
         return None
 
     # SAFETY NET: force PyMySQL if someone pasted mysql://
@@ -330,11 +346,22 @@ def _build_engine(app):
         db_url = "mysql+pymysql://" + db_url[len("mysql://"):]
         logging.getLogger("app").info("Normalized DATABASE_URL to PyMySQL")
 
+    # Add helpful defaults if missing
+    if "charset=" not in db_url:
+        sep = "&" if "?" in db_url else "?"
+        db_url = f"{db_url}{sep}charset=utf8mb4"
+    if "connect_timeout=" not in db_url:
+        sep = "&" if "?" in db_url else "?"
+        db_url = f"{db_url}{sep}connect_timeout={app.config['DB_CONNECT_TIMEOUT_S']}"
+
     connect_args = {}
     if "mysql" in db_url:
         connect_args = {
             "init_command": f"SET SESSION MAX_EXECUTION_TIME={app.config['DB_STATEMENT_TIMEOUT_MS']}",
         }
+
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        connect_args["ssl"] = {}
 
     engine = create_engine(
         db_url,
