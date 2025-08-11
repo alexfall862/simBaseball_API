@@ -106,6 +106,7 @@ class JsonFormatter(logging.Formatter):
 
 def setup_logging():
     logging.getLogger("app").info("App boot: PID=%s, PORT=%s, DATABASE_URL set=%s", os.getpid(), os.getenv("PORT"), bool(os.getenv("DATABASE_URL")))
+    logging.getLogger("app").info("ADMIN_PASSWORD set? %s", bool(os.getenv("ADMIN_PASSWORD")))
     root = logging.getLogger()
     root.setLevel(logging.INFO)  # ensure it's exactly INFO
     formatter = JsonFormatter()
