@@ -19,6 +19,7 @@ admin_bp = Blueprint(
 # Allowed statement patterns
 SQL_READ_ALLOWED  = re.compile(r"^\s*(SELECT|SHOW|DESCRIBE|EXPLAIN)\b", re.I)
 SQL_WRITE_ALLOWED = re.compile(r"^\s*(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|RENAME|REPLACE)\b", re.I)
+SQL_SELECT_ONLY = re.compile(r"^\s*SELECT\b", re.I)
 
 # Preset queries (you can move to JSON later)
 PRESET_QUERIES = {
@@ -33,14 +34,12 @@ PRESET_QUERIES = {
             SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE()
-            ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC
-            LIMIT 50
         """,
         "mode": "read",
     },
     "recent_users": {
         "label": "Recent users",
-        "sql": "SELECT id, name, email, created_at FROM users ORDER BY created_at DESC LIMIT 50",
+        "sql": "SELECT id, name, email, created_at FROM users ORDER BY created_at DESC",
         "mode": "read",
     },
 }
@@ -140,7 +139,7 @@ def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
     )
 
     # Enforce LIMIT for SELECTs if missing
-    if SQL_READ_ALLOWED.match(sql) and not re.search(r"\bLIMIT\s+\d+", sql, flags=re.I):
+    if SQL_SELECT_ONLY.match(sql) and not re.search(r"\bLIMIT\s+\d+\b", sql, flags=re.I):
         sql = f"{sql.rstrip(';')} LIMIT {limit}"
 
     try:
