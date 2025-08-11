@@ -105,6 +105,7 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload)
 
 def setup_logging():
+    logging.getLogger("app").info("App boot: PID=%s, PORT=%s, DATABASE_URL set=%s", os.getpid(), os.getenv("PORT"), bool(os.getenv("DATABASE_URL")))
     root = logging.getLogger()
     root.setLevel(logging.INFO)  # ensure it's exactly INFO
     formatter = JsonFormatter()
@@ -146,6 +147,30 @@ def create_app(config_object=Config):
     setup_logging()
     app = Flask(__name__)
     app.config.from_object(config_object)
+
+    from admin import admin_bp
+    # Secure session cookie
+    app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=not app.debug,  # secure cookies in prod
+    )
+
+    # Mount the admin UI/API under /admin
+    app.register_blueprint(admin_bp)
+
+    # Optional: a tiny root + favicon to keep logs clean
+    @app.get("/")
+    def root():
+        return jsonify(status="up")
+
+    @app.get("/favicon.ico")
+    def favicon():
+        return ("", 204)
+
+
+
 
     # CORS
     CORS(app, resources={r"/*": {"origins": app.config["CORS_ORIGINS"]}})

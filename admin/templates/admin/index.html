@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DB Admin</title>
+  <link rel="stylesheet" href="{{ url_for('admin.static', filename='styles.css') }}">
+</head>
+<body>
+  <main>
+    <h2>DB Admin</h2>
+
+    <section class="card">
+      <h3>Login</h3>
+      <form id="login" onsubmit="return false">
+        <input id="pw" type="password" placeholder="Admin password (leave empty if disabled)" />
+        <button id="btn-login">Login</button>
+        <button id="btn-logout" class="muted" title="Clear session">Logout</button>
+      </form>
+      <pre id="auth-out" class="muted"></pre>
+    </section>
+
+    <section class="card">
+      <h3>Presets</h3>
+      <div class="row">
+        <select id="preset"></select>
+        <button id="btn-preset">Run preset</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Custom SQL</h3>
+      <div class="row">
+        <label>Mode:
+          <select id="mode">
+            <option value="read">Read-only</option>
+            <option value="write">Write (if enabled)</option>
+          </select>
+        </label>
+        <label>Row cap:
+          <input id="limit" type="number" min="1" max="5000" value="100" />
+        </label>
+        <label>
+          <input id="dry" type="checkbox" checked />
+          Dry run (writes)
+        </label>
+      </div>
+      <textarea id="sql" placeholder="SELECT * FROM users LIMIT 10;"></textarea>
+      <button id="btn-run">Run</button>
+    </section>
+
+    <section class="card">
+      <h3>Result</h3>
+      <pre id="out"></pre>
+    </section>
+  </main>
+
+  <script src="{{ url_for('admin.static', filename='app.js') }}" defer></script>
+</body>
+</html>
