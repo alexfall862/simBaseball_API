@@ -78,6 +78,15 @@ def admin_logout():
     session.clear()
     return jsonify(ok=True)
 
+@admin_bp.get("/me")
+def admin_me():
+    from flask import current_app
+    return jsonify(
+       admin=session.get("admin"),
+       secure=current_app.config.get("SESSION_COOKIE_SECURE"),
+       samesite=current_app.config.get("SESSION_COOKIE_SAMESITE"),
+    )
+
 @admin_bp.get("/presets")
 def admin_presets():
     guard = _require_admin()

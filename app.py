@@ -32,7 +32,7 @@ try:
     on_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
     if not on_railway:
         from dotenv import load_dotenv
-        load_dotenv()  # loads .env into os.environ
+        load_dotenv(override=False)  # loads .env into os.environ
 except Exception:
     pass
 
@@ -324,13 +324,17 @@ def _build_engine(app):
     db_url = app.config["DATABASE_URL"]
     if not db_url:
         return None
+
+    # SAFETY NET: force PyMySQL if someone pasted mysql://
+    if db_url.startswith("mysql://"):
+        db_url = "mysql+pymysql://" + db_url[len("mysql://"):]
+        logging.getLogger("app").info("Normalized DATABASE_URL to PyMySQL")
+
+    connect_args = {}
     if "mysql" in db_url:
-        # Enforce SELECT statement timeout at session level (MySQL 5.7.8+ / 8.0+)
         connect_args = {
-            "init_command": f"SET SESSION MAX_EXECUTION_TIME={app.config['DB_STATEMENT_TIMEOUT_MS']}"
+            "init_command": f"SET SESSION MAX_EXECUTION_TIME={app.config['DB_STATEMENT_TIMEOUT_MS']}",
         }
-    else:
-        connect_args = {}
 
     engine = create_engine(
         db_url,
