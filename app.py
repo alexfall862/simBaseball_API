@@ -243,6 +243,14 @@ def create_app(config_object=Config):
             log.exception("prometheus_init_failed")
 
     # -------- Error Handlers --------
+    @app.get("/routes")
+    def _routes():
+        from flask import Response
+        lines = []
+        for r in sorted(app.url_map.iter_rules(), key=lambda x: x.rule):
+            lines.append(f"{','.join(sorted(r.methods))}  {r.rule}  -> {r.endpoint}")
+        return Response("\n".join(lines), mimetype="text/plain")
+    
     @app.errorhandler(HTTPException)
     def handle_http_ex(e: HTTPException):
         return jsonify(error=e.name, message=e.description), e.code
