@@ -286,56 +286,59 @@ def create_app(config_object=Config):
     @soft_timeout(app)
     def schema():
         table = request.args.get("table")
-        params = {"db": None, "table": None}
-    
-        # Use the current DB from the connection so you don't hardcode it
-        sql_all = text("""
-            SELECT
-                c.TABLE_NAME  AS table_name,
-                c.COLUMN_NAME AS column_name,
-                c.DATA_TYPE   AS data_type,
-                c.IS_NULLABLE AS is_nullable,
-                c.COLUMN_DEFAULT AS column_default,
-                c.CHARACTER_MAXIMUM_LENGTH AS char_len,
-                c.NUMERIC_PRECISION AS num_precision,
-                c.NUMERIC_SCALE     AS num_scale
-            FROM information_schema.COLUMNS c
-            WHERE c.TABLE_SCHEMA = DATABASE()
-            ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
-        """)
 
-        # ONE TABLE
-        sql_one = text("""
-            SELECT
-                c.TABLE_NAME  AS table_name,
-                c.COLUMN_NAME AS column_name,
-                c.DATA_TYPE   AS data_type,
-                c.IS_NULLABLE AS is_nullable,
-                c.COLUMN_DEFAULT AS column_default,
-                c.CHARACTER_MAXIMUM_LENGTH AS char_len,
-                c.NUMERIC_PRECISION AS num_precision,
-                c.NUMERIC_SCALE     AS num_scale
-            FROM information_schema.COLUMNS c
-            WHERE c.TABLE_SCHEMA = DATABASE()
-            AND c.TABLE_NAME = :table
-            ORDER BY c.ORDINAL_POSITION
-        """)
-    
-        rows = []
-        with engine.connect() as conn:
-            if table:
-                params["table"] = table
-                result = conn.execute(sql_one, params)
-            else:
-                result = conn.execute(sql_all, params)
-            rows = [dict(r._mapping) for r in result]
-    
-        # Fold into {table_name: [ {column...}, ... ], ...}
+        if table:
+            sql = text("""
+                SELECT
+                    c.TABLE_NAME  AS table_name,
+                    c.COLUMN_NAME AS column_name,
+                    c.DATA_TYPE   AS data_type,
+                    c.IS_NULLABLE AS is_nullable,
+                    c.COLUMN_DEFAULT AS column_default,
+                    c.CHARACTER_MAXIMUM_LENGTH AS char_len,
+                    c.NUMERIC_PRECISION AS num_precision,
+                    c.NUMERIC_SCALE     AS num_scale
+                FROM information_schema.COLUMNS c
+                WHERE c.TABLE_SCHEMA = DATABASE()
+                AND c.TABLE_NAME = :table
+                ORDER BY c.ORDINAL_POSITION
+            """)
+            params = {"table": table}
+        else:
+            sql = text("""
+                SELECT
+                    c.TABLE_NAME  AS table_name,
+                    c.COLUMN_NAME AS column_name,
+                    c.DATA_TYPE   AS data_type,
+                    c.IS_NULLABLE AS is_nullable,
+                    c.COLUMN_DEFAULT AS column_default,
+                    c.CHARACTER_MAXIMUM_LENGTH AS char_len,
+                    c.NUMERIC_PRECISION AS num_precision,
+                    c.NUMERIC_SCALE     AS num_scale
+                FROM information_schema.COLUMNS c
+                WHERE c.TABLE_SCHEMA = DATABASE()
+                ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+            """)
+            params = {}
+
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(sql, params)
+                rows = [dict(r._mapping) for r in result]
+        except Exception as e:
+            logging.exception("schema_query_failed")
+            return jsonify(error="schema_query_failed", message=str(e)), 500
+
+        if table and not rows:
+            return jsonify(error="table_not_found",
+                        message=f"Table '{table}' not found"), 404
+
         schema_map = {}
         for r in rows:
             t = r.pop("table_name")
             schema_map.setdefault(t, []).append(r)
         return jsonify(schema=schema_map, table_count=len(schema_map))
+
     log.info("stage: routes_ok") 
     return app
 # ----------------------------
