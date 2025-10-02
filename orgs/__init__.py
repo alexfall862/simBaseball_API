@@ -29,6 +29,15 @@ def _row_to_dict(row):
 # row is a RowMapping with ._mapping in SQLAlchemy 2.x
     return dict(row._mapping)
 
+def reflect_view(view_name: str):
+    engine = get_engine()
+    md = MetaData()
+    vw = Table(view_name, md, autoload_with=engine)
+    return vw
+
+@orgs_bp.get("/org_report")
+def get_org_details(org: str):
+    return {"is": "working"}
 
 
 
