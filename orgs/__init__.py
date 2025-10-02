@@ -37,7 +37,8 @@ def reflect_view(view_name: str):
 
 @orgs_bp.get("/org_report")
 def get_org_details(org: str):
-    return {"is": "working"}
+    value = {"is": "working"}
+    return jsonify(value), 200
 
 
 
