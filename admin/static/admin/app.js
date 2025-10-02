@@ -68,3 +68,55 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-run").addEventListener("click", runSQL);
   loadPresets();
 });
+
+document.addEventListener('DOMContentLoaded', () => {
+  // --- Organizations dropdown wiring ---
+  const orgsSelect = document.getElementById('orgs-select');
+  const orgsRefresh = document.getElementById('orgs-refresh');
+  const orgsResult = document.getElementById('orgs-result');
+  async function fetchJSON(url) {
+    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  }
+  async function loadOrgs() {
+    try {
+      orgsSelect.innerHTML = '<option value="" disabled selected>Loading...</option>';
+      const abbrevs = await fetchJSON('/api/v1/organizations');
+      orgsSelect.innerHTML = '<option value="" disabled selected>Select an organization</option>' +
+        abbrevs.map(a => `<option value="${a}">${a}</option>`).join('');
+    } catch (err) {
+      console.error('Failed to load organizations', err);
+      orgsSelect.innerHTML = '<option value="" disabled selected>Error loading orgs</option>';
+    }
+  }
+  function renderKV(tableData) {
+    if (!Array.isArray(tableData) || tableData.length === 0) {
+      orgsResult.innerHTML = '<p>No results.</p>';
+      return;
+    }
+    const row = tableData[0];
+    const rows = Object.keys(row).map(k => `
+<div class="kv-row"><div class="kv-key">${k}</div><div class="kv-val">${String(row[k])}</div></div>
+`).join('');
+    orgsResult.innerHTML = `<div class="kv-table">${rows}</div>`;
+  }
+  async function loadOrg(org) {
+    if (!org) return;
+    try {
+      const data = await fetchJSON(`/api/v1/${encodeURIComponent(org)}/`);
+      renderKV(data);
+    } catch (err) {
+      console.error('Failed to load org', err);
+      orgsResult.innerHTML = '<p>Error fetching organization.</p>';
+    }
+  }
+  if (orgsSelect && orgsRefresh && orgsResult) {
+    loadOrgs();
+    orgsRefresh.addEventListener('click', loadOrgs);
+    orgsSelect.addEventListener('change', () => {
+      const val = orgsSelect.value;
+      loadOrg(val);
+    });
+  }
+});

@@ -6,6 +6,8 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException, BadRequest
 
+
+
 # ---- Rate limiting (lightweight) ----
 # Using flask-limiter is great; if you prefer zero extra deps, here's a tiny in-memory limiter.
 # Swap for flask-limiter in real prod or Redis-backed limiters in multi-instance deployments.
@@ -155,6 +157,16 @@ def create_app(config_object=Config):
     # (optional: hard-fail in prod)
     if os.getenv("RAILWAY_ENVIRONMENT") and not app.config["DATABASE_URL"]:
         log.warning("DATABASE_URL not set at runtime on Railway")
+
+
+    #Register Orgs Blueprint
+    try: 
+        from orgs import orgs_bp
+        app.register_blueprint(orgs_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register orgs blueprint: %s", e)
+
+
 
     from admin import admin_bp
     # Secure session cookie
