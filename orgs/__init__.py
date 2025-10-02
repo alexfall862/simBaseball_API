@@ -37,8 +37,15 @@ def reflect_view(view_name: str):
 
 @orgs_bp.get("/org_report")
 def get_org_details(org: str):
-    value = {"is": "working"}
-    return jsonify(value), 200
+    try:
+        vw = reflect_view("organization_report")
+        org_upper = (org or "").upper()
+        stmt = select(vw).where(vw.c.org_abbrev == org_upper).limit(1)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return jsonify([] if not row else [dict(row._mapping)]), 200
+    except SQLAlchemyError:
+        return jsonify({"error": {"code": "db_unavailable", "message": "Database temporarily unavailable"}}), 503
 
 
 
