@@ -36,11 +36,10 @@ def reflect_view(view_name: str):
     return vw
 
 @orgs_bp.get("/org_report")
-def get_org_details(org: str):
+def get_org_details():
     try:
         vw = reflect_view("organization_report")
-        org_upper = (org or "").upper()
-        stmt = select(vw).where(vw.c.org_abbrev == org_upper).limit(1)
+        stmt = select(vw)
         with get_engine().connect() as conn:
             row = conn.execute(stmt).first()
         return jsonify([] if not row else [dict(row._mapping)]), 200
