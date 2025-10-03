@@ -22,8 +22,12 @@ def _reflect_orgs_table():
         setattr(orgs_bp, "_orgs_table", orgs_table)
     return getattr(orgs_bp, "_orgs_table")
 
-
-
+def _serialize(value):
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)  # per your preference to return as strings
+    return value
 
 def _row_to_dict(row):
 # row is a RowMapping with ._mapping in SQLAlchemy 2.x
@@ -35,16 +39,25 @@ def reflect_view(view_name: str):
     vw = Table(view_name, md, autoload_with=engine)
     return vw
 
-@orgs_bp.get("/org_report")
-def get_org_details():
+
+@orgs_bp.get("/org_report/")
+# @rate_limit()  # uncomment to apply your default rate limits
+def get_org_report():
+    """
+    Return all rows from the MySQL view `organization_report` as JSON.
+    No URL params; this just dumps the full view.
+    """
     try:
         vw = reflect_view("organization_report")
         stmt = select(vw)
         with get_engine().connect() as conn:
-            row = conn.execute(stmt)
-        return jsonify([] if not row else [dict(row._mapping)]), 200
+            rows = conn.execute(stmt).all()
+        data = [_row_to_dict(r) for r in rows]
+        return jsonify(data), 200
     except SQLAlchemyError:
-        return jsonify({"error": {"code": "db_unavailable", "message": "Database temporarily unavailable"}}), 503
+        return jsonify({
+            "error": {"code": "db_unavailable", "message": "Database temporarily unavailable"}
+        }), 503
 
 @orgs_bp.get("/organizations")
 # @rate_limit() # Reuse your project’s default limiter if available
