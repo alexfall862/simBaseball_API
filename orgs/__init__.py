@@ -41,12 +41,10 @@ def get_org_details():
         vw = reflect_view("organization_report")
         stmt = select(vw)
         with get_engine().connect() as conn:
-            row = conn.execute(stmt).first()
+            row = conn.execute(stmt)
         return jsonify([] if not row else [dict(row._mapping)]), 200
     except SQLAlchemyError:
         return jsonify({"error": {"code": "db_unavailable", "message": "Database temporarily unavailable"}}), 503
-
-
 
 @orgs_bp.get("/organizations")
 # @rate_limit() # Reuse your project’s default limiter if available
