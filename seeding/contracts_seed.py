@@ -17,7 +17,7 @@ VET_MIN_SALARY = 1_000_000
 VET_MAX_SALARY = 20_000_000
 
 
-def seed_initial_contracts():
+def seed_initial_contracts(engine=None):
     """
     One-time contract seeding for launch.
 
