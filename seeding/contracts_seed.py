@@ -3,7 +3,7 @@
 import random
 from decimal import Decimal
 
-from sqlalchemy import MetaData, Table, select, delete, update
+from sqlalchemy import MetaData, Table, select, and_, delete, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine  # you already use this in other modules
@@ -11,8 +11,9 @@ from db import get_engine  # you already use this in other modules
 
 STARTING_LEAGUE_YEAR = 2026
 
-MINOR_SALARY = Decimal("50000.00")
-PRE_ARB_SALARY = Decimal("600000.00")
+# Tweak these if you want different ranges
+MINOR_SALARY = Decimal("40000.00")
+PRE_ARB_SALARY = Decimal("800000.00")
 VET_MIN_SALARY = 1_000_000
 VET_MAX_SALARY = 20_000_000
 
@@ -25,11 +26,7 @@ def seed_initial_contracts(engine=None):
     - Resets contract lengths, salaries, and team shares based on level/age.
     - Leaves contracts rows in place but overwrites years/current_year/etc.
     - Wipes and repopulates contractDetails and contractTeamShare.
-
-    Returns:
-        dict: {"seeded_contracts": <int>}
     """
-
     if engine is None:
         engine = get_engine()
     md = MetaData()
@@ -39,13 +36,21 @@ def seed_initial_contracts(engine=None):
     shares = Table("contractTeamShare", md, autoload_with=engine)
     players = Table("simbbPlayers", md, autoload_with=engine)
 
-    # Adjust if your schema is different
-    player_age_col = players.c.age
+    # Helper: decide age field
+    # Adjust this based on your actual player schema:
+    # e.g. players.c.age or players.c.birthYear, etc.
+    # For now, we assume an 'age' column exists.
+    player_age_col = players.c.age  # TODO: change if your column name differs
 
     with engine.begin() as conn:  # begin() => transaction
         try:
             # 1) Snapshot contracts + players + current holder orgs
+            #
+            # We'll use the existing contractTeamShare rows to find
+            # the current holder org for each contract, based on the
+            # contractDetails row for contracts.current_year where isHolder=1.
 
+            # Subquery: current-year detail per contract
             current_detail_subq = (
                 select(
                     details.c.id.label("detail_id"),
@@ -57,6 +62,7 @@ def seed_initial_contracts(engine=None):
                 .subquery()
             )
 
+            # Subquery: holder org for that detail (if any)
             holder_subq = (
                 select(
                     shares.c.contractDetailsID.label("detail_id"),
@@ -66,10 +72,11 @@ def seed_initial_contracts(engine=None):
                 .subquery()
             )
 
+            # Join contracts + players + holder info
             snapshot_stmt = (
                 select(
                     contracts.c.id.label("contract_id"),
-                    contracts.c.playerID.label("player_id"),
+                    contracts.c.PlayerID.label("player_id"),
                     contracts.c.years.label("old_years"),
                     contracts.c.current_year.label("old_current_year"),
                     contracts.c.signingOrg.label("old_signing_org"),
@@ -79,7 +86,7 @@ def seed_initial_contracts(engine=None):
                 )
                 .select_from(
                     contracts
-                    .join(players, players.c.id == contracts.c.playerID)
+                    .join(players, players.c.id == contracts.c.PlayerID)
                     .outerjoin(
                         current_detail_subq,
                         current_detail_subq.c.contract_id == contracts.c.id,
@@ -89,17 +96,19 @@ def seed_initial_contracts(engine=None):
                         holder_subq.c.detail_id == current_detail_subq.c.detail_id,
                     )
                 )
-                # Add filters if you only want certain contracts:
+                # If you want to limit to "active" or "non-finished" contracts:
                 # .where(contracts.c.isFinished == 0)
             )
 
             contract_rows = conn.execute(snapshot_stmt).all()
 
+            # Build in-memory snapshot keyed by contract_id
             contract_info = {}
             for row in contract_rows:
                 m = row._mapping
                 contract_id = m["contract_id"]
 
+                # Decide holder org: prefer holder_subq, fallback to old signingOrg
                 holder_org_id = (
                     m["holder_org_id"]
                     if m["holder_org_id"] is not None
@@ -119,7 +128,8 @@ def seed_initial_contracts(engine=None):
             conn.execute(delete(details))
 
             # 3) Update contracts + build new details in memory
-            new_details_to_insert = []
+            new_details_to_insert = []  # list of dicts for bulk insert
+            # We'll also track for each contract: (holder_org_id, detail_ids later)
             contract_lengths = {}
             contract_salaries = {}
 
@@ -129,10 +139,14 @@ def seed_initial_contracts(engine=None):
                 player_age = info["player_age"]
                 holder_org_id = info["holder_org_id"]
 
+                # --- Decide contract category & terms ---
+
+                # Default safe values in case age is None
                 length = 1
                 annual_salary = MINOR_SALARY
 
                 if current_level is None:
+                    # If somehow missing, treat as minor
                     length = 1
                     annual_salary = MINOR_SALARY
                 elif current_level < 9:
@@ -140,19 +154,24 @@ def seed_initial_contracts(engine=None):
                     length = 1
                     annual_salary = MINOR_SALARY
                 else:
-                    # MLB level
+                    # MLB level (current_level == 9 normally)
+                    # Decide age category; if age unknown, treat as pre-arb
                     if player_age is not None and player_age >= 27:
+                        # Veteran
                         length = random.randint(1, 3)
                         annual_salary = Decimal(
                             str(random.randint(VET_MIN_SALARY, VET_MAX_SALARY))
                         )
                     else:
+                        # Pre-arb MLB
                         length = 1
                         annual_salary = PRE_ARB_SALARY
 
+                # Remember for later (TeamShare)
                 contract_lengths[contract_id] = length
                 contract_salaries[contract_id] = annual_salary
 
+                # --- Update contracts row ---
                 upd = (
                     update(contracts)
                     .where(contracts.c.id == contract_id)
@@ -165,10 +184,12 @@ def seed_initial_contracts(engine=None):
                         signingOrg=holder_org_id,
                         leagueYearSigned=STARTING_LEAGUE_YEAR,
                         isFinished=0,
+                        # keep current_level as is
                     )
                 )
                 conn.execute(upd)
 
+                # --- Prepare contractDetails rows ---
                 for year_idx in range(1, length + 1):
                     new_details_to_insert.append(
                         {
@@ -178,10 +199,11 @@ def seed_initial_contracts(engine=None):
                         }
                     )
 
+            # 4) Insert contractDetails in bulk
             if new_details_to_insert:
                 conn.execute(details.insert(), new_details_to_insert)
 
-            # 5) Reload contractDetails and create TeamShare rows
+            # 5) Re-load contractDetails to get ids and create TeamShare rows
             details_stmt = select(
                 details.c.id,
                 details.c.contractID,
@@ -197,6 +219,7 @@ def seed_initial_contracts(engine=None):
 
                 info = contract_info.get(contract_id)
                 if not info:
+                    # Should not happen, but just in case
                     continue
 
                 holder_org_id = info["holder_org_id"]
@@ -213,11 +236,10 @@ def seed_initial_contracts(engine=None):
             if team_shares_to_insert:
                 conn.execute(shares.insert(), team_shares_to_insert)
 
-            seeded_count = len(contract_info)
-            print(f"Seeded {seeded_count} contracts with new terms.")
-
-            return {"seeded_contracts": seeded_count}
+            # If we get here, everything is fine
+            print(f"Seeded {len(contract_info)} contracts with new terms.")
 
         except SQLAlchemyError as e:
+            # Transaction will be rolled back automatically by engine.begin()
             print("Error during contract seeding:", str(e))
             raise
