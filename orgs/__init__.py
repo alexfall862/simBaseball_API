@@ -80,9 +80,6 @@ def list_organizations():
             }
         }), 503
 
-
-
-
 @orgs_bp.get("/<string:org>/")
 # @rate_limit() # Reuse your project’s default limiter if available
 def get_organization(org: str):
