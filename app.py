@@ -182,6 +182,16 @@ def create_app(config_object=Config):
     except Exception as e:
         app.logger.exception("Failed to register rosters blueprint: %s", e)
 
+    try: 
+        from seeding.contracts_seed import seed_initial_contracts
+        app.register_blueprint(seed_initial_contracts, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register seeding blueprint: %s", e)
+
+
+
+
+
     from admin import admin_bp
     # Secure session cookie
     app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))
@@ -365,8 +375,49 @@ def create_app(config_object=Config):
             schema_map.setdefault(t, []).append(r)
         return jsonify(schema=schema_map, table_count=len(schema_map))
 
+    @app.post("/admin/seed-contracts")
+    @soft_timeout(app)
+    def seed_contracts():
+        """
+        One-off endpoint to wipe and reseed contractDetails and contractTeamShare,
+        and reset contracts according to the seeding rules in seeding/contracts_seed.py.
+        """
+
+        # 1) Env guard so you don't run this by accident
+        if os.getenv("ALLOW_CONTRACT_SEEDING", "false").lower() != "true":
+            return jsonify(
+                error="forbidden",
+                message="Contract seeding is disabled. Set ALLOW_CONTRACT_SEEDING=true to enable."
+            ), 403
+
+        # 2) Simple admin auth using ADMIN_PASSWORD
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        # 3) Run the seeding function
+        result = seed_initial_contracts()  # returns e.g. {"seeded_contracts": N}
+
+        # 4) Return JSON summary
+        return jsonify(
+            status="ok",
+            details=result,
+        ), 200
+
     log.info("stage: routes_ok") 
     return app
+
+
+
+
+
+
+
 # ----------------------------
 # Helpers
 # ----------------------------
