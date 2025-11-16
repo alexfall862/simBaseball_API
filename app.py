@@ -400,14 +400,22 @@ def create_app(config_object=Config):
                     message="Invalid admin password."
                 ), 401
 
-        # 3) Run the seeding function
-        result = seed_initial_contracts()  # returns e.g. {"seeded_contracts": N}
+        # 3) Make sure we *have* an engine
+        if not getattr(app, "engine", None):
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
 
-        # 4) Return JSON summary
+        # 4) Run the seeding function using the app's engine
+        result = seed_initial_contracts(app.engine)
+
+        # 5) Return JSON summary
         return jsonify(
             status="ok",
             details=result,
         ), 200
+
 
     log.info("stage: routes_ok") 
     return app

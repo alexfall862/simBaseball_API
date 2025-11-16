@@ -30,7 +30,8 @@ def seed_initial_contracts():
         dict: {"seeded_contracts": <int>}
     """
 
-    engine = get_engine()
+    if engine is None:
+        engine = get_engine()
     md = MetaData()
 
     contracts = Table("contracts", md, autoload_with=engine)
