@@ -76,7 +76,7 @@ def seed_initial_contracts(engine=None):
             snapshot_stmt = (
                 select(
                     contracts.c.id.label("contract_id"),
-                    contracts.c.PlayerID.label("player_id"),
+                    contracts.c.playerID.label("player_id"),
                     contracts.c.years.label("old_years"),
                     contracts.c.current_year.label("old_current_year"),
                     contracts.c.signingOrg.label("old_signing_org"),
@@ -86,7 +86,7 @@ def seed_initial_contracts(engine=None):
                 )
                 .select_from(
                     contracts
-                    .join(players, players.c.id == contracts.c.PlayerID)
+                    .join(players, players.c.id == contracts.c.playerID)
                     .outerjoin(
                         current_detail_subq,
                         current_detail_subq.c.contract_id == contracts.c.id,
