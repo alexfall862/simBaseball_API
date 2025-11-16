@@ -5,6 +5,7 @@ from flask import has_request_context
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException, BadRequest
+from seeding.contracts_seed import seed_initial_contracts
 
 
 
@@ -181,16 +182,6 @@ def create_app(config_object=Config):
         app.register_blueprint(rosters_bp, url_prefix="/api/v1")
     except Exception as e:
         app.logger.exception("Failed to register rosters blueprint: %s", e)
-
-    try: 
-        from seeding.contracts_seed import seed_initial_contracts
-        app.register_blueprint(seed_initial_contracts, url_prefix="/api/v1")
-    except Exception as e:
-        app.logger.exception("Failed to register seeding blueprint: %s", e)
-
-
-
-
 
     from admin import admin_bp
     # Secure session cookie
