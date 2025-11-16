@@ -22,13 +22,6 @@ def _reflect_orgs_table():
         setattr(orgs_bp, "_orgs_table", orgs_table)
     return getattr(orgs_bp, "_orgs_table")
 
-def _serialize(value):
-    if isinstance(value, (datetime, date, time)):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return str(value)  # per your preference to return as strings
-    return value
-
 def _row_to_dict(row):
 # row is a RowMapping with ._mapping in SQLAlchemy 2.x
     return dict(row._mapping)
