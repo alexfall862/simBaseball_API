@@ -23,7 +23,7 @@ def _get_tables():
             "organizations": Table("organizations", md, autoload_with=engine),
             "players": Table("simbbPlayers", md, autoload_with=engine),
             # NEW: level reference table (rename "level" here if your table name differs)
-            "levels": Table("level", md, autoload_with=engine),
+            "levels": Table("levels", md, autoload_with=engine),
         }
     return rosters_bp._tables
 
