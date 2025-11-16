@@ -159,7 +159,7 @@ def create_app(config_object=Config):
         log.warning("DATABASE_URL not set at runtime on Railway")
 
 
-    #Register Orgs Blueprint
+    #Register Blueprints
     try: 
         from orgs import orgs_bp
         app.register_blueprint(orgs_bp, url_prefix="/api/v1")

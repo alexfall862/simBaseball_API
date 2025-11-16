@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify
 from sqlalchemy import MetaData, Table, select
 from sqlalchemy.exc import SQLAlchemyError
 from db import get_engine
+import logging
 
 players_bp = Blueprint("players", __name__)
 
@@ -43,6 +44,7 @@ def get_players():
         with engine.connect() as conn:
             rows = conn.execute(stmt).all()
 
+        logging.getLogger("app").info("get_players: fetched %d rows", len(rows))
         return jsonify([row[0] for row in rows]), 200
     except SQLAlchemyError:
         return (
