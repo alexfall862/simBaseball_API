@@ -369,39 +369,37 @@ def create_app(config_object=Config):
     @app.post("/admin/seed-contracts")
     @soft_timeout(app)
     def seed_contracts():
-        """
-        One-off endpoint to wipe and reseed contractDetails and contractTeamShare,
-        and reset contracts according to the seeding rules in seeding/contracts_seed.py.
-        """
+        log = logging.getLogger("app")
+        log.info("seed_contracts: endpoint called")
 
-        # 1) Env guard so you don't run this by accident
         if os.getenv("ALLOW_CONTRACT_SEEDING", "false").lower() != "true":
+            log.info("seed_contracts: blocked by ALLOW_CONTRACT_SEEDING")
             return jsonify(
                 error="forbidden",
                 message="Contract seeding is disabled. Set ALLOW_CONTRACT_SEEDING=true to enable."
             ), 403
 
-        # 2) Simple admin auth using ADMIN_PASSWORD
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
             if header_pw != admin_pw:
+                log.info("seed_contracts: invalid admin password")
                 return jsonify(
                     error="unauthorized",
                     message="Invalid admin password."
                 ), 401
 
-        # 3) Make sure we *have* an engine
         if not getattr(app, "engine", None):
+            log.error("seed_contracts: no app.engine")
             return jsonify(
                 error="no_db_engine",
                 message="Database engine is not initialized on the app."
             ), 500
 
-        # 4) Run the seeding function using the app's engine
+        log.info("seed_contracts: calling seed_initial_contracts")
         result = seed_initial_contracts(app.engine)
+        log.info("seed_contracts: seeding finished: %s", result)
 
-        # 5) Return JSON summary
         return jsonify(
             status="ok",
             details=result,

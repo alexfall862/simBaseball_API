@@ -1,13 +1,15 @@
 # seeding/contracts_seed.py
 
 import random
+import logging
 from decimal import Decimal
 
-from sqlalchemy import MetaData, Table, select, and_, delete, update
+from sqlalchemy import MetaData, Table, select, delete, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine  # you already use this in other modules
 
+log = logging.getLogger("app")  # use the same logger your app config initializes
 
 STARTING_LEAGUE_YEAR = 2026
 
@@ -27,6 +29,7 @@ def seed_initial_contracts(engine=None):
     - Leaves contracts rows in place but overwrites years/current_year/etc.
     - Wipes and repopulates contractDetails and contractTeamShare.
     """
+
     if engine is None:
         engine = get_engine()
     md = MetaData()
@@ -36,19 +39,13 @@ def seed_initial_contracts(engine=None):
     shares = Table("contractTeamShare", md, autoload_with=engine)
     players = Table("simbbPlayers", md, autoload_with=engine)
 
-    # Helper: decide age field
-    # Adjust this based on your actual player schema:
-    # e.g. players.c.age or players.c.birthYear, etc.
-    # For now, we assume an 'age' column exists.
-    player_age_col = players.c.age  # TODO: change if your column name differs
+    # Adjust this if your schema is different
+    player_age_col = players.c.age
 
     with engine.begin() as conn:  # begin() => transaction
         try:
             # 1) Snapshot contracts + players + current holder orgs
-            #
-            # We'll use the existing contractTeamShare rows to find
-            # the current holder org for each contract, based on the
-            # contractDetails row for contracts.current_year where isHolder=1.
+            log.info("contract_seeding: starting snapshot")
 
             # Subquery: current-year detail per contract
             current_detail_subq = (
@@ -96,11 +93,14 @@ def seed_initial_contracts(engine=None):
                         holder_subq.c.detail_id == current_detail_subq.c.detail_id,
                     )
                 )
-                # If you want to limit to "active" or "non-finished" contracts:
-                # .where(contracts.c.isFinished == 0)
+                # .where(contracts.c.isFinished == 0)  # if you have this
             )
 
             contract_rows = conn.execute(snapshot_stmt).all()
+            log.info(
+                "contract_seeding: snapshot rows=%d",
+                len(contract_rows),
+            )
 
             # Build in-memory snapshot keyed by contract_id
             contract_info = {}
@@ -124,12 +124,14 @@ def seed_initial_contracts(engine=None):
                 }
 
             # 2) Wipe old contractDetails and contractTeamShare
+            log.info("contract_seeding: deleting old details & shares")
             conn.execute(delete(shares))
             conn.execute(delete(details))
 
             # 3) Update contracts + build new details in memory
+            log.info("contract_seeding: updating contracts & building details")
+
             new_details_to_insert = []  # list of dicts for bulk insert
-            # We'll also track for each contract: (holder_org_id, detail_ids later)
             contract_lengths = {}
             contract_salaries = {}
 
@@ -199,8 +201,14 @@ def seed_initial_contracts(engine=None):
                         }
                     )
 
+            log.info(
+                "contract_seeding: prepared details rows=%d",
+                len(new_details_to_insert),
+            )
+
             # 4) Insert contractDetails in bulk
             if new_details_to_insert:
+                log.info("contract_seeding: inserting details")
                 conn.execute(details.insert(), new_details_to_insert)
 
             # 5) Re-load contractDetails to get ids and create TeamShare rows
@@ -233,13 +241,27 @@ def seed_initial_contracts(engine=None):
                     }
                 )
 
+            log.info(
+                "contract_seeding: prepared team share rows=%d",
+                len(team_shares_to_insert),
+            )
+
             if team_shares_to_insert:
+                log.info("contract_seeding: inserting team shares")
                 conn.execute(shares.insert(), team_shares_to_insert)
 
             # If we get here, everything is fine
-            print(f"Seeded {len(contract_info)} contracts with new terms.")
+            seeded_count = len(contract_info)
+            log.info(
+                "contract_seeding: done. contracts=%d, details=%d, shares=%d",
+                seeded_count,
+                len(all_details),
+                len(team_shares_to_insert),
+            )
+
+            return {"seeded_contracts": seeded_count}
 
         except SQLAlchemyError as e:
-            # Transaction will be rolled back automatically by engine.begin()
+            log.exception("contract_seeding: SQLAlchemyError: %s", str(e))
             print("Error during contract seeding:", str(e))
             raise
