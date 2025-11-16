@@ -623,3 +623,279 @@ def get_org_obligations(org_abbrev: str):
     }
 
     return jsonify(response), 200
+
+@rosters_bp.get("/obligations")
+def get_all_org_obligations():
+    """
+    Return financial obligations for ALL organizations in a given league year.
+
+    Query params:
+      - league_year (required, int): the league year (e.g., 2027)
+
+    Response structure:
+      {
+        "league_year": 2027,
+        "orgs": {
+          "NYY": {
+            "org_id": ...,
+            "org_abbrev": "NYY",
+            "totals": {
+              "active_salary": ...,
+              "inactive_salary": ...,
+              "buyout": ...,
+              "signing_bonus": ...,
+              "overall": ...
+            },
+            "obligations": [ ...rows as in the single-org endpoint... ]
+          },
+          "LAD": { ... },
+          ...
+        }
+      }
+    """
+    league_year = request.args.get("league_year", type=int)
+    if league_year is None:
+        return (
+            jsonify(
+                {
+                    "error": {
+                        "code": "missing_league_year",
+                        "message": "Query parameter 'league_year' is required and must be an integer.",
+                    }
+                }
+            ),
+            400,
+        )
+
+    tables = _get_tables()
+    contracts = tables["contracts"]
+    details = tables["contract_details"]
+    shares = tables["contract_team_share"]
+    orgs = tables["organizations"]
+    players = tables["players"]
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            # -------------------------
+            # A. Salary obligations
+            # -------------------------
+            league_year_expr = contracts.c.leagueYearSigned + (details.c.year - literal(1))
+
+            salary_stmt = (
+                select(
+                    orgs.c.id.label("org_id"),
+                    orgs.c.org_abbrev.label("org_abbrev"),
+                    contracts.c.id.label("contract_id"),
+                    contracts.c.leagueYearSigned.label("leagueYearSigned"),
+                    contracts.c.isActive.label("isActive"),
+                    contracts.c.isBuyout.label("isBuyout"),
+                    contracts.c.bonus.label("bonus"),
+                    contracts.c.signingOrg.label("signingOrg"),
+                    details.c.id.label("contractDetails_id"),
+                    details.c.year.label("year_index"),
+                    details.c.salary.label("salary"),
+                    shares.c.salary_share.label("salary_share"),
+                    shares.c.isHolder.label("isHolder"),
+                    shares.c.orgID.label("share_org_id"),
+                    players.c.id.label("player_id"),
+                )
+                .select_from(
+                    contracts
+                    .join(details, details.c.contractID == contracts.c.id)
+                    .join(shares, shares.c.contractDetailsID == details.c.id)
+                    .join(orgs, orgs.c.id == shares.c.orgID)
+                    .join(players, players.c.id == contracts.c.playerID)
+                )
+                .where(
+                    and_(
+                        league_year_expr == league_year,
+                        shares.c.salary_share > 0,
+                    )
+                )
+            )
+
+            salary_rows = conn.execute(salary_stmt).all()
+
+            # -------------------------
+            # B. Bonus / buyout obligations
+            # -------------------------
+            bonus_stmt = (
+                select(
+                    orgs.c.id.label("org_id"),
+                    orgs.c.org_abbrev.label("org_abbrev"),
+                    contracts.c.id.label("contract_id"),
+                    contracts.c.leagueYearSigned.label("leagueYearSigned"),
+                    contracts.c.isActive.label("isActive"),
+                    contracts.c.isBuyout.label("isBuyout"),
+                    contracts.c.bonus.label("bonus"),
+                    contracts.c.signingOrg.label("signingOrg"),
+                    players.c.id.label("player_id"),
+                )
+                .select_from(
+                    contracts
+                    .join(orgs, orgs.c.id == contracts.c.signingOrg)
+                    .join(players, players.c.id == contracts.c.playerID)
+                )
+                .where(
+                    and_(
+                        contracts.c.leagueYearSigned == league_year,
+                        contracts.c.bonus > 0,
+                    )
+                )
+            )
+
+            bonus_rows = conn.execute(bonus_stmt).all()
+
+    except SQLAlchemyError:
+        return (
+            jsonify(
+                {
+                    "error": {
+                        "code": "db_unavailable",
+                        "message": "Database temporarily unavailable",
+                    }
+                }
+            ),
+            503,
+        )
+
+    # -------------------------
+    # Build grouped-by-org result
+    # -------------------------
+    def _num(val):
+        return float(val) if val is not None else 0.0
+
+    by_org = {}
+
+    # Helper to get/create org bucket
+    def _get_bucket(org_id, org_abbrev):
+        bucket = by_org.get(org_abbrev)
+        if bucket is None:
+            bucket = {
+                "org_id": org_id,
+                "org_abbrev": org_abbrev,
+                "totals": {
+                    "active_salary": 0.0,
+                    "inactive_salary": 0.0,
+                    "buyout": 0.0,
+                    "signing_bonus": 0.0,
+                    "overall": 0.0,
+                },
+                "obligations": [],
+            }
+            by_org[org_abbrev] = bucket
+        return bucket
+
+    # ----- Salary obligations -----
+    for row in salary_rows:
+        m = row._mapping
+        org_id = m["org_id"]
+        org_abbrev = m["org_abbrev"]
+
+        bucket = _get_bucket(org_id, org_abbrev)
+
+        salary = _num(m["salary"])
+        share = _num(m["salary_share"])
+        base_amount = salary * share
+
+        is_buyout = bool(m.get("isBuyout") or False)
+        is_active = bool(m.get("isActive") or False)
+        is_holder = bool(m.get("isHolder") or False)
+
+        # Category classification:
+        if is_buyout:
+            category = "buyout"
+        elif is_active and is_holder:
+            category = "active_salary"
+        else:
+            category = "inactive_salary"
+
+        obligation = {
+            "type": "salary",
+            "category": category,
+            "league_year": league_year,
+            "year_index": m["year_index"],
+            "player": {
+                "id": m["player_id"],
+            },
+            "contract": {
+                "id": m["contract_id"],
+                "leagueYearSigned": m["leagueYearSigned"],
+                "isActive": is_active,
+                "isBuyout": is_buyout,
+            },
+            "flags": {
+                "is_holder": is_holder,
+                "is_buyout": is_buyout,
+            },
+            "salary": salary,
+            "salary_share": share,
+            "base_amount": base_amount,
+            "bonus_amount": 0.0,
+        }
+
+        bucket["obligations"].append(obligation)
+
+        bucket["totals"]["overall"] += base_amount
+        if category == "buyout":
+            bucket["totals"]["buyout"] += base_amount
+        elif category == "active_salary":
+            bucket["totals"]["active_salary"] += base_amount
+        elif category == "inactive_salary":
+            bucket["totals"]["inactive_salary"] += base_amount
+
+    # ----- Bonus / buyout obligations -----
+    for row in bonus_rows:
+        m = row._mapping
+        org_id = m["org_id"]
+        org_abbrev = m["org_abbrev"]
+
+        bucket = _get_bucket(org_id, org_abbrev)
+
+        bonus = _num(m["bonus"])
+        if bonus <= 0:
+            continue
+
+        is_buyout = bool(m.get("isBuyout") or False)
+        is_active = bool(m.get("isActive") or False)
+
+        category = "buyout" if is_buyout else "signing_bonus"
+
+        obligation = {
+            "type": "bonus",
+            "category": category,
+            "league_year": league_year,
+            "player": {
+                "id": m["player_id"],
+            },
+            "contract": {
+                "id": m["contract_id"],
+                "leagueYearSigned": m["leagueYearSigned"],
+                "isActive": is_active,
+                "isBuyout": is_buyout,
+            },
+            "flags": {
+                "is_holder": False,
+                "is_buyout": is_buyout,
+            },
+            "salary": 0.0,
+            "salary_share": None,
+            "base_amount": 0.0,
+            "bonus_amount": bonus,
+        }
+
+        bucket["obligations"].append(obligation)
+
+        bucket["totals"]["overall"] += bonus
+        if category == "buyout":
+            bucket["totals"]["buyout"] += bonus
+        elif category == "signing_bonus":
+            bucket["totals"]["signing_bonus"] += bonus
+
+    response = {
+        "league_year": league_year,
+        "orgs": by_org,
+    }
+
+    return jsonify(response), 200
