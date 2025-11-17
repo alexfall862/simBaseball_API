@@ -148,7 +148,7 @@ def run_year_start_books(engine, league_year: int) -> Dict[str, Any]:
         bonus_rows = conn.execute(
             select(
                 contracts.c.id.label("contract_id"),
-                contracts.c.PlayerID.label("player_id"),
+                contracts.c.playerID.label("player_id"),
                 contracts.c.signingOrg.label("org_id"),
                 contracts.c.isBuyout.label("isBuyout"),
                 contracts.c.bonus.label("bonus"),
@@ -270,7 +270,7 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
             salary_rows = conn.execute(
                 select(
                     contracts.c.id.label("contract_id"),
-                    contracts.c.PlayerID.label("player_id"),
+                    contracts.c.playerID.label("player_id"),
                     details.c.salary.label("salary"),
                     shares.c.salary_share.label("salary_share"),
                     shares.c.orgID.label("org_id"),
