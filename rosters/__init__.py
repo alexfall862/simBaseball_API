@@ -8,6 +8,146 @@ from db import get_engine
 
 rosters_bp = Blueprint("rosters", __name__)
 
+# Positional rating formulas (weights are fractions; they will be renormalized
+# if some attributes are missing).
+POSITION_WEIGHTS = {
+    "c": {  # catcher
+        "contact_base": 0.18,
+        "power_base": 0.18,
+        "discipline_base": 0.08,
+        "eye_base": 0.06,
+        "catchframe_base": 0.12,
+        "catchsequence_base": 0.10,
+        "fieldcatch_base": 0.08,
+        "fieldreact_base": 0.08,
+        "throwpower_base": 0.06,
+        "throwacc_base": 0.04,
+        "basereaction_base": 0.02,
+    },
+    "fb": {  # first base
+        "contact_base": 0.30,
+        "power_base": 0.40,
+        "discipline_base": 0.12,
+        "eye_base": 0.08,
+        "baserunning_base": 0.04,
+        "fieldcatch_base": 0.04,
+        "fieldreact_base": 0.02,
+    },
+    "sb": {  # catcher
+        # Offensive contribution
+        "contact_base": 0.18,
+        "power_base": 0.18,
+        "discipline_base": 0.08,
+        "eye_base": 0.06,
+        # Receiving / game-calling / defense
+        "catchframe_base": 0.12,
+        "catchsequence_base": 0.10,
+        "fieldcatch_base": 0.08,
+        "fieldreact_base": 0.08,
+        "throwpower_base": 0.06,
+        "throwacc_base": 0.04,
+        "basereaction_base": 0.02,
+    },
+    "tb": {  # first base
+        "contact_base": 0.30,
+        "power_base": 0.40,
+        "discipline_base": 0.12,
+        "eye_base": 0.08,
+        "baserunning_base": 0.04,
+        "fieldcatch_base": 0.04,
+        "fieldreact_base": 0.02,
+    },
+    "ss": {  # catcher
+        # Offensive contribution
+        "contact_base": 0.18,
+        "power_base": 0.18,
+        "discipline_base": 0.08,
+        "eye_base": 0.06,
+        # Receiving / game-calling / defense
+        "catchframe_base": 0.12,
+        "catchsequence_base": 0.10,
+        "fieldcatch_base": 0.08,
+        "fieldreact_base": 0.08,
+        "throwpower_base": 0.06,
+        "throwacc_base": 0.04,
+        "basereaction_base": 0.02,
+    },
+    "lf": {  # first base
+        "contact_base": 0.30,
+        "power_base": 0.40,
+        "discipline_base": 0.12,
+        "eye_base": 0.08,
+        "baserunning_base": 0.04,
+        "fieldcatch_base": 0.04,
+        "fieldreact_base": 0.02,
+    },
+    "cf": {  # catcher
+        # Offensive contribution
+        "contact_base": 0.18,
+        "power_base": 0.18,
+        "discipline_base": 0.08,
+        "eye_base": 0.06,
+        # Receiving / game-calling / defense
+        "catchframe_base": 0.12,
+        "catchsequence_base": 0.10,
+        "fieldcatch_base": 0.08,
+        "fieldreact_base": 0.08,
+        "throwpower_base": 0.06,
+        "throwacc_base": 0.04,
+        "basereaction_base": 0.02,
+    },
+    "rf": {  # first base
+        "contact_base": 0.30,
+        "power_base": 0.40,
+        "discipline_base": 0.12,
+        "eye_base": 0.08,
+        "baserunning_base": 0.04,
+        "fieldcatch_base": 0.04,
+        "fieldreact_base": 0.02,
+    },
+    "dh": {  # catcher
+        # Offensive contribution
+        "contact_base": 0.18,
+        "power_base": 0.18,
+        "discipline_base": 0.08,
+        "eye_base": 0.06,
+        # Receiving / game-calling / defense
+        "catchframe_base": 0.12,
+        "catchsequence_base": 0.10,
+        "fieldcatch_base": 0.08,
+        "fieldreact_base": 0.08,
+        "throwpower_base": 0.06,
+        "throwacc_base": 0.04,
+        "basereaction_base": 0.02,
+    },
+    "sp": {  # first base
+        "contact_base": 0.30,
+        "power_base": 0.40,
+        "discipline_base": 0.12,
+        "eye_base": 0.08,
+        "baserunning_base": 0.04,
+        "fieldcatch_base": 0.04,
+        "fieldreact_base": 0.02,
+    },
+    "rp": {  # catcher
+        # Offensive contribution
+        "contact_base": 0.18,
+        "power_base": 0.18,
+        "discipline_base": 0.08,
+        "eye_base": 0.06,
+        # Receiving / game-calling / defense
+        "catchframe_base": 0.12,
+        "catchsequence_base": 0.10,
+        "fieldcatch_base": 0.08,
+        "fieldreact_base": 0.08,
+        "throwpower_base": 0.06,
+        "throwacc_base": 0.04,
+        "basereaction_base": 0.02,
+    }                    
+}
+
+
+
 
 # -------------------------------------------------------------------
 # Table reflection helpers
@@ -35,7 +175,10 @@ def _get_tables():
 def _get_player_column_categories():
     """
     Categorize simbbPlayers columns into:
-      - rating_cols: numeric attributes to be 20–80 masked (endswith _base / _rating, plus pitchN_ovr)
+      - rating_cols: numeric attributes to be 20–80 masked directly
+                     (endswith _base)
+      - derived_rating_cols: attributes we will *derive* from other columns
+                             (position _rating, pitchN_ovr)
       - pot_cols: potential grade columns (endswith _pot)
       - bio_cols: everything else (id, names, biographical stuff, pitchN_name, etc.)
 
@@ -48,6 +191,7 @@ def _get_player_column_categories():
     players = tables["players"]
 
     rating_cols = []
+    derived_cols = []
     pot_cols = []
     bio_cols = []
 
@@ -60,21 +204,435 @@ def _get_player_column_categories():
 
         if name.endswith("_pot"):
             pot_cols.append(name)
-        elif (
-            name.endswith("_base")
-            or name.endswith("_rating")
-            or re.match(r"^pitch\d+_ovr$", name)
-        ):
+        elif name.endswith("_base"):
             rating_cols.append(name)
+        elif name.endswith("_rating") or re.match(r"^pitch\d+_ovr$", name):
+            # Position and pitch overall ratings will be *derived*, not used as raw inputs
+            derived_cols.append(name)
         else:
             bio_cols.append(name)
 
     rosters_bp._player_col_cats = {
         "rating": rating_cols,
+        "derived": derived_cols,
         "pot": pot_cols,
         "bio": bio_cols,
     }
     return rosters_bp._player_col_cats
+
+def _compute_derived_raw_ratings(row):
+    """
+    Compute raw (0–100-ish) derived ratings for:
+      - c_rating
+      - fb_rating
+      - pitch1_ovr ... pitch5_ovr
+
+    All of these are weighted averages of underlying *_base attributes.
+    The weights here are examples and can be tweaked later.
+    """
+    m = row._mapping
+    derived = {}
+
+    def _weighted(components):
+        """
+        components: dict {column_name: weight}
+        Returns a weighted average of those columns, ignoring missing/invalid values.
+        """
+        vals = []
+        for col, w in components.items():
+            v = m.get(col)
+            if v is None:
+                continue
+            try:
+                num = float(v)
+            except (TypeError, ValueError):
+                continue
+            vals.append((num, w))
+
+        if not vals:
+            return None
+
+        total_w = sum(w for _, w in vals)
+        if total_w <= 0:
+            return None
+
+        return sum(v * w for v, w in vals) / total_w
+
+    # --- Pitch overalls (pitch1_ovr ... pitch5_ovr) ---
+    # Simple equal-weight average of consist / accuracy / break / control.
+    for i in range(1, 6):
+        prefix = f"pitch{i}_"
+        # Only compute if this pitch actually exists (has a name)
+        if m.get(prefix + "name") is None:
+            continue
+
+        raw = _weighted({
+            prefix + "consist_base": 0.25,
+            prefix + "pacc_base":    0.25,
+            prefix + "pbrk_base":    0.25,
+            prefix + "pcntrl_base":  0.25,
+        })
+        if raw is not None:
+            derived[f"pitch{i}_ovr"] = raw
+
+    # --- Catcher position rating (c_rating) ---
+    # Example weighting: framing, sequencing, catching, reaction, arm accuracy/power.
+    derived["c_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.010,
+        #defense1
+        "throwacc_base":        0.05,
+        "throwpower_base":      0.05,
+        "catchframe_base":      0.15,
+        "catchsequence_base":   0.15,
+        #defense2
+        "fieldcatch_base":      0.05,
+        "fieldreact_base":      0.05,
+        "fieldspot_base":       0.05,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+
+    # --- First base position rating (fb_rating) ---
+    # Example weighting: catching, reaction, positioning, arm.
+    derived["fb_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.005,
+        #defense1
+        "throwacc_base":        0.05,
+        "throwpower_base":      0.00,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.05,
+        "fieldreact_base":      0.075,
+        "fieldspot_base":       0.05,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+
+    derived["sb_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.025,
+        #defense1
+        "throwacc_base":        0.075,
+        "throwpower_base":      0.025,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.05,
+        "fieldreact_base":      0.075,
+        "fieldspot_base":       0.05,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+
+    derived["tb_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.025,
+        #defense1
+        "throwacc_base":        0.075,
+        "throwpower_base":      0.075,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.075,
+        "fieldreact_base":      0.10,
+        "fieldspot_base":       0.075,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+    
+    derived["ss_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.025,
+        #defense1
+        "throwacc_base":        0.10,
+        "throwpower_base":      0.10,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.10,
+        "fieldreact_base":      0.15,
+        "fieldspot_base":       0.10,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+    
+    derived["lf_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.10,
+        #defense1
+        "throwacc_base":        0.10,
+        "throwpower_base":      0.05,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.075,
+        "fieldreact_base":      0.025,
+        "fieldspot_base":       0.075,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+    
+    derived["cf_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.15,
+        #defense1
+        "throwacc_base":        0.05,
+        "throwpower_base":      0.10,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.10,
+        "fieldreact_base":      0.05,
+        "fieldspot_base":       0.10,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+    
+    derived["rf_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.10,
+        #defense1
+        "throwacc_base":        0.10,
+        "throwpower_base":      0.15,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.075,
+        "fieldreact_base":      0.025,
+        "fieldspot_base":       0.075,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+    
+    derived["dh_rating"] = _weighted({
+        #batting
+        "power_base":           0.10,
+        "contact_base":         0.10,
+        "eye_base":             0.10,
+        "discipline_base":      0.10,
+        #base offense 
+        "base_reaction_base":   0.025,
+        "baserunning_base":     0.025,
+        "speed_base":           0.025,
+        #defense1
+        "throwacc_base":        0.00,
+        "throwpower_base":      0.00,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.00,
+        "fieldreact_base":      0.00,
+        "fieldspot_base":       0.00,
+        #pitching
+        "pendurance_base":      0.00,
+        "pgencontrol_base":     0.00,
+        "psequencing_base":     0.00,
+        "pthrowpower_base":     0.00,
+        "pickoff_base":         0.00,
+        "pitch1_ovr":           0.00,
+        "pitch2_ovr":           0.00,
+        "pitch3_ovr":           0.00,
+        "pitch4_ovr":           0.00,
+        "pitch5_ovr":           0.00,
+    })
+    
+    derived["sp_rating"] = _weighted({
+        #batting
+        "power_base":           0.00,
+        "contact_base":         0.00,
+        "eye_base":             0.00,
+        "discipline_base":      0.00,
+        #base offense 
+        "base_reaction_base":   0.00,
+        "baserunning_base":     0.00,
+        "speed_base":           0.00,
+        #defense1
+        "throwacc_base":        0.00,
+        "throwpower_base":      0.00,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.025,
+        "fieldreact_base":      0.05,
+        "fieldspot_base":       0.025,
+        #pitching
+        "pendurance_base":      0.20,
+        "pgencontrol_base":     0.10,
+        "psequencing_base":     0.10,
+        "pthrowpower_base":     0.10,
+        "pickoff_base":         0.05,
+        "pitch1_ovr":           0.15,
+        "pitch2_ovr":           0.125,
+        "pitch3_ovr":           0.10,
+        "pitch4_ovr":           0.075,
+        "pitch5_ovr":           0.05,
+    })
+    
+    derived["rp_rating"] = _weighted({
+        #batting
+        "power_base":           0.00,
+        "contact_base":         0.00,
+        "eye_base":             0.00,
+        "discipline_base":      0.00,
+        #base offense 
+        "base_reaction_base":   0.00,
+        "baserunning_base":     0.00,
+        "speed_base":           0.00,
+        #defense1
+        "throwacc_base":        0.00,
+        "throwpower_base":      0.00,
+        "catchframe_base":      0.00,
+        "catchsequence_base":   0.00,
+        #defense2
+        "fieldcatch_base":      0.025,
+        "fieldreact_base":      0.05,
+        "fieldspot_base":       0.025,
+        #pitching
+        "pendurance_base":      0.05,
+        "pgencontrol_base":     0.10,
+        "psequencing_base":     0.10,
+        "pthrowpower_base":     0.10,
+        "pickoff_base":         0.05,
+        "pitch1_ovr":           0.20,
+        "pitch2_ovr":           0.15,
+        "pitch3_ovr":           0.10,
+        "pitch4_ovr":           0.05,
+        "pitch5_ovr":           0.025,
+    })
+
+
+    return derived
 
 def _row_to_player_dict(row):
     """
@@ -162,7 +720,8 @@ def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=Non
     """
     Build a SELECT that returns:
       - org_id, org_abbrev,
-      - current_level,
+      - current_level (int),
+      - league_level (string, e.g. 'mlb', 'aa'),
       - team_abbrev (from teams table),
       - all simbbPlayers columns.
 
@@ -180,6 +739,7 @@ def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=Non
     orgs = tables["organizations"]
     players = tables["players"]
     teams = tables["teams"]
+    levels = tables["levels"]
 
     conditions = [
         contracts.c.isActive == 1,
@@ -207,6 +767,7 @@ def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=Non
             orgs.c.id.label("org_id"),
             orgs.c.org_abbrev.label("org_abbrev"),
             contracts.c.current_level.label("current_level"),
+            levels.c.league_level.label("league_level"),
             teams.c.team_abbrev.label("team_abbrev"),
             players,  # expands all player columns
         )
@@ -231,6 +792,10 @@ def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=Non
                 players,
                 players.c.id == contracts.c.playerID,
             )
+            .join(
+                levels,
+                levels.c.id == contracts.c.current_level,
+            )
             .outerjoin(
                 teams,
                 and_(
@@ -244,30 +809,26 @@ def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=Non
 
     return stmt
 
-def _compute_distributions_by_level(rows, rating_cols):
+def _compute_distributions_by_level(rows, rating_cols, include_derived=False):
     """
-    Given a list of rows (with 'current_level' and all simbbPlayers columns),
+    Given a list of rows (with 'league_level' and/or 'current_level'),
     compute mean and stddev for each rating column per level.
 
-    Returns:
-      {
-        level_int: {
-          "contact_base": {"mean": ..., "std": ...},
-          "power_base":   {"mean": ..., "std": ...},
-          ...
-        },
-        ...
-      }
+    If include_derived is True, we also compute distributions for:
+      - c_rating, fb_rating
+      - pitch1_ovr ... pitch5_ovr
+    based on _compute_derived_raw_ratings.
     """
+    # --- Base attributes ---
     level_attr_values = {}
 
     for row in rows:
         m = row._mapping
-        level = m.get("current_level")
-        if level is None:
+        level_key = m.get("league_level") or m.get("current_level")
+        if level_key is None:
             continue
 
-        level_bucket = level_attr_values.setdefault(level, {})
+        level_bucket = level_attr_values.setdefault(level_key, {})
         for col in rating_cols:
             val = m.get(col)
             if val is None:
@@ -279,19 +840,57 @@ def _compute_distributions_by_level(rows, rating_cols):
             level_bucket.setdefault(col, []).append(num)
 
     dist = {}
-    for level, attrs in level_attr_values.items():
-        dist[level] = {}
+    for level_key, attrs in level_attr_values.items():
+        dist[level_key] = {}
         for col, vals in attrs.items():
             if not vals:
-                dist[level][col] = {"mean": None, "std": None}
+                dist[level_key][col] = {"mean": None, "std": None}
             elif len(vals) == 1:
                 mean = float(vals[0])
-                dist[level][col] = {"mean": mean, "std": 0.0}
+                dist[level_key][col] = {"mean": mean, "std": 0.0}
             else:
                 mean = float(sum(vals) / len(vals))
                 var = sum((v - mean) ** 2 for v in vals) / len(vals)  # population variance
                 std = var ** 0.5
-                dist[level][col] = {"mean": mean, "std": std}
+                dist[level_key][col] = {"mean": mean, "std": std}
+
+    # --- Derived attributes (position ratings, pitch overalls) ---
+    if include_derived:
+        derived_values = {}
+
+        for row in rows:
+            m = row._mapping
+            level_key = m.get("league_level") or m.get("current_level")
+            if level_key is None:
+                continue
+
+            raw_derived = _compute_derived_raw_ratings(row)
+            if not raw_derived:
+                continue
+
+            lvl_bucket = derived_values.setdefault(level_key, {})
+            for name, val in raw_derived.items():
+                if val is None:
+                    continue
+                try:
+                    num = float(val)
+                except (TypeError, ValueError):
+                    continue
+                lvl_bucket.setdefault(name, []).append(num)
+
+        for level_key, attrs in derived_values.items():
+            level_dist = dist.setdefault(level_key, {})
+            for name, vals in attrs.items():
+                if not vals:
+                    continue
+                if len(vals) == 1:
+                    mean = float(vals[0])
+                    std = 0.0
+                else:
+                    mean = float(sum(vals) / len(vals))
+                    var = sum((v - mean) ** 2 for v in vals) / len(vals)
+                    std = var ** 0.5
+                level_dist[name] = {"mean": mean, "std": std}
 
     return dist
 
@@ -334,13 +933,13 @@ def _to_20_80(raw_val, mean, std):
 
 def _build_player_with_ratings(row, dist_by_level, col_cats):
     """
-    Convert a raw row into a structured player dict with:
+    Convert a row into a structured player dict with:
       - bio
-      - 20–80 ratings (for _base/_rating and pitchN_ovr)
+      - 20–80 ratings (for _base, plus derived position & pitch overalls)
       - potentials (_pot) as raw strings.
     """
     m = row._mapping
-    level = m.get("current_level")
+    level_key = m.get("league_level") or m.get("current_level")
     org_abbrev = m.get("org_abbrev")
     team_abbrev = m.get("team_abbrev")
 
@@ -348,13 +947,14 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
     pot_cols = col_cats["pot"]
     bio_cols = col_cats["bio"]
 
-    dist_for_level = dist_by_level.get(level, {})
+    dist_for_level = dist_by_level.get(level_key, {})
 
+    # --- Bio fields ---
     bio = {}
     for name in bio_cols:
-        # We already skip 'team' in the categorizer
         bio[name] = m.get(name)
 
+    # --- Base 20–80 ratings (from *_base columns) ---
     ratings = {}
     for col in rating_cols:
         val = m.get(col)
@@ -364,6 +964,16 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
         else:
             ratings[col] = _to_20_80(val, d["mean"], d["std"])
 
+    # --- Derived 20–80 ratings (position ratings & pitch overalls) ---
+    raw_derived = _compute_derived_raw_ratings(row)
+    for attr_name, raw_val in raw_derived.items():
+        d = dist_for_level.get(attr_name)
+        if d is None:
+            ratings[attr_name] = None
+        else:
+            ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
+
+    # --- Potentials ---
     potentials = {}
     for col in pot_cols:
         potentials[col] = m.get(col)
@@ -371,7 +981,8 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
     return {
         "id": m.get("id"),
         "org_abbrev": org_abbrev,
-        "current_level": level,
+        "league_level": m.get("league_level"),
+        "current_level": m.get("current_level"),
         "team_abbrev": team_abbrev,
         "bio": bio,
         "ratings": ratings,
@@ -416,14 +1027,20 @@ def get_team_ratings():
             if not all_rows:
                 return jsonify(
                     {
-                        "league_level": level,
+                        "league_level": None,
+                        "league_level_id": level,
                         "team": team_abbrev,
                         "count": 0,
                         "players": [],
                     }
                 ), 200
 
-            dist_by_level = _compute_distributions_by_level(all_rows, col_cats["rating"])
+            # Include derived attributes in distributions
+            dist_by_level = _compute_distributions_by_level(
+                all_rows,
+                col_cats["rating"],
+                include_derived=True,
+            )
 
             # 2) Narrow to specific team, if requested
             if team_abbrev:
@@ -444,9 +1061,17 @@ def get_team_ratings():
         for row in rows
     ]
 
+    # Determine league_level string for this level from the rows
+    league_level_name = None
+    for p in players_out:
+        if p.get("league_level"):
+            league_level_name = p["league_level"]
+            break
+
     return jsonify(
         {
-            "league_level": level,
+            "league_level": league_level_name,
+            "league_level_id": level,
             "team": team_abbrev,
             "count": len(players_out),
             "players": players_out,
@@ -456,7 +1081,7 @@ def get_team_ratings():
 @rosters_bp.get("/orgs/<string:org_abbrev>/ratings")
 def get_org_ratings(org_abbrev: str):
     """
-    Org-level 20–80 ratings, grouped by level.
+    Org-level 20–80 ratings, grouped by league_level string.
 
     Uses pro levels 4–9 by default (scraps → MLB).
 
@@ -498,7 +1123,11 @@ def get_org_ratings(org_abbrev: str):
                     }
                 ), 200
 
-            dist_by_level = _compute_distributions_by_level(all_rows, col_cats["rating"])
+            dist_by_level = _compute_distributions_by_level(
+                all_rows,
+                col_cats["rating"],
+                include_derived=True,
+            )
 
             # 2) Players for this org only
             org_stmt = _build_ratings_base_stmt(
@@ -514,14 +1143,17 @@ def get_org_ratings(org_abbrev: str):
     levels_out = {}
     for row in org_rows:
         m = row._mapping
-        lvl = m.get("current_level")
-        if lvl is None:
+        lvl_id = m.get("current_level")
+        lvl_name = m.get("league_level")
+        if lvl_id is None:
             continue
-        key = str(lvl)
+
+        key = lvl_name or str(lvl_id)
         bucket = levels_out.setdefault(
             key,
             {
-                "level": lvl,
+                "league_level": key,
+                "level_id": lvl_id,
                 "players": [],
             },
         )
@@ -543,7 +1175,7 @@ def get_org_ratings(org_abbrev: str):
 @rosters_bp.get("/ratings")
 def get_league_ratings():
     """
-    League-wide 20–80 ratings, grouped by org then level.
+    League-wide 20–80 ratings, grouped by org then league_level string.
 
     Uses pro levels 4–9 by default.
 
@@ -570,24 +1202,32 @@ def get_league_ratings():
     if not rows:
         return jsonify(
             {
-                "levels": list(range(4, 10)),
+                "levels": [],
                 "orgs": {},
             }
         ), 200
 
-    # Compute distributions across the whole league
-    dist_by_level = _compute_distributions_by_level(rows, col_cats["rating"])
+    # Compute distributions across the whole league (including derived ratings)
+    dist_by_level = _compute_distributions_by_level(
+        rows,
+        col_cats["rating"],
+        include_derived=True,
+    )
 
-    # Build groupings
     orgs_out = {}
+    level_names_set = set()
+
     for row in rows:
         m = row._mapping
         org_id = m.get("org_id")
         org_abbrev = m.get("org_abbrev")
-        lvl = m.get("current_level")
-        if lvl is None:
+        lvl_id = m.get("current_level")
+        lvl_name = m.get("league_level")
+        if lvl_id is None:
             continue
-        lvl_key = str(lvl)
+
+        key_lvl = lvl_name or str(lvl_id)
+        level_names_set.add(key_lvl)
 
         org_bucket = orgs_out.setdefault(
             org_abbrev,
@@ -598,9 +1238,10 @@ def get_league_ratings():
             },
         )
         lvl_bucket = org_bucket["levels"].setdefault(
-            lvl_key,
+            key_lvl,
             {
-                "level": lvl,
+                "league_level": key_lvl,
+                "level_id": lvl_id,
                 "players": [],
             },
         )
@@ -613,9 +1254,11 @@ def get_league_ratings():
         for lvl_bucket in org_bucket["levels"].values():
             lvl_bucket["count"] = len(lvl_bucket["players"])
 
+    level_names = sorted(level_names_set)
+
     return jsonify(
         {
-            "levels": list(range(4, 10)),
+            "levels": level_names,
             "orgs": orgs_out,
         }
     ), 200
