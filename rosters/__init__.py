@@ -27,9 +27,54 @@ def _get_tables():
             "organizations": Table("organizations", md, autoload_with=engine),
             "players": Table("simbbPlayers", md, autoload_with=engine),
             "levels": Table("levels", md, autoload_with=engine),
+            "teams": Table("teams", md, autoload_with=engine),
+
         }
     return rosters_bp._tables
 
+def _get_player_column_categories():
+    """
+    Categorize simbbPlayers columns into:
+      - rating_cols: numeric attributes to be 20–80 masked (endswith _base / _rating, plus pitchN_ovr)
+      - pot_cols: potential grade columns (endswith _pot)
+      - bio_cols: everything else (id, names, biographical stuff, pitchN_name, etc.)
+
+    We also skip the deprecated 'team' column entirely.
+    """
+    if hasattr(rosters_bp, "_player_col_cats"):
+        return rosters_bp._player_col_cats
+
+    tables = _get_tables()
+    players = tables["players"]
+
+    rating_cols = []
+    pot_cols = []
+    bio_cols = []
+
+    for col in players.c:
+        name = col.name
+
+        # Skip deprecated team column
+        if name == "team":
+            continue
+
+        if name.endswith("_pot"):
+            pot_cols.append(name)
+        elif (
+            name.endswith("_base")
+            or name.endswith("_rating")
+            or re.match(r"^pitch\d+_ovr$", name)
+        ):
+            rating_cols.append(name)
+        else:
+            bio_cols.append(name)
+
+    rosters_bp._player_col_cats = {
+        "rating": rating_cols,
+        "pot": pot_cols,
+        "bio": bio_cols,
+    }
+    return rosters_bp._player_col_cats
 
 def _row_to_player_dict(row):
     """
@@ -113,6 +158,467 @@ def _build_base_roster_stmt(level_filter=None):
 
     return stmt
 
+def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=None):
+    """
+    Build a SELECT that returns:
+      - org_id, org_abbrev,
+      - current_level,
+      - team_abbrev (from teams table),
+      - all simbbPlayers columns.
+
+    Filters:
+      - contracts.isActive = 1
+      - contractTeamShare.isHolder = 1
+      - optional level_filter: int or (min_level, max_level)
+      - optional org_abbrev
+      - optional team_abbrev
+    """
+    tables = _get_tables()
+    contracts = tables["contracts"]
+    details = tables["contract_details"]
+    shares = tables["contract_team_share"]
+    orgs = tables["organizations"]
+    players = tables["players"]
+    teams = tables["teams"]
+
+    conditions = [
+        contracts.c.isActive == 1,
+        shares.c.isHolder == 1,
+    ]
+
+    # Level filter: either single int or (min_level, max_level)
+    if isinstance(level_filter, int):
+        conditions.append(contracts.c.current_level == level_filter)
+    elif isinstance(level_filter, tuple) and len(level_filter) == 2:
+        min_level, max_level = level_filter
+        if min_level is not None:
+            conditions.append(contracts.c.current_level >= min_level)
+        if max_level is not None:
+            conditions.append(contracts.c.current_level <= max_level)
+
+    if org_abbrev:
+        conditions.append(orgs.c.org_abbrev == org_abbrev)
+
+    if team_abbrev:
+        conditions.append(teams.c.team_abbrev == team_abbrev)
+
+    stmt = (
+        select(
+            orgs.c.id.label("org_id"),
+            orgs.c.org_abbrev.label("org_abbrev"),
+            contracts.c.current_level.label("current_level"),
+            teams.c.team_abbrev.label("team_abbrev"),
+            players,  # expands all player columns
+        )
+        .select_from(
+            contracts
+            .join(
+                details,
+                and_(
+                    details.c.contractID == contracts.c.id,
+                    details.c.year == contracts.c.current_year,
+                ),
+            )
+            .join(
+                shares,
+                shares.c.contractDetailsID == details.c.id,
+            )
+            .join(
+                orgs,
+                orgs.c.id == shares.c.orgID,
+            )
+            .join(
+                players,
+                players.c.id == contracts.c.playerID,
+            )
+            .outerjoin(
+                teams,
+                and_(
+                    teams.c.orgID == orgs.c.id,
+                    teams.c.team_level == contracts.c.current_level,
+                ),
+            )
+        )
+        .where(and_(*conditions))
+    )
+
+    return stmt
+
+def _compute_distributions_by_level(rows, rating_cols):
+    """
+    Given a list of rows (with 'current_level' and all simbbPlayers columns),
+    compute mean and stddev for each rating column per level.
+
+    Returns:
+      {
+        level_int: {
+          "contact_base": {"mean": ..., "std": ...},
+          "power_base":   {"mean": ..., "std": ...},
+          ...
+        },
+        ...
+      }
+    """
+    level_attr_values = {}
+
+    for row in rows:
+        m = row._mapping
+        level = m.get("current_level")
+        if level is None:
+            continue
+
+        level_bucket = level_attr_values.setdefault(level, {})
+        for col in rating_cols:
+            val = m.get(col)
+            if val is None:
+                continue
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                continue
+            level_bucket.setdefault(col, []).append(num)
+
+    dist = {}
+    for level, attrs in level_attr_values.items():
+        dist[level] = {}
+        for col, vals in attrs.items():
+            if not vals:
+                dist[level][col] = {"mean": None, "std": None}
+            elif len(vals) == 1:
+                mean = float(vals[0])
+                dist[level][col] = {"mean": mean, "std": 0.0}
+            else:
+                mean = float(sum(vals) / len(vals))
+                var = sum((v - mean) ** 2 for v in vals) / len(vals)  # population variance
+                std = var ** 0.5
+                dist[level][col] = {"mean": mean, "std": std}
+
+    return dist
+
+
+def _to_20_80(raw_val, mean, std):
+    """
+    Map a raw numeric value into a 20–80 scouting scale, clamped and rounded to nearest 5.
+      - 50 at mean
+      - 80 at +3 std
+      - 20 at -3 std
+      - intermediate values in between.
+    """
+    if raw_val is None or mean is None:
+        return None
+
+    try:
+        x = float(raw_val)
+    except (TypeError, ValueError):
+        return None
+
+    if std is None or std <= 0:
+        z = 0.0
+    else:
+        z = (x - mean) / std
+
+    # Clamp z between -3 and 3
+    if z < -3.0:
+        z = -3.0
+    elif z > 3.0:
+        z = 3.0
+
+    raw_score = 50.0 + (z / 3.0) * 30.0  # -3σ→20, 0→50, +3σ→80
+    raw_score = max(20.0, min(80.0, raw_score))
+
+    # Round to nearest 5
+    score = int(round(raw_score / 5.0) * 5)
+    score = max(20, min(80, score))
+    return score
+
+
+def _build_player_with_ratings(row, dist_by_level, col_cats):
+    """
+    Convert a raw row into a structured player dict with:
+      - bio
+      - 20–80 ratings (for _base/_rating and pitchN_ovr)
+      - potentials (_pot) as raw strings.
+    """
+    m = row._mapping
+    level = m.get("current_level")
+    org_abbrev = m.get("org_abbrev")
+    team_abbrev = m.get("team_abbrev")
+
+    rating_cols = col_cats["rating"]
+    pot_cols = col_cats["pot"]
+    bio_cols = col_cats["bio"]
+
+    dist_for_level = dist_by_level.get(level, {})
+
+    bio = {}
+    for name in bio_cols:
+        # We already skip 'team' in the categorizer
+        bio[name] = m.get(name)
+
+    ratings = {}
+    for col in rating_cols:
+        val = m.get(col)
+        d = dist_for_level.get(col)
+        if d is None:
+            ratings[col] = None
+        else:
+            ratings[col] = _to_20_80(val, d["mean"], d["std"])
+
+    potentials = {}
+    for col in pot_cols:
+        potentials[col] = m.get(col)
+
+    return {
+        "id": m.get("id"),
+        "org_abbrev": org_abbrev,
+        "current_level": level,
+        "team_abbrev": team_abbrev,
+        "bio": bio,
+        "ratings": ratings,
+        "potentials": potentials,
+    }
+
+# -------------------------------------------------------------------
+# Roster Display Endpoints
+# -------------------------------------------------------------------
+
+@rosters_bp.get("/ratings/teams")
+def get_team_ratings():
+    """
+    Team-level 20–80 ratings view.
+
+    Query params:
+      - level (required, int): league_level id (e.g. 9 for MLB)
+      - team (optional, string): team_abbrev; if missing, returns ALL players at that level.
+
+    Examples:
+      /api/v1/ratings/teams?level=9&team=NYY
+      /api/v1/ratings/teams?level=9
+    """
+    level = request.args.get("level", type=int)
+    if level is None:
+        return jsonify(
+            error="missing_param",
+            message="level query param (int) is required, e.g. ?level=9 for MLB"
+        ), 400
+
+    team_abbrev = request.args.get("team")
+
+    try:
+        engine = get_engine()
+        col_cats = _get_player_column_categories()
+
+        with engine.connect() as conn:
+            # 1) Get all players at this level (for distributions across the league)
+            all_stmt = _build_ratings_base_stmt(level_filter=level)
+            all_rows = conn.execute(all_stmt).all()
+
+            if not all_rows:
+                return jsonify(
+                    {
+                        "league_level": level,
+                        "team": team_abbrev,
+                        "count": 0,
+                        "players": [],
+                    }
+                ), 200
+
+            dist_by_level = _compute_distributions_by_level(all_rows, col_cats["rating"])
+
+            # 2) Narrow to specific team, if requested
+            if team_abbrev:
+                team_stmt = _build_ratings_base_stmt(
+                    level_filter=level,
+                    team_abbrev=team_abbrev,
+                )
+                rows = conn.execute(team_stmt).all()
+            else:
+                rows = all_rows
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_team_ratings: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    players_out = [
+        _build_player_with_ratings(row, dist_by_level, col_cats)
+        for row in rows
+    ]
+
+    return jsonify(
+        {
+            "league_level": level,
+            "team": team_abbrev,
+            "count": len(players_out),
+            "players": players_out,
+        }
+    ), 200
+
+@rosters_bp.get("/orgs/<string:org_abbrev>/ratings")
+def get_org_ratings(org_abbrev: str):
+    """
+    Org-level 20–80 ratings, grouped by level.
+
+    Uses pro levels 4–9 by default (scraps → MLB).
+
+    Example:
+      /api/v1/orgs/NYY/ratings
+    """
+    # Pro levels range (4=scraps, 9=MLB)
+    level_filter = (4, 9)
+
+    tables = _get_tables()
+    orgs = tables["organizations"]
+
+    try:
+        engine = get_engine()
+        col_cats = _get_player_column_categories()
+
+        with engine.connect() as conn:
+            # Ensure org exists
+            org_row = conn.execute(
+                select(orgs.c.id).where(orgs.c.org_abbrev == org_abbrev).limit(1)
+            ).first()
+            if not org_row:
+                return jsonify(
+                    error="org_not_found",
+                    message=f"No organization with abbrev '{org_abbrev}'"
+                ), 404
+
+            org_id = org_row[0]
+
+            # 1) All players at these levels league-wide (for distributions)
+            all_stmt = _build_ratings_base_stmt(level_filter=level_filter)
+            all_rows = conn.execute(all_stmt).all()
+            if not all_rows:
+                return jsonify(
+                    {
+                        "org": org_abbrev,
+                        "org_id": org_id,
+                        "levels": {},
+                    }
+                ), 200
+
+            dist_by_level = _compute_distributions_by_level(all_rows, col_cats["rating"])
+
+            # 2) Players for this org only
+            org_stmt = _build_ratings_base_stmt(
+                level_filter=level_filter,
+                org_abbrev=org_abbrev,
+            )
+            org_rows = conn.execute(org_stmt).all()
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_org_ratings: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    levels_out = {}
+    for row in org_rows:
+        m = row._mapping
+        lvl = m.get("current_level")
+        if lvl is None:
+            continue
+        key = str(lvl)
+        bucket = levels_out.setdefault(
+            key,
+            {
+                "level": lvl,
+                "players": [],
+            },
+        )
+        player = _build_player_with_ratings(row, dist_by_level, col_cats)
+        bucket["players"].append(player)
+
+    # Add counts
+    for bucket in levels_out.values():
+        bucket["count"] = len(bucket["players"])
+
+    return jsonify(
+        {
+            "org": org_abbrev,
+            "org_id": org_id,
+            "levels": levels_out,
+        }
+    ), 200
+
+@rosters_bp.get("/ratings")
+def get_league_ratings():
+    """
+    League-wide 20–80 ratings, grouped by org then level.
+
+    Uses pro levels 4–9 by default.
+
+    Example:
+      /api/v1/ratings
+    """
+    level_filter = (4, 9)
+
+    tables = _get_tables()
+    orgs = tables["organizations"]
+
+    try:
+        engine = get_engine()
+        col_cats = _get_player_column_categories()
+
+        with engine.connect() as conn:
+            stmt = _build_ratings_base_stmt(level_filter=level_filter)
+            rows = conn.execute(stmt).all()
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_league_ratings: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    if not rows:
+        return jsonify(
+            {
+                "levels": list(range(4, 10)),
+                "orgs": {},
+            }
+        ), 200
+
+    # Compute distributions across the whole league
+    dist_by_level = _compute_distributions_by_level(rows, col_cats["rating"])
+
+    # Build groupings
+    orgs_out = {}
+    for row in rows:
+        m = row._mapping
+        org_id = m.get("org_id")
+        org_abbrev = m.get("org_abbrev")
+        lvl = m.get("current_level")
+        if lvl is None:
+            continue
+        lvl_key = str(lvl)
+
+        org_bucket = orgs_out.setdefault(
+            org_abbrev,
+            {
+                "org_id": org_id,
+                "org_abbrev": org_abbrev,
+                "levels": {},
+            },
+        )
+        lvl_bucket = org_bucket["levels"].setdefault(
+            lvl_key,
+            {
+                "level": lvl,
+                "players": [],
+            },
+        )
+
+        player = _build_player_with_ratings(row, dist_by_level, col_cats)
+        lvl_bucket["players"].append(player)
+
+    # Add counts per level
+    for org_bucket in orgs_out.values():
+        for lvl_bucket in org_bucket["levels"].values():
+            lvl_bucket["count"] = len(lvl_bucket["players"])
+
+    return jsonify(
+        {
+            "levels": list(range(4, 10)),
+            "orgs": orgs_out,
+        }
+    ), 200
 
 # -------------------------------------------------------------------
 # 1 & 2) All active players in an org, optionally at a specific level
@@ -1479,7 +1985,7 @@ def get_org_ledger(org_abbrev: str):
                     ledger.outerjoin(game_weeks, ledger.c.game_week_id == game_weeks.c.id)
                 )
                 .where(and_(*conditions))
-                .order_by(game_weeks.c.week_index.nullsfirst(), ledger.c.id)
+                .order_by(game_weeks.c.week_index.asc(), ledger.c.id)
             )
 
             rows = conn.execute(stmt).all()
