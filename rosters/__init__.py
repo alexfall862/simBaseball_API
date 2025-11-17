@@ -1,6 +1,7 @@
 # rosters/__init__.py
-from flask import Blueprint, jsonify, request, current_app, func
-from sqlalchemy import MetaData, Table, select, and_, literal
+
+from flask import Blueprint, jsonify, request, current_app
+from sqlalchemy import MetaData, Table, select, and_, literal, func
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
@@ -8,9 +9,12 @@ from db import get_engine
 rosters_bp = Blueprint("rosters", __name__)
 
 
+# -------------------------------------------------------------------
+# Table reflection helpers
+# -------------------------------------------------------------------
 def _get_tables():
     """
-    Reflect and cache the tables we need for roster queries.
+    Reflect and cache the tables we need for roster & obligations queries.
     """
     if not hasattr(rosters_bp, "_tables"):
         engine = get_engine()
@@ -22,10 +26,10 @@ def _get_tables():
             "contract_team_share": Table("contractTeamShare", md, autoload_with=engine),
             "organizations": Table("organizations", md, autoload_with=engine),
             "players": Table("simbbPlayers", md, autoload_with=engine),
-            # NEW: level reference table (rename "level" here if your table name differs)
             "levels": Table("levels", md, autoload_with=engine),
         }
     return rosters_bp._tables
+
 
 def _row_to_player_dict(row):
     """
@@ -350,6 +354,10 @@ def get_all_rosters_grouped():
     # Otherwise, return the grouped-by-org map
     return jsonify(by_org), 200
 
+
+# -------------------------------------------------------------------
+# Obligations: single org, all orgs, and history
+# -------------------------------------------------------------------
 @rosters_bp.get("/orgs/<string:org_abbrev>/obligations")
 def get_org_obligations(org_abbrev: str):
     """
@@ -357,14 +365,6 @@ def get_org_obligations(org_abbrev: str):
 
     Query params:
       - league_year (required, int): the league year (e.g., 2027)
-
-    Obligations include:
-      - salary obligations for that league year from contractDetails + contractTeamShare
-      - bonus / buyout obligations from contracts.bonus in leagueYearSigned
-
-    Each obligation row is classified so the frontend can distinguish:
-      - active vs inactive vs buyout
-      - salary vs bonus
     """
     league_year = request.args.get("league_year", type=int)
     if league_year is None:
@@ -413,7 +413,6 @@ def get_org_obligations(org_abbrev: str):
             # -------------------------
             # A. Salary obligations
             # -------------------------
-            # league_year_for_row = contracts.leagueYearSigned + (contractDetails.year - 1)
             league_year_expr = contracts.c.leagueYearSigned + (details.c.year - literal(1))
 
             salary_stmt = (
@@ -431,7 +430,6 @@ def get_org_obligations(org_abbrev: str):
                     shares.c.isHolder.label("isHolder"),
                     shares.c.orgID.label("org_id"),
                     players.c.id.label("player_id"),
-                    # if you want more player columns, add them here explicitly
                 )
                 .select_from(
                     contracts
@@ -453,7 +451,6 @@ def get_org_obligations(org_abbrev: str):
             # -------------------------
             # B. Bonus / buyout obligations
             # -------------------------
-            # Bonus applies in leagueYearSigned, from signingOrg.
             bonus_stmt = (
                 select(
                     contracts.c.id.label("contract_id"),
@@ -498,13 +495,10 @@ def get_org_obligations(org_abbrev: str):
         "overall": 0.0,
     }
 
-    # Helper to safely coerce numeric values
     def _num(val):
         return float(val) if val is not None else 0.0
 
-    # ------------------------------------
-    # Build salary-based obligation rows
-    # ------------------------------------
+    # Salary obligations
     for row in salary_rows:
         m = row._mapping
         salary = _num(m["salary"])
@@ -515,9 +509,6 @@ def get_org_obligations(org_abbrev: str):
         is_active = bool(m.get("isActive") or False)
         is_holder = bool(m.get("isHolder") or False)
 
-        # Category classification:
-        # - Any obligations from a buyout contract are considered "buyout" money.
-        # - Otherwise, distinguish active vs inactive based on isActive + isHolder.
         if is_buyout:
             category = "buyout"
         elif is_active and is_holder:
@@ -531,9 +522,7 @@ def get_org_obligations(org_abbrev: str):
                 "category": category,
                 "league_year": league_year,
                 "year_index": m["year_index"],
-                "player": {
-                    "id": m["player_id"],
-                },
+                "player": {"id": m["player_id"]},
                 "contract": {
                     "id": m["contract_id"],
                     "leagueYearSigned": m["leagueYearSigned"],
@@ -559,9 +548,7 @@ def get_org_obligations(org_abbrev: str):
         elif category == "inactive_salary":
             totals["inactive_salary"] += base_amount
 
-    # ------------------------------------
-    # Build bonus / buyout obligation rows
-    # ------------------------------------
+    # Bonus / buyout obligations
     for row in bonus_rows:
         m = row._mapping
         bonus = _num(m["bonus"])
@@ -570,7 +557,6 @@ def get_org_obligations(org_abbrev: str):
 
         is_buyout = bool(m.get("isBuyout") or False)
         is_active = bool(m.get("isActive") or False)
-
         category = "buyout" if is_buyout else "signing_bonus"
 
         obligations.append(
@@ -578,9 +564,7 @@ def get_org_obligations(org_abbrev: str):
                 "type": "bonus",
                 "category": category,
                 "league_year": league_year,
-                "player": {
-                    "id": m["player_id"],
-                },
+                "player": {"id": m["player_id"]},
                 "contract": {
                     "id": m["contract_id"],
                     "leagueYearSigned": m["leagueYearSigned"],
@@ -588,7 +572,7 @@ def get_org_obligations(org_abbrev: str):
                     "isBuyout": is_buyout,
                 },
                 "flags": {
-                    "is_holder": False,  # bonus based on signingOrg, not holder
+                    "is_holder": False,
                     "is_buyout": is_buyout,
                 },
                 "salary": 0.0,
@@ -614,6 +598,7 @@ def get_org_obligations(org_abbrev: str):
 
     return jsonify(response), 200
 
+
 @rosters_bp.get("/obligations")
 def get_all_org_obligations():
     """
@@ -621,27 +606,6 @@ def get_all_org_obligations():
 
     Query params:
       - league_year (required, int): the league year (e.g., 2027)
-
-    Response structure:
-      {
-        "league_year": 2027,
-        "orgs": {
-          "NYY": {
-            "org_id": ...,
-            "org_abbrev": "NYY",
-            "totals": {
-              "active_salary": ...,
-              "inactive_salary": ...,
-              "buyout": ...,
-              "signing_bonus": ...,
-              "overall": ...
-            },
-            "obligations": [ ...rows as in the single-org endpoint... ]
-          },
-          "LAD": { ... },
-          ...
-        }
-      }
     """
     league_year = request.args.get("league_year", type=int)
     if league_year is None:
@@ -667,9 +631,6 @@ def get_all_org_obligations():
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            # -------------------------
-            # A. Salary obligations
-            # -------------------------
             league_year_expr = contracts.c.leagueYearSigned + (details.c.year - literal(1))
 
             salary_stmt = (
@@ -707,9 +668,6 @@ def get_all_org_obligations():
 
             salary_rows = conn.execute(salary_stmt).all()
 
-            # -------------------------
-            # B. Bonus / buyout obligations
-            # -------------------------
             bonus_stmt = (
                 select(
                     orgs.c.id.label("org_id"),
@@ -750,15 +708,11 @@ def get_all_org_obligations():
             503,
         )
 
-    # -------------------------
-    # Build grouped-by-org result
-    # -------------------------
     def _num(val):
         return float(val) if val is not None else 0.0
 
     by_org = {}
 
-    # Helper to get/create org bucket
     def _get_bucket(org_id, org_abbrev):
         bucket = by_org.get(org_abbrev)
         if bucket is None:
@@ -777,7 +731,7 @@ def get_all_org_obligations():
             by_org[org_abbrev] = bucket
         return bucket
 
-    # ----- Salary obligations -----
+    # Salary obligations
     for row in salary_rows:
         m = row._mapping
         org_id = m["org_id"]
@@ -793,7 +747,6 @@ def get_all_org_obligations():
         is_active = bool(m.get("isActive") or False)
         is_holder = bool(m.get("isHolder") or False)
 
-        # Category classification:
         if is_buyout:
             category = "buyout"
         elif is_active and is_holder:
@@ -806,9 +759,7 @@ def get_all_org_obligations():
             "category": category,
             "league_year": league_year,
             "year_index": m["year_index"],
-            "player": {
-                "id": m["player_id"],
-            },
+            "player": {"id": m["player_id"]},
             "contract": {
                 "id": m["contract_id"],
                 "leagueYearSigned": m["leagueYearSigned"],
@@ -835,7 +786,7 @@ def get_all_org_obligations():
         elif category == "inactive_salary":
             bucket["totals"]["inactive_salary"] += base_amount
 
-    # ----- Bonus / buyout obligations -----
+    # Bonus / buyout obligations
     for row in bonus_rows:
         m = row._mapping
         org_id = m["org_id"]
@@ -849,16 +800,13 @@ def get_all_org_obligations():
 
         is_buyout = bool(m.get("isBuyout") or False)
         is_active = bool(m.get("isActive") or False)
-
         category = "buyout" if is_buyout else "signing_bonus"
 
         obligation = {
             "type": "bonus",
             "category": category,
             "league_year": league_year,
-            "player": {
-                "id": m["player_id"],
-            },
+            "player": {"id": m["player_id"]},
             "contract": {
                 "id": m["contract_id"],
                 "leagueYearSigned": m["leagueYearSigned"],
@@ -890,6 +838,7 @@ def get_all_org_obligations():
 
     return jsonify(response), 200
 
+
 @rosters_bp.get("/orgs/<string:org_abbrev>/obligations/history")
 def get_org_obligations_history(org_abbrev: str):
     """
@@ -898,34 +847,6 @@ def get_org_obligations_history(org_abbrev: str):
     Optional query params:
       - min_year (int): minimum league_year to include
       - max_year (int): maximum league_year to include
-
-    Response shape:
-      {
-        "org": "NYY",
-        "org_id": 45,
-        "years": {
-          "2024": {
-            "league_year": 2024,
-            "totals": {
-              "active_salary": ...,
-              "inactive_salary": ...,
-              "buyout": ...,
-              "signing_bonus": ...,
-              "overall": ...
-            },
-            "obligations": [ ...rows... ]
-          },
-          "2025": { ... },
-          ...
-        },
-        "lifetime_totals": {
-          "active_salary": ...,
-          "inactive_salary": ...,
-          "buyout": ...,
-          "signing_bonus": ...,
-          "overall": ...
-        }
-      }
     """
     min_year = request.args.get("min_year", type=int)
     max_year = request.args.get("max_year", type=int)
@@ -960,17 +881,12 @@ def get_org_obligations_history(org_abbrev: str):
 
             org_id = org_row[0]
 
-            # -------------------------
-            # A. Salary obligations (all years)
-            # -------------------------
-            # league_year_for_row = contracts.leagueYearSigned + (contractDetails.year - 1)
             league_year_expr = contracts.c.leagueYearSigned + (details.c.year - literal(1))
 
             salary_conditions = [
                 shares.c.orgID == org_id,
                 shares.c.salary_share > 0,
             ]
-
             if min_year is not None:
                 salary_conditions.append(league_year_expr >= min_year)
             if max_year is not None:
@@ -1004,9 +920,6 @@ def get_org_obligations_history(org_abbrev: str):
 
             salary_rows = conn.execute(salary_stmt).all()
 
-            # -------------------------
-            # B. Bonus / buyout obligations (all years)
-            # -------------------------
             bonus_conditions = [
                 contracts.c.signingOrg == org_id,
                 contracts.c.bonus > 0,
@@ -1045,9 +958,6 @@ def get_org_obligations_history(org_abbrev: str):
             503,
         )
 
-    # -------------------------
-    # Group by league_year and compute totals
-    # -------------------------
     def _num(val):
         return float(val) if val is not None else 0.0
 
@@ -1078,7 +988,7 @@ def get_org_obligations_history(org_abbrev: str):
             years[key] = bucket
         return bucket
 
-    # ----- Salary obligations across all years -----
+    # Salary obligations across all years
     for row in salary_rows:
         m = row._mapping
         league_year = int(m["league_year"])
@@ -1104,9 +1014,7 @@ def get_org_obligations_history(org_abbrev: str):
             "category": category,
             "league_year": league_year,
             "year_index": m["year_index"],
-            "player": {
-                "id": m["player_id"],
-            },
+            "player": {"id": m["player_id"]},
             "contract": {
                 "id": m["contract_id"],
                 "leagueYearSigned": m["leagueYearSigned"],
@@ -1125,7 +1033,6 @@ def get_org_obligations_history(org_abbrev: str):
 
         bucket["obligations"].append(obligation)
 
-        # Per-year totals
         bucket["totals"]["overall"] += base_amount
         if category == "buyout":
             bucket["totals"]["buyout"] += base_amount
@@ -1134,7 +1041,6 @@ def get_org_obligations_history(org_abbrev: str):
         elif category == "inactive_salary":
             bucket["totals"]["inactive_salary"] += base_amount
 
-        # Lifetime totals
         lifetime_totals["overall"] += base_amount
         if category == "buyout":
             lifetime_totals["buyout"] += base_amount
@@ -1143,7 +1049,7 @@ def get_org_obligations_history(org_abbrev: str):
         elif category == "inactive_salary":
             lifetime_totals["inactive_salary"] += base_amount
 
-    # ----- Bonus / buyout obligations across all years -----
+    # Bonus / buyout obligations across all years
     for row in bonus_rows:
         m = row._mapping
         league_year = int(m["leagueYearSigned"])
@@ -1155,16 +1061,13 @@ def get_org_obligations_history(org_abbrev: str):
 
         is_buyout = bool(m.get("isBuyout") or False)
         is_active = bool(m.get("isActive") or False)
-
         category = "buyout" if is_buyout else "signing_bonus"
 
         obligation = {
             "type": "bonus",
             "category": category,
             "league_year": league_year,
-            "player": {
-                "id": m["player_id"],
-            },
+            "player": {"id": m["player_id"]},
             "contract": {
                 "id": m["contract_id"],
                 "leagueYearSigned": m["leagueYearSigned"],
@@ -1183,14 +1086,12 @@ def get_org_obligations_history(org_abbrev: str):
 
         bucket["obligations"].append(obligation)
 
-        # Per-year totals
         bucket["totals"]["overall"] += bonus
         if category == "buyout":
             bucket["totals"]["buyout"] += bonus
         elif category == "signing_bonus":
             bucket["totals"]["signing_bonus"] += bonus
 
-        # Lifetime totals
         lifetime_totals["overall"] += bonus
         if category == "buyout":
             lifetime_totals["buyout"] += bonus
@@ -1206,7 +1107,11 @@ def get_org_obligations_history(org_abbrev: str):
 
     return jsonify(response), 200
 
-def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
+
+# -------------------------------------------------------------------
+# Financial summaries (ledger-based)
+# -------------------------------------------------------------------
+def get_org_financial_summary(org_abbrev: str, league_year: int):
     """
     Summarize an organization's finances for a given league_year.
 
@@ -1216,6 +1121,7 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
     - interest_events: interest_income/interest_expense entries in this year
     - ending_balance: after this year's activity + interest
     """
+    engine = get_engine()
     md = MetaData()
     orgs = Table("organizations", md, autoload_with=engine)
     league_years = Table("league_years", md, autoload_with=engine)
@@ -1223,7 +1129,7 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
     ledger = Table("org_ledger_entries", md, autoload_with=engine)
 
     with engine.connect() as conn:
-        # --- Resolve org_abbrev -> org_id ---
+        # org lookup
         org_row = conn.execute(
             select(orgs.c.id, orgs.c.org_abbrev)
             .where(orgs.c.org_abbrev == org_abbrev)
@@ -1235,7 +1141,7 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
         org_m = org_row._mapping
         org_id = org_m["id"]
 
-        # --- Resolve league_year -> league_years row ---
+        # league_year row
         ly_row = conn.execute(
             select(
                 league_years.c.id,
@@ -1252,7 +1158,7 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
         league_year_id = ly_m["id"]
         weeks_in_season = int(ly_m["weeks_in_season"])
 
-        # --- Starting balance: all ledger entries from prior years ---
+        # Starting balance: all prior years
         starting_balance = conn.execute(
             select(func.coalesce(func.sum(ledger.c.amount), 0))
             .select_from(
@@ -1269,7 +1175,7 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
             )
         ).scalar_one()
 
-        # --- Year-level (non-week) entries for this year ---
+        # Year-level entries (no game_week_id)
         year_level_rows = conn.execute(
             select(
                 ledger.c.entry_type,
@@ -1290,7 +1196,6 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
             for r in year_level_rows
         }
 
-        # Separate out categories
         year_start_events = {
             k: v
             for k, v in year_level_totals.items()
@@ -1305,10 +1210,9 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
         year_start_net = sum(year_start_events.values())
         interest_net = sum(interest_events.values())
 
-        # Balance right after year-start events but before weekly activity
         balance_after_year_start = float(starting_balance) + year_start_net
 
-        # --- Weekly entries (grouped by week_index + entry_type) ---
+        # Weekly entries
         weekly_rows = conn.execute(
             select(
                 game_weeks.c.week_index,
@@ -1327,7 +1231,6 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
             .group_by(game_weeks.c.week_index, ledger.c.entry_type)
         ).all()
 
-        # Organize totals per week & type
         week_type_totals = {}
         for row in weekly_rows:
             m = row._mapping
@@ -1341,8 +1244,8 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
 
         for week_index in range(1, weeks_in_season + 1):
             by_type = week_type_totals.get(week_index, {})
-            salary_total = by_type.get("salary", 0.0)          # negative in ledger
-            performance_total = by_type.get("performance", 0.0)  # positive
+            salary_total = by_type.get("salary", 0.0)
+            performance_total = by_type.get("performance", 0.0)
 
             other_types = {
                 k: v for k, v in by_type.items()
@@ -1357,14 +1260,13 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
             weeks_summary.append(
                 {
                     "week_index": week_index,
-                    # Present salary_out as positive “outflow” for the frontend
-                    "salary_out": -salary_total,
+                    "salary_out": -salary_total,  # present as positive outflow
                     "performance_in": performance_total,
                     "other_in": other_in,
                     "other_out": other_out,
                     "net": week_net,
                     "cumulative_balance": cumulative,
-                    "by_type": by_type,  # detailed breakdown if you want it
+                    "by_type": by_type,
                 }
             )
 
@@ -1385,34 +1287,8 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int):
         "ending_balance": ending_balance,
     }
 
-@rosters_bp.get("/orgs/<string:org_abbrev>/financial_summary")
-def get_org_financial_summary_endpoint(org_abbrev):
-    app = current_app
-    engine = getattr(app, "engine", None)
-    if not engine:
-        return jsonify(
-            error="no_db_engine",
-            message="Database engine is not initialized on the app."
-        ), 500
 
-    league_year = request.args.get("league_year", type=int)
-    if not league_year:
-        return jsonify(
-            error="missing_param",
-            message="league_year query param is required, e.g. ?league_year=2026"
-        ), 400
-
-    try:
-        summary = get_org_financial_summary(engine, org_abbrev, league_year)
-    except ValueError as e:
-        return jsonify(error="not_found", message=str(e)), 404
-    except SQLAlchemyError as e:
-        app.logger.exception("get_org_financial_summary: db error")
-        return jsonify(error="database_error", message=str(e)), 500
-
-    return jsonify(summary), 200
-
-def get_league_financial_summary(engine, league_year: int):
+def get_league_financial_summary(league_year: int):
     """
     League-wide financial summary for a given league_year.
 
@@ -1420,18 +1296,17 @@ def get_league_financial_summary(engine, league_year: int):
       {
         "league_year": 2026,
         "orgs": {
-          "NYY": { ...same shape as get_org_financial_summary... },
+          "NYY": { ...per-org financial summary... },
           "LAD": { ... },
           ...
         }
       }
     """
+    engine = get_engine()
     md = MetaData()
     orgs = Table("organizations", md, autoload_with=engine)
     league_years = Table("league_years", md, autoload_with=engine)
 
-    # Validate league_year once up front, and get its row (so
-    # get_org_financial_summary won't fail per org on missing year)
     with engine.connect() as conn:
         ly_row = conn.execute(
             select(league_years.c.id, league_years.c.league_year)
@@ -1442,45 +1317,24 @@ def get_league_financial_summary(engine, league_year: int):
         if not ly_row:
             raise ValueError(f"league_year {league_year} not found in league_years")
 
-        # Get all orgs (abbrev + id) – order by abbrev for stable output
         org_rows = conn.execute(
-            select(orgs.c.org_abbrev, orgs.c.id)
-            .order_by(orgs.c.org_abbrev)
+            select(orgs.c.org_abbrev, orgs.c.id).order_by(orgs.c.org_abbrev)
         ).all()
 
     org_summaries = {}
-
-    # Reuse the existing per-org helper for each org
     for row in org_rows:
         m = row._mapping
         org_abbrev = m["org_abbrev"]
-        org_summaries[org_abbrev] = get_org_financial_summary(
-            engine,
-            org_abbrev,
-            league_year,
-        )
+        org_summaries[org_abbrev] = get_org_financial_summary(org_abbrev, league_year)
 
     return {
         "league_year": league_year,
         "orgs": org_summaries,
     }
 
-@rosters_bp.get("/financial_summary")
-def get_league_financial_summary_endpoint():
-    """
-    League-wide financial summary for a given league_year.
 
-    Example:
-      GET /api/v1/financial_summary?league_year=2026
-    """
-    app = current_app
-    engine = getattr(app, "engine", None)
-    if not engine:
-        return jsonify(
-            error="no_db_engine",
-            message="Database engine is not initialized on the app."
-        ), 500
-
+@rosters_bp.get("/orgs/<string:org_abbrev>/financial_summary")
+def get_org_financial_summary_endpoint(org_abbrev):
     league_year = request.args.get("league_year", type=int)
     if not league_year:
         return jsonify(
@@ -1489,12 +1343,31 @@ def get_league_financial_summary_endpoint():
         ), 400
 
     try:
-        summary = get_league_financial_summary(engine, league_year)
+        summary = get_org_financial_summary(org_abbrev, league_year)
     except ValueError as e:
-        # e.g. league_year not found
         return jsonify(error="not_found", message=str(e)), 404
     except SQLAlchemyError as e:
-        app.logger.exception("get_league_financial_summary: db error")
+        current_app.logger.exception("get_org_financial_summary: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    return jsonify(summary), 200
+
+
+@rosters_bp.get("/financial_summary")
+def get_league_financial_summary_endpoint():
+    league_year = request.args.get("league_year", type=int)
+    if not league_year:
+        return jsonify(
+            error="missing_param",
+            message="league_year query param is required, e.g. ?league_year=2026"
+        ), 400
+
+    try:
+        summary = get_league_financial_summary(league_year)
+    except ValueError as e:
+        return jsonify(error="not_found", message=str(e)), 404
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_league_financial_summary: db error")
         return jsonify(error="database_error", message=str(e)), 500
 
     return jsonify(summary), 200
