@@ -8,147 +8,6 @@ from db import get_engine
 
 rosters_bp = Blueprint("rosters", __name__)
 
-# Positional rating formulas (weights are fractions; they will be renormalized
-# if some attributes are missing).
-POSITION_WEIGHTS = {
-    "c": {  # catcher
-        "contact_base": 0.18,
-        "power_base": 0.18,
-        "discipline_base": 0.08,
-        "eye_base": 0.06,
-        "catchframe_base": 0.12,
-        "catchsequence_base": 0.10,
-        "fieldcatch_base": 0.08,
-        "fieldreact_base": 0.08,
-        "throwpower_base": 0.06,
-        "throwacc_base": 0.04,
-        "basereaction_base": 0.02,
-    },
-    "fb": {  # first base
-        "contact_base": 0.30,
-        "power_base": 0.40,
-        "discipline_base": 0.12,
-        "eye_base": 0.08,
-        "baserunning_base": 0.04,
-        "fieldcatch_base": 0.04,
-        "fieldreact_base": 0.02,
-    },
-    "sb": {  # catcher
-        # Offensive contribution
-        "contact_base": 0.18,
-        "power_base": 0.18,
-        "discipline_base": 0.08,
-        "eye_base": 0.06,
-        # Receiving / game-calling / defense
-        "catchframe_base": 0.12,
-        "catchsequence_base": 0.10,
-        "fieldcatch_base": 0.08,
-        "fieldreact_base": 0.08,
-        "throwpower_base": 0.06,
-        "throwacc_base": 0.04,
-        "basereaction_base": 0.02,
-    },
-    "tb": {  # first base
-        "contact_base": 0.30,
-        "power_base": 0.40,
-        "discipline_base": 0.12,
-        "eye_base": 0.08,
-        "baserunning_base": 0.04,
-        "fieldcatch_base": 0.04,
-        "fieldreact_base": 0.02,
-    },
-    "ss": {  # catcher
-        # Offensive contribution
-        "contact_base": 0.18,
-        "power_base": 0.18,
-        "discipline_base": 0.08,
-        "eye_base": 0.06,
-        # Receiving / game-calling / defense
-        "catchframe_base": 0.12,
-        "catchsequence_base": 0.10,
-        "fieldcatch_base": 0.08,
-        "fieldreact_base": 0.08,
-        "throwpower_base": 0.06,
-        "throwacc_base": 0.04,
-        "basereaction_base": 0.02,
-    },
-    "lf": {  # first base
-        "contact_base": 0.30,
-        "power_base": 0.40,
-        "discipline_base": 0.12,
-        "eye_base": 0.08,
-        "baserunning_base": 0.04,
-        "fieldcatch_base": 0.04,
-        "fieldreact_base": 0.02,
-    },
-    "cf": {  # catcher
-        # Offensive contribution
-        "contact_base": 0.18,
-        "power_base": 0.18,
-        "discipline_base": 0.08,
-        "eye_base": 0.06,
-        # Receiving / game-calling / defense
-        "catchframe_base": 0.12,
-        "catchsequence_base": 0.10,
-        "fieldcatch_base": 0.08,
-        "fieldreact_base": 0.08,
-        "throwpower_base": 0.06,
-        "throwacc_base": 0.04,
-        "basereaction_base": 0.02,
-    },
-    "rf": {  # first base
-        "contact_base": 0.30,
-        "power_base": 0.40,
-        "discipline_base": 0.12,
-        "eye_base": 0.08,
-        "baserunning_base": 0.04,
-        "fieldcatch_base": 0.04,
-        "fieldreact_base": 0.02,
-    },
-    "dh": {  # catcher
-        # Offensive contribution
-        "contact_base": 0.18,
-        "power_base": 0.18,
-        "discipline_base": 0.08,
-        "eye_base": 0.06,
-        # Receiving / game-calling / defense
-        "catchframe_base": 0.12,
-        "catchsequence_base": 0.10,
-        "fieldcatch_base": 0.08,
-        "fieldreact_base": 0.08,
-        "throwpower_base": 0.06,
-        "throwacc_base": 0.04,
-        "basereaction_base": 0.02,
-    },
-    "sp": {  # first base
-        "contact_base": 0.30,
-        "power_base": 0.40,
-        "discipline_base": 0.12,
-        "eye_base": 0.08,
-        "baserunning_base": 0.04,
-        "fieldcatch_base": 0.04,
-        "fieldreact_base": 0.02,
-    },
-    "rp": {  # catcher
-        # Offensive contribution
-        "contact_base": 0.18,
-        "power_base": 0.18,
-        "discipline_base": 0.08,
-        "eye_base": 0.06,
-        # Receiving / game-calling / defense
-        "catchframe_base": 0.12,
-        "catchsequence_base": 0.10,
-        "fieldcatch_base": 0.08,
-        "fieldreact_base": 0.08,
-        "throwpower_base": 0.06,
-        "throwacc_base": 0.04,
-        "basereaction_base": 0.02,
-    }                    
-}
-
-
-
-
 # -------------------------------------------------------------------
 # Table reflection helpers
 # -------------------------------------------------------------------
@@ -273,11 +132,11 @@ def _compute_derived_raw_ratings(row):
             prefix + "pcntrl_base":  0.25,
         })
         if raw is not None:
-            derived[f"pitch{i}_ovr"] = raw
+            derived[f"pitch{i}_ovr__"] = raw
 
     # --- Catcher position rating (c_rating) ---
     # Example weighting: framing, sequencing, catching, reaction, arm accuracy/power.
-    derived["c_rating"] = _weighted({
+    derived["Oc_rating"] = _weighted({
         #batting
         "power_base":           0.10,
         "contact_base":         0.10,
