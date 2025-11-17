@@ -1116,6 +1116,8 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
     Summarize an organization's finances for a given league_year.
 
     - starting_balance: net balance from all prior league years
+    - season_revenue: sum of all positive ledger entries in this league_year
+    - season_expenses: sum of absolute values of all negative ledger entries in this league_year
     - year_start_events: media/bonus/buyout (non-week entries in this year)
     - weeks: per-week salary/performance/other + cumulative balance
     - interest_events: interest_income/interest_expense entries in this year
@@ -1129,7 +1131,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
     ledger = Table("org_ledger_entries", md, autoload_with=engine)
 
     with engine.connect() as conn:
-        # org lookup
+        # --- Resolve org ---
         org_row = conn.execute(
             select(orgs.c.id, orgs.c.org_abbrev)
             .where(orgs.c.org_abbrev == org_abbrev)
@@ -1141,7 +1143,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
         org_m = org_row._mapping
         org_id = org_m["id"]
 
-        # league_year row
+        # --- Resolve league_year ---
         ly_row = conn.execute(
             select(
                 league_years.c.id,
@@ -1158,7 +1160,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
         league_year_id = ly_m["id"]
         weeks_in_season = int(ly_m["weeks_in_season"])
 
-        # Starting balance: all prior years
+        # --- Starting balance: all prior years ---
         starting_balance = conn.execute(
             select(func.coalesce(func.sum(ledger.c.amount), 0))
             .select_from(
@@ -1175,7 +1177,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
             )
         ).scalar_one()
 
-        # Year-level entries (no game_week_id)
+        # --- Year-level entries (no game_week_id) for this league_year ---
         year_level_rows = conn.execute(
             select(
                 ledger.c.entry_type,
@@ -1196,6 +1198,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
             for r in year_level_rows
         }
 
+        # Break out categories
         year_start_events = {
             k: v
             for k, v in year_level_totals.items()
@@ -1210,9 +1213,19 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
         year_start_net = sum(year_start_events.values())
         interest_net = sum(interest_events.values())
 
+        # Season revenue/expenses (include year-level + weekly + interest)
+        season_revenue = 0.0
+        season_expenses = 0.0
+
+        for v in year_level_totals.values():
+            if v > 0:
+                season_revenue += v
+            elif v < 0:
+                season_expenses += -v
+
         balance_after_year_start = float(starting_balance) + year_start_net
 
-        # Weekly entries
+        # --- Weekly entries grouped by week_index + entry_type ---
         weekly_rows = conn.execute(
             select(
                 game_weeks.c.week_index,
@@ -1239,13 +1252,19 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
             total = float(m["total"])
             week_type_totals.setdefault(week, {})[etype] = total
 
+            # contribute to season revenue/expenses
+            if total > 0:
+                season_revenue += total
+            elif total < 0:
+                season_expenses += -total
+
         weeks_summary = []
         cumulative = balance_after_year_start
 
         for week_index in range(1, weeks_in_season + 1):
             by_type = week_type_totals.get(week_index, {})
-            salary_total = by_type.get("salary", 0.0)
-            performance_total = by_type.get("performance", 0.0)
+            salary_total = by_type.get("salary", 0.0)          # negative in ledger
+            performance_total = by_type.get("performance", 0.0)  # positive
 
             other_types = {
                 k: v for k, v in by_type.items()
@@ -1280,6 +1299,8 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
         },
         "league_year": league_year,
         "starting_balance": float(starting_balance),
+        "season_revenue": season_revenue,
+        "season_expenses": season_expenses,
         "year_start_events": year_start_events,
         "weeks": weeks_summary,
         "interest_events": interest_events,
@@ -1295,6 +1316,10 @@ def get_league_financial_summary(league_year: int):
     Returns:
       {
         "league_year": 2026,
+        "league_totals": {
+          "season_revenue": ...,
+          "season_expenses": ...
+        },
         "orgs": {
           "NYY": { ...per-org financial summary... },
           "LAD": { ... },
@@ -1322,16 +1347,25 @@ def get_league_financial_summary(league_year: int):
         ).all()
 
     org_summaries = {}
+    league_totals = {
+        "season_revenue": 0.0,
+        "season_expenses": 0.0,
+    }
+
     for row in org_rows:
         m = row._mapping
         org_abbrev = m["org_abbrev"]
-        org_summaries[org_abbrev] = get_org_financial_summary(org_abbrev, league_year)
+        summary = get_org_financial_summary(org_abbrev, league_year)
+        org_summaries[org_abbrev] = summary
+
+        league_totals["season_revenue"] += float(summary.get("season_revenue", 0.0))
+        league_totals["season_expenses"] += float(summary.get("season_expenses", 0.0))
 
     return {
         "league_year": league_year,
+        "league_totals": league_totals,
         "orgs": org_summaries,
     }
-
 
 @rosters_bp.get("/orgs/<string:org_abbrev>/financial_summary")
 def get_org_financial_summary_endpoint(org_abbrev):
@@ -1372,3 +1406,308 @@ def get_league_financial_summary_endpoint():
         return jsonify(error="database_error", message=str(e)), 500
 
     return jsonify(summary), 200
+
+@rosters_bp.get("/orgs/<string:org_abbrev>/ledger")
+def get_org_ledger(org_abbrev: str):
+    """
+    Inspect raw ledger entries for an org in a given league_year.
+
+    Query params:
+      - league_year (required, int)
+      - entry_type (optional, string) to filter (e.g. 'salary', 'media', 'performance', etc.)
+    """
+    league_year = request.args.get("league_year", type=int)
+    if not league_year:
+        return jsonify(
+            error="missing_param",
+            message="league_year query param is required, e.g. ?league_year=2026"
+        ), 400
+
+    entry_type = request.args.get("entry_type")
+
+    engine = get_engine()
+    md = MetaData()
+    orgs = Table("organizations", md, autoload_with=engine)
+    league_years = Table("league_years", md, autoload_with=engine)
+    game_weeks = Table("game_weeks", md, autoload_with=engine)
+    ledger = Table("org_ledger_entries", md, autoload_with=engine)
+
+    try:
+        with engine.connect() as conn:
+            # org lookup
+            org_row = conn.execute(
+                select(orgs.c.id, orgs.c.org_abbrev)
+                .where(orgs.c.org_abbrev == org_abbrev)
+                .limit(1)
+            ).first()
+            if not org_row:
+                return jsonify(
+                    error="org_not_found",
+                    message=f"Organization '{org_abbrev}' not found"
+                ), 404
+
+            org_m = org_row._mapping
+            org_id = org_m["id"]
+
+            # league_year lookup
+            ly_row = conn.execute(
+                select(league_years.c.id, league_years.c.league_year)
+                .where(league_years.c.league_year == league_year)
+                .limit(1)
+            ).first()
+            if not ly_row:
+                return jsonify(
+                    error="league_year_not_found",
+                    message=f"league_year {league_year} not found in league_years"
+                ), 404
+
+            league_year_id = ly_row._mapping["id"]
+
+            conditions = [
+                ledger.c.org_id == org_id,
+                ledger.c.league_year_id == league_year_id,
+            ]
+            if entry_type:
+                conditions.append(ledger.c.entry_type == entry_type)
+
+            stmt = (
+                select(
+                    ledger,
+                    game_weeks.c.week_index,
+                )
+                .select_from(
+                    ledger.outerjoin(game_weeks, ledger.c.game_week_id == game_weeks.c.id)
+                )
+                .where(and_(*conditions))
+                .order_by(game_weeks.c.week_index.nullsfirst(), ledger.c.id)
+            )
+
+            rows = conn.execute(stmt).all()
+
+            entries = []
+            for row in rows:
+                m = row._mapping
+                # row includes all ledger columns + week_index
+                entry = {k: v for k, v in m.items()}
+                entries.append(entry)
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_org_ledger: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    return jsonify(
+        {
+            "org": {
+                "id": org_id,
+                "abbrev": org_abbrev,
+            },
+            "league_year": league_year,
+            "count": len(entries),
+            "entries": entries,
+        }
+    ), 200
+
+@rosters_bp.get("/orgs/<string:org_abbrev>/weekly_record")
+def get_org_weekly_record(org_abbrev: str):
+    """
+    Weekly performance summary for an org in a given league_year.
+
+    Uses team_weekly_record + game_weeks.
+
+    Query params:
+      - league_year (required, int)
+
+    Response:
+      {
+        "org": {...},
+        "league_year": 2026,
+        "weeks": [
+          {"week_index": 1, "wins": 3, "losses": 1},
+          ...
+        ],
+        "totals": {"wins": 85, "losses": 77}
+      }
+    """
+    league_year = request.args.get("league_year", type=int)
+    if not league_year:
+        return jsonify(
+            error="missing_param",
+            message="league_year query param is required, e.g. ?league_year=2026"
+        ), 400
+
+    engine = get_engine()
+    md = MetaData()
+    orgs = Table("organizations", md, autoload_with=engine)
+    league_years = Table("league_years", md, autoload_with=engine)
+    game_weeks = Table("game_weeks", md, autoload_with=engine)
+    team_weekly = Table("team_weekly_record", md, autoload_with=engine)
+
+    try:
+        with engine.connect() as conn:
+            # org lookup
+            org_row = conn.execute(
+                select(orgs.c.id, orgs.c.org_abbrev)
+                .where(orgs.c.org_abbrev == org_abbrev)
+                .limit(1)
+            ).first()
+            if not org_row:
+                return jsonify(
+                    error="org_not_found",
+                    message=f"Organization '{org_abbrev}' not found"
+                ), 404
+
+            org_m = org_row._mapping
+            org_id = org_m["id"]
+
+            # league_year lookup
+            ly_row = conn.execute(
+                select(league_years.c.id, league_years.c.league_year)
+                .where(league_years.c.league_year == league_year)
+                .limit(1)
+            ).first()
+            if not ly_row:
+                return jsonify(
+                    error="league_year_not_found",
+                    message=f"league_year {league_year} not found in league_years"
+                ), 404
+
+            league_year_id = ly_row._mapping["id"]
+
+            stmt = (
+                select(
+                    team_weekly.c.wins,
+                    team_weekly.c.losses,
+                    game_weeks.c.week_index,
+                )
+                .select_from(
+                    team_weekly.join(
+                        game_weeks,
+                        team_weekly.c.game_week_id == game_weeks.c.id,
+                    )
+                )
+                .where(
+                    and_(
+                        team_weekly.c.org_id == org_id,
+                        team_weekly.c.league_year_id == league_year_id,
+                    )
+                )
+                .order_by(game_weeks.c.week_index)
+            )
+
+            rows = conn.execute(stmt).all()
+
+            weeks = []
+            total_wins = 0
+            total_losses = 0
+
+            for row in rows:
+                m = row._mapping
+                w = int(m["wins"])
+                l = int(m["losses"])
+                weeks.append(
+                    {
+                        "week_index": m["week_index"],
+                        "wins": w,
+                        "losses": l,
+                    }
+                )
+                total_wins += w
+                total_losses += l
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_org_weekly_record: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    return jsonify(
+        {
+            "org": {
+                "id": org_id,
+                "abbrev": org_abbrev,
+            },
+            "league_year": league_year,
+            "weeks": weeks,
+            "totals": {
+                "wins": total_wins,
+                "losses": total_losses,
+            },
+        }
+    ), 200
+
+@rosters_bp.get("/league_state")
+def get_league_state():
+    """
+    Return the current league_state row, plus resolved league_year and week_index.
+
+    Assumes a single row in league_state.
+    """
+    engine = get_engine()
+    md = MetaData()
+    league_state = Table("league_state", md, autoload_with=engine)
+    league_years = Table("league_years", md, autoload_with=engine)
+    game_weeks = Table("game_weeks", md, autoload_with=engine)
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(
+                    league_state.c.id,
+                    league_state.c.current_league_year_id,
+                    league_state.c.current_game_week_id,
+                    league_state.c.books_last_run_at,
+                    league_state.c.games_last_run_at,
+                ).limit(1)
+            ).first()
+
+            if not row:
+                # Table exists but no state row yet
+                return jsonify(
+                    {
+                        "state": None,
+                        "message": "league_state table is empty; initialize it via admin tools.",
+                    }
+                ), 200
+
+            m = row._mapping
+
+            current_league_year = None
+            current_week_index = None
+
+            if m["current_league_year_id"] is not None:
+                ly_row = conn.execute(
+                    select(league_years.c.league_year)
+                    .where(league_years.c.id == m["current_league_year_id"])
+                    .limit(1)
+                ).first()
+                if ly_row:
+                    current_league_year = ly_row._mapping["league_year"]
+
+            if m["current_game_week_id"] is not None:
+                gw_row = conn.execute(
+                    select(game_weeks.c.week_index)
+                    .where(game_weeks.c.id == m["current_game_week_id"])
+                    .limit(1)
+                ).first()
+                if gw_row:
+                    current_week_index = gw_row._mapping["week_index"]
+
+            def _to_str_or_none(val):
+                if val is None:
+                    return None
+                # Safely stringify timestamps or other types
+                return getattr(val, "isoformat", lambda: str(val))()
+
+            payload = {
+                "id": m["id"],
+                "current_league_year_id": m["current_league_year_id"],
+                "current_game_week_id": m["current_game_week_id"],
+                "current_league_year": current_league_year,
+                "current_week_index": current_week_index,
+                "books_last_run_at": _to_str_or_none(m["books_last_run_at"]),
+                "games_last_run_at": _to_str_or_none(m["games_last_run_at"]),
+            }
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_league_state: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    return jsonify(payload), 200
