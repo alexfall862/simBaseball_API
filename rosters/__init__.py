@@ -1,6 +1,6 @@
 # rosters/__init__.py
 from flask import Blueprint, jsonify, request, current_app, func
-from sqlalchemy import MetaData, Table, select, and_
+from sqlalchemy import MetaData, Table, select, and_, literal
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
@@ -350,10 +350,6 @@ def get_all_rosters_grouped():
     # Otherwise, return the grouped-by-org map
     return jsonify(by_org), 200
 
-from flask import Blueprint, jsonify, request
-from sqlalchemy import MetaData, Table, select, and_, literal
-from sqlalchemy.exc import SQLAlchemyError
-from db import get_engine
 
 rosters_bp = Blueprint("rosters", __name__)
 
