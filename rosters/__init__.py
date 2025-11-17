@@ -3,7 +3,7 @@
 from flask import Blueprint, jsonify, request, current_app
 from sqlalchemy import MetaData, Table, select, and_, literal, func
 from sqlalchemy.exc import SQLAlchemyError
-
+import re
 from db import get_engine
 
 rosters_bp = Blueprint("rosters", __name__)
