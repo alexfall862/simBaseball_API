@@ -350,12 +350,6 @@ def get_all_rosters_grouped():
     # Otherwise, return the grouped-by-org map
     return jsonify(by_org), 200
 
-
-rosters_bp = Blueprint("rosters", __name__)
-
-# ... _get_tables and _row_to_player_dict etc. defined above ...
-
-
 @rosters_bp.get("/orgs/<string:org_abbrev>/obligations")
 def get_org_obligations(org_abbrev: str):
     """
