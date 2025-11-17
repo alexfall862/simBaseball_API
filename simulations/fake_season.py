@@ -27,7 +27,7 @@ def simulate_fake_season(engine, league_year: int, league_level: int = 9) -> Dic
     weekly = Table("team_weekly_record", md, autoload_with=engine)
 
     with engine.begin() as conn:
-        # 1) Resolve league_year row & week_index -> game_week_id map
+        # 1) Resolve league_year row (by year) & map to ID
         ly_row = conn.execute(
             select(
                 league_years.c.id,
@@ -51,14 +51,14 @@ def simulate_fake_season(engine, league_year: int, league_level: int = 9) -> Dic
         if not week_index_to_id:
             raise ValueError(f"No game_weeks found for league_year_id={league_year_id}")
 
-        # 2) Fetch MLB games for this season from gamelist, with orgs
+        # 2) Fetch MLB games for this season from gamelist, using league_year_id
         t_home = teams.alias("t_home")
         t_away = teams.alias("t_away")
 
         game_rows = conn.execute(
             select(
                 gamelist.c.id.label("game_id"),
-                gamelist.c.season,
+                gamelist.c.season,           # this will be league_year_id
                 gamelist.c.league_level,
                 gamelist.c.season_week,
                 gamelist.c.season_subweek,
@@ -74,7 +74,7 @@ def simulate_fake_season(engine, league_year: int, league_level: int = 9) -> Dic
             )
             .where(
                 and_(
-                    gamelist.c.season == league_year,
+                    gamelist.c.season == league_year_id,      # <-- USE ID HERE
                     gamelist.c.league_level == league_level,
                 )
             )

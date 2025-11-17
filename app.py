@@ -29,6 +29,7 @@ from financials.books import (
     run_year_start_books,
     run_week_books,
     run_year_end_interest,
+    run_full_season_books
 )
 
 from simulations.fake_season import simulate_fake_season
@@ -552,6 +553,50 @@ def create_app(config_object=Config):
 
         log.info("admin_run_year_end_interest: completed: %s", result)
         return jsonify(status="ok", details=result), 200
+
+    @app.post("/admin/run-season-books")
+    @soft_timeout(app)
+    def admin_run_season_books():
+        log = logging.getLogger("app")
+        log.info("admin_run_season_books: endpoint called")
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("admin_run_season_books: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("admin_run_season_books: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        payload = request.get_json(silent=True) or {}
+        league_year = payload.get("league_year") or request.args.get("league_year", type=int)
+
+        if not league_year:
+            return jsonify(
+                error="missing_param",
+                message="league_year is required."
+            ), 400
+
+        try:
+            result = run_full_season_books(app.engine, int(league_year))
+        except ValueError as e:
+            return jsonify(error="bad_request", message=str(e)), 400
+        except SQLAlchemyError as e:
+            log.exception("admin_run_season_books: db error")
+            return jsonify(error="database_error", message=str(e)), 500
+
+        log.info("admin_run_season_books: completed: %s", result)
+        return jsonify(status="ok", details=result), 200
+
 
 # ----------------------------
 # - Simulations

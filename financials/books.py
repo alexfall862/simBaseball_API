@@ -12,6 +12,7 @@ from sqlalchemy import (
     literal,
 )
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func
 
 
 INTEREST_RATE = Decimal("0.05")  # 5% annual
@@ -543,4 +544,204 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
         "interest_entries_created": created,
         "interest_entries_skipped": skipped,
         "interest_rate": float(INTEREST_RATE),
+    }
+
+def run_full_season_books(engine, league_year: int) -> Dict[str, Any]:
+    """
+    Run the entire financial cycle for a league_year:
+
+      1. Year-start books (media + bonuses/buyouts).
+      2. Weekly books for each game_week (salary + performance).
+      3. Year-end interest.
+
+    Assumes:
+      - league_years row exists and has weeks_in_season set,
+      - team_weekly_record already populated for that season.
+    """
+    tables = _get_tables(engine)
+    ly_tbl = tables["league_years"]
+
+    with engine.begin() as conn:
+        ly_row = _get_league_year_row(conn, tables, league_year)
+        weeks_in_season = int(ly_row["weeks_in_season"])
+
+    # 1) Year start
+    year_start_result = run_year_start_books(engine, league_year)
+
+    # 2) Weekly books
+    weekly_results = []
+    for week_index in range(1, weeks_in_season + 1):
+        res = run_week_books(engine, league_year, week_index)
+        weekly_results.append(res)
+
+    # 3) Year end interest
+    year_end_result = run_year_end_interest(engine, league_year)
+
+    return {
+        "league_year": league_year,
+        "weeks_in_season": weeks_in_season,
+        "year_start": year_start_result,
+        "weeks": weekly_results,
+        "year_end": year_end_result,
+    }
+
+
+
+def get_org_financial_summary(engine, org_abbrev: str, league_year: int) -> Dict[str, Any]:
+    """
+    Summarize an organization's finances for a league_year:
+
+      - starting_balance: net balance from all prior years
+      - year_start_events: media/bonus/buyout totals for that year (non-week entries)
+      - weekly activity: per-week salary/performance/other and cumulative balance
+      - interest_events: interest_income/interest_expense in that year
+      - ending_balance: net balance after this year (including interest)
+    """
+    tables = _get_tables(engine)
+    orgs = tables["organizations"]
+    ly_tbl = tables["league_years"]
+    gw_tbl = tables["game_weeks"]
+    ledger = tables["ledger"]
+
+    with engine.begin() as conn:
+        # org lookup by abbrev (adjust column name if needed)
+        org_row = conn.execute(
+            select(
+                orgs.c.id,
+                orgs.c.org_abbrev,
+            ).where(orgs.c.org_abbrev == org_abbrev)
+        ).first()
+        if not org_row:
+            raise ValueError(f"Organization '{org_abbrev}' not found")
+
+        org = org_row._mapping
+        org_id = org["id"]
+
+        # league_year row
+        ly_row = _get_league_year_row(conn, tables, league_year)
+        league_year_id = ly_row["id"]
+        weeks_in_season = int(ly_row["weeks_in_season"])
+
+        # --- Starting balance (all years < league_year) ---
+        starting_balance = conn.execute(
+            select(func.coalesce(func.sum(ledger.c.amount), 0))
+            .select_from(ledger.join(ly_tbl, ledger.c.league_year_id == ly_tbl.c.id))
+            .where(
+                and_(
+                    ledger.c.org_id == org_id,
+                    ly_tbl.c.league_year < league_year,
+                )
+            )
+        ).scalar_one()
+
+        # --- Year-level (non-week) entries for this year ---
+        year_level_rows = conn.execute(
+            select(
+                ledger.c.entry_type,
+                func.coalesce(func.sum(ledger.c.amount), 0).label("total"),
+            )
+            .where(
+                and_(
+                    ledger.c.org_id == org_id,
+                    ledger.c.league_year_id == league_year_id,
+                    ledger.c.game_week_id.is_(None),
+                )
+            )
+            .group_by(ledger.c.entry_type)
+        ).all()
+
+        year_level_totals: Dict[str, float] = {
+            r._mapping["entry_type"]: float(r._mapping["total"]) for r in year_level_rows
+        }
+
+        year_start_events = {
+            k: v
+            for k, v in year_level_totals.items()
+            if k in ("media", "bonus", "buyout")
+        }
+        interest_events = {
+            k: v
+            for k, v in year_level_totals.items()
+            if k in ("interest_income", "interest_expense")
+        }
+
+        year_start_net = sum(year_start_events.values())
+        interest_net = sum(interest_events.values())
+
+        # balance immediately after year-start events
+        balance_after_year_start = float(starting_balance) + year_start_net
+
+        # --- Weekly entries (grouped by week_index + entry_type) ---
+        weekly_rows = conn.execute(
+            select(
+                gw_tbl.c.week_index,
+                ledger.c.entry_type,
+                func.coalesce(func.sum(ledger.c.amount), 0).label("total"),
+            )
+            .select_from(
+                ledger.join(gw_tbl, ledger.c.game_week_id == gw_tbl.c.id)
+            )
+            .where(
+                and_(
+                    ledger.c.org_id == org_id,
+                    ledger.c.league_year_id == league_year_id,
+                )
+            )
+            .group_by(gw_tbl.c.week_index, ledger.c.entry_type)
+        ).all()
+
+        # Build per-week breakdowns
+        week_type_totals: Dict[int, Dict[str, float]] = {}
+        for row in weekly_rows:
+            m = row._mapping
+            week = m["week_index"]
+            etype = m["entry_type"]
+            total = float(m["total"])
+            wdict = week_type_totals.setdefault(week, {})
+            wdict[etype] = total
+
+        weeks_summary = []
+        cumulative = balance_after_year_start
+
+        for week_index in range(1, weeks_in_season + 1):
+            by_type = week_type_totals.get(week_index, {})
+            salary_total = by_type.get("salary", 0.0)       # negative
+            performance_total = by_type.get("performance", 0.0)  # positive
+
+            other_types = {
+                k: v for k, v in by_type.items()
+                if k not in ("salary", "performance")
+            }
+            other_in = sum(v for v in other_types.values() if v > 0)
+            other_out = -sum(v for v in other_types.values() if v < 0)
+
+            week_net = sum(by_type.values())  # sum of all entry_type totals
+            cumulative += week_net
+
+            weeks_summary.append({
+                "week_index": week_index,
+                "salary_out": -salary_total,          # present as positive outflow
+                "performance_in": performance_total,
+                "other_in": other_in,
+                "other_out": other_out,
+                "net": week_net,
+                "cumulative_balance": cumulative,
+                "by_type": by_type,   # optional detailed breakdown
+            })
+
+        ending_balance_before_interest = cumulative
+        ending_balance = ending_balance_before_interest + interest_net
+
+    return {
+        "org": {
+            "id": org_id,
+            "abbrev": org["org_abbrev"],
+        },
+        "league_year": league_year,
+        "starting_balance": float(starting_balance),
+        "year_start_events": year_start_events,
+        "weeks": weeks_summary,
+        "interest_events": interest_events,
+        "ending_balance_before_interest": ending_balance_before_interest,
+        "ending_balance": ending_balance,
     }
