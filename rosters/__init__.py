@@ -7,6 +7,7 @@ import re
 from db import get_engine
 
 rosters_bp = Blueprint("rosters", __name__)
+PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
 
 # -------------------------------------------------------------------
 # Table reflection helpers
@@ -671,14 +672,24 @@ def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=Non
 def _compute_distributions_by_level(rows, rating_cols, include_derived=False):
     """
     Given a list of rows (with 'league_level' and/or 'current_level'),
-    compute mean and stddev for each rating column per level.
+    compute mean and stddev for each rating dimension per level.
+
+    Behavior:
+      - For non-pitch *_base columns: each column gets its own distribution
+        key, e.g. "contact_base", "speed_base".
+      - For pitch component *_base columns (pitchN_pacc/pbrk/pcntrl/consist_base):
+        we POOL values across all pitchN for that component at a given level:
+          * all pitchN_pacc_base contribute to a single "pitch_pacc" dist
+          * all pitchN_pbrk_base -> "pitch_pbrk"
+          * all pitchN_pcntrl_base -> "pitch_pcntrl"
+          * all pitchN_consist_base -> "pitch_consist"
 
     If include_derived is True, we also compute distributions for:
       - c_rating, fb_rating
       - pitch1_ovr ... pitch5_ovr
     based on _compute_derived_raw_ratings.
     """
-    # --- Base attributes ---
+    # --- Base attributes (includes pooled pitch components) ---
     level_attr_values = {}
 
     for row in rows:
@@ -688,6 +699,7 @@ def _compute_distributions_by_level(rows, rating_cols, include_derived=False):
             continue
 
         level_bucket = level_attr_values.setdefault(level_key, {})
+
         for col in rating_cols:
             val = m.get(col)
             if val is None:
@@ -696,22 +708,33 @@ def _compute_distributions_by_level(rows, rating_cols, include_derived=False):
                 num = float(val)
             except (TypeError, ValueError):
                 continue
-            level_bucket.setdefault(col, []).append(num)
+
+            # Check if this is a pitch component column
+            m_pitch = PITCH_COMPONENT_RE.match(col)
+            if m_pitch:
+                component = m_pitch.group(1)  # pacc / pbrk / pcntrl / consist
+                # pooled key per component
+                dist_key = f"pitch_{component}"
+            else:
+                # normal attribute: use column name directly
+                dist_key = col
+
+            level_bucket.setdefault(dist_key, []).append(num)
 
     dist = {}
     for level_key, attrs in level_attr_values.items():
         dist[level_key] = {}
-        for col, vals in attrs.items():
+        for dist_key, vals in attrs.items():
             if not vals:
-                dist[level_key][col] = {"mean": None, "std": None}
+                dist[level_key][dist_key] = {"mean": None, "std": None}
             elif len(vals) == 1:
                 mean = float(vals[0])
-                dist[level_key][col] = {"mean": mean, "std": 0.0}
+                dist[level_key][dist_key] = {"mean": mean, "std": 0.0}
             else:
                 mean = float(sum(vals) / len(vals))
                 var = sum((v - mean) ** 2 for v in vals) / len(vals)  # population variance
                 std = var ** 0.5
-                dist[level_key][col] = {"mean": mean, "std": std}
+                dist[level_key][dist_key] = {"mean": mean, "std": std}
 
     # --- Derived attributes (position ratings, pitch overalls) ---
     if include_derived:
@@ -753,7 +776,6 @@ def _compute_distributions_by_level(rows, rating_cols, include_derived=False):
 
     return dist
 
-
 def _to_20_80(raw_val, mean, std):
     """
     Map a raw numeric value into a 20–80 scouting scale, clamped and rounded to nearest 5.
@@ -794,7 +816,9 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
     """
     Convert a row into a structured player dict with:
       - bio
-      - 20–80 ratings (for _base, plus derived position & pitch overalls)
+      - 20–80 ratings:
+          * for *_base columns (output key: *_display)
+          * for derived ratings (c_rating, fb_rating, pitchN_ovr)
       - potentials (_pot) as raw strings.
     """
     m = row._mapping
@@ -817,20 +841,37 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
     ratings = {}
     for col in rating_cols:
         val = m.get(col)
-        d = dist_for_level.get(col)
-        if d is None:
-            ratings[col] = None
+
+        # Determine which distribution key to use:
+        # either pooled pitch component ("pitch_pacc", etc.) or the column name itself.
+        m_pitch = PITCH_COMPONENT_RE.match(col)
+        if m_pitch:
+            component = m_pitch.group(1)  # pacc / pbrk / pcntrl / consist
+            dist_key = f"pitch_{component}"
         else:
-            ratings[col] = _to_20_80(val, d["mean"], d["std"])
+            dist_key = col
+
+        d = dist_for_level.get(dist_key)
+        if not d or d["mean"] is None:
+            scaled = None
+        else:
+            scaled = _to_20_80(val, d["mean"], d["std"])
+
+        # Rename *_base → *_display in the output
+        out_name = col.replace("_base", "_display")
+        ratings[out_name] = scaled
 
     # --- Derived 20–80 ratings (position ratings & pitch overalls) ---
     raw_derived = _compute_derived_raw_ratings(row)
     for attr_name, raw_val in raw_derived.items():
         d = dist_for_level.get(attr_name)
-        if d is None:
-            ratings[attr_name] = None
+        if not d or d["mean"] is None:
+            scaled = None
         else:
-            ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
+            scaled = _to_20_80(raw_val, d["mean"], d["std"])
+
+        # For derived attributes we keep the name as-is (e.g. c_rating, pitch1_ovr)
+        ratings[attr_name] = scaled
 
     # --- Potentials ---
     potentials = {}
