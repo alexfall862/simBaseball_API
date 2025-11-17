@@ -11,7 +11,7 @@ def simulate_fake_season(engine, league_year: int, league_level: int = 9) -> Dic
     """
     Fake-season harness:
 
-      - Reads MLB schedule from gameslist for the given season/league_level.
+      - Reads MLB schedule from gamelist for the given season/league_level.
       - Simulates a winner/loser and score for each game into game_results.
       - Aggregates weekly wins/losses per org into team_weekly_record.
 
@@ -19,7 +19,7 @@ def simulate_fake_season(engine, league_year: int, league_level: int = 9) -> Dic
     for that league_year before re-populating them.
     """
     md = MetaData()
-    gameslist = Table("gameslist", md, autoload_with=engine)
+    gamelist = Table("gamelist", md, autoload_with=engine)
     teams = Table("teams", md, autoload_with=engine)
     league_years = Table("league_years", md, autoload_with=engine)
     game_weeks = Table("game_weeks", md, autoload_with=engine)
@@ -51,37 +51,37 @@ def simulate_fake_season(engine, league_year: int, league_level: int = 9) -> Dic
         if not week_index_to_id:
             raise ValueError(f"No game_weeks found for league_year_id={league_year_id}")
 
-        # 2) Fetch MLB games for this season from gameslist, with orgs
+        # 2) Fetch MLB games for this season from gamelist, with orgs
         t_home = teams.alias("t_home")
         t_away = teams.alias("t_away")
 
         game_rows = conn.execute(
             select(
-                gameslist.c.id.label("game_id"),
-                gameslist.c.season,
-                gameslist.c.league_level,
-                gameslist.c.season_week,
-                gameslist.c.season_subweek,
-                gameslist.c.home_team.label("home_team_id"),
-                gameslist.c.away_team.label("away_team_id"),
+                gamelist.c.id.label("game_id"),
+                gamelist.c.season,
+                gamelist.c.league_level,
+                gamelist.c.season_week,
+                gamelist.c.season_subweek,
+                gamelist.c.home_team.label("home_team_id"),
+                gamelist.c.away_team.label("away_team_id"),
                 t_home.c.orgID.label("home_org_id"),
                 t_away.c.orgID.label("away_org_id"),
             )
             .select_from(
-                gameslist
-                .join(t_home, gameslist.c.home_team == t_home.c.id)
-                .join(t_away, gameslist.c.away_team == t_away.c.id)
+                gamelist
+                .join(t_home, gamelist.c.home_team == t_home.c.id)
+                .join(t_away, gamelist.c.away_team == t_away.c.id)
             )
             .where(
                 and_(
-                    gameslist.c.season == league_year,
-                    gameslist.c.league_level == league_level,
+                    gamelist.c.season == league_year,
+                    gamelist.c.league_level == league_level,
                 )
             )
         ).all()
 
         if not game_rows:
-            raise ValueError(f"No games in gameslist for season={league_year}, league_level={league_level}")
+            raise ValueError(f"No games in gamelist for season={league_year}, league_level={league_level}")
 
         game_ids = [r._mapping["game_id"] for r in game_rows]
 
