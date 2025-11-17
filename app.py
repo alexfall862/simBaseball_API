@@ -171,6 +171,11 @@ def create_app(config_object=Config):
 
     #Register Blueprints
     try: 
+        from rosters import rosters_bp
+        app.register_blueprint(rosters_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register rosters blueprint: %s", e)
+    try: 
         from orgs import orgs_bp
         app.register_blueprint(orgs_bp, url_prefix="/api/v1")
     except Exception as e:
@@ -186,11 +191,6 @@ def create_app(config_object=Config):
         app.register_blueprint(players_bp, url_prefix="/api/v1")
     except Exception as e:
         app.logger.exception("Failed to register players blueprint: %s", e)
-    try: 
-        from rosters import rosters_bp
-        app.register_blueprint(rosters_bp, url_prefix="/api/v1")
-    except Exception as e:
-        app.logger.exception("Failed to register rosters blueprint: %s", e)
 
     from admin import admin_bp
     # Secure session cookie

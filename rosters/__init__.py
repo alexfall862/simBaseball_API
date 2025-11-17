@@ -598,8 +598,8 @@ def get_org_obligations(org_abbrev: str):
 
     return jsonify(response), 200
 
-
 @rosters_bp.get("/obligations")
+@rosters_bp.get("/obligations/")
 def get_all_org_obligations():
     """
     Return financial obligations for ALL organizations in a given league year.
@@ -1354,6 +1354,7 @@ def get_org_financial_summary_endpoint(org_abbrev):
 
 
 @rosters_bp.get("/financial_summary")
+@rosters_bp.get("/financial_summary/")
 def get_league_financial_summary_endpoint():
     league_year = request.args.get("league_year", type=int)
     if not league_year:
