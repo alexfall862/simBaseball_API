@@ -25,6 +25,11 @@ try:
 except Exception:
     PROMETHEUS_AVAILABLE = False
 
+from financials.books import (
+    run_year_start_books,
+    run_week_books,
+    run_year_end_interest,
+)
 
 # ----------------------------
 # Pull local env or Railway
@@ -406,13 +411,148 @@ def create_app(config_object=Config):
         ), 200
 
 
+
+
+# ----------------------------
+# Financials
+# ----------------------------
+
+    @app.post("/admin/run-year-start-books")
+    @soft_timeout(app)
+    def admin_run_year_start_books():
+        log = logging.getLogger("app")
+        log.info("admin_run_year_start_books: endpoint called")
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("admin_run_year_start_books: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("admin_run_year_start_books: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        # league_year from JSON or query param
+        payload = request.get_json(silent=True) or {}
+        league_year = payload.get("league_year") or request.args.get("league_year", type=int)
+
+        if not league_year:
+            return jsonify(
+                error="missing_param",
+                message="league_year is required (in JSON body or query string)."
+            ), 400
+
+        try:
+            result = run_year_start_books(app.engine, int(league_year))
+        except ValueError as e:
+            return jsonify(error="bad_request", message=str(e)), 400
+        except SQLAlchemyError as e:
+            log.exception("admin_run_year_start_books: db error")
+            return jsonify(error="database_error", message=str(e)), 500
+
+        log.info("admin_run_year_start_books: completed: %s", result)
+        return jsonify(status="ok", details=result), 200
+
+
+    @app.post("/admin/run-week-books")
+    @soft_timeout(app)
+    def admin_run_week_books():
+        log = logging.getLogger("app")
+        log.info("admin_run_week_books: endpoint called")
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("admin_run_week_books: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("admin_run_week_books: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        payload = request.get_json(silent=True) or {}
+        league_year = payload.get("league_year") or request.args.get("league_year", type=int)
+        week_index = payload.get("week_index") or request.args.get("week_index", type=int)
+
+        if not league_year or not week_index:
+            return jsonify(
+                error="missing_param",
+                message="league_year and week_index are required."
+            ), 400
+
+        try:
+            result = run_week_books(app.engine, int(league_year), int(week_index))
+        except ValueError as e:
+            return jsonify(error="bad_request", message=str(e)), 400
+        except SQLAlchemyError as e:
+            log.exception("admin_run_week_books: db error")
+            return jsonify(error="database_error", message=str(e)), 500
+
+        log.info("admin_run_week_books: completed: %s", result)
+        return jsonify(status="ok", details=result), 200
+
+
+    @app.post("/admin/run-year-end-interest")
+    @soft_timeout(app)
+    def admin_run_year_end_interest():
+        log = logging.getLogger("app")
+        log.info("admin_run_year_end_interest: endpoint called")
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("admin_run_year_end_interest: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("admin_run_year_end_interest: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        payload = request.get_json(silent=True) or {}
+        league_year = payload.get("league_year") or request.args.get("league_year", type=int)
+
+        if not league_year:
+            return jsonify(
+                error="missing_param",
+                message="league_year is required."
+            ), 400
+
+        try:
+            result = run_year_end_interest(app.engine, int(league_year))
+        except ValueError as e:
+            return jsonify(error="bad_request", message=str(e)), 400
+        except SQLAlchemyError as e:
+            log.exception("admin_run_year_end_interest: db error")
+            return jsonify(error="database_error", message=str(e)), 500
+
+        log.info("admin_run_year_end_interest: completed: %s", result)
+        return jsonify(status="ok", details=result), 200
+
+
     log.info("stage: routes_ok") 
     return app
-
-
-
-
-
 
 
 # ----------------------------
@@ -476,7 +616,6 @@ def soft_timeout(app: Flask):
             return result
         return wrapper
     return decorator
-
 
 # ----------------------------
 # Entrypoint
