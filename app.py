@@ -31,6 +31,9 @@ from financials.books import (
     run_year_end_interest,
 )
 
+from simulations.fake_season import simulate_fake_season
+
+
 # ----------------------------
 # Pull local env or Railway
 # ----------------------------
@@ -548,6 +551,54 @@ def create_app(config_object=Config):
             return jsonify(error="database_error", message=str(e)), 500
 
         log.info("admin_run_year_end_interest: completed: %s", result)
+        return jsonify(status="ok", details=result), 200
+
+# ----------------------------
+# - Simulations
+#-----------------------------
+
+    @app.post("/admin/simulate-fake-season")
+    @soft_timeout(app)
+    def admin_simulate_fake_season():
+        log = logging.getLogger("app")
+        log.info("admin_simulate_fake_season: endpoint called")
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("admin_simulate_fake_season: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("admin_simulate_fake_season: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        payload = request.get_json(silent=True) or {}
+        league_year = payload.get("league_year") or request.args.get("league_year", type=int)
+        league_level = payload.get("league_level") or request.args.get("league_level", type=int) or 9
+
+        if not league_year:
+            return jsonify(
+                error="missing_param",
+                message="league_year is required."
+            ), 400
+
+        try:
+            result = simulate_fake_season(app.engine, int(league_year), int(league_level))
+        except ValueError as e:
+            return jsonify(error="bad_request", message=str(e)), 400
+        except SQLAlchemyError as e:
+            log.exception("admin_simulate_fake_season: db error")
+            return jsonify(error="database_error", message=str(e)), 500
+
+        log.info("admin_simulate_fake_season: completed: %s", result)
         return jsonify(status="ok", details=result), 200
 
 
