@@ -579,11 +579,12 @@ def _build_base_roster_stmt(level_filter=None):
 def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=None):
     """
     Build a SELECT that returns:
-      - org_id, org_abbrev,
-      - current_level (int),
-      - league_level (string, e.g. 'mlb', 'aa'),
-      - team_abbrev (from teams table),
-      - all simbbPlayers columns.
+      - org_id, org_abbrev
+      - current_level (int)
+      - league_level (string, e.g. 'mlb', 'aa')
+      - team_abbrev (from teams)
+      - all simbbPlayers columns
+      - selected contract metadata for the *current* active, holding contract
 
     Filters:
       - contracts.isActive = 1
@@ -624,12 +625,34 @@ def _build_ratings_base_stmt(level_filter=None, org_abbrev=None, team_abbrev=Non
 
     stmt = (
         select(
+            # Org / level / team
             orgs.c.id.label("org_id"),
             orgs.c.org_abbrev.label("org_abbrev"),
             contracts.c.current_level.label("current_level"),
             levels.c.league_level.label("league_level"),
             teams.c.team_abbrev.label("team_abbrev"),
-            players,  # expands all player columns
+
+            # Contract metadata (current active holding contract)
+            contracts.c.id.label("contract_id"),
+            contracts.c.years.label("contract_years"),
+            contracts.c.current_year.label("contract_current_year"),
+            contracts.c.leagueYearSigned.label("contract_leagueYearSigned"),
+            contracts.c.isActive.label("contract_isActive"),
+            contracts.c.isBuyout.label("contract_isBuyout"),
+            contracts.c.isExtension.label("contract_isExtension"),
+            contracts.c.isFinished.label("contract_isFinished"),
+            contracts.c.onIR.label("contract_onIR"),
+
+            # Current-year detail row (for this contract)
+            details.c.id.label("contractDetails_id"),
+            details.c.year.label("contractDetails_year_index"),
+            details.c.salary.label("contractDetails_salary"),
+
+            # Team share for that detail row
+            shares.c.salary_share.label("contractTeam_salary_share"),
+
+            # All player columns
+            players,
         )
         .select_from(
             contracts
@@ -819,7 +842,8 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
       - 20–80 ratings:
           * for *_base columns (output key: *_display)
           * for derived ratings (c_rating, fb_rating, pitchN_ovr)
-      - potentials (_pot) as raw strings.
+      - potentials (_pot) as raw strings
+      - contract: current active holding contract metadata
     """
     m = row._mapping
     level_key = m.get("league_level") or m.get("current_level")
@@ -832,18 +856,25 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
 
     dist_for_level = dist_by_level.get(level_key, {})
 
+    def _num_or_none(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
     # --- Bio fields ---
     bio = {}
     for name in bio_cols:
         bio[name] = m.get(name)
 
-    # --- Base 20–80 ratings (from *_base columns) ---
+    # --- Base 20–80 ratings (from *_base columns, output as *_display) ---
     ratings = {}
     for col in rating_cols:
         val = m.get(col)
 
-        # Determine which distribution key to use:
-        # either pooled pitch component ("pitch_pacc", etc.) or the column name itself.
+        # Use pooled pitch distribution for pitch components, otherwise per-column
         m_pitch = PITCH_COMPONENT_RE.match(col)
         if m_pitch:
             component = m_pitch.group(1)  # pacc / pbrk / pcntrl / consist
@@ -857,7 +888,6 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
         else:
             scaled = _to_20_80(val, d["mean"], d["std"])
 
-        # Rename *_base → *_display in the output
         out_name = col.replace("_base", "_display")
         ratings[out_name] = scaled
 
@@ -870,13 +900,39 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
         else:
             scaled = _to_20_80(raw_val, d["mean"], d["std"])
 
-        # For derived attributes we keep the name as-is (e.g. c_rating, pitch1_ovr)
+        # Keep derived names as-is: c_rating, fb_rating, pitch1_ovr, etc.
         ratings[attr_name] = scaled
 
     # --- Potentials ---
     potentials = {}
     for col in pot_cols:
         potentials[col] = m.get(col)
+
+    # --- Contract metadata (current active holding contract) ---
+    base_salary = _num_or_none(m.get("contractDetails_salary"))
+    share = _num_or_none(m.get("contractTeam_salary_share"))
+    salary_for_org = None
+    if base_salary is not None and share is not None:
+        salary_for_org = base_salary * share
+
+    contract = {
+        "id": m.get("contract_id"),
+        "years": m.get("contract_years"),
+        "current_year": m.get("contract_current_year"),
+        "league_year_signed": m.get("contract_leagueYearSigned"),
+        "is_active": bool(m.get("contract_isActive") or 0),
+        "is_buyout": bool(m.get("contract_isBuyout") or 0),
+        "is_extension": bool(m.get("contract_isExtension") or 0),
+        "is_finished": bool(m.get("contract_isFinished") or 0),
+        "on_ir": bool(m.get("contract_onIR") or 0),
+        "current_year_detail": {
+            "id": m.get("contractDetails_id"),
+            "year_index": m.get("contractDetails_year_index"),
+            "base_salary": base_salary,
+            "salary_share": share,
+            "salary_for_org": salary_for_org,
+        },
+    }
 
     return {
         "id": m.get("id"),
@@ -887,6 +943,7 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
         "bio": bio,
         "ratings": ratings,
         "potentials": potentials,
+        "contract": contract,
     }
 
 # -------------------------------------------------------------------
