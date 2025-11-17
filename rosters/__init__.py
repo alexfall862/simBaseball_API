@@ -138,24 +138,24 @@ def _compute_derived_raw_ratings(row):
     # --- Catcher position rating (c_rating) ---
     # Example weighting: framing, sequencing, catching, reaction, arm accuracy/power.
     derived["c_rating"] = _weighted({
-        #batting
+        #batting 10
         "power_base":           0.025,
         "contact_base":         0.025,
         "eye_base":             0.025,
         "discipline_base":      0.025,
-        #base offense 
+        #base offense 5 
         "base_reaction_base":   0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.000,
-        #defense1
+        #defense1 60
         "throwacc_base":        0.05,
         "throwpower_base":      0.05,
         "catchframe_base":      0.25,
         "catchsequence_base":   0.25,
-        #defense2
-        "fieldcatch_base":      0.10,
+        #defense2 25
+        "fieldcatch_base":      0.05,
         "fieldreact_base":      0.15,
-        "fieldspot_base":       0.10,
+        "fieldspot_base":       0.05,
         #pitching
         "pendurance_base":      0.00,
         "pgencontrol_base":     0.00,
@@ -172,21 +172,21 @@ def _compute_derived_raw_ratings(row):
     # --- First base position rating (fb_rating) ---
     # Example weighting: catching, reaction, positioning, arm.
     derived["fb_rating"] = _weighted({
-        #batting
+        #batting 70
         "power_base":           0.175,
         "contact_base":         0.175,
         "eye_base":             0.175,
         "discipline_base":      0.175,
-        #base offense 
+        #base offense 7.5 
         "base_reaction_base":   0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.025,
-        #defense1
+        #defense1 2.5
         "throwacc_base":        0.025,
         "throwpower_base":      0.00,
         "catchframe_base":      0.00,
         "catchsequence_base":   0.00,
-        #defense2
+        #defense2 20
         "fieldcatch_base":      0.05,
         "fieldreact_base":      0.10,
         "fieldspot_base":       0.05,
@@ -204,21 +204,21 @@ def _compute_derived_raw_ratings(row):
     })
 
     derived["sb_rating"] = _weighted({
-        #batting
-        "power_base":           0.125,
-        "contact_base":         0.125,
-        "eye_base":             0.125,
-        "discipline_base":      0.125,
-        #base offense 
+        #batting 40
+        "power_base":           0.1,
+        "contact_base":         0.1,
+        "eye_base":             0.1,
+        "discipline_base":      0.1,
+        #base offense 10
         "base_reaction_base":   0.025,
         "baserunning_base":     0.025,
-        "speed_base":           0.025,
-        #defense1
-        "throwacc_base":        0.05,
-        "throwpower_base":      0.025,
+        "speed_base":           0.050,
+        #defense1 20
+        "throwacc_base":        0.15,
+        "throwpower_base":      0.05,
         "catchframe_base":      0.00,
         "catchsequence_base":   0.00,
-        #defense2
+        #defense2 30
         "fieldcatch_base":      0.10,
         "fieldreact_base":      0.15,
         "fieldspot_base":       0.05,
@@ -236,21 +236,21 @@ def _compute_derived_raw_ratings(row):
     })
 
     derived["tb_rating"] = _weighted({
-        #batting
+        #batting 50
         "power_base":           0.125,
         "contact_base":         0.125,
         "eye_base":             0.125,
         "discipline_base":      0.125,
-        #base offense 
+        #base offense 5 
         "base_reaction_base":   0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.00,
-        #defense1
+        #defense1 20
         "throwacc_base":        0.10,
         "throwpower_base":      0.10,
         "catchframe_base":      0.00,
         "catchsequence_base":   0.00,
-        #defense2
+        #defense2 25
         "fieldcatch_base":      0.05,
         "fieldreact_base":      0.15,
         "fieldspot_base":       0.05,
@@ -268,15 +268,15 @@ def _compute_derived_raw_ratings(row):
     })
     
     derived["ss_rating"] = _weighted({
-        #batting 20
-        "power_base":           0.05,
-        "contact_base":         0.05,
-        "eye_base":             0.05,
-        "discipline_base":      0.05,
-        #base offense 10 
+        #batting 15
+        "power_base":           0.0375,
+        "contact_base":         0.0375,
+        "eye_base":             0.0375,
+        "discipline_base":      0.0375,
+        #base offense 15
         "base_reaction_base":   0.025,
         "baserunning_base":     0.025,
-        "speed_base":           0.05,
+        "speed_base":           0.10,
         #defense1 30
         "throwacc_base":        0.15,
         "throwpower_base":      0.15,
@@ -300,11 +300,11 @@ def _compute_derived_raw_ratings(row):
     })
     
     derived["lf_rating"] = _weighted({
-        #batting 50
-        "power_base":           0.125,
-        "contact_base":         0.125,
-        "eye_base":             0.125,
-        "discipline_base":      0.125,
+        #batting 40
+        "power_base":           0.1,
+        "contact_base":         0.1,
+        "eye_base":             0.1,
+        "discipline_base":      0.1,
         #base offense 15
         "base_reaction_base":   0.025,
         "baserunning_base":     0.025,
@@ -314,10 +314,10 @@ def _compute_derived_raw_ratings(row):
         "throwpower_base":      0.05,
         "catchframe_base":      0.00,
         "catchsequence_base":   0.00,
-        #defense2 20
-        "fieldcatch_base":      0.075,
-        "fieldreact_base":      0.025,
-        "fieldspot_base":       0.100,
+        #defense2 30
+        "fieldcatch_base":      0.10,
+        "fieldreact_base":      0.05,
+        "fieldspot_base":       0.15,
         #pitching
         "pendurance_base":      0.00,
         "pgencontrol_base":     0.00,
@@ -364,24 +364,24 @@ def _compute_derived_raw_ratings(row):
     })
     
     derived["rf_rating"] = _weighted({
-        #batting 45
-        "power_base":           0.1125,
-        "contact_base":         0.1125,
-        "eye_base":             0.1125,
-        "discipline_base":      0.1125,
+        #batting 40
+        "power_base":           0.1,
+        "contact_base":         0.1,
+        "eye_base":             0.1,
+        "discipline_base":      0.1,
         #base offense 15
         "base_reaction_base":   0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.10,
-        #defense1 20
-        "throwacc_base":        0.10,
+        #defense1 15
+        "throwacc_base":        0.05,
         "throwpower_base":      0.10,
         "catchframe_base":      0.00,
         "catchsequence_base":   0.00,
-        #defense2 20
-        "fieldcatch_base":      0.075,
-        "fieldreact_base":      0.025,
-        "fieldspot_base":       0.100,
+        #defense2 30
+        "fieldcatch_base":      0.10,
+        "fieldreact_base":      0.05,
+        "fieldspot_base":       0.15,
         #pitching
         "pendurance_base":      0.00,
         "pgencontrol_base":     0.00,
