@@ -13,8 +13,7 @@ from rosters import (
     _get_player_column_categories,
     _compute_derived_raw_ratings,
 )
-from services.injuries import get_active_injury_malus
-from services.stamina import get_effective_stamina
+
 from services.rotation import pick_starting_pitcher
 from services.defense_xp import (
     compute_defensive_xp_mod_for_player,
@@ -23,6 +22,8 @@ from services.defense_xp import (
 from services.lineups import build_defense_and_lineup
 from services.pregame_injuries import roll_pregame_injuries_for_team
 import random
+from services.stamina import get_effective_stamina, get_effective_stamina_bulk
+from services.injuries import get_active_injury_malus, get_active_injury_malus_bulk
 
 
 @dataclass
@@ -31,6 +32,66 @@ class EnginePlayerView:
 
     def to_dict(self) -> Dict[str, Any]:
         return self.data
+
+@dataclass
+class EnginePlayerView:
+    data: Dict[str, Any]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.data
+
+
+class _DummyRow:
+    """
+    Lightweight stand-in so _compute_derived_raw_ratings can work with a dict
+    instead of a real Row object.
+    """
+    def __init__(self, mapping: Dict[str, Any]):
+        self._mapping = mapping
+
+
+def _build_engine_player_view_from_mapping(mapping: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Core logic for turning a player row mapping (already adjusted for injuries)
+    into the engine-facing dict.
+
+    Used by both the single-player and bulk variants.
+    """
+    col_cats = _get_player_column_categories()
+    rating_cols = col_cats["rating"]
+    derived_cols = col_cats["derived"]
+
+    # Let the existing rating logic operate on this adjusted mapping
+    dummy_row = _DummyRow(mapping)
+    derived = _compute_derived_raw_ratings(dummy_row) or {}
+
+    engine_player: Dict[str, Any] = {}
+
+    # Core identity/metadata fields
+    for key in [
+        "id",
+        "firstname",
+        "lastname",
+        "ptype",
+        "durability",
+        "injury_risk",
+        "left_split",
+        "center_split",
+        "right_split",
+    ]:
+        engine_player[key] = mapping.get(key)
+
+    # All *_base, via rating_cols
+    for col in rating_cols:
+        engine_player[col] = mapping.get(col)
+
+    # Derived *_rating + pitchN_ovr
+    for key, value in derived.items():
+        if key in derived_cols or (key.startswith("pitch") and key.endswith("_ovr")):
+            engine_player[key] = value
+
+    return engine_player
+
 
 def _get_pitch_hand_for_player(conn, player_id: int) -> str | None:
     """
@@ -462,10 +523,6 @@ def build_engine_player_view(conn, player_id: int) -> EnginePlayerView:
     if row is None:
         raise ValueError(f"Player {player_id} not found in simbbPlayers")
 
-    col_cats = _get_player_column_categories()
-    rating_cols = col_cats["rating"]
-    derived_cols = col_cats["derived"]
-
     raw_mapping = dict(row._mapping)
 
     # Apply injury maluses to *_base attributes
@@ -485,28 +542,79 @@ def build_engine_player_view(conn, player_id: int) -> EnginePlayerView:
                 delta_num = 0.0
             adjusted_mapping[attr] = base_num + delta_num
 
-    class _DummyRow:
-        def __init__(self, mapping):
-            self._mapping = mapping
-
-    dummy_row = _DummyRow(adjusted_mapping)
-    derived = _compute_derived_raw_ratings(dummy_row) or {}
-
-    engine_player: Dict[str, Any] = {}
-
-    for key in ["id", "firstname", "lastname", "ptype", "durability", "injury_risk",
-                "left_split", "center_split", "right_split"]:
-        engine_player[key] = adjusted_mapping.get(key)
-
-    for col in rating_cols:
-        engine_player[col] = adjusted_mapping.get(col)
-
-    for key, value in derived.items():
-        if key in derived_cols or (key.startswith("pitch") and key.endswith("_ovr")):
-            engine_player[key] = value
-
+    engine_player = _build_engine_player_view_from_mapping(adjusted_mapping)
     return EnginePlayerView(engine_player)
 
+def build_engine_player_views_bulk(
+    conn,
+    player_ids: List[int],
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Bulk version of build_engine_player_view, but only for the parts that
+    depend on simbbPlayers + injuries.
+
+    - Loads all simbbPlayers rows for the given player IDs in a single query.
+    - For each player:
+        - applies their injury malus to *_base attributes
+        - recomputes derived ratings via _build_engine_player_view_from_mapping
+    - Returns a dict:
+        {player_id: engine_player_dict}
+
+    NOTE: This deliberately does *not* attach stamina, strategy, or XP mods.
+          Those are layered on later in build_team_game_side.
+    """
+    if not player_ids:
+        return {}
+
+    ids = [int(pid) for pid in player_ids]
+
+    r_tables = _get_roster_tables()
+    players = r_tables["players"]
+
+    # 1) Load all simbbPlayers rows in one shot
+    rows = (
+        conn.execute(
+            select(players).where(players.c.id.in_(ids))
+        )
+        .mappings()
+        .all()
+    )
+
+    raw_by_id: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        pid = int(row["id"])
+        raw_by_id[pid] = dict(row)
+
+    results: Dict[int, Dict[str, Any]] = {}
+
+    # 2) Bulk-load injury maluses for all players
+    malus_by_player = get_active_injury_malus_bulk(conn, ids)
+
+    for pid in ids:
+        raw_mapping = raw_by_id.get(pid)
+        if raw_mapping is None:
+            continue
+
+        adjusted_mapping = dict(raw_mapping)
+        malus = malus_by_player.get(pid) or {}
+
+        for attr, delta in malus.items():
+            if attr.endswith("_base") and attr in adjusted_mapping:
+                base_val = adjusted_mapping.get(attr)
+                try:
+                    base_num = float(base_val) if base_val is not None else 0.0
+                except (TypeError, ValueError):
+                    base_num = 0.0
+                try:
+                    delta_num = float(delta)
+                except (TypeError, ValueError):
+                    delta_num = 0.0
+                adjusted_mapping[attr] = base_num + delta_num
+
+        engine_player = _build_engine_player_view_from_mapping(adjusted_mapping)
+        results[pid] = engine_player
+
+    return results
 
 # -------------------------------------------------------------------
 # Lineup + team payload
@@ -597,26 +705,37 @@ def build_team_game_side(
             "pregame_injuries": [],
         }
     
-    # --- Bulk-load strategies & XP once ---
+    # --- Bulk-load strategies, XP, player views, and stamina once ---
     strategies_by_player = _load_player_strategies_bulk(conn, player_ids, org_id=org_id)
     xp_by_player = compute_defensive_xp_mod_for_players(conn, player_ids, league_level_id)
 
-    # Build engine player views and attach stamina/strategy/xp
+    # Engine-facing base views (players + injuries + derived ratings)
+    engine_views_by_player = build_engine_player_views_bulk(conn, player_ids)
+
+    # Stamina: bulk wrapper (currently loops over get_effective_stamina; we can
+    # later optimize internals to do a single IN() query against fatigue tables).
+    stamina_by_player = get_effective_stamina_bulk(conn, player_ids, league_year_id)
+
     for pid in player_ids:
-        ep = build_engine_player_view(conn, pid).to_dict()
+        base_view = engine_views_by_player.get(pid)
+        if base_view is None:
+            # If something went wrong / player missing, skip or handle as needed.
+            # For now, we skip; you can raise if you'd rather fail hard.
+            continue
 
-        # Stamina still per-player; can be bulked later if needed
-        ep["stamina"] = get_effective_stamina(conn, pid, league_year_id)
+        ep = dict(base_view)
 
-        # Strategy (bulk)
+        # Stamina
+        ep["stamina"] = int(stamina_by_player.get(pid, 100))
+
+        # Strategy
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
         ep.update(strat)
 
-        # Defensive XP modifiers (bulk)
+        # Defensive XP modifiers
         ep["defensive_xp_mod"] = xp_by_player.get(pid, {pos: 0.0 for pos in POSITION_CODES})
 
         players_by_id[pid] = ep
-
     # --- Pregame injuries (ephemeral, per-game only) ---
     pregame_injuries: List[Dict[str, Any]] = []
 
@@ -759,6 +878,6 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
     }
 
     if random_seed is not None:
-        payload["random_seed"] = random_seed
+        payload["random_seed"] = str(random_seed)
 
     return payload

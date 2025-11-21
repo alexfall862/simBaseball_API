@@ -202,7 +202,7 @@ def _generate_effects_for_injury_type(
     injury_type_row: Dict[str, Any],
 ) -> Dict[str, float]:
     """
-    effects_json is expected like:
+    impact_template_json is expected like:
 
       {
         "contact": {"min_pct": 0.5, "max_pct": 0.8},
@@ -211,7 +211,7 @@ def _generate_effects_for_injury_type(
 
     We sample a multiplier for each key between [min_pct, max_pct].
     """
-    raw = injury_type_row.get("effects_json")
+    raw = injury_type_row.get("impact_template_json")
     if not raw:
         return {}
 
@@ -239,20 +239,32 @@ def _generate_effects_for_injury_type(
 
     return effects
 
-
 def _sample_duration_weeks(
     rng: random.Random,
     injury_type_row: Dict[str, Any],
 ) -> int:
     """
-    Sample injury length in weeks from min/mean/max.
+    Sample injury length in weeks from min_weeks / mean_weeks / max_weeks.
 
     Uses triangular distribution with mode at mean.
     """
     try:
-        min_w = float(injury_type_row.get("min_length_weeks") or injury_type_row.get("min_length") or 1.0)
-        mean_w = float(injury_type_row.get("mean_length_weeks") or injury_type_row.get("mean_length") or min_w)
-        max_w = float(injury_type_row.get("max_length_weeks") or injury_type_row.get("max_length") or mean_w)
+        # Primary: use the actual columns from injury_types
+        min_w = float(
+            injury_type_row.get("min_weeks")
+            or injury_type_row.get("min_length_weeks")
+            or 1.0
+        )
+        mean_w = float(
+            injury_type_row.get("mean_weeks")
+            or injury_type_row.get("mean_length_weeks")
+            or min_w
+        )
+        max_w = float(
+            injury_type_row.get("max_weeks")
+            or injury_type_row.get("max_length_weeks")
+            or mean_w
+        )
     except (TypeError, ValueError):
         return 1
 
@@ -266,7 +278,6 @@ def _sample_duration_weeks(
     val = rng.triangular(min_w, max_w, mean_w)
     weeks = int(round(val))
     return max(1, weeks)
-
 
 def _apply_effects_to_player(
     player: Dict[str, Any],

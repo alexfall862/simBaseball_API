@@ -1,212 +1,140 @@
 # services/stamina.py
 
-import logging
-from typing import Iterable, Dict, Any
+from __future__ import annotations
+
+from typing import Dict, Iterable
 
 from sqlalchemy import MetaData, Table, select, and_
-from sqlalchemy.sql import func
 
 from db import get_engine
-from rosters import _get_tables as _get_roster_tables
-from services.injuries import get_active_injury_malus
 
-logger = logging.getLogger(__name__)
+# -------------------------------------------------------------------
+# Table reflection + cache
+# -------------------------------------------------------------------
 
-_metadata = None
-_stamina_tables = None
+_METADATA = None
+_TABLES = None
 
 
-def _get_stamina_tables():
+def _get_tables():
     """
-    Reflect and cache player_fatigue_state and players (for durability).
+    Reflect and cache the stamina-related table(s).
+
+    Uses player_fatigue_state as defined in the DB:
+
+      player_fatigue_state(
+        player_id BIGINT UNSIGNED,
+        league_year_id BIGINT UNSIGNED,
+        stamina INT,
+        last_game_id BIGINT UNSIGNED NULL,
+        last_week_id BIGINT UNSIGNED NULL,
+        last_updated_at DATETIME,
+        PRIMARY KEY (player_id, league_year_id)
+      )
     """
-    global _metadata, _stamina_tables
-    if _stamina_tables is not None:
-        return _stamina_tables
+    global _METADATA, _TABLES
+    if _TABLES is not None:
+        return _TABLES
 
     engine = get_engine()
     md = MetaData()
 
-    fatigue = Table("player_fatigue_state", md, autoload_with=engine)
-    players = _get_roster_tables()["players"]
+    player_fatigue_state = Table("player_fatigue_state", md, autoload_with=engine)
 
-    _metadata = md
-    _stamina_tables = {
-        "fatigue": fatigue,
-        "players": players,
+    _METADATA = md
+    _TABLES = {
+        "player_fatigue_state": player_fatigue_state,
     }
-    return _stamina_tables
+    return _TABLES
 
 
-def _clamp_stamina(value: float) -> int:
-    return max(0, min(int(round(value)), 100))
+def _clamp_stamina(val) -> int:
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        return 100
+    if n < 0:
+        return 0
+    if n > 100:
+        return 100
+    return n
 
+
+# -------------------------------------------------------------------
+# Public API
+# -------------------------------------------------------------------
 
 def get_effective_stamina(conn, player_id: int, league_year_id: int) -> int:
     """
-    Return the final stamina value (0–100) for a player going into this game.
+    Return the current stamina (0–100) for a single player in a given league_year.
 
-    Logic:
-      - Base stamina is from player_fatigue_state (player_id, league_year_id),
-        defaulting to 100 if no row exists yet.
-      - Injury malus JSON may contain a 'stamina_delta' key that is added on top.
-      - Result is clamped to [0, 100].
+    If there is no row in player_fatigue_state, treat the player as fully rested (100).
+
+    This is used by:
+      - rotation.pick_starting_pitcher
+      - anywhere else that needs a single-player stamina query.
     """
-    tables = _get_stamina_tables()
-    fatigue = tables["fatigue"]
+    tables = _get_tables()
+    fatigue = tables["player_fatigue_state"]
 
-    stmt = (
-        select(fatigue.c.stamina)
-        .where(
-            and_(
-                fatigue.c.player_id == player_id,
-                fatigue.c.league_year_id == league_year_id,
-            )
-        )
-    )
-    base_stamina = conn.execute(stmt).scalar_one_or_none()
-    if base_stamina is None:
-        base_stamina = 100
-
-    malus = get_active_injury_malus(conn, player_id)
-    stamina_delta = float(malus.get("stamina_delta", 0.0))
-
-    final_stamina = _clamp_stamina(base_stamina + stamina_delta)
-    return final_stamina
-
-
-def apply_game_usage_fatigue(
-    conn,
-    league_year_id: int,
-    usage_rows: Iterable[Dict[str, Any]],
-) -> None:
-    """
-    Apply fatigue after a canonical game based on player usage.
-
-    usage_rows is expected to be an iterable of dicts like:
-      {
-        "player_id": int,
-        "role": "starter" | "reliever" | "position",
-        "innings_pitched": float,
-        "plate_appearances": int,
-      }
-
-    This is a first-pass heuristic; tune once engine usage data is finalized.
-    """
-    tables = _get_stamina_tables()
-    fatigue = tables["fatigue"]
-
-    for usage in usage_rows:
-        pid = usage["player_id"]
-        role = (usage.get("role") or "").lower()
-        ip = float(usage.get("innings_pitched", 0.0) or 0.0)
-        pa = int(usage.get("plate_appearances", 0) or 0)
-
-        if role == "starter":
-            drain = 25 + ip * 5  # e.g. 5 IP → 50 drain
-        elif role == "reliever":
-            drain = 10 + ip * 4
-        else:
-            # Position players: modest drain scaled by PA
-            drain = min(25, 5 + pa * 1.5)
-
-        drain = max(0, drain)
-
-        stmt = (
-            select(fatigue.c.stamina)
-            .where(
-                and_(
-                    fatigue.c.player_id == pid,
-                    fatigue.c.league_year_id == league_year_id,
-                )
-            )
-        )
-        current = conn.execute(stmt).scalar_one_or_none()
-        if current is None:
-            current = 100
-
-        new_val = _clamp_stamina(current - drain)
-
-        updated = conn.execute(
-            fatigue.update()
-            .where(
-                and_(
-                    fatigue.c.player_id == pid,
-                    fatigue.c.league_year_id == league_year_id,
-                )
-            )
-            .values(
-                stamina=new_val,
-                last_game_id=None,  # set if you want
-                last_week_id=None,
-                last_updated_at=func.now(),
-            )
-        )
-        if updated.rowcount == 0:
-            conn.execute(
-                fatigue.insert().values(
-                    player_id=pid,
-                    league_year_id=league_year_id,
-                    stamina=new_val,
-                    last_game_id=None,
-                    last_week_id=None,
-                )
-            )
-
-
-def regen_weekly_stamina(conn, league_year_id: int) -> None:
-    """
-    Weekly regen step, to be called when you advance the league week.
-
-    Simple v1 logic:
-      - Base regen amount by durability:
-          'Iron Man'   -> +40
-          'Normal'     -> +30
-          'Needs Rest' -> +20
-      - You can extend this to factor in actual games played this week.
-    """
-    tables = _get_stamina_tables()
-    fatigue = tables["fatigue"]
-    players = tables["players"]
-
-    DUR_REGEN = {
-        "Iron Man": 40,
-        "Normal": 30,
-        "Needs Rest": 20,
-    }
-
-    stmt = (
-        select(
-            fatigue.c.player_id,
-            fatigue.c.stamina,
-            players.c.durability,
-        )
-        .select_from(
-            fatigue.join(players, fatigue.c.player_id == players.c.id)
-        )
-        .where(fatigue.c.league_year_id == league_year_id)
-    )
-
-    rows = conn.execute(stmt).mappings().all()
-    for row in rows:
-        pid = row["player_id"]
-        stamina = int(row["stamina"])
-        durability = (row["durability"] or "").strip()
-
-        regen = DUR_REGEN.get(durability, 30)
-        new_val = _clamp_stamina(stamina + regen)
-
+    row = (
         conn.execute(
-            fatigue.update()
-            .where(
+            select(fatigue.c.stamina).where(
                 and_(
-                    fatigue.c.player_id == pid,
-                    fatigue.c.league_year_id == league_year_id,
+                    fatigue.c.player_id == int(player_id),
+                    fatigue.c.league_year_id == int(league_year_id),
                 )
             )
-            .values(
-                stamina=new_val,
-                last_week_id=None,
-                last_updated_at=func.now(),
+        )
+        .first()
+    )
+
+    if not row:
+        return 100
+
+    return _clamp_stamina(row[0])
+
+
+def get_effective_stamina_bulk(
+    conn,
+    player_ids: Iterable[int],
+    league_year_id: int,
+) -> Dict[int, int]:
+    """
+    Bulk version of get_effective_stamina using a single IN() query.
+
+    Returns:
+      {player_id: stamina_int}
+
+    Players with no row in player_fatigue_state are treated as fully rested (100).
+
+    This is used by build_team_game_side to attach stamina for all roster players.
+    """
+    ids = [int(pid) for pid in player_ids]
+    if not ids:
+        return {}
+
+    tables = _get_tables()
+    fatigue = tables["player_fatigue_state"]
+
+    rows = (
+        conn.execute(
+            select(fatigue.c.player_id, fatigue.c.stamina).where(
+                and_(
+                    fatigue.c.league_year_id == int(league_year_id),
+                    fatigue.c.player_id.in_(ids),
+                )
             )
         )
+        .mappings()
+        .all()
+    )
+
+    # Default fully rested unless we find a row
+    out: Dict[int, int] = {pid: 100 for pid in ids}
+
+    for row in rows:
+        pid = int(row["player_id"])
+        out[pid] = _clamp_stamina(row["stamina"])
+
+    return out
