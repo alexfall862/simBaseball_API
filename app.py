@@ -8,7 +8,6 @@ from werkzeug.exceptions import HTTPException, BadRequest
 from seeding.contracts_seed import seed_initial_contracts
 
 
-
 # ---- Rate limiting (lightweight) ----
 # Using flask-limiter is great; if you prefer zero extra deps, here's a tiny in-memory limiter.
 # Swap for flask-limiter in real prod or Redis-backed limiters in multi-instance deployments.
@@ -191,6 +190,12 @@ def create_app(config_object=Config):
         app.register_blueprint(players_bp, url_prefix="/api/v1")
     except Exception as e:
         app.logger.exception("Failed to register players blueprint: %s", e)
+
+    try:
+        from games import games_bp
+        app.register_blueprint(games_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register games blueprint: %s", e)
 
     from admin import admin_bp
     # Secure session cookie
@@ -712,6 +717,8 @@ def soft_timeout(app: Flask):
             return result
         return wrapper
     return decorator
+
+
 
 # ----------------------------
 # Entrypoint

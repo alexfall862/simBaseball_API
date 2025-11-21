@@ -1,6 +1,6 @@
 # teams/__init__.py
 from flask import Blueprint, jsonify
-from sqlalchemy import MetaData, Table, select, text
+from sqlalchemy import MetaData, Table, select, text, and_
 from sqlalchemy.exc import SQLAlchemyError
 from db import get_engine
 
