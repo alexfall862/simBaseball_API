@@ -4,6 +4,7 @@ from functools import wraps
 from flask import has_request_context
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
+from flask_sock import Sock
 from werkzeug.exceptions import HTTPException, BadRequest
 from seeding.contracts_seed import seed_initial_contracts
 
@@ -222,6 +223,62 @@ def create_app(config_object=Config):
     # CORS
     CORS(app, resources={r"/*": {"origins": app.config["CORS_ORIGINS"]}})
     log.info("stage: cors_ok")
+
+    # WebSocket support
+    sock = Sock(app)
+    log.info("stage: websocket_ok")
+
+    @sock.route("/ws")
+    def websocket_handler(ws):
+        """
+        WebSocket endpoint for broadcasting simulation state.
+
+        Flow:
+        1. Client connects
+        2. Server sends current Timestamp immediately
+        3. Server broadcasts updated Timestamp whenever state changes
+        4. Connection stays open until client disconnects
+        """
+        from services.websocket_manager import ws_manager
+        from services.timestamp import get_current_timestamp
+
+        log.info("WebSocket client connected")
+
+        # Register this connection
+        ws_manager.add_connection(ws)
+
+        try:
+            # Send current timestamp immediately on connect
+            timestamp_data = get_current_timestamp()
+            if timestamp_data:
+                ws.send(json.dumps(timestamp_data))
+                log.info("Sent initial timestamp to new WebSocket client")
+            else:
+                log.warning("No timestamp data available for new WebSocket client")
+
+            # Keep connection alive - listen for any messages (we ignore them)
+            while True:
+                try:
+                    # This blocks until a message is received or connection closes
+                    # We don't process client messages, just keep the connection alive
+                    message = ws.receive(timeout=30)
+                    if message is None:
+                        # Connection closed by client
+                        break
+                except Exception:
+                    # Timeout or error - check if connection is still alive
+                    try:
+                        ws.send("")  # Empty ping to check connection
+                    except Exception:
+                        break  # Connection is dead
+
+        except Exception as e:
+            log.warning(f"WebSocket error: {e}")
+
+        finally:
+            # Clean up on disconnect
+            ws_manager.remove_connection(ws)
+            log.info("WebSocket client disconnected")
 
     # Request ID middleware
     @app.before_request

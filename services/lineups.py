@@ -176,6 +176,58 @@ def _load_team_position_plan_for_pos(
     return [dict(r) for r in rows]
 
 
+def _load_all_position_plans_for_team(
+    conn,
+    team_id: int,
+    vs_hand: str | None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Bulk-load ALL position plans for a team at once.
+
+    Returns:
+        {position_code: [list of plan rows], ...}
+
+    This replaces 8 individual queries with a single query.
+    """
+    tables = _get_lineup_tables()
+    tpp = tables["tpp"]
+
+    conditions = [tpp.c.team_id == team_id]
+
+    if vs_hand in ("L", "R"):
+        conditions.append(or_(tpp.c.vs_hand == vs_hand, tpp.c.vs_hand == "both"))
+
+    stmt = (
+        select(
+            tpp.c.position_code,
+            tpp.c.player_id,
+            tpp.c.target_weight,
+            tpp.c.priority,
+            tpp.c.locked,
+        )
+        .where(and_(*conditions))
+        .order_by(tpp.c.position_code.asc(), tpp.c.priority.asc(), tpp.c.id.asc())
+    )
+
+    rows = conn.execute(stmt).mappings().all()
+
+    # Group by position_code
+    plans_by_position: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        pos = row["position_code"]
+        plan_row = {
+            "player_id": row["player_id"],
+            "target_weight": row["target_weight"],
+            "priority": row["priority"],
+            "locked": row["locked"],
+        }
+        if pos not in plans_by_position:
+            plans_by_position[pos] = []
+        plans_by_position[pos].append(plan_row)
+
+    return plans_by_position
+
+
 # -------------------------------------------------------------------
 # team_lineup_roles loading
 # -------------------------------------------------------------------
@@ -247,6 +299,64 @@ def _load_weekly_usage_for_pos(
         total += starts
 
     return usage_map, total
+
+
+def _load_all_weekly_usage_for_team(
+    conn,
+    league_year_id: int,
+    season_week: int,
+    team_id: int,
+    vs_hand: str | None,
+) -> Dict[str, Tuple[Dict[int, int], int]]:
+    """
+    Bulk-load ALL weekly usage data for a team at once.
+
+    Returns:
+        {position_code: (usage_map, total_starts), ...}
+
+    This replaces 8 individual queries with a single query.
+    """
+    tables = _get_lineup_tables()
+    ppuw = tables["ppuw"]
+
+    conditions = [
+        ppuw.c.league_year_id == league_year_id,
+        ppuw.c.season_week == season_week,
+        ppuw.c.team_id == team_id,
+    ]
+    if vs_hand in ("L", "R"):
+        conditions.append(ppuw.c.vs_hand == vs_hand)
+
+    stmt = select(
+        ppuw.c.position_code,
+        ppuw.c.player_id,
+        ppuw.c.starts_this_week
+    ).where(and_(*conditions))
+
+    rows = conn.execute(stmt).all()
+
+    # Group by position_code
+    usage_by_position: Dict[str, Dict[int, int]] = {}
+    totals_by_position: Dict[str, int] = {}
+
+    for row in rows:
+        pos = row.position_code
+        pid = int(row.player_id)
+        starts = int(row.starts_this_week or 0)
+
+        if pos not in usage_by_position:
+            usage_by_position[pos] = {}
+            totals_by_position[pos] = 0
+
+        usage_by_position[pos][pid] = starts
+        totals_by_position[pos] += starts
+
+    # Convert to expected return format
+    result: Dict[str, Tuple[Dict[int, int], int]] = {}
+    for pos in usage_by_position:
+        result[pos] = (usage_by_position[pos], totals_by_position[pos])
+
+    return result
 
 
 def _score_player_for_role(p: Dict[str, Any], role: str) -> float:
@@ -421,12 +531,14 @@ def _build_batting_order(
 def _choose_player_for_position(
     conn,
     team_id: int,
-    league_year_id: int,  # reserved for future weekly-usage integration
-    season_week: int,     # reserved for future weekly-usage integration
+    league_year_id: int,
+    season_week: int,
     position_code: str,
     vs_hand: str | None,
     players_by_id: Dict[int, Dict[str, Any]],
     remaining_ids: List[int],
+    plans_by_position: Dict[str, List[Dict[str, Any]]],
+    usage_by_position: Dict[str, Tuple[Dict[int, int], int]],
 ) -> int | None:
     """
     Choose a player for a single defensive position.
@@ -443,8 +555,9 @@ def _choose_player_for_position(
       - If no suitable candidate, fall back to best remaining player by
         positional rating + XP + offense.
 
-    NOTE: league_year_id and season_week are not yet used, but kept in
-    the signature for future integration with player_position_usage_week.
+    Parameters:
+      plans_by_position: Pre-loaded position plans from _load_all_position_plans_for_team
+      usage_by_position: Pre-loaded weekly usage from _load_all_weekly_usage_for_team
     """
     # We never put pitchers in *field* positions here (only SP at 'p')
     remaining_field_ids = [
@@ -456,8 +569,8 @@ def _choose_player_for_position(
 
     rating_key = _POS_RATING_KEY.get(position_code)
 
-    # Load depth chart for this position (if any)
-    plan_rows = _load_team_position_plan_for_pos(conn, team_id, position_code, vs_hand)
+    # Get pre-loaded depth chart for this position (if any)
+    plan_rows = plans_by_position.get(position_code, [])
 
     # First pass: using team_position_plan
     if plan_rows:
@@ -481,15 +594,8 @@ def _choose_player_for_position(
             total_weight += w
 
         if filtered_plan and total_weight > 0:
-            # Weekly usage for this pos/split
-            usage_map, total_starts = _load_weekly_usage_for_pos(
-                conn=conn,
-                league_year_id=league_year_id,
-                season_week=season_week,
-                team_id=team_id,
-                position_code=position_code,
-                vs_hand=vs_hand,
-            )
+            # Get pre-loaded weekly usage for this pos/split
+            usage_map, total_starts = usage_by_position.get(position_code, ({}, 0))
 
             best_pid = None
             best_score = None
@@ -603,6 +709,13 @@ def build_defense_and_lineup(
     It does NOT yet use:
       - player_position_usage_week (weekly targets)
     """
+    # Bulk-load position plans and weekly usage for all positions at once
+    # This replaces 8-16 individual queries with just 2 queries
+    plans_by_position = _load_all_position_plans_for_team(conn, team_id, vs_hand)
+    usage_by_position = _load_all_weekly_usage_for_team(
+        conn, league_year_id, season_week, team_id, vs_hand
+    )
+
     # Initialize defense with SP fixed
     defense: Dict[str, Any] = {
         "startingpitcher": starter_id,
@@ -630,6 +743,8 @@ def build_defense_and_lineup(
             vs_hand=vs_hand,
             players_by_id=players_by_id,
             remaining_ids=remaining_ids,
+            plans_by_position=plans_by_position,
+            usage_by_position=usage_by_position,
         )
         if chosen is not None:
             defense[pos] = chosen

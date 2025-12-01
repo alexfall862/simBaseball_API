@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from typing import Dict, Any, List
 
 import json
+import logging
 
 from sqlalchemy import MetaData, Table, select, and_
+
+logger = logging.getLogger(__name__)
 
 from db import get_engine
 from rosters import (
@@ -125,6 +128,58 @@ def _get_pitch_hand_for_player(conn, player_id: int) -> str | None:
         return "R"
 
     return None
+
+
+def _get_pitch_hands_bulk(conn, player_ids: List[int]) -> Dict[int, str | None]:
+    """
+    Bulk-load pitch_hand for multiple players at once.
+
+    Returns:
+        {player_id: 'L'|'R'|None, ...}
+
+    This replaces N individual queries with a single IN() query.
+    """
+    if not player_ids:
+        return {}
+
+    tables = _get_roster_tables()
+    players = tables["players"]
+
+    rows = conn.execute(
+        select(players.c.id, players.c.pitch_hand).where(
+            players.c.id.in_(player_ids)
+        )
+    ).all()
+
+    result: Dict[int, str | None] = {}
+
+    for row in rows:
+        pid = int(row[0])
+        raw = row[1]
+
+        if raw is None:
+            result[pid] = None
+            continue
+
+        s = str(raw).strip().upper()
+        if not s:
+            result[pid] = None
+            continue
+
+        # Treat anything starting with L as left-handed, anything with R as right-handed.
+        if s[0] == "L":
+            result[pid] = "L"
+        elif s[0] == "R":
+            result[pid] = "R"
+        else:
+            result[pid] = None
+
+    # Fill in missing players with None
+    for pid in player_ids:
+        if pid not in result:
+            result[pid] = None
+
+    return result
 
 
 
@@ -835,8 +890,10 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
     home_sp_id = int(home_rot["starter_id"])
 
     # --- Get opponent SP handedness for vs_hand platoon logic ---
-    away_sp_hand = _get_pitch_hand_for_player(conn, away_sp_id)
-    home_sp_hand = _get_pitch_hand_for_player(conn, home_sp_id)
+    # Bulk-load pitch hands for both starting pitchers at once
+    pitch_hands = _get_pitch_hands_bulk(conn, [away_sp_id, home_sp_id])
+    away_sp_hand = pitch_hands.get(away_sp_id)
+    home_sp_hand = pitch_hands.get(home_sp_id)
 
     # Each lineup sees the *opponent* SP hand
     away_vs_hand = home_sp_hand
@@ -881,3 +938,198 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
         payload["random_seed"] = str(random_seed)
 
     return payload
+
+
+# -------------------------------------------------------------------
+# Public: weekly batch processing
+# -------------------------------------------------------------------
+
+def build_week_payloads(
+    conn,
+    league_year_id: int,
+    season_week: int,
+    league_level: int | None = None,
+) -> Dict[str, Any]:
+    """
+    Build game payloads for all games in a given season_week.
+
+    Processes games sequentially by subweek (a → b → c → d) to allow
+    for state updates (stamina, rotation, injuries) between subweeks.
+
+    Args:
+        conn: Database connection
+        league_year_id: The league year to filter games
+        season_week: The week number to process
+        league_level: Optional league level filter (e.g., 9 for MLB)
+
+    Returns:
+        {
+            "league_year_id": 2026,
+            "season_week": 1,
+            "league_level": 9,
+            "total_games": 47,
+            "subweeks": {
+                "a": [game_payload, ...],
+                "b": [game_payload, ...],
+                "c": [game_payload, ...],
+                "d": [game_payload, ...]
+            }
+        }
+
+    Raises:
+        ValueError: If no games found or if any game fails to build
+    """
+    tables = _get_core_tables()
+    gamelist = tables["gamelist"]
+    seasons = tables["seasons"]
+    league_years = tables["league_years"]
+
+    # Resolve which season(s) map to this league_year_id
+    # league_years.id -> league_years.league_year (year) -> seasons.year -> seasons.id
+    ly_row = conn.execute(
+        select(league_years.c.league_year).where(league_years.c.id == league_year_id)
+    ).first()
+
+    if not ly_row:
+        raise ValueError(f"league_year_id {league_year_id} not found in league_years table")
+
+    year = int(ly_row[0])
+
+    # Find season(s) for this year
+    season_rows = conn.execute(
+        select(seasons.c.id).where(seasons.c.year == year)
+    ).all()
+
+    if not season_rows:
+        raise ValueError(f"No seasons found for year {year}")
+
+    season_ids = [int(row[0]) for row in season_rows]
+
+    # Build query conditions (gamelist.season column contains season_id)
+    conditions = [
+        gamelist.c.season.in_(season_ids),
+        gamelist.c.season_week == season_week,
+    ]
+
+    if league_level is not None:
+        conditions.append(gamelist.c.league_level == league_level)
+
+    # Load all games for this week
+    stmt = (
+        select(gamelist)
+        .where(and_(*conditions))
+        .order_by(gamelist.c.season_subweek.asc(), gamelist.c.id.asc())
+    )
+
+    all_games = conn.execute(stmt).mappings().all()
+
+    if not all_games:
+        raise ValueError(
+            f"No games found for league_year_id={league_year_id} (year={year}), "
+            f"season_week={season_week}, league_level={league_level}"
+        )
+
+    # Group games by subweek
+    games_by_subweek: Dict[str, List[Any]] = {"a": [], "b": [], "c": [], "d": []}
+
+    for game_row in all_games:
+        subweek = game_row.get("season_subweek") or "a"
+        subweek = str(subweek).lower()
+
+        if subweek not in games_by_subweek:
+            logger.warning(
+                f"Game {game_row['id']} has unexpected subweek '{subweek}', "
+                f"defaulting to 'a'"
+            )
+            subweek = "a"
+
+        games_by_subweek[subweek].append(game_row)
+
+    # Process each subweek in order
+    subweek_payloads: Dict[str, List[Dict[str, Any]]] = {}
+    total_games = 0
+
+    for subweek in ["a", "b", "c", "d"]:
+        games = games_by_subweek[subweek]
+
+        if not games:
+            subweek_payloads[subweek] = []
+            continue
+
+        logger.info(
+            f"Processing subweek '{subweek}': {len(games)} games "
+            f"(week {season_week}, league_year {league_year_id})"
+        )
+
+        payloads = []
+
+        for game_row in games:
+            game_id = int(game_row["id"])
+
+            try:
+                payload = build_game_payload(conn, game_id)
+                payloads.append(payload)
+                total_games += 1
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to build payload for game_id={game_id} "
+                    f"in subweek '{subweek}': {e}"
+                )
+                raise ValueError(
+                    f"Failed to build game {game_id} in subweek '{subweek}': {e}"
+                ) from e
+
+        subweek_payloads[subweek] = payloads
+
+        # Send payloads to game engine for simulation
+        try:
+            from services.game_engine_client import simulate_games_batch
+
+            logger.info(
+                f"Sending {len(payloads)} games to engine for subweek '{subweek}'"
+            )
+
+            # Call game engine to simulate this subweek's games
+            results = simulate_games_batch(payloads, subweek)
+
+            logger.info(
+                f"Received {len(results)} results from engine for subweek '{subweek}'"
+            )
+
+            # Store game results in database
+            # TODO: Implement result storage
+            # _store_game_results(conn, results)
+
+            # Update player state for next subweek
+            # TODO: Implement state updates
+            # _update_player_state_after_subweek(conn, results, league_year_id)
+
+        except ImportError:
+            # Game engine client not available - skip simulation
+            logger.warning(
+                f"Game engine client not available, skipping simulation "
+                f"for subweek '{subweek}'"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to simulate subweek '{subweek}': {e}")
+            # Depending on your requirements, you can either:
+            # - Raise to abort the entire week
+            # - Continue to next subweek (comment out the raise below)
+            raise ValueError(
+                f"Simulation failed for subweek '{subweek}': {e}"
+            ) from e
+
+    # Determine league level from first game if not provided
+    detected_league_level = None
+    if all_games:
+        detected_league_level = all_games[0].get("league_level")
+
+    return {
+        "league_year_id": league_year_id,
+        "season_week": season_week,
+        "league_level": league_level or detected_league_level,
+        "total_games": total_games,
+        "subweeks": subweek_payloads,
+    }

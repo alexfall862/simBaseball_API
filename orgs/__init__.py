@@ -33,6 +33,59 @@ def reflect_view(view_name: str):
     return vw
 
 
+
+def shape_org_report(row_dict: dict) -> dict:
+    return {
+        "id": row_dict.get("id"),
+        "org_abbrev": row_dict.get("org_abbrev"),
+        "cash": row_dict.get("cash"),
+        "teams": {
+            "mlb": {
+                "team_id": row_dict.get("mlb_team_id"),
+                "team_city": row_dict.get("mlb_city"),
+                "team_nickname": row_dict.get("mlb_nickname"),
+                "team_full_name": row_dict.get("mlb_full_name"),
+                "team_abbrev": row_dict.get("mlb_abbrev")
+            }, 
+            "aaa": {
+                "team_id": row_dict.get("aaa_team_id"),
+                "team_city": row_dict.get("aaa_city"),
+                "team_nickname": row_dict.get("aaa_nickname"),
+                "team_full_name": row_dict.get("aaa_full_name"),
+                "team_abbrev": row_dict.get("aaa_abbrev")
+            },
+            "aa": {
+                "team_id": row_dict.get("aa_team_id"),
+                "team_city": row_dict.get("aa_city"),
+                "team_nickname": row_dict.get("aa_nickname"),
+                "team_full_name": row_dict.get("aa_full_name"),
+                "team_abbrev": row_dict.get("aa_abbrev")
+            },
+            "higha": {
+                "team_id": row_dict.get("higha_team_id"),
+                "team_city": row_dict.get("higha_city"),
+                "team_nickname": row_dict.get("higha_nickname"),
+                "team_full_name": row_dict.get("higha_full_name"),
+                "team_abbrev": row_dict.get("higha_abbrev")
+            },
+            "a": {
+                "team_id": row_dict.get("a_team_id"),
+                "team_city": row_dict.get("a_city"),
+                "team_nickname": row_dict.get("a_nickname"),
+                "team_full_name": row_dict.get("a_full_name"),
+                "team_abbrev": row_dict.get("a_abbrev")
+            }, 
+            "scraps": {
+                "team_id": row_dict.get("scraps_team_id"),
+                "team_city": row_dict.get("scraps_city"),
+                "team_nickname": row_dict.get("scraps_nickname"),
+                "team_full_name": row_dict.get("scraps_full_name"),
+                "team_abbrev": row_dict.get("scraps_abbrev")
+            }
+        }
+
+    }
+
 @orgs_bp.get("/org_report/")
 # @rate_limit()  # uncomment to apply your default rate limits
 def get_org_report():
@@ -46,6 +99,7 @@ def get_org_report():
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).all()
         data = [_row_to_dict(r) for r in rows]
+        data = [shape_org_report(d) for d in data]
         return jsonify(data), 200
     except SQLAlchemyError:
         return jsonify({

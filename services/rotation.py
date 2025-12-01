@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 from sqlalchemy import MetaData, Table, select, and_
 from db import get_engine
 from rosters import _get_tables as _get_roster_tables
-from services.stamina import get_effective_stamina
+from services.stamina import get_effective_stamina, get_effective_stamina_bulk
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,37 @@ def _get_usage_preference_for_player(conn, player_id: int) -> str:
     return val
 
 
+def _get_usage_preferences_bulk(conn, player_ids: List[int]) -> Dict[int, str]:
+    """
+    Bulk-load usage preferences for multiple players at once.
+
+    Returns:
+        {player_id: usage_preference, ...}
+
+    Players without an explicit strategy row default to 'normal'.
+    """
+    if not player_ids:
+        return {}
+
+    tables = _get_rotation_tables()
+    strategies = tables["strategies"]
+
+    stmt = select(
+        strategies.c.playerID,
+        strategies.c.usage_preference
+    ).where(strategies.c.playerID.in_(player_ids))
+
+    result = {pid: "normal" for pid in player_ids}
+
+    for row in conn.execute(stmt):
+        pid = int(row.playerID)
+        pref = row.usage_preference
+        if pref:
+            result[pid] = pref
+
+    return result
+
+
 def _fallback_pick_starter_without_rotation(
     conn,
     team_id: int,
@@ -122,11 +153,15 @@ def _fallback_pick_starter_without_rotation(
     if not pitcher_ids:
         raise ValueError(f"No pitchers found on roster for team_id {team_id}")
 
+    # Bulk-load stamina and usage preferences for all pitchers
+    stamina_by_player = get_effective_stamina_bulk(conn, pitcher_ids, league_year_id)
+    usage_prefs = _get_usage_preferences_bulk(conn, pitcher_ids)
+
     candidates: List[Dict[str, Any]] = []
 
     for pid in pitcher_ids:
-        stamina = get_effective_stamina(conn, pid, league_year_id)
-        usage_pref = _get_usage_preference_for_player(conn, pid)
+        stamina = stamina_by_player.get(pid, 100)
+        usage_pref = usage_prefs.get(pid, "normal")
         threshold = _USAGE_THRESHOLDS.get(usage_pref, 70)
 
         candidates.append(
@@ -222,14 +257,21 @@ def pick_starting_pitcher(
         next_slot = ((current_slot + i) % rotation_size) + 1
         slot_order.append(next_slot)
 
+    # Collect all pitcher IDs from rotation slots
+    pitcher_ids = [int(r["player_id"]) for r in slot_rows]
+
+    # Bulk-load stamina and usage preferences for all rotation pitchers
+    stamina_by_player = get_effective_stamina_bulk(conn, pitcher_ids, league_year_id)
+    usage_prefs = _get_usage_preferences_bulk(conn, pitcher_ids)
+
     candidates: List[Dict[str, Any]] = []
 
     for slot_num in slot_order:
         s_row = next(r for r in slot_rows if r["slot"] == slot_num)
         pid = int(s_row["player_id"])
 
-        stamina = get_effective_stamina(conn, pid, league_year_id)
-        usage_pref = _get_usage_preference_for_player(conn, pid)
+        stamina = stamina_by_player.get(pid, 100)
+        usage_pref = usage_prefs.get(pid, "normal")
         threshold = _USAGE_THRESHOLDS.get(usage_pref, 70)
 
         candidates.append(

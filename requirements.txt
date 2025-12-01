@@ -1,8 +1,11 @@
 Flask==3.0.3
 flask-cors==4.0.1
+flask-sock==0.7.0
 SQLAlchemy==2.0.32
 pymysql==1.1.0
 prometheus-flask-exporter==0.23.0
 gunicorn==23.0.0
 python-dotenv==1.0.1
 cryptography==42.0.8
+requests==2.31.0
+simple-websocket==1.0.0
