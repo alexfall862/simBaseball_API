@@ -81,6 +81,9 @@ def _build_engine_player_view_from_mapping(mapping: Dict[str, Any]) -> Dict[str,
         "left_split",
         "center_split",
         "right_split",
+        "bat_hand",
+        "pitch_hand",
+        "arm_angle",
     ]:
         engine_player[key] = mapping.get(key)
 
@@ -877,6 +880,9 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
     season_week = int(game_row["season_week"])
     season_subweek = game_row.get("season_subweek")
 
+    # Load ballpark modifiers for home team's stadium
+    ballpark = get_ballpark_info(conn, home_team_id)
+
     # random_seed may or may not exist yet depending on your schema
     random_seed = None
     if "random_seed" in game_row and game_row["random_seed"] is not None:
@@ -929,7 +935,8 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
         "league_year_id": league_year_id,
         "season_week": season_week,
         "season_subweek": season_subweek,
-        "rules": rules,              # <-- game rules from level_rules
+        "rules": rules,
+        "ballpark": ballpark,
         "home_side": home_side,
         "away_side": away_side,
     }
