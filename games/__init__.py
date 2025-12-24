@@ -46,7 +46,7 @@ def get_game_payload(game_id: int):
 @games_bp.get("/games/simulate-week/<int:league_year_id>/<int:season_week>")
 def simulate_week_get(league_year_id: int, season_week: int):
     """
-    GET version of simulate-week for browser testing.
+    GET version of simulate-week for testing - returns payloads WITHOUT sending to engine.
 
     Query parameters:
       - league_level (optional): Filter by league level (e.g., 9 for MLB)
@@ -66,6 +66,7 @@ def simulate_week_get(league_year_id: int, season_week: int):
                 league_year_id=league_year_id,
                 season_week=season_week,
                 league_level=league_level,
+                simulate=False,  # Don't send to engine, just return payloads
             )
 
         current_app.logger.info(

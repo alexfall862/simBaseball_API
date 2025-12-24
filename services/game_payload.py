@@ -1054,6 +1054,7 @@ def build_week_payloads(
     league_year_id: int,
     season_week: int,
     league_level: int | None = None,
+    simulate: bool = True,
 ) -> Dict[str, Any]:
     """
     Build game payloads for all games in a given season_week.
@@ -1066,6 +1067,7 @@ def build_week_payloads(
         league_year_id: The league year to filter games
         season_week: The week number to process
         league_level: Optional league level filter (e.g., 9 for MLB)
+        simulate: If True, send payloads to game engine. If False, just build and return.
 
     Returns:
         {
@@ -1196,44 +1198,45 @@ def build_week_payloads(
 
         subweek_payloads[subweek] = payloads
 
-        # Send payloads to game engine for simulation
-        try:
-            from services.game_engine_client import simulate_games_batch
+        # Send payloads to game engine for simulation (if enabled)
+        if simulate:
+            try:
+                from services.game_engine_client import simulate_games_batch
 
-            logger.info(
-                f"Sending {len(payloads)} games to engine for subweek '{subweek}'"
-            )
+                logger.info(
+                    f"Sending {len(payloads)} games to engine for subweek '{subweek}'"
+                )
 
-            # Call game engine to simulate this subweek's games
-            results = simulate_games_batch(payloads, subweek)
+                # Call game engine to simulate this subweek's games
+                results = simulate_games_batch(payloads, subweek)
 
-            logger.info(
-                f"Received {len(results)} results from engine for subweek '{subweek}'"
-            )
+                logger.info(
+                    f"Received {len(results)} results from engine for subweek '{subweek}'"
+                )
 
-            # Store game results in database
-            # TODO: Implement result storage
-            # _store_game_results(conn, results)
+                # Store game results in database
+                # TODO: Implement result storage
+                # _store_game_results(conn, results)
 
-            # Update player state for next subweek
-            # TODO: Implement state updates
-            # _update_player_state_after_subweek(conn, results, league_year_id)
+                # Update player state for next subweek
+                # TODO: Implement state updates
+                # _update_player_state_after_subweek(conn, results, league_year_id)
 
-        except ImportError:
-            # Game engine client not available - skip simulation
-            logger.warning(
-                f"Game engine client not available, skipping simulation "
-                f"for subweek '{subweek}'"
-            )
+            except ImportError:
+                # Game engine client not available - skip simulation
+                logger.warning(
+                    f"Game engine client not available, skipping simulation "
+                    f"for subweek '{subweek}'"
+                )
 
-        except Exception as e:
-            logger.error(f"Failed to simulate subweek '{subweek}': {e}")
-            # Depending on your requirements, you can either:
-            # - Raise to abort the entire week
-            # - Continue to next subweek (comment out the raise below)
-            raise ValueError(
-                f"Simulation failed for subweek '{subweek}': {e}"
-            ) from e
+            except Exception as e:
+                logger.error(f"Failed to simulate subweek '{subweek}': {e}")
+                # Depending on your requirements, you can either:
+                # - Raise to abort the entire week
+                # - Continue to next subweek (comment out the raise below)
+                raise ValueError(
+                    f"Simulation failed for subweek '{subweek}': {e}"
+                ) from e
 
     # Determine league level from first game if not provided
     detected_league_level = None
