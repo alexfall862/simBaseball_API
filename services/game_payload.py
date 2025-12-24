@@ -209,6 +209,7 @@ def _get_core_tables():
     engine = get_engine()
     md = MetaData()
 
+    # Core game tables
     gamelist = Table("gamelist", md, autoload_with=engine)
     seasons = Table("seasons", md, autoload_with=engine)
     league_years = Table("league_years", md, autoload_with=engine)
@@ -217,6 +218,27 @@ def _get_core_tables():
     teams = Table("teams", md, autoload_with=engine)
     player_strategies = Table("playerStrategies", md, autoload_with=engine)
     injury_types = Table("injury_types", md, autoload_with=engine)
+
+    # Normalized simulation config - static reference tables
+    field_zones = Table("field_zones", md, autoload_with=engine)
+    distance_zones = Table("distance_zones", md, autoload_with=engine)
+    contact_types = Table("contact_types", md, autoload_with=engine)
+    fielding_outcomes = Table("fielding_outcomes", md, autoload_with=engine)
+    defensive_positions = Table("defensive_positions", md, autoload_with=engine)
+    fielding_difficulty_levels = Table("fielding_difficulty_levels", md, autoload_with=engine)
+
+    # Normalized simulation config - static mapping tables
+    defensive_alignment = Table("defensive_alignment", md, autoload_with=engine)
+    fielding_difficulty_mapping = Table("fielding_difficulty_mapping", md, autoload_with=engine)
+    time_to_ground = Table("time_to_ground", md, autoload_with=engine)
+    fielding_modifier = Table("fielding_modifier", md, autoload_with=engine)
+
+    # Normalized simulation config - level-specific tables
+    level_contact_odds = Table("level_contact_odds", md, autoload_with=engine)
+    level_batting_config = Table("level_batting_config", md, autoload_with=engine)
+    level_game_config = Table("level_game_config", md, autoload_with=engine)
+    level_distance_weights = Table("level_distance_weights", md, autoload_with=engine)
+    level_fielding_weights = Table("level_fielding_weights", md, autoload_with=engine)
 
     _CORE_METADATA = md
     _CORE_TABLES = {
@@ -228,6 +250,24 @@ def _get_core_tables():
         "teams": teams,
         "playerStrategies": player_strategies,
         "injury_types": injury_types,
+        # Static reference tables
+        "field_zones": field_zones,
+        "distance_zones": distance_zones,
+        "contact_types": contact_types,
+        "fielding_outcomes": fielding_outcomes,
+        "defensive_positions": defensive_positions,
+        "fielding_difficulty_levels": fielding_difficulty_levels,
+        # Static mapping tables
+        "defensive_alignment": defensive_alignment,
+        "fielding_difficulty_mapping": fielding_difficulty_mapping,
+        "time_to_ground": time_to_ground,
+        "fielding_modifier": fielding_modifier,
+        # Level-specific tables
+        "level_contact_odds": level_contact_odds,
+        "level_batting_config": level_batting_config,
+        "level_game_config": level_game_config,
+        "level_distance_weights": level_distance_weights,
+        "level_fielding_weights": level_fielding_weights,
     }
     return _CORE_TABLES
 
@@ -477,6 +517,349 @@ def get_all_injury_types(conn) -> List[Dict[str, Any]]:
         result.append(injury_type)
 
     _INJURY_TYPES_CACHE = result
+    return result
+
+
+# -------------------------------------------------------------------
+# Normalized game constants (static, cached once per process)
+# -------------------------------------------------------------------
+
+_GAME_CONSTANTS_CACHE: Dict[str, Any] | None = None
+
+
+def get_game_constants(conn) -> Dict[str, Any]:
+    """
+    Load all static game constants from normalized tables (cached).
+
+    This data does not vary by league level and is loaded once per process.
+
+    Returns:
+        {
+            "field_zones": [{"id": 1, "name": "far_left", ...}, ...],
+            "distance_zones": [...],
+            "contact_types": [...],
+            "fielding_outcomes": [...],
+            "defensive_positions": [...],
+            "fielding_difficulty_levels": [...],
+            "defensive_alignment": {
+                "far_left": {"deep_of": ["leftfield"], ...},
+                ...
+            },
+            "fielding_difficulty": {
+                "far_left": {"deep_of": "threestepaway", ...},
+                ...
+            },
+            "time_to_ground": {
+                "barrel": {"deep_of": 2, "middle_of": 1, ...},
+                ...
+            },
+            "fielding_modifier": {
+                "air": {"infield": {"out": 2, ...}, "outfield": {...}},
+                "ground": {...}
+            }
+        }
+    """
+    global _GAME_CONSTANTS_CACHE
+
+    if _GAME_CONSTANTS_CACHE is not None:
+        return _GAME_CONSTANTS_CACHE
+
+    tables = _get_core_tables()
+
+    # Load reference tables as lists
+    field_zones_rows = conn.execute(
+        select(tables["field_zones"]).order_by(tables["field_zones"].c.sort_order)
+    ).mappings().all()
+    field_zones = [dict(row) for row in field_zones_rows]
+    field_zone_by_id = {fz["id"]: fz["name"] for fz in field_zones}
+
+    distance_zones_rows = conn.execute(
+        select(tables["distance_zones"]).order_by(tables["distance_zones"].c.sort_order)
+    ).mappings().all()
+    distance_zones = [dict(row) for row in distance_zones_rows]
+    distance_zone_by_id = {dz["id"]: dz["name"] for dz in distance_zones}
+
+    contact_types_rows = conn.execute(
+        select(tables["contact_types"]).order_by(tables["contact_types"].c.sort_order)
+    ).mappings().all()
+    contact_types = [dict(row) for row in contact_types_rows]
+    contact_type_by_id = {ct["id"]: ct["name"] for ct in contact_types}
+
+    fielding_outcomes_rows = conn.execute(
+        select(tables["fielding_outcomes"]).order_by(tables["fielding_outcomes"].c.sort_order)
+    ).mappings().all()
+    fielding_outcomes = [dict(row) for row in fielding_outcomes_rows]
+    fielding_outcome_by_id = {fo["id"]: fo["name"] for fo in fielding_outcomes}
+
+    defensive_positions_rows = conn.execute(
+        select(tables["defensive_positions"]).order_by(tables["defensive_positions"].c.sort_order)
+    ).mappings().all()
+    defensive_positions = [dict(row) for row in defensive_positions_rows]
+    defensive_position_by_id = {dp["id"]: dp["name"] for dp in defensive_positions}
+
+    fielding_difficulty_levels_rows = conn.execute(
+        select(tables["fielding_difficulty_levels"]).order_by(tables["fielding_difficulty_levels"].c.sort_order)
+    ).mappings().all()
+    fielding_difficulty_levels = [dict(row) for row in fielding_difficulty_levels_rows]
+    difficulty_level_by_id = {dl["id"]: dl["name"] for dl in fielding_difficulty_levels}
+
+    # Load defensive_alignment as nested dict: {field_zone: {distance_zone: [positions by priority]}}
+    alignment_rows = conn.execute(
+        select(tables["defensive_alignment"]).order_by(
+            tables["defensive_alignment"].c.field_zone_id,
+            tables["defensive_alignment"].c.distance_zone_id,
+            tables["defensive_alignment"].c.priority
+        )
+    ).mappings().all()
+
+    defensive_alignment: Dict[str, Dict[str, List[str]]] = {}
+    for row in alignment_rows:
+        fz_name = field_zone_by_id.get(row["field_zone_id"], "unknown")
+        dz_name = distance_zone_by_id.get(row["distance_zone_id"], "unknown")
+        pos_name = defensive_position_by_id.get(row["position_id"], "unknown")
+
+        if fz_name not in defensive_alignment:
+            defensive_alignment[fz_name] = {}
+        if dz_name not in defensive_alignment[fz_name]:
+            defensive_alignment[fz_name][dz_name] = []
+        defensive_alignment[fz_name][dz_name].append(pos_name)
+
+    # Load fielding_difficulty_mapping as nested dict: {field_zone: {distance_zone: difficulty_name}}
+    difficulty_rows = conn.execute(
+        select(tables["fielding_difficulty_mapping"])
+    ).mappings().all()
+
+    fielding_difficulty: Dict[str, Dict[str, str]] = {}
+    for row in difficulty_rows:
+        fz_name = field_zone_by_id.get(row["field_zone_id"], "unknown")
+        dz_name = distance_zone_by_id.get(row["distance_zone_id"], "unknown")
+        diff_name = difficulty_level_by_id.get(row["difficulty_level_id"], "unknown")
+
+        if fz_name not in fielding_difficulty:
+            fielding_difficulty[fz_name] = {}
+        fielding_difficulty[fz_name][dz_name] = diff_name
+
+    # Load time_to_ground as nested dict: {contact_type: {distance_zone: time_value}}
+    ttg_rows = conn.execute(
+        select(tables["time_to_ground"])
+    ).mappings().all()
+
+    time_to_ground: Dict[str, Dict[str, int]] = {}
+    for row in ttg_rows:
+        ct_name = contact_type_by_id.get(row["contact_type_id"], "unknown")
+        dz_name = distance_zone_by_id.get(row["distance_zone_id"], "unknown")
+        time_val = int(row["time_value"])
+
+        if ct_name not in time_to_ground:
+            time_to_ground[ct_name] = {}
+        time_to_ground[ct_name][dz_name] = time_val
+
+    # Load fielding_modifier as nested dict: {ball_type: {zone_type: {outcome: modifier}}}
+    fm_rows = conn.execute(
+        select(tables["fielding_modifier"])
+    ).mappings().all()
+
+    fielding_modifier: Dict[str, Dict[str, Dict[str, int]]] = {}
+    for row in fm_rows:
+        ball_type = row["ball_type"]
+        zone_type = row["zone_type"]
+        outcome_name = fielding_outcome_by_id.get(row["fielding_outcome_id"], "unknown")
+        modifier_val = int(row["modifier_value"])
+
+        if ball_type not in fielding_modifier:
+            fielding_modifier[ball_type] = {}
+        if zone_type not in fielding_modifier[ball_type]:
+            fielding_modifier[ball_type][zone_type] = {}
+        fielding_modifier[ball_type][zone_type][outcome_name] = modifier_val
+
+    _GAME_CONSTANTS_CACHE = {
+        "field_zones": field_zones,
+        "distance_zones": distance_zones,
+        "contact_types": contact_types,
+        "fielding_outcomes": fielding_outcomes,
+        "defensive_positions": defensive_positions,
+        "fielding_difficulty_levels": fielding_difficulty_levels,
+        "defensive_alignment": defensive_alignment,
+        "fielding_difficulty": fielding_difficulty,
+        "time_to_ground": time_to_ground,
+        "fielding_modifier": fielding_modifier,
+    }
+
+    return _GAME_CONSTANTS_CACHE
+
+
+# -------------------------------------------------------------------
+# Level-specific configuration (normalized tables)
+# -------------------------------------------------------------------
+
+_LEVEL_CONFIG_CACHE: Dict[int, Dict[str, Any]] = {}
+
+
+def get_level_config_normalized(conn, league_level: int) -> Dict[str, Any]:
+    """
+    Load all level-specific configuration from normalized tables.
+
+    Returns:
+        {
+            "batting": {
+                "inside_swing": 0.65,
+                "outside_swing": 0.30,
+                "inside_contact": 0.87,
+                "outside_contact": 0.66,
+                "modexp": 2.0
+            },
+            "game": {
+                "error_rate": 0.05,
+                "steal_success": 0.65,
+                "pickoff_success": 0.10,
+                "pregame_injury_base_rate": 0.10,
+                "ingame_injury_base_rate": 0.10,
+                "energy_tick_cap": 1.5,
+                "energy_step": 2.0,
+                "short_leash": 0.8,
+                "normal_leash": 0.7,
+                "long_leash": 0.5,
+                "fielding_multiplier": 0.0
+            },
+            "contact_odds": {
+                "barrel": 7.0,
+                "solid": 12.0,
+                ...
+            },
+            "distance_weights": {
+                "barrel": {"homerun": 0.20, "deep_of": 0.45, ...},
+                ...
+            },
+            "fielding_weights": {
+                "barrel": {"out": 0.25, "single": 0.28, ...},
+                ...
+            }
+        }
+    """
+    if league_level in _LEVEL_CONFIG_CACHE:
+        return _LEVEL_CONFIG_CACHE[league_level]
+
+    tables = _get_core_tables()
+
+    # Load contact type and fielding outcome name lookups
+    contact_types_rows = conn.execute(
+        select(tables["contact_types"].c.id, tables["contact_types"].c.name)
+    ).all()
+    contact_type_by_id = {row[0]: row[1] for row in contact_types_rows}
+
+    distance_zones_rows = conn.execute(
+        select(tables["distance_zones"].c.id, tables["distance_zones"].c.name)
+    ).all()
+    distance_zone_by_id = {row[0]: row[1] for row in distance_zones_rows}
+
+    fielding_outcomes_rows = conn.execute(
+        select(tables["fielding_outcomes"].c.id, tables["fielding_outcomes"].c.name)
+    ).all()
+    fielding_outcome_by_id = {row[0]: row[1] for row in fielding_outcomes_rows}
+
+    # Load batting config
+    batting_row = conn.execute(
+        select(tables["level_batting_config"])
+        .where(tables["level_batting_config"].c.league_level == league_level)
+    ).mappings().first()
+
+    batting = {
+        "inside_swing": float(batting_row["inside_swing"]) if batting_row else 0.65,
+        "outside_swing": float(batting_row["outside_swing"]) if batting_row else 0.30,
+        "inside_contact": float(batting_row["inside_contact"]) if batting_row else 0.87,
+        "outside_contact": float(batting_row["outside_contact"]) if batting_row else 0.66,
+        "modexp": float(batting_row["modexp"]) if batting_row else 2.0,
+    }
+
+    # Load game config
+    game_row = conn.execute(
+        select(tables["level_game_config"])
+        .where(tables["level_game_config"].c.league_level == league_level)
+    ).mappings().first()
+
+    game = {
+        "error_rate": float(game_row["error_rate"]) if game_row else 0.05,
+        "steal_success": float(game_row["steal_success"]) if game_row else 0.65,
+        "pickoff_success": float(game_row["pickoff_success"]) if game_row else 0.10,
+        "pregame_injury_base_rate": float(game_row["pregame_injury_base_rate"]) if game_row else 0.10,
+        "ingame_injury_base_rate": float(game_row["ingame_injury_base_rate"]) if game_row else 0.10,
+        "energy_tick_cap": float(game_row["energy_tick_cap"]) if game_row else 1.5,
+        "energy_step": float(game_row["energy_step"]) if game_row else 2.0,
+        "short_leash": float(game_row["short_leash"]) if game_row else 0.8,
+        "normal_leash": float(game_row["normal_leash"]) if game_row else 0.7,
+        "long_leash": float(game_row["long_leash"]) if game_row else 0.5,
+        "fielding_multiplier": float(game_row["fielding_multiplier"]) if game_row else 0.0,
+    }
+
+    # Load contact odds
+    odds_rows = conn.execute(
+        select(tables["level_contact_odds"])
+        .where(tables["level_contact_odds"].c.league_level == league_level)
+    ).mappings().all()
+
+    contact_odds: Dict[str, float] = {}
+    for row in odds_rows:
+        ct_name = contact_type_by_id.get(row["contact_type_id"], "unknown")
+        contact_odds[ct_name] = float(row["odds"])
+
+    # Load distance weights
+    dist_rows = conn.execute(
+        select(tables["level_distance_weights"])
+        .where(tables["level_distance_weights"].c.league_level == league_level)
+    ).mappings().all()
+
+    distance_weights: Dict[str, Dict[str, float]] = {}
+    for row in dist_rows:
+        ct_name = contact_type_by_id.get(row["contact_type_id"], "unknown")
+        dz_name = distance_zone_by_id.get(row["distance_zone_id"], "unknown")
+        weight = float(row["weight"])
+
+        if ct_name not in distance_weights:
+            distance_weights[ct_name] = {}
+        distance_weights[ct_name][dz_name] = weight
+
+    # Load fielding weights
+    field_rows = conn.execute(
+        select(tables["level_fielding_weights"])
+        .where(tables["level_fielding_weights"].c.league_level == league_level)
+    ).mappings().all()
+
+    fielding_weights: Dict[str, Dict[str, float]] = {}
+    for row in field_rows:
+        ct_name = contact_type_by_id.get(row["contact_type_id"], "unknown")
+        fo_name = fielding_outcome_by_id.get(row["fielding_outcome_id"], "unknown")
+        weight = float(row["weight"])
+
+        if ct_name not in fielding_weights:
+            fielding_weights[ct_name] = {}
+        fielding_weights[ct_name][fo_name] = weight
+
+    result = {
+        "batting": batting,
+        "game": game,
+        "contact_odds": contact_odds,
+        "distance_weights": distance_weights,
+        "fielding_weights": fielding_weights,
+    }
+
+    _LEVEL_CONFIG_CACHE[league_level] = result
+    return result
+
+
+def get_level_configs_normalized_bulk(conn, league_levels: List[int]) -> Dict[int, Dict[str, Any]]:
+    """
+    Bulk-load level configurations for multiple league levels.
+
+    Returns:
+        {league_level: level_config_dict, ...}
+    """
+    if not league_levels:
+        return {}
+
+    result: Dict[int, Dict[str, Any]] = {}
+    for level in league_levels:
+        result[level] = get_level_config_normalized(conn, level)
+
     return result
 
 
@@ -973,8 +1356,11 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
     # Load ballpark modifiers for home team's stadium
     ballpark = get_ballpark_info(conn, home_team_id)
 
-    # Load baseline simulation config for this league level
-    level_config = get_level_sim_config(conn, league_level_id)
+    # Load static game constants (cached, same for all games)
+    game_constants = get_game_constants(conn)
+
+    # Load level-specific config from normalized tables
+    level_config = get_level_config_normalized(conn, league_level_id)
 
     # Load injury type reference data
     injury_types = get_all_injury_types(conn)
@@ -1032,6 +1418,7 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
         "season_week": season_week,
         "season_subweek": season_subweek,
         "rules": rules,
+        "game_constants": game_constants,
         "level_config": level_config,
         "injury_types": injury_types,
         "ballpark": ballpark,
@@ -1136,9 +1523,12 @@ def build_week_payloads(
             f"season_week={season_week}, league_level={league_level}"
         )
 
-    # Collect unique league levels and load their configs
+    # Load static game constants (cached, same for all games)
+    game_constants = get_game_constants(conn)
+
+    # Collect unique league levels and load their configs from normalized tables
     unique_levels = list(set(int(g["league_level"]) for g in all_games))
-    level_configs_raw = get_level_sim_configs_bulk(conn, unique_levels)
+    level_configs_raw = get_level_configs_normalized_bulk(conn, unique_levels)
     # Convert to string keys for JSON compatibility
     level_configs = {str(k): v for k, v in level_configs_raw.items()}
 
@@ -1248,6 +1638,7 @@ def build_week_payloads(
         "season_week": season_week,
         "league_level": league_level or detected_league_level,
         "total_games": total_games,
+        "game_constants": game_constants,
         "level_configs": level_configs,
         "injury_types": injury_types,
         "subweeks": subweek_payloads,
