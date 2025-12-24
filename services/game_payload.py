@@ -84,6 +84,11 @@ def _build_engine_player_view_from_mapping(mapping: Dict[str, Any]) -> Dict[str,
         "bat_hand",
         "pitch_hand",
         "arm_angle",
+        "pitch1_name",
+        "pitch2_name",
+        "pitch3_name",
+        "pitch4_name",
+        "pitch5_name",
     ]:
         engine_player[key] = mapping.get(key)
 
@@ -211,6 +216,7 @@ def _get_core_tables():
     level_sim_config = Table("level_sim_config", md, autoload_with=engine)
     teams = Table("teams", md, autoload_with=engine)
     player_strategies = Table("playerStrategies", md, autoload_with=engine)
+    injury_types = Table("injury_types", md, autoload_with=engine)
 
     _CORE_METADATA = md
     _CORE_TABLES = {
@@ -221,6 +227,7 @@ def _get_core_tables():
         "level_sim_config": level_sim_config,
         "teams": teams,
         "playerStrategies": player_strategies,
+        "injury_types": injury_types,
     }
     return _CORE_TABLES
 
@@ -372,6 +379,37 @@ def get_level_sim_config(conn, league_level_id: int) -> Dict[str, Any]:
     return _normalize_json(row[0])
 
 
+def get_level_sim_configs_bulk(conn, league_level_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """
+    Bulk-load baseline_outcomes_json for multiple league levels.
+
+    Returns:
+        {league_level_id: {baseline_outcomes...}, ...}
+    """
+    if not league_level_ids:
+        return {}
+
+    tables = _get_core_tables()
+    cfg_table = tables["level_sim_config"]
+
+    rows = conn.execute(
+        select(cfg_table.c.league_level, cfg_table.c.baseline_outcomes_json)
+        .where(cfg_table.c.league_level.in_(league_level_ids))
+    ).all()
+
+    result: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        level_id = int(row[0])
+        result[level_id] = _normalize_json(row[1])
+
+    # Fill in missing levels with empty dict
+    for level_id in league_level_ids:
+        if level_id not in result:
+            result[level_id] = {}
+
+    return result
+
+
 def get_ballpark_info(conn, team_id: int) -> Dict[str, Any]:
     """
     Return ballpark modifiers and name for the home team.
@@ -402,6 +440,44 @@ def get_ballpark_info(conn, team_id: int) -> Dict[str, Any]:
         "pitch_break_mod": float(pb or 1.0),
         "power_mod": float(pw or 1.0),
     }
+
+
+# Cache for injury types (loaded once per process)
+_INJURY_TYPES_CACHE: List[Dict[str, Any]] | None = None
+
+
+def get_all_injury_types(conn) -> List[Dict[str, Any]]:
+    """
+    Load all injury type definitions from the injury_types table.
+
+    Results are cached since injury types don't change during runtime.
+
+    Returns:
+        List of injury type dicts with id, code, name, and other fields.
+    """
+    global _INJURY_TYPES_CACHE
+
+    if _INJURY_TYPES_CACHE is not None:
+        return _INJURY_TYPES_CACHE
+
+    tables = _get_core_tables()
+    injury_types = tables["injury_types"]
+
+    rows = conn.execute(select(injury_types)).mappings().all()
+
+    result = []
+    for row in rows:
+        injury_type = {}
+        for key, value in row.items():
+            # Normalize JSON fields
+            if key.endswith("_json") and value is not None:
+                injury_type[key] = _normalize_json(value)
+            else:
+                injury_type[key] = value
+        result.append(injury_type)
+
+    _INJURY_TYPES_CACHE = result
+    return result
 
 
 # -------------------------------------------------------------------
@@ -738,12 +814,14 @@ def build_team_game_side(
     teams = r_tables["teams"]
 
     team_row = conn.execute(
-        select(teams.c.orgID).where(teams.c.id == team_id).limit(1)
+        select(teams.c.orgID, teams.c.name, teams.c.abbrev).where(teams.c.id == team_id).limit(1)
     ).first()
     if not team_row:
         raise ValueError(f"Team id {team_id} not found")
 
     org_id = int(team_row[0])
+    team_name = team_row[1]
+    team_abbrev = team_row[2]
 
     player_ids = _get_team_roster_player_ids(conn, team_id)
     players_by_id: Dict[int, Dict[str, Any]] = {}
@@ -753,6 +831,8 @@ def build_team_game_side(
         # No players; return an empty shell
         return {
             "team_id": team_id,
+            "team_name": team_name,
+            "team_abbrev": team_abbrev,
             "org_id": org_id,
             "players": [],
             "starting_pitcher_id": None,
@@ -832,6 +912,8 @@ def build_team_game_side(
 
     return {
         "team_id": team_id,
+        "team_name": team_name,
+        "team_abbrev": team_abbrev,
         "org_id": org_id,
         "players": list(players_by_id.values()),
         "starting_pitcher_id": starter_id,
@@ -882,6 +964,12 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
 
     # Load ballpark modifiers for home team's stadium
     ballpark = get_ballpark_info(conn, home_team_id)
+
+    # Load baseline simulation config for this league level
+    level_config = get_level_sim_config(conn, league_level_id)
+
+    # Load injury type reference data
+    injury_types = get_all_injury_types(conn)
 
     # random_seed may or may not exist yet depending on your schema
     random_seed = None
@@ -936,6 +1024,8 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
         "season_week": season_week,
         "season_subweek": season_subweek,
         "rules": rules,
+        "level_config": level_config,
+        "injury_types": injury_types,
         "ballpark": ballpark,
         "home_side": home_side,
         "away_side": away_side,
@@ -1035,6 +1125,15 @@ def build_week_payloads(
             f"No games found for league_year_id={league_year_id} (year={year}), "
             f"season_week={season_week}, league_level={league_level}"
         )
+
+    # Collect unique league levels and load their configs
+    unique_levels = list(set(int(g["league_level"]) for g in all_games))
+    level_configs_raw = get_level_sim_configs_bulk(conn, unique_levels)
+    # Convert to string keys for JSON compatibility
+    level_configs = {str(k): v for k, v in level_configs_raw.items()}
+
+    # Load injury type reference data (cached, so only one DB query)
+    injury_types = get_all_injury_types(conn)
 
     # Group games by subweek
     games_by_subweek: Dict[str, List[Any]] = {"a": [], "b": [], "c": [], "d": []}
@@ -1138,5 +1237,7 @@ def build_week_payloads(
         "season_week": season_week,
         "league_level": league_level or detected_league_level,
         "total_games": total_games,
+        "level_configs": level_configs,
+        "injury_types": injury_types,
         "subweeks": subweek_payloads,
     }
