@@ -814,14 +814,20 @@ def build_team_game_side(
     teams = r_tables["teams"]
 
     team_row = conn.execute(
-        select(teams.c.orgID, teams.c.name, teams.c.abbrev).where(teams.c.id == team_id).limit(1)
+        select(
+            teams.c.orgID,
+            teams.c.team_abbrev,
+            teams.c.team_name,
+            teams.c.team_nickname,
+        ).where(teams.c.id == team_id).limit(1)
     ).first()
     if not team_row:
         raise ValueError(f"Team id {team_id} not found")
 
     org_id = int(team_row[0])
-    team_name = team_row[1]
-    team_abbrev = team_row[2]
+    team_abbrev = team_row[1]
+    team_name = team_row[2]
+    team_nickname = team_row[3]
 
     player_ids = _get_team_roster_player_ids(conn, team_id)
     players_by_id: Dict[int, Dict[str, Any]] = {}
@@ -831,8 +837,9 @@ def build_team_game_side(
         # No players; return an empty shell
         return {
             "team_id": team_id,
-            "team_name": team_name,
             "team_abbrev": team_abbrev,
+            "team_name": team_name,
+            "team_nickname": team_nickname,
             "org_id": org_id,
             "players": [],
             "starting_pitcher_id": None,
@@ -912,8 +919,9 @@ def build_team_game_side(
 
     return {
         "team_id": team_id,
-        "team_name": team_name,
         "team_abbrev": team_abbrev,
+        "team_name": team_name,
+        "team_nickname": team_nickname,
         "org_id": org_id,
         "players": list(players_by_id.values()),
         "starting_pitcher_id": starter_id,
