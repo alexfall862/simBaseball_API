@@ -1319,17 +1319,28 @@ def build_team_game_side(
 # Public: full game payload
 # -------------------------------------------------------------------
 
-def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
+def build_game_payload_core(conn, game_id: int) -> Dict[str, Any]:
     """
-    Build the full engine payload for a single game_id.
+    Build the core game-specific payload for a single game_id.
 
-    - Looks up the game in gamelist
-    - Resolves league_year_id via seasons/league_years
-    - Loads game rules from level_rules (including DH flag)
-    - Picks starting pitchers for home and away
-    - Derives vs_hand for each lineup from the opponent SP's pitch_hand
-    - Rolls pregame injuries (if random_seed is set)
-    - Builds team-side payloads
+    This contains only the game-specific data (teams, ballpark, etc.)
+    without the metadata that should live at root level (game_constants,
+    level_config, injury_types, rules).
+
+    Used internally by both build_game_payload() and build_week_payloads().
+
+    Returns:
+        {
+            "game_id": 123,
+            "league_level_id": 9,
+            "league_year_id": 1,
+            "season_week": 1,
+            "season_subweek": "a",
+            "ballpark": {...},
+            "home_side": {...},
+            "away_side": {...},
+            "random_seed": "12345"  # optional
+        }
     """
     tables = _get_core_tables()
     gamelist = tables["gamelist"]
@@ -1344,7 +1355,7 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
     league_level_id = int(game_row["league_level"])
     league_year_id = _resolve_league_year_id_for_game(conn, game_row)
 
-    # Load game rules for this league level
+    # Load game rules for this league level (needed for DH flag)
     rules = _get_level_rules_for_league(conn, league_level_id)
     use_dh = bool(rules["dh"])
 
@@ -1355,15 +1366,6 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
 
     # Load ballpark modifiers for home team's stadium
     ballpark = get_ballpark_info(conn, home_team_id)
-
-    # Load static game constants (cached, same for all games)
-    game_constants = get_game_constants(conn)
-
-    # Load level-specific config from normalized tables
-    level_config = get_level_config_normalized(conn, league_level_id)
-
-    # Load injury type reference data
-    injury_types = get_all_injury_types(conn)
 
     # random_seed may or may not exist yet depending on your schema
     random_seed = None
@@ -1417,10 +1419,6 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
         "league_year_id": league_year_id,
         "season_week": season_week,
         "season_subweek": season_subweek,
-        "rules": rules,
-        "game_constants": game_constants,
-        "level_config": level_config,
-        "injury_types": injury_types,
         "ballpark": ballpark,
         "home_side": home_side,
         "away_side": away_side,
@@ -1430,6 +1428,71 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
         payload["random_seed"] = str(random_seed)
 
     return payload
+
+
+def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
+    """
+    Build the full engine payload for a single game_id.
+
+    Returns a structure matching the weekly batch format, with the game
+    placed in subweek 'a'. This ensures the engine always receives a
+    consistent payload shape regardless of single vs. weekly simulation.
+
+    Structure:
+        {
+            "league_year_id": 1,
+            "season_week": 1,
+            "league_level": 9,
+            "total_games": 1,
+            "game_constants": {...},
+            "level_configs": {"9": {...}},
+            "rules": {"9": {...}},
+            "injury_types": [...],
+            "subweeks": {
+                "a": [game_payload],
+                "b": [],
+                "c": [],
+                "d": []
+            }
+        }
+    """
+    # Build the core game data
+    game_core = build_game_payload_core(conn, game_id)
+
+    league_level_id = game_core["league_level_id"]
+    league_year_id = game_core["league_year_id"]
+    season_week = game_core["season_week"]
+
+    # Load static game constants (cached, same for all games)
+    game_constants = get_game_constants(conn)
+
+    # Load level-specific config from normalized tables
+    level_config = get_level_config_normalized(conn, league_level_id)
+    level_configs = {str(league_level_id): level_config}
+
+    # Load rules for this level
+    rules = _get_level_rules_for_league(conn, league_level_id)
+    rules_by_level = {str(league_level_id): rules}
+
+    # Load injury type reference data
+    injury_types = get_all_injury_types(conn)
+
+    return {
+        "league_year_id": league_year_id,
+        "season_week": season_week,
+        "league_level": league_level_id,
+        "total_games": 1,
+        "game_constants": game_constants,
+        "level_configs": level_configs,
+        "rules": rules_by_level,
+        "injury_types": injury_types,
+        "subweeks": {
+            "a": [game_core],
+            "b": [],
+            "c": [],
+            "d": [],
+        },
+    }
 
 
 # -------------------------------------------------------------------
@@ -1462,13 +1525,22 @@ def build_week_payloads(
             "season_week": 1,
             "league_level": 9,
             "total_games": 47,
+            "game_constants": {...},
+            "level_configs": {"9": {...}},
+            "rules": {"9": {...}},
+            "injury_types": [...],
             "subweeks": {
-                "a": [game_payload, ...],
-                "b": [game_payload, ...],
-                "c": [game_payload, ...],
-                "d": [game_payload, ...]
+                "a": [game_core_payload, ...],
+                "b": [game_core_payload, ...],
+                "c": [game_core_payload, ...],
+                "d": [game_core_payload, ...]
             }
         }
+
+    Note:
+        Individual game payloads in subweeks contain only game-specific data
+        (game_id, ballpark, home_side, away_side). Metadata like game_constants,
+        level_configs, rules, and injury_types are at the root level only.
 
     Raises:
         ValueError: If no games found or if any game fails to build
@@ -1532,6 +1604,12 @@ def build_week_payloads(
     # Convert to string keys for JSON compatibility
     level_configs = {str(k): v for k, v in level_configs_raw.items()}
 
+    # Load rules for all unique levels
+    rules_by_level = {
+        str(level): _get_level_rules_for_league(conn, level)
+        for level in unique_levels
+    }
+
     # Load injury type reference data (cached, so only one DB query)
     injury_types = get_all_injury_types(conn)
 
@@ -1573,7 +1651,8 @@ def build_week_payloads(
             game_id = int(game_row["id"])
 
             try:
-                payload = build_game_payload(conn, game_id)
+                # Use core payload (game-specific data only, no redundant metadata)
+                payload = build_game_payload_core(conn, game_id)
                 payloads.append(payload)
                 total_games += 1
 
@@ -1640,6 +1719,7 @@ def build_week_payloads(
         "total_games": total_games,
         "game_constants": game_constants,
         "level_configs": level_configs,
+        "rules": rules_by_level,
         "injury_types": injury_types,
         "subweeks": subweek_payloads,
     }
