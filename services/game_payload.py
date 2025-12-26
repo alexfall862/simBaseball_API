@@ -917,6 +917,9 @@ DEFAULT_PLAYER_STRATEGY = {
     "pitching_approach": "normal",
     "baserunning_approach": "normal",
     "usage_preference": "normal",
+    "stealfreq": 1.87,          # Steal attempt frequency (0-100, represents %)
+    "pickofffreq": 1.0,         # Pickoff attempt frequency (0-100, represents %)
+    "pitchchoices": [1, 1, 1, 1, 1],  # Pitch mix weights for 5 pitch slots
 }
 
 def _load_player_strategies_bulk(
@@ -972,20 +975,42 @@ def _load_player_strategies_bulk(
             out[pid] = DEFAULT_PLAYER_STRATEGY.copy()
             continue
 
+        # String fields: use 'or' pattern (empty string -> default)
         strat = {
             "plate_approach": row.get("plate_approach") or DEFAULT_PLAYER_STRATEGY["plate_approach"],
             "pitching_approach": row.get("pitching_approach") or DEFAULT_PLAYER_STRATEGY["pitching_approach"],
             "baserunning_approach": row.get("baserunning_approach") or DEFAULT_PLAYER_STRATEGY["baserunning_approach"],
             "usage_preference": row.get("usage_preference") or DEFAULT_PLAYER_STRATEGY["usage_preference"],
         }
+
+        # Numeric fields: explicit None check (0 is a valid value)
+        stealfreq = row.get("stealfreq")
+        strat["stealfreq"] = float(stealfreq) if stealfreq is not None else DEFAULT_PLAYER_STRATEGY["stealfreq"]
+
+        pickofffreq = row.get("pickofffreq")
+        strat["pickofffreq"] = float(pickofffreq) if pickofffreq is not None else DEFAULT_PLAYER_STRATEGY["pickofffreq"]
+
+        # Array field: handle JSON string or list
+        pitchchoices_raw = row.get("pitchchoices")
+        if pitchchoices_raw is None:
+            strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
+        elif isinstance(pitchchoices_raw, list):
+            strat["pitchchoices"] = pitchchoices_raw
+        else:
+            # Try to parse as JSON string
+            try:
+                strat["pitchchoices"] = json.loads(pitchchoices_raw)
+            except (TypeError, json.JSONDecodeError):
+                strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
+
         out[pid] = strat
 
     return out
 
-def _load_player_strategy(conn, player_id: int, org_id: int | None = None) -> Dict[str, str]:
+def _load_player_strategy(conn, player_id: int, org_id: int | None = None) -> Dict[str, Any]:
     """
     Load per-player strategy for the given player/org, if present.
-    Defaults all strategy fields to 'normal' if not set.
+    Defaults all strategy fields if not set.
     """
     tables = _get_core_tables()
     strategies = tables["playerStrategies"]
@@ -998,19 +1023,36 @@ def _load_player_strategy(conn, player_id: int, org_id: int | None = None) -> Di
     row = conn.execute(stmt).mappings().first()
 
     if not row:
-        return {
-            "plate_approach": "normal",
-            "pitching_approach": "normal",
-            "baserunning_approach": "normal",
-            "usage_preference": "normal",
-        }
+        return DEFAULT_PLAYER_STRATEGY.copy()
 
-    return {
-        "plate_approach": row.get("plate_approach") or "normal",
-        "pitching_approach": row.get("pitching_approach") or "normal",
-        "baserunning_approach": row.get("baserunning_approach") or "normal",
-        "usage_preference": row.get("usage_preference") or "normal",
+    # String fields
+    strat = {
+        "plate_approach": row.get("plate_approach") or DEFAULT_PLAYER_STRATEGY["plate_approach"],
+        "pitching_approach": row.get("pitching_approach") or DEFAULT_PLAYER_STRATEGY["pitching_approach"],
+        "baserunning_approach": row.get("baserunning_approach") or DEFAULT_PLAYER_STRATEGY["baserunning_approach"],
+        "usage_preference": row.get("usage_preference") or DEFAULT_PLAYER_STRATEGY["usage_preference"],
     }
+
+    # Numeric fields: explicit None check (0 is valid)
+    stealfreq = row.get("stealfreq")
+    strat["stealfreq"] = float(stealfreq) if stealfreq is not None else DEFAULT_PLAYER_STRATEGY["stealfreq"]
+
+    pickofffreq = row.get("pickofffreq")
+    strat["pickofffreq"] = float(pickofffreq) if pickofffreq is not None else DEFAULT_PLAYER_STRATEGY["pickofffreq"]
+
+    # Array field: handle JSON string or list
+    pitchchoices_raw = row.get("pitchchoices")
+    if pitchchoices_raw is None:
+        strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
+    elif isinstance(pitchchoices_raw, list):
+        strat["pitchchoices"] = pitchchoices_raw
+    else:
+        try:
+            strat["pitchchoices"] = json.loads(pitchchoices_raw)
+        except (TypeError, json.JSONDecodeError):
+            strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
+
+    return strat
 
 
 # -------------------------------------------------------------------
