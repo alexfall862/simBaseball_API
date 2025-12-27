@@ -21,6 +21,56 @@ _USAGE_THRESHOLDS = {
 }
 
 
+def _safe_float(val) -> float:
+    """Safely convert a value to float, returning 0.0 on failure."""
+    if val is None:
+        return 0.0
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _compute_pitcher_ability_score(p: Dict[str, Any]) -> float:
+    """
+    Compute overall ability score for a starting pitcher.
+
+    Formula:
+      - 30% pendurance_base (workload capacity)
+      - 40% pgencontrol_base (general control)
+      - 10% pickoff_base
+      - 20% average of 5 pitches' quality (each pitch = avg of pacc, pbrk, pcntrl, pconsist)
+
+    Returns:
+        Float score (higher is better).
+    """
+    pendurance = _safe_float(p.get("pendurance_base"))
+    pgencontrol = _safe_float(p.get("pgencontrol_base"))
+    pickoff = _safe_float(p.get("pickoff_base"))
+
+    # Calculate average quality across all 5 pitches
+    pitch_qualities = []
+    for n in range(1, 6):
+        pacc = _safe_float(p.get(f"pitch{n}_pacc_base"))
+        pbrk = _safe_float(p.get(f"pitch{n}_pbrk_base"))
+        pcntrl = _safe_float(p.get(f"pitch{n}_pcntrl_base"))
+        pconsist = _safe_float(p.get(f"pitch{n}_pconsist_base"))
+        pitch_avg = (pacc + pbrk + pcntrl + pconsist) / 4.0
+        pitch_qualities.append(pitch_avg)
+
+    avg_pitch_quality = sum(pitch_qualities) / 5.0
+
+    # Weighted combination
+    score = (
+        (pendurance * 0.30) +
+        (pgencontrol * 0.40) +
+        (pickoff * 0.10) +
+        (avg_pitch_quality * 0.20)
+    )
+
+    return score
+
+
 def _get_rotation_tables():
     global _metadata, _rotation_tables
     if _rotation_tables is not None:
@@ -93,6 +143,47 @@ def _get_team_pitcher_ids(conn, team_id: int) -> List[int]:
     return pitcher_ids
 
 
+def _load_pitcher_ratings_bulk(conn, pitcher_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """
+    Bulk-load pitcher rating attributes needed for ability score calculation.
+
+    Returns:
+        {player_id: {pendurance_base, pgencontrol_base, pickoff_base,
+                     pitch1_pacc_base, pitch1_pbrk_base, ...}, ...}
+    """
+    if not pitcher_ids:
+        return {}
+
+    r_tables = _get_roster_tables()
+    players = r_tables["players"]
+
+    # Columns needed for ability score calculation
+    columns = [
+        players.c.id,
+        players.c.pendurance_base,
+        players.c.pgencontrol_base,
+        players.c.pickoff_base,
+    ]
+
+    # Add all 5 pitch rating columns
+    for n in range(1, 6):
+        columns.extend([
+            getattr(players.c, f"pitch{n}_pacc_base"),
+            getattr(players.c, f"pitch{n}_pbrk_base"),
+            getattr(players.c, f"pitch{n}_pcntrl_base"),
+            getattr(players.c, f"pitch{n}_pconsist_base"),
+        ])
+
+    stmt = select(*columns).where(players.c.id.in_(pitcher_ids))
+
+    result: Dict[int, Dict[str, Any]] = {}
+    for row in conn.execute(stmt).mappings():
+        pid = int(row["id"])
+        result[pid] = dict(row)
+
+    return result
+
+
 def _get_usage_preference_for_player(conn, player_id: int) -> str:
     tables = _get_rotation_tables()
     strategies = tables["strategies"]
@@ -146,16 +237,19 @@ def _fallback_pick_starter_without_rotation(
     Fallback when no team_pitching_rotation row exists:
 
       - Find all pitchers on this team.
-      - Compute stamina + usage_preference for each.
-      - Pick the first who meets their threshold; if none, pick the highest stamina.
+      - Compute ability score for each (weighted: pendurance, pgencontrol, pickoff, pitch quality).
+      - Compute stamina + usage_preference for rest eligibility.
+      - Among pitchers who meet their stamina threshold, pick highest ability score.
+      - If none meet threshold, pick highest ability score regardless (desperation mode).
     """
     pitcher_ids = _get_team_pitcher_ids(conn, team_id)
     if not pitcher_ids:
         raise ValueError(f"No pitchers found on roster for team_id {team_id}")
 
-    # Bulk-load stamina and usage preferences for all pitchers
+    # Bulk-load all needed data
     stamina_by_player = get_effective_stamina_bulk(conn, pitcher_ids, league_year_id)
     usage_prefs = _get_usage_preferences_bulk(conn, pitcher_ids)
+    ratings_by_player = _load_pitcher_ratings_bulk(conn, pitcher_ids)
 
     candidates: List[Dict[str, Any]] = []
 
@@ -164,6 +258,10 @@ def _fallback_pick_starter_without_rotation(
         usage_pref = usage_prefs.get(pid, "normal")
         threshold = _USAGE_THRESHOLDS.get(usage_pref, 70)
 
+        # Compute ability score from ratings
+        player_ratings = ratings_by_player.get(pid, {})
+        ability_score = _compute_pitcher_ability_score(player_ratings)
+
         candidates.append(
             {
                 "player_id": pid,
@@ -171,24 +269,29 @@ def _fallback_pick_starter_without_rotation(
                 "stamina": stamina,
                 "usage_preference": usage_pref,
                 "threshold": threshold,
+                "ability_score": ability_score,
             }
         )
 
-    # Try to find someone who meets their threshold
-    starter = None
-    for cand in candidates:
-        if cand["stamina"] >= cand["threshold"]:
-            starter = cand
-            break
+    # Filter to pitchers who meet their stamina threshold
+    rested_candidates = [c for c in candidates if c["stamina"] >= c["threshold"]]
 
-    # If none meet threshold, pick the highest stamina (desperation mode)
-    if starter is None:
-        starter = max(candidates, key=lambda c: c["stamina"])
+    if rested_candidates:
+        # Pick highest ability score among rested pitchers
+        starter = max(rested_candidates, key=lambda c: c["ability_score"])
+    else:
+        # Desperation mode: pick highest ability score regardless of stamina
+        starter = max(candidates, key=lambda c: c["ability_score"])
+        logger.warning(
+            "Desperation mode: no pitchers meet stamina threshold for team_id %s",
+            team_id,
+        )
 
-    logger.warning(
-        "Fallback rotation used for team_id %s, starter %s (stamina=%s, usage_pref=%s)",
+    logger.info(
+        "Fallback rotation for team_id %s: starter %s (ability=%.2f, stamina=%s, usage_pref=%s)",
         team_id,
         starter["player_id"],
+        starter["ability_score"],
         starter["stamina"],
         starter["usage_preference"],
     )
