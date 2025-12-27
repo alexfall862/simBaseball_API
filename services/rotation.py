@@ -54,7 +54,7 @@ def _compute_pitcher_ability_score(p: Dict[str, Any]) -> float:
         pacc = _safe_float(p.get(f"pitch{n}_pacc_base"))
         pbrk = _safe_float(p.get(f"pitch{n}_pbrk_base"))
         pcntrl = _safe_float(p.get(f"pitch{n}_pcntrl_base"))
-        pconsist = _safe_float(p.get(f"pitch{n}_pconsist_base"))
+        pconsist = _safe_float(p.get(f"pitch{n}_consist_base"))
         pitch_avg = (pacc + pbrk + pcntrl + pconsist) / 4.0
         pitch_qualities.append(pitch_avg)
 
@@ -171,7 +171,7 @@ def _load_pitcher_ratings_bulk(conn, pitcher_ids: List[int]) -> Dict[int, Dict[s
             getattr(players.c, f"pitch{n}_pacc_base"),
             getattr(players.c, f"pitch{n}_pbrk_base"),
             getattr(players.c, f"pitch{n}_pcntrl_base"),
-            getattr(players.c, f"pitch{n}_pconsist_base"),
+            getattr(players.c, f"pitch{n}_consist_base"),
         ])
 
     stmt = select(*columns).where(players.c.id.in_(pitcher_ids))
