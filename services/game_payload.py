@@ -226,6 +226,7 @@ def _get_core_tables():
     fielding_outcomes = Table("fielding_outcomes", md, autoload_with=engine)
     defensive_positions = Table("defensive_positions", md, autoload_with=engine)
     fielding_difficulty_levels = Table("fielding_difficulty_levels", md, autoload_with=engine)
+    catch_situations = Table("catch_situations", md, autoload_with=engine)
 
     # Normalized simulation config - static mapping tables
     defensive_alignment = Table("defensive_alignment", md, autoload_with=engine)
@@ -239,6 +240,7 @@ def _get_core_tables():
     level_game_config = Table("level_game_config", md, autoload_with=engine)
     level_distance_weights = Table("level_distance_weights", md, autoload_with=engine)
     level_fielding_weights = Table("level_fielding_weights", md, autoload_with=engine)
+    level_catch_rates = Table("level_catch_rates", md, autoload_with=engine)
 
     _CORE_METADATA = md
     _CORE_TABLES = {
@@ -257,6 +259,7 @@ def _get_core_tables():
         "fielding_outcomes": fielding_outcomes,
         "defensive_positions": defensive_positions,
         "fielding_difficulty_levels": fielding_difficulty_levels,
+        "catch_situations": catch_situations,
         # Static mapping tables
         "defensive_alignment": defensive_alignment,
         "fielding_difficulty_mapping": fielding_difficulty_mapping,
@@ -268,6 +271,7 @@ def _get_core_tables():
         "level_game_config": level_game_config,
         "level_distance_weights": level_distance_weights,
         "level_fielding_weights": level_fielding_weights,
+        "level_catch_rates": level_catch_rates,
     }
     return _CORE_TABLES
 
@@ -733,6 +737,10 @@ def get_level_config_normalized(conn, league_level: int) -> Dict[str, Any]:
             "fielding_weights": {
                 "barrel": {"out": 0.25, "single": 0.28, ...},
                 ...
+            },
+            "catch_rates": {
+                "barrel": {"deep_gap": 0.30, "gap": 0.50, "routine_of": 0.92, ...},
+                ...
             }
         }
     """
@@ -756,6 +764,11 @@ def get_level_config_normalized(conn, league_level: int) -> Dict[str, Any]:
         select(tables["fielding_outcomes"].c.id, tables["fielding_outcomes"].c.name)
     ).all()
     fielding_outcome_by_id = {row[0]: row[1] for row in fielding_outcomes_rows}
+
+    catch_situations_rows = conn.execute(
+        select(tables["catch_situations"].c.id, tables["catch_situations"].c.name)
+    ).all()
+    catch_situation_by_id = {row[0]: row[1] for row in catch_situations_rows}
 
     # Load batting config
     batting_row = conn.execute(
@@ -834,12 +847,29 @@ def get_level_config_normalized(conn, league_level: int) -> Dict[str, Any]:
             fielding_weights[ct_name] = {}
         fielding_weights[ct_name][fo_name] = weight
 
+    # Load catch rates (situation-based OUT probabilities)
+    catch_rows = conn.execute(
+        select(tables["level_catch_rates"])
+        .where(tables["level_catch_rates"].c.league_level == league_level)
+    ).mappings().all()
+
+    catch_rates: Dict[str, Dict[str, float]] = {}
+    for row in catch_rows:
+        ct_name = contact_type_by_id.get(row["contact_type_id"], "unknown")
+        cs_name = catch_situation_by_id.get(row["catch_situation_id"], "unknown")
+        rate = float(row["catch_rate"])
+
+        if ct_name not in catch_rates:
+            catch_rates[ct_name] = {}
+        catch_rates[ct_name][cs_name] = rate
+
     result = {
         "batting": batting,
         "game": game,
         "contact_odds": contact_odds,
         "distance_weights": distance_weights,
         "fielding_weights": fielding_weights,
+        "catch_rates": catch_rates,
     }
 
     _LEVEL_CONFIG_CACHE[league_level] = result
