@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, current_app, request
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
-from services.game_payload import build_game_payload, build_week_payloads
+from services.game_payload import build_game_payload, build_week_payloads, build_synthetic_matchups
 from services.timestamp import (
     set_run_games,
     set_subweek_completed,
@@ -375,6 +375,104 @@ def get_timestamp_endpoint():
 
     except Exception as e:
         current_app.logger.exception("get_timestamp: unexpected error")
+        return jsonify(
+            error="unexpected_error",
+            message=str(e)
+        ), 500
+
+
+@games_bp.get("/games/debug/synthetic")
+def get_synthetic_matchups():
+    """
+    Generate synthetic matchups for testing purposes.
+
+    Creates fake game payloads by randomly pairing teams from the database.
+    Returns payloads in the same structure as build_week_payloads() for
+    consistent engine testing.
+
+    Query parameters:
+      - count (int): Number of matchups to generate (default: 10, max: 1000)
+      - league_level (int): League level to use (default: 9 for MLB)
+      - league_year_id (int): Optional league year ID for context
+      - seed (int): Optional random seed for reproducible results
+
+    Example:
+      GET /api/v1/games/debug/synthetic
+      GET /api/v1/games/debug/synthetic?count=50&league_level=9
+      GET /api/v1/games/debug/synthetic?count=100&seed=12345
+
+    Response:
+    {
+        "league_year_id": null,
+        "season_week": null,
+        "league_level": 9,
+        "total_games": 50,
+        "synthetic": true,
+        "seed": 12345,
+        "game_constants": {...},
+        "rules": {...},
+        "subweeks": {
+            "a": [game_payload, ...],
+            "b": [...],
+            "c": [...],
+            "d": [...]
+        }
+    }
+    """
+    # Parse query parameters
+    count = request.args.get("count", default=10, type=int)
+    league_level = request.args.get("league_level", default=9, type=int)
+    league_year_id = request.args.get("league_year_id", type=int)
+    seed = request.args.get("seed", type=int)
+
+    # Validate count
+    if count < 1:
+        return jsonify(
+            error="invalid_parameter",
+            message="count must be at least 1"
+        ), 400
+
+    if count > 1000:
+        return jsonify(
+            error="invalid_parameter",
+            message="count cannot exceed 1000"
+        ), 400
+
+    engine = get_engine()
+
+    try:
+        with engine.connect() as conn:
+            result = build_synthetic_matchups(
+                conn=conn,
+                count=count,
+                league_level=league_level,
+                league_year_id=league_year_id,
+                seed=seed,
+            )
+
+        current_app.logger.info(
+            f"Generated {result['total_games']} synthetic matchups "
+            f"(level={league_level}, seed={seed})"
+        )
+
+        return jsonify(result), 200
+
+    except ValueError as e:
+        current_app.logger.warning(f"get_synthetic_matchups validation error: {e}")
+        return jsonify(
+            error="validation_error",
+            message=str(e)
+        ), 400
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_synthetic_matchups: database error")
+        return jsonify(
+            error="database_error",
+            message=str(e)
+        ), 500
+
+    except Exception as e:
+        current_app.logger.exception("get_synthetic_matchups: unexpected error")
         return jsonify(
             error="unexpected_error",
             message=str(e)
