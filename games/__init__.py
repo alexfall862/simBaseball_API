@@ -1,7 +1,7 @@
 # games/__init__.py
 
 import threading
-from flask import Blueprint, jsonify, current_app, request
+from flask import Blueprint, jsonify, current_app, request, redirect
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
@@ -527,14 +527,17 @@ def _run_synthetic_task(task_id: str, count: int, league_level: int,
         store.set_failed(task_id, str(e))
 
 
-@games_bp.post("/games/debug/synthetic-async")
+@games_bp.route("/games/debug/synthetic-async", methods=["GET", "POST"])
 def start_synthetic_matchups_async():
     """
     Start async generation of synthetic matchups.
 
     Returns immediately with a task_id that can be polled for status/results.
 
-    Request body (JSON):
+    GET (browser-friendly):
+        /api/v1/games/debug/synthetic-async?count=1000&league_level=9
+
+    POST (JSON body):
     {
         "count": 1000,           // Number of games (default: 10, max: 10000)
         "league_level": 9,       // League level (default: 9)
@@ -551,12 +554,19 @@ def start_synthetic_matchups_async():
     }
 
     Example:
-        POST /api/v1/games/debug/synthetic-async
-        Content-Type: application/json
-
-        {"count": 1000, "league_level": 9}
+        GET  /api/v1/games/debug/synthetic-async?count=1000
+        POST /api/v1/games/debug/synthetic-async  (with JSON body)
     """
-    body = request.get_json(silent=True) or {}
+    # Support both GET (query params) and POST (JSON body)
+    if request.method == "GET":
+        body = {
+            "count": request.args.get("count", 10),
+            "league_level": request.args.get("league_level", 9),
+            "league_year_id": request.args.get("league_year_id"),
+            "seed": request.args.get("seed"),
+        }
+    else:
+        body = request.get_json(silent=True) or {}
 
     count = body.get("count", 10)
     league_level = body.get("league_level", 9)
@@ -636,11 +646,17 @@ def start_synthetic_matchups_async():
         f"Started async synthetic task {task.id} (count={count}, level={league_level})"
     )
 
+    poll_url = f"/api/v1/games/tasks/{task.id}"
+
+    # If redirect=true, send browser directly to status page
+    if request.args.get("redirect", "").lower() == "true":
+        return redirect(poll_url)
+
     return jsonify(
         task_id=task.id,
         status=task.status.value,
         total=count,
-        poll_url=f"/api/v1/games/tasks/{task.id}",
+        poll_url=poll_url,
     ), 202
 
 
