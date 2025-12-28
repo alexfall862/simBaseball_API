@@ -1,10 +1,16 @@
 # games/__init__.py
 
+import threading
 from flask import Blueprint, jsonify, current_app, request
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
-from services.game_payload import build_game_payload, build_week_payloads, build_synthetic_matchups
+from services.game_payload import (
+    build_game_payload,
+    build_week_payloads,
+    build_synthetic_matchups,
+    build_synthetic_matchups_with_progress,
+)
 from services.timestamp import (
     set_run_games,
     set_subweek_completed,
@@ -12,6 +18,7 @@ from services.timestamp import (
     advance_week,
     reset_week_games,
 )
+from services.task_store import get_task_store, TaskStatus
 
 games_bp = Blueprint("games", __name__)
 
@@ -477,3 +484,274 @@ def get_synthetic_matchups():
             error="unexpected_error",
             message=str(e)
         ), 500
+
+
+# -------------------------------------------------------------------
+# Async task endpoints
+# -------------------------------------------------------------------
+
+def _run_synthetic_task(task_id: str, count: int, league_level: int,
+                        league_year_id: int | None, seed: int | None):
+    """
+    Background worker function for synthetic matchup generation.
+
+    Runs in a separate thread and updates the task store with progress.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    store = get_task_store()
+    store.set_running(task_id)
+
+    def on_progress(current: int, total: int):
+        store.set_progress(task_id, current)
+
+    engine = get_engine()
+
+    try:
+        with engine.connect() as conn:
+            result = build_synthetic_matchups_with_progress(
+                conn=conn,
+                count=count,
+                league_level=league_level,
+                league_year_id=league_year_id,
+                seed=seed,
+                on_progress=on_progress,
+            )
+
+        store.set_complete(task_id, result)
+        logger.info(f"Task {task_id} completed: {result['total_games']} games")
+
+    except Exception as e:
+        logger.exception(f"Task {task_id} failed")
+        store.set_failed(task_id, str(e))
+
+
+@games_bp.post("/games/debug/synthetic-async")
+def start_synthetic_matchups_async():
+    """
+    Start async generation of synthetic matchups.
+
+    Returns immediately with a task_id that can be polled for status/results.
+
+    Request body (JSON):
+    {
+        "count": 1000,           // Number of games (default: 10, max: 10000)
+        "league_level": 9,       // League level (default: 9)
+        "league_year_id": null,  // Optional league year ID
+        "seed": 12345            // Optional random seed
+    }
+
+    Response:
+    {
+        "task_id": "abc12345",
+        "status": "pending",
+        "total": 1000,
+        "poll_url": "/api/v1/games/tasks/abc12345"
+    }
+
+    Example:
+        POST /api/v1/games/debug/synthetic-async
+        Content-Type: application/json
+
+        {"count": 1000, "league_level": 9}
+    """
+    body = request.get_json(silent=True) or {}
+
+    count = body.get("count", 10)
+    league_level = body.get("league_level", 9)
+    league_year_id = body.get("league_year_id")
+    seed = body.get("seed")
+
+    # Validate count
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        return jsonify(
+            error="invalid_parameter",
+            message="count must be an integer"
+        ), 400
+
+    if count < 1:
+        return jsonify(
+            error="invalid_parameter",
+            message="count must be at least 1"
+        ), 400
+
+    if count > 10000:
+        return jsonify(
+            error="invalid_parameter",
+            message="count cannot exceed 10000 for async jobs"
+        ), 400
+
+    # Validate league_level
+    try:
+        league_level = int(league_level)
+    except (TypeError, ValueError):
+        return jsonify(
+            error="invalid_parameter",
+            message="league_level must be an integer"
+        ), 400
+
+    # Validate optional params
+    if league_year_id is not None:
+        try:
+            league_year_id = int(league_year_id)
+        except (TypeError, ValueError):
+            return jsonify(
+                error="invalid_parameter",
+                message="league_year_id must be an integer"
+            ), 400
+
+    if seed is not None:
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError):
+            return jsonify(
+                error="invalid_parameter",
+                message="seed must be an integer"
+            ), 400
+
+    # Create task
+    store = get_task_store()
+    task = store.create_task(
+        task_type="synthetic_matchups",
+        total=count,
+        metadata={
+            "league_level": league_level,
+            "league_year_id": league_year_id,
+            "seed": seed,
+        }
+    )
+
+    # Start background thread
+    thread = threading.Thread(
+        target=_run_synthetic_task,
+        args=(task.id, count, league_level, league_year_id, seed),
+        daemon=True,
+    )
+    thread.start()
+
+    current_app.logger.info(
+        f"Started async synthetic task {task.id} (count={count}, level={league_level})"
+    )
+
+    return jsonify(
+        task_id=task.id,
+        status=task.status.value,
+        total=count,
+        poll_url=f"/api/v1/games/tasks/{task.id}",
+    ), 202
+
+
+@games_bp.get("/games/tasks/<task_id>")
+def get_task_status(task_id: str):
+    """
+    Get the status and result of an async task.
+
+    Response (pending/running):
+    {
+        "task_id": "abc12345",
+        "status": "running",
+        "progress": 450,
+        "total": 1000,
+        "metadata": {...}
+    }
+
+    Response (complete):
+    {
+        "task_id": "abc12345",
+        "status": "complete",
+        "progress": 1000,
+        "total": 1000,
+        "result": {...}  // Full game payload
+    }
+
+    Response (failed):
+    {
+        "task_id": "abc12345",
+        "status": "failed",
+        "error": "Error message"
+    }
+
+    Query parameters:
+        - include_result (bool): If false, omit result even when complete (default: true)
+                                 Useful for checking status without downloading large payloads
+
+    Example:
+        GET /api/v1/games/tasks/abc12345
+        GET /api/v1/games/tasks/abc12345?include_result=false
+    """
+    store = get_task_store()
+    task = store.get_task(task_id)
+
+    if not task:
+        return jsonify(
+            error="not_found",
+            message=f"Task {task_id} not found"
+        ), 404
+
+    include_result = request.args.get("include_result", "true").lower() != "false"
+
+    return jsonify(task.to_dict(include_result=include_result)), 200
+
+
+@games_bp.get("/games/tasks")
+def list_tasks():
+    """
+    List all active tasks.
+
+    Query parameters:
+        - type (str): Filter by task type (e.g., "synthetic_matchups")
+
+    Response:
+    {
+        "tasks": [
+            {"task_id": "abc123", "status": "running", "progress": 50, "total": 100, ...},
+            {"task_id": "def456", "status": "complete", "progress": 100, "total": 100, ...}
+        ]
+    }
+
+    Example:
+        GET /api/v1/games/tasks
+        GET /api/v1/games/tasks?type=synthetic_matchups
+    """
+    store = get_task_store()
+    task_type = request.args.get("type")
+
+    tasks = store.list_tasks(task_type=task_type)
+
+    # Return task summaries without full results
+    return jsonify(
+        tasks=[t.to_dict(include_result=False) for t in tasks]
+    ), 200
+
+
+@games_bp.delete("/games/tasks/<task_id>")
+def delete_task(task_id: str):
+    """
+    Delete a task from the store.
+
+    Useful for cleaning up completed tasks or freeing memory.
+
+    Response:
+    {
+        "ok": true,
+        "message": "Task abc12345 deleted"
+    }
+
+    Example:
+        DELETE /api/v1/games/tasks/abc12345
+    """
+    store = get_task_store()
+
+    if store.delete_task(task_id):
+        return jsonify(
+            ok=True,
+            message=f"Task {task_id} deleted"
+        ), 200
+    else:
+        return jsonify(
+            error="not_found",
+            message=f"Task {task_id} not found"
+        ), 404

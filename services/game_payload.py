@@ -2031,3 +2031,189 @@ def build_synthetic_matchups(
             "d": [],
         },
     }
+
+
+def build_synthetic_matchups_with_progress(
+    conn,
+    count: int = 10,
+    league_level: int = 9,
+    league_year_id: int | None = None,
+    seed: int | None = None,
+    on_progress: callable = None,
+) -> Dict[str, Any]:
+    """
+    Generate synthetic game matchups with progress callbacks.
+
+    Same as build_synthetic_matchups but calls on_progress(current, total)
+    after each game is built, allowing for progress tracking in background tasks.
+
+    Args:
+        conn: Database connection
+        count: Number of games to generate
+        league_level: League level to use (default: 9 for MLB)
+        league_year_id: Optional league year ID
+        seed: Optional random seed for reproducibility
+        on_progress: Optional callback function(current: int, total: int)
+
+    Returns:
+        Same structure as build_synthetic_matchups()
+    """
+    import random as rand_module
+
+    rng = rand_module.Random(seed) if seed else rand_module.Random()
+
+    tables = _get_core_tables()
+    r_tables = _get_roster_tables()
+    teams_table = r_tables["teams"]
+    league_years = tables["league_years"]
+
+    # Resolve league_year_id if not provided
+    if league_year_id is None:
+        ly_row = conn.execute(
+            select(league_years.c.id)
+            .order_by(league_years.c.league_year.desc())
+            .limit(1)
+        ).first()
+        if not ly_row:
+            raise ValueError("No league_years found in database")
+        league_year_id = int(ly_row[0])
+
+    # Get all teams at this league level
+    team_rows = conn.execute(
+        select(teams_table.c.id, teams_table.c.team_abbrev)
+        .where(teams_table.c.team_level == league_level)
+    ).all()
+
+    if len(team_rows) < 2:
+        raise ValueError(
+            f"Need at least 2 teams at league_level={league_level}, "
+            f"found {len(team_rows)}"
+        )
+
+    team_ids = [int(row[0]) for row in team_rows]
+
+    logger.info(
+        f"Building {count} synthetic matchups from {len(team_ids)} teams "
+        f"at level {league_level} (with progress tracking)"
+    )
+
+    # Load static game constants
+    game_constants = get_game_constants(conn)
+
+    # Load level config and rules
+    level_config = get_level_config_normalized(conn, league_level)
+    level_configs = {str(league_level): level_config}
+
+    rules = _get_level_rules_for_league(conn, league_level)
+    rules_by_level = {str(league_level): rules}
+    use_dh = bool(rules["dh"])
+
+    # Load injury types
+    injury_types = get_all_injury_types(conn)
+
+    # Generate random matchups
+    game_payloads: List[Dict[str, Any]] = []
+    games_attempted = 0
+
+    for game_idx in range(count):
+        games_attempted += 1
+
+        # Pick two different teams randomly
+        home_team_id, away_team_id = rng.sample(team_ids, 2)
+
+        # Generate a synthetic random seed for this game
+        game_seed = rng.randint(1, 2**31 - 1)
+
+        # Load ballpark for home team
+        ballpark = get_ballpark_info(conn, home_team_id)
+
+        # Pick starting pitchers
+        try:
+            home_rot = pick_starting_pitcher(conn, home_team_id, league_year_id)
+            away_rot = pick_starting_pitcher(conn, away_team_id, league_year_id)
+            home_sp_id = int(home_rot["starter_id"])
+            away_sp_id = int(away_rot["starter_id"])
+        except Exception as e:
+            logger.warning(
+                f"Skipping matchup {home_team_id} vs {away_team_id}: {e}"
+            )
+            if on_progress:
+                on_progress(games_attempted, count)
+            continue
+
+        # Get pitcher handedness for platoon matchups
+        pitch_hands = _get_pitch_hands_bulk(conn, [away_sp_id, home_sp_id])
+        away_sp_hand = pitch_hands.get(away_sp_id)
+        home_sp_hand = pitch_hands.get(home_sp_id)
+
+        home_vs_hand = away_sp_hand
+        away_vs_hand = home_sp_hand
+
+        # Build team sides
+        try:
+            home_side = build_team_game_side(
+                conn=conn,
+                team_id=home_team_id,
+                league_level_id=league_level,
+                league_year_id=league_year_id,
+                season_week=0,
+                starter_id=home_sp_id,
+                vs_hand=home_vs_hand,
+                random_seed=game_seed,
+                use_dh=use_dh,
+            )
+            away_side = build_team_game_side(
+                conn=conn,
+                team_id=away_team_id,
+                league_level_id=league_level,
+                league_year_id=league_year_id,
+                season_week=0,
+                starter_id=away_sp_id,
+                vs_hand=away_vs_hand,
+                random_seed=game_seed,
+                use_dh=use_dh,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Skipping matchup {home_team_id} vs {away_team_id}: {e}"
+            )
+            if on_progress:
+                on_progress(games_attempted, count)
+            continue
+
+        payload = {
+            "game_id": -(game_idx + 1),
+            "league_level_id": league_level,
+            "league_year_id": league_year_id,
+            "season_week": 0,
+            "season_subweek": "a",
+            "ballpark": ballpark,
+            "home_side": home_side,
+            "away_side": away_side,
+            "random_seed": str(game_seed),
+        }
+
+        game_payloads.append(payload)
+
+        # Report progress
+        if on_progress:
+            on_progress(games_attempted, count)
+
+    logger.info(f"Generated {len(game_payloads)} synthetic game payloads")
+
+    return {
+        "league_year_id": league_year_id,
+        "season_week": 0,
+        "league_level": league_level,
+        "total_games": len(game_payloads),
+        "game_constants": game_constants,
+        "level_configs": level_configs,
+        "rules": rules_by_level,
+        "injury_types": injury_types,
+        "subweeks": {
+            "a": game_payloads,
+            "b": [],
+            "c": [],
+            "d": [],
+        },
+    }
