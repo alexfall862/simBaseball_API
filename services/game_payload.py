@@ -197,6 +197,47 @@ _CORE_METADATA = None
 _CORE_TABLES = None
 _LEVEL_RULES_CACHE: Dict[int, Dict[str, Any]] = {}
 
+
+def clear_game_payload_caches() -> Dict[str, bool]:
+    """
+    Clear all in-memory caches in the game_payload module.
+
+    This should be called after database updates to configuration tables
+    (level_catch_rates, level_rules, level_*_config, injury_types, etc.)
+    to ensure fresh data is loaded on the next request.
+
+    Returns:
+        Dict with cache names and whether they were cleared (had data).
+    """
+    global _CORE_METADATA, _CORE_TABLES, _LEVEL_RULES_CACHE
+    global _GAME_CONSTANTS_CACHE, _LEVEL_CONFIG_CACHE, _INJURY_TYPES_CACHE
+
+    cleared = {}
+
+    # Core tables cache
+    cleared["core_tables"] = _CORE_TABLES is not None
+    _CORE_METADATA = None
+    _CORE_TABLES = None
+
+    # Level rules cache
+    cleared["level_rules"] = len(_LEVEL_RULES_CACHE) > 0
+    _LEVEL_RULES_CACHE = {}
+
+    # Game constants cache (static reference tables)
+    cleared["game_constants"] = _GAME_CONSTANTS_CACHE is not None
+    _GAME_CONSTANTS_CACHE = None
+
+    # Level config cache (includes catch_rates, batting config, etc.)
+    cleared["level_config"] = len(_LEVEL_CONFIG_CACHE) > 0
+    _LEVEL_CONFIG_CACHE = {}
+
+    # Injury types cache
+    cleared["injury_types"] = _INJURY_TYPES_CACHE is not None
+    _INJURY_TYPES_CACHE = None
+
+    logger.info(f"Cleared game_payload caches: {cleared}")
+    return cleared
+
 def _get_core_tables():
     """
     Reflect and cache core tables used by game payload building and

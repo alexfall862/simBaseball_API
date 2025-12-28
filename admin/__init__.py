@@ -116,6 +116,52 @@ def admin_run_sql():
     dry_run = bool(body.get("dry_run", True))
     return _run_sql_internal(sql, mode, limit, dry_run)
 
+
+@admin_bp.post("/clear-caches")
+def admin_clear_caches():
+    """
+    Clear all in-memory caches to force fresh data from the database.
+
+    Use this after making direct database changes to configuration tables
+    (level_catch_rates, level_rules, injury_types, etc.) to ensure the
+    API returns updated values.
+
+    Response:
+    {
+        "ok": true,
+        "cleared": {
+            "game_payload": {"core_tables": true, "level_config": true, ...},
+            "rosters": {"tables": true, "player_col_cats": false}
+        }
+    }
+
+    Example:
+        POST /admin/clear-caches
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from services.game_payload import clear_game_payload_caches
+        from rosters import clear_rosters_caches
+
+        cleared = {
+            "game_payload": clear_game_payload_caches(),
+            "rosters": clear_rosters_caches(),
+        }
+
+        logging.getLogger("app").info(
+            "admin_clear_caches",
+            extra={"cleared": cleared}
+        )
+
+        return jsonify(ok=True, cleared=cleared)
+
+    except Exception as e:
+        logging.exception("admin_clear_caches failed")
+        return jsonify(ok=False, error="clear_caches_failed", message=str(e)), 500
+
 def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
     if not sql:
         return jsonify(error="missing_sql"), 400

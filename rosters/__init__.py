@@ -1,5 +1,6 @@
 # rosters/__init__.py
 
+from typing import Dict
 from flask import Blueprint, jsonify, request, current_app
 from sqlalchemy import MetaData, Table, select, and_, literal, func
 from sqlalchemy.exc import SQLAlchemyError
@@ -8,6 +9,28 @@ from db import get_engine
 
 rosters_bp = Blueprint("rosters", __name__)
 PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+
+
+def clear_rosters_caches() -> Dict[str, bool]:
+    """
+    Clear all in-memory caches in the rosters module.
+
+    Returns:
+        Dict with cache names and whether they were cleared (had data).
+    """
+    cleared = {}
+
+    # Tables cache (stored on blueprint)
+    cleared["tables"] = hasattr(rosters_bp, "_tables")
+    if hasattr(rosters_bp, "_tables"):
+        delattr(rosters_bp, "_tables")
+
+    # Player column categories cache
+    cleared["player_col_cats"] = hasattr(rosters_bp, "_player_col_cats")
+    if hasattr(rosters_bp, "_player_col_cats"):
+        delattr(rosters_bp, "_player_col_cats")
+
+    return cleared
 
 # -------------------------------------------------------------------
 # Table reflection helpers
