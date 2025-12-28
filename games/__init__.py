@@ -1,7 +1,8 @@
 # games/__init__.py
 
 import threading
-from flask import Blueprint, jsonify, current_app, request, redirect
+import gzip
+from flask import Blueprint, jsonify, current_app, request, redirect, Response
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
@@ -633,30 +634,32 @@ def start_synthetic_matchups_async():
             "seed": seed,
         }
     )
+    task_id = task["task_id"]
 
     # Start background thread
     thread = threading.Thread(
         target=_run_synthetic_task,
-        args=(task.id, count, league_level, league_year_id, seed),
+        args=(task_id, count, league_level, league_year_id, seed),
         daemon=True,
     )
     thread.start()
 
     current_app.logger.info(
-        f"Started async synthetic task {task.id} (count={count}, level={league_level})"
+        f"Started async synthetic task {task_id} (count={count}, level={league_level})"
     )
 
-    poll_url = f"/api/v1/games/tasks/{task.id}"
+    poll_url = f"/api/v1/games/tasks/{task_id}"
 
     # If redirect=true, send browser directly to status page
     if request.args.get("redirect", "").lower() == "true":
         return redirect(poll_url)
 
     return jsonify(
-        task_id=task.id,
-        status=task.status.value,
+        task_id=task_id,
+        status=task["status"],
         total=count,
         poll_url=poll_url,
+        download_url=f"/api/v1/games/tasks/{task_id}/download",
     ), 202
 
 
@@ -680,7 +683,7 @@ def get_task_status(task_id: str):
         "status": "complete",
         "progress": 1000,
         "total": 1000,
-        "result": {...}  // Full game payload
+        "result": {...}  // Full game payload (WARNING: can be very large!)
     }
 
     Response (failed):
@@ -691,15 +694,29 @@ def get_task_status(task_id: str):
     }
 
     Query parameters:
-        - include_result (bool): If false, omit result even when complete (default: true)
-                                 Useful for checking status without downloading large payloads
+        - include_result (bool): If false, omit result even when complete (default: false)
+                                 Set to true only for small tasks; use /download for large results
 
     Example:
         GET /api/v1/games/tasks/abc12345
-        GET /api/v1/games/tasks/abc12345?include_result=false
+        GET /api/v1/games/tasks/abc12345?include_result=true
     """
     store = get_task_store()
-    task = store.get_task(task_id)
+
+    # Default to NOT including result (it's huge and crashes browsers)
+    include_result = request.args.get("include_result", "false").lower() == "true"
+
+    if include_result:
+        task = store.get_task(task_id)
+    else:
+        # Get task without result to avoid loading large data
+        tasks = store.list_tasks()
+        task = next((t for t in tasks if t["task_id"] == task_id), None)
+        if task is None:
+            # Try to get it directly (might be filtered out)
+            task = store.get_task(task_id)
+            if task:
+                task.pop("result", None)
 
     if not task:
         return jsonify(
@@ -707,9 +724,80 @@ def get_task_status(task_id: str):
             message=f"Task {task_id} not found"
         ), 404
 
-    include_result = request.args.get("include_result", "true").lower() != "false"
+    # Add download URL hint for completed tasks
+    if task["status"] == TaskStatus.COMPLETE.value and not include_result:
+        task["download_url"] = f"/api/v1/games/tasks/{task_id}/download"
 
-    return jsonify(task.to_dict(include_result=include_result)), 200
+    return jsonify(task), 200
+
+
+@games_bp.get("/games/tasks/<task_id>/download")
+def download_task_result(task_id: str):
+    """
+    Download the task result as a JSON file.
+
+    This streams the compressed result directly, avoiding memory issues
+    with large payloads. The browser will download it as a .json file.
+
+    Query parameters:
+        - compressed (bool): If true, return gzipped data (default: false)
+
+    Example:
+        GET /api/v1/games/tasks/abc12345/download
+        GET /api/v1/games/tasks/abc12345/download?compressed=true
+    """
+    store = get_task_store()
+
+    # First check if task exists and is complete
+    task = store.get_task(task_id)
+    if not task:
+        return jsonify(
+            error="not_found",
+            message=f"Task {task_id} not found"
+        ), 404
+
+    if task["status"] != TaskStatus.COMPLETE.value:
+        return jsonify(
+            error="not_ready",
+            message=f"Task {task_id} is not complete (status: {task['status']})",
+            status=task["status"],
+            progress=task["progress"],
+            total=task["total"],
+        ), 400
+
+    # Get compressed result
+    compressed_data = store.get_task_result_compressed(task_id)
+    if not compressed_data:
+        return jsonify(
+            error="no_result",
+            message=f"Task {task_id} has no result data"
+        ), 404
+
+    # Return compressed or decompressed based on query param
+    return_compressed = request.args.get("compressed", "false").lower() == "true"
+
+    filename = f"synthetic_games_{task_id}.json"
+
+    if return_compressed:
+        return Response(
+            compressed_data,
+            mimetype="application/gzip",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}.gz",
+                "Content-Length": len(compressed_data),
+            }
+        )
+    else:
+        # Decompress for download
+        decompressed = gzip.decompress(compressed_data)
+        return Response(
+            decompressed,
+            mimetype="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Length": len(decompressed),
+            }
+        )
 
 
 @games_bp.get("/games/tasks")
@@ -737,10 +825,12 @@ def list_tasks():
 
     tasks = store.list_tasks(task_type=task_type)
 
-    # Return task summaries without full results
-    return jsonify(
-        tasks=[t.to_dict(include_result=False) for t in tasks]
-    ), 200
+    # Add download URLs for completed tasks
+    for task in tasks:
+        if task["status"] == TaskStatus.COMPLETE.value:
+            task["download_url"] = f"/api/v1/games/tasks/{task['task_id']}/download"
+
+    return jsonify(tasks=tasks), 200
 
 
 @games_bp.delete("/games/tasks/<task_id>")

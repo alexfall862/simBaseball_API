@@ -1,21 +1,25 @@
 # services/task_store.py
 """
-In-memory task store for background job tracking.
+Database-backed task store for background job tracking.
 
-Provides a simple way to track long-running tasks with status, progress,
-and results. Tasks are stored in memory and automatically cleaned up
-after a configurable TTL.
-
-For production with multiple workers, consider replacing with Redis.
+Provides persistent storage for long-running tasks across multiple workers.
+Tasks are stored in the `background_tasks` table and automatically cleaned
+up after a configurable TTL.
 """
 
-import threading
+import json
 import time
 import uuid
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+import gzip
+from typing import Any, Dict, List, Optional
 from enum import Enum
+
+from sqlalchemy import (
+    MetaData, Table, Column, String, Text, Integer, Float,
+    create_engine, select, delete, update, LargeBinary
+)
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
@@ -27,171 +31,262 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
-@dataclass
-class Task:
-    id: str
-    status: TaskStatus
-    task_type: str
-    created_at: float
-    updated_at: float
-    progress: int = 0
-    total: int = 0
-    result: Optional[Any] = None
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+# Table definition (will be created if it doesn't exist)
+_metadata = MetaData()
 
-    def to_dict(self, include_result: bool = True) -> Dict[str, Any]:
-        """Convert task to JSON-serializable dict."""
-        d = {
-            "task_id": self.id,
-            "status": self.status.value,
-            "task_type": self.task_type,
-            "progress": self.progress,
-            "total": self.total,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "metadata": self.metadata,
+background_tasks = Table(
+    "background_tasks",
+    _metadata,
+    Column("id", String(32), primary_key=True),
+    Column("status", String(20), nullable=False, default="pending"),
+    Column("task_type", String(100), nullable=False),
+    Column("progress", Integer, nullable=False, default=0),
+    Column("total", Integer, nullable=False, default=0),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Column("metadata_json", Text, nullable=True),
+    Column("result_json", LargeBinary, nullable=True),  # Compressed JSON
+    Column("error", Text, nullable=True),
+)
+
+
+class DatabaseTaskStore:
+    """
+    Database-backed task store that works across multiple workers.
+
+    Tasks are stored in the `background_tasks` table with compressed results
+    to handle large payloads efficiently.
+    """
+
+    def __init__(self, engine, task_ttl_seconds: int = 3600):
+        self._engine = engine
+        self._ttl = task_ttl_seconds
+        self._ensure_table_exists()
+
+    def _ensure_table_exists(self):
+        """Create the background_tasks table if it doesn't exist."""
+        try:
+            _metadata.create_all(self._engine, tables=[background_tasks], checkfirst=True)
+            logger.info("background_tasks table ready")
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to create background_tasks table: {e}")
+            raise
+
+    def create_task(self, task_type: str, total: int = 0, metadata: Optional[Dict] = None) -> Dict[str, Any]:
+        """Create a new pending task and return it."""
+        task_id = str(uuid.uuid4())[:8]
+        now = time.time()
+
+        task_data = {
+            "id": task_id,
+            "status": TaskStatus.PENDING.value,
+            "task_type": task_type,
+            "progress": 0,
+            "total": total,
+            "created_at": now,
+            "updated_at": now,
+            "metadata_json": json.dumps(metadata or {}),
+            "result_json": None,
+            "error": None,
         }
 
-        if self.status == TaskStatus.FAILED:
-            d["error"] = self.error
+        try:
+            with self._engine.begin() as conn:
+                self._cleanup_old_tasks(conn)
+                conn.execute(background_tasks.insert().values(**task_data))
 
-        if include_result and self.status == TaskStatus.COMPLETE:
-            d["result"] = self.result
+            logger.info(f"Created task {task_id} (type={task_type}, total={total})")
+            return self._row_to_task(task_data)
 
-        return d
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to create task: {e}")
+            raise
 
-
-class TaskStore:
-    """
-    Thread-safe in-memory task store.
-
-    Tasks are automatically cleaned up after `task_ttl_seconds` (default: 1 hour).
-    """
-
-    def __init__(self, task_ttl_seconds: int = 3600):
-        self._tasks: Dict[str, Task] = {}
-        self._lock = threading.RLock()
-        self._ttl = task_ttl_seconds
-
-    def create_task(self, task_type: str, total: int = 0, metadata: Optional[Dict] = None) -> Task:
-        """Create a new pending task and return it."""
-        task_id = str(uuid.uuid4())[:8]  # Short ID for convenience
-        now = time.time()
-
-        task = Task(
-            id=task_id,
-            status=TaskStatus.PENDING,
-            task_type=task_type,
-            created_at=now,
-            updated_at=now,
-            total=total,
-            metadata=metadata or {},
-        )
-
-        with self._lock:
-            self._cleanup_old_tasks()
-            self._tasks[task_id] = task
-
-        logger.info(f"Created task {task_id} (type={task_type}, total={total})")
-        return task
-
-    def get_task(self, task_id: str) -> Optional[Task]:
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Get a task by ID, or None if not found."""
-        with self._lock:
-            return self._tasks.get(task_id)
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    select(background_tasks).where(background_tasks.c.id == task_id)
+                ).mappings().first()
 
-    def update_task(
-        self,
-        task_id: str,
-        status: Optional[TaskStatus] = None,
-        progress: Optional[int] = None,
-        result: Optional[Any] = None,
-        error: Optional[str] = None,
-    ) -> Optional[Task]:
-        """Update task fields. Returns updated task or None if not found."""
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if not task:
-                return None
+                if not row:
+                    return None
 
-            if status is not None:
-                task.status = status
-            if progress is not None:
-                task.progress = progress
-            if result is not None:
-                task.result = result
-            if error is not None:
-                task.error = error
+                return self._row_to_task(dict(row))
 
-            task.updated_at = time.time()
-            return task
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get task {task_id}: {e}")
+            return None
 
-    def set_running(self, task_id: str) -> Optional[Task]:
+    def get_task_result_compressed(self, task_id: str) -> Optional[bytes]:
+        """Get the raw compressed result for streaming/download."""
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    select(background_tasks.c.result_json, background_tasks.c.status)
+                    .where(background_tasks.c.id == task_id)
+                ).first()
+
+                if not row or row[1] != TaskStatus.COMPLETE.value:
+                    return None
+
+                return row[0]
+
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get compressed result for task {task_id}: {e}")
+            return None
+
+    def set_running(self, task_id: str) -> bool:
         """Mark task as running."""
-        return self.update_task(task_id, status=TaskStatus.RUNNING)
+        return self._update_task(task_id, status=TaskStatus.RUNNING.value)
 
-    def set_progress(self, task_id: str, progress: int) -> Optional[Task]:
+    def set_progress(self, task_id: str, progress: int) -> bool:
         """Update task progress."""
-        return self.update_task(task_id, progress=progress)
+        return self._update_task(task_id, progress=progress)
 
-    def set_complete(self, task_id: str, result: Any) -> Optional[Task]:
-        """Mark task as complete with result."""
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if task:
-                task.status = TaskStatus.COMPLETE
-                task.result = result
-                task.progress = task.total
-                task.updated_at = time.time()
-        return task
+    def set_complete(self, task_id: str, result: Any) -> bool:
+        """Mark task as complete with result (compressed)."""
+        try:
+            # Compress the result JSON
+            result_json = json.dumps(result, separators=(',', ':'))
+            compressed = gzip.compress(result_json.encode('utf-8'))
 
-    def set_failed(self, task_id: str, error: str) -> Optional[Task]:
-        """Mark task as failed with error message."""
-        return self.update_task(task_id, status=TaskStatus.FAILED, error=error)
+            logger.info(
+                f"Task {task_id} result: {len(result_json)} bytes -> "
+                f"{len(compressed)} bytes compressed ({len(compressed)/len(result_json)*100:.1f}%)"
+            )
 
-    def delete_task(self, task_id: str) -> bool:
-        """Delete a task. Returns True if deleted, False if not found."""
-        with self._lock:
-            if task_id in self._tasks:
-                del self._tasks[task_id]
-                return True
+            with self._engine.begin() as conn:
+                result = conn.execute(
+                    update(background_tasks)
+                    .where(background_tasks.c.id == task_id)
+                    .values(
+                        status=TaskStatus.COMPLETE.value,
+                        result_json=compressed,
+                        updated_at=time.time(),
+                    )
+                )
+                return result.rowcount > 0
+
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to set task {task_id} complete: {e}")
             return False
 
-    def list_tasks(self, task_type: Optional[str] = None) -> list[Task]:
+    def set_failed(self, task_id: str, error: str) -> bool:
+        """Mark task as failed with error message."""
+        return self._update_task(task_id, status=TaskStatus.FAILED.value, error=error)
+
+    def delete_task(self, task_id: str) -> bool:
+        """Delete a task. Returns True if deleted."""
+        try:
+            with self._engine.begin() as conn:
+                result = conn.execute(
+                    delete(background_tasks).where(background_tasks.c.id == task_id)
+                )
+                return result.rowcount > 0
+
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to delete task {task_id}: {e}")
+            return False
+
+    def list_tasks(self, task_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all tasks, optionally filtered by type."""
-        with self._lock:
-            tasks = list(self._tasks.values())
+        try:
+            with self._engine.connect() as conn:
+                stmt = select(
+                    background_tasks.c.id,
+                    background_tasks.c.status,
+                    background_tasks.c.task_type,
+                    background_tasks.c.progress,
+                    background_tasks.c.total,
+                    background_tasks.c.created_at,
+                    background_tasks.c.updated_at,
+                    background_tasks.c.metadata_json,
+                    background_tasks.c.error,
+                    # Don't select result_json to avoid loading large data
+                ).order_by(background_tasks.c.created_at.desc())
 
-        if task_type:
-            tasks = [t for t in tasks if t.task_type == task_type]
+                if task_type:
+                    stmt = stmt.where(background_tasks.c.task_type == task_type)
 
-        return sorted(tasks, key=lambda t: t.created_at, reverse=True)
+                rows = conn.execute(stmt).mappings().all()
 
-    def _cleanup_old_tasks(self):
-        """Remove tasks older than TTL. Called internally with lock held."""
-        now = time.time()
-        cutoff = now - self._ttl
+                return [self._row_to_task(dict(row), include_result=False) for row in rows]
 
-        expired = [
-            tid for tid, task in self._tasks.items()
-            if task.updated_at < cutoff
-        ]
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to list tasks: {e}")
+            return []
 
-        for tid in expired:
-            del self._tasks[tid]
+    def _update_task(self, task_id: str, **values) -> bool:
+        """Update task fields."""
+        values["updated_at"] = time.time()
 
-        if expired:
-            logger.info(f"Cleaned up {len(expired)} expired tasks")
+        try:
+            with self._engine.begin() as conn:
+                result = conn.execute(
+                    update(background_tasks)
+                    .where(background_tasks.c.id == task_id)
+                    .values(**values)
+                )
+                return result.rowcount > 0
+
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to update task {task_id}: {e}")
+            return False
+
+    def _cleanup_old_tasks(self, conn):
+        """Remove tasks older than TTL."""
+        cutoff = time.time() - self._ttl
+
+        try:
+            result = conn.execute(
+                delete(background_tasks).where(background_tasks.c.updated_at < cutoff)
+            )
+            if result.rowcount > 0:
+                logger.info(f"Cleaned up {result.rowcount} expired tasks")
+
+        except SQLAlchemyError as e:
+            logger.warning(f"Failed to cleanup old tasks: {e}")
+
+    def _row_to_task(self, row: Dict, include_result: bool = True) -> Dict[str, Any]:
+        """Convert a database row to a task dict."""
+        task = {
+            "task_id": row["id"],
+            "status": row["status"],
+            "task_type": row["task_type"],
+            "progress": row["progress"],
+            "total": row["total"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "metadata": json.loads(row.get("metadata_json") or "{}"),
+        }
+
+        if row.get("error"):
+            task["error"] = row["error"]
+
+        if include_result and row.get("result_json") and row["status"] == TaskStatus.COMPLETE.value:
+            try:
+                decompressed = gzip.decompress(row["result_json"])
+                task["result"] = json.loads(decompressed.decode('utf-8'))
+            except Exception as e:
+                logger.error(f"Failed to decompress result: {e}")
+                task["result"] = None
+
+        return task
 
 
-# Global task store instance
-_task_store: Optional[TaskStore] = None
+# Global store instance (initialized lazily)
+_task_store: Optional[DatabaseTaskStore] = None
 
 
-def get_task_store() -> TaskStore:
-    """Get or create the global task store instance."""
+def get_task_store() -> DatabaseTaskStore:
+    """Get or create the global database task store instance."""
     global _task_store
+
     if _task_store is None:
-        _task_store = TaskStore()
+        from db import get_engine
+        engine = get_engine()
+        _task_store = DatabaseTaskStore(engine)
+
     return _task_store

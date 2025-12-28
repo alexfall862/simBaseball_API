@@ -1,74 +1,425 @@
 <!doctype html>
-<html>
+<html lang="en">
 
 <head>
   <meta charset="utf-8" />
-  <title>DB Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SimBaseball Admin</title>
   <link rel="stylesheet" href="{{ url_for('admin.static', filename='styles.css') }}">
 </head>
 
 <body>
-  <main>
-    <h2>DB Admin</h2>
+  <!-- Sidebar Navigation -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h1>SimBaseball</h1>
+      <span class="version">API Admin</span>
+    </div>
 
-    <section class="card">
-      <h3>Login</h3>
-      <form id="login" onsubmit="return false">
-        <input id="pw" type="password" placeholder="Admin password (leave empty if disabled)" />
-        <button id="btn-login">Login</button>
-        <button id="btn-logout" class="muted" title="Clear session">Logout</button>
-      </form>
-      <pre id="auth-out" class="muted"></pre>
-    </section>
+    <div class="nav-section">
+      <div class="nav-section-title">Overview</div>
+      <a href="#" class="nav-item active" data-section="dashboard">
+        <span class="nav-icon">&#9632;</span> Dashboard
+      </a>
+    </div>
 
-    <section class="card">
-      <h3>Presets</h3>
-      <div class="row">
-        <select id="preset"></select>
-        <button id="btn-preset">Run preset</button>
+    <div class="nav-section">
+      <div class="nav-section-title">Game Management</div>
+      <a href="#" class="nav-item" data-section="synthetic">
+        <span class="nav-icon">&#9881;</span> Synthetic Games
+      </a>
+      <a href="#" class="nav-item" data-section="tasks">
+        <span class="nav-icon">&#9203;</span> Background Tasks
+      </a>
+      <a href="#" class="nav-item" data-section="simulate">
+        <span class="nav-icon">&#9654;</span> Simulate Week
+      </a>
+      <a href="#" class="nav-item" data-section="timestamp">
+        <span class="nav-icon">&#128339;</span> Timestamp
+      </a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Data Browser</div>
+      <a href="#" class="nav-item" data-section="organizations">
+        <span class="nav-icon">&#127970;</span> Organizations
+      </a>
+      <a href="#" class="nav-item" data-section="teams">
+        <span class="nav-icon">&#9917;</span> Teams
+      </a>
+      <a href="#" class="nav-item" data-section="players">
+        <span class="nav-icon">&#9977;</span> Players
+      </a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Administration</div>
+      <a href="#" class="nav-item" data-section="cache">
+        <span class="nav-icon">&#128451;</span> Cache Manager
+      </a>
+      <a href="#" class="nav-item" data-section="sql">
+        <span class="nav-icon">&#128190;</span> SQL Console
+      </a>
+      <a href="#" class="nav-item" data-section="health">
+        <span class="nav-icon">&#128153;</span> System Health
+      </a>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="auth-status" id="auth-status">
+        <span class="status-dot offline"></span>
+        <span id="auth-text">Not logged in</span>
       </div>
-    </section>
+    </div>
+  </nav>
 
-    <section id="orgs-section" class="card">
-      <h2>Organizations</h2>
-      <div class="row">
-        <label for="orgs-select">Choose org:</label>
-        <select id="orgs-select">
-          <option value="" selected disabled>Loading...</option>
-        </select>
-        <button id="orgs-refresh" type="button">Refresh</button>
+  <!-- Main Content -->
+  <main class="main-content">
+    <!-- Top Bar -->
+    <header class="topbar">
+      <button class="menu-toggle" id="menu-toggle">&#9776;</button>
+      <div class="topbar-title" id="page-title">Dashboard</div>
+      <div class="topbar-actions">
+        <input type="password" id="admin-password" placeholder="Admin password" />
+        <button id="btn-login" class="btn btn-primary">Login</button>
+        <button id="btn-logout" class="btn btn-secondary" style="display:none">Logout</button>
       </div>
-      <div id="orgs-result" class="tablelike" aria-live="polite"></div>
-    </section>
+    </header>
 
-    <section class="card">
-      <h3>Custom SQL</h3>
-      <div class="row">
-        <label>Mode:
-          <select id="mode">
-            <option value="read">Read-only</option>
-            <option value="write">Write (if enabled)</option>
-          </select>
-        </label>
-        <label>Row cap:
-          <input id="limit" type="number" min="1" max="5000" value="100" />
-        </label>
-        <label>
-          <input id="dry" type="checkbox" checked />
-          Dry run (writes)
-        </label>
-      </div>
-      <textarea id="sql" placeholder="SELECT * FROM users LIMIT 10;"></textarea>
-      <button id="btn-run">Run</button>
-    </section>
+    <!-- Content Sections -->
+    <div class="content">
 
-    <section class="card">
-      <h3>Result</h3>
-      <pre id="out"></pre>
-    </section>
+      <!-- Dashboard Section -->
+      <section id="section-dashboard" class="section active">
+        <div class="grid-3">
+          <div class="stat-card">
+            <div class="stat-label">Timestamp Status</div>
+            <div class="stat-value" id="dash-season">--</div>
+            <div class="stat-sub" id="dash-week">Loading...</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Active Tasks</div>
+            <div class="stat-value" id="dash-tasks">--</div>
+            <div class="stat-sub">Background jobs</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Database</div>
+            <div class="stat-value" id="dash-db">--</div>
+            <div class="stat-sub" id="dash-db-status">Checking...</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Quick Actions</h3>
+          <div class="button-group">
+            <button class="btn btn-primary" onclick="App.goTo('synthetic')">Generate Synthetic Games</button>
+            <button class="btn btn-secondary" onclick="App.goTo('tasks')">View Tasks</button>
+            <button class="btn btn-secondary" onclick="App.goTo('cache')">Clear Caches</button>
+            <button class="btn btn-secondary" onclick="App.refreshDashboard()">Refresh</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>API Endpoints</h3>
+          <div class="endpoint-list">
+            <div class="endpoint"><span class="method get">GET</span> <code>/api/v1/games/timestamp</code></div>
+            <div class="endpoint"><span class="method get">GET</span> <code>/api/v1/games/debug/synthetic</code></div>
+            <div class="endpoint"><span class="method get">GET</span> <code>/api/v1/games/debug/synthetic-async</code></div>
+            <div class="endpoint"><span class="method get">GET</span> <code>/api/v1/games/tasks</code></div>
+            <div class="endpoint"><span class="method get">GET</span> <code>/api/v1/organizations</code></div>
+            <div class="endpoint"><span class="method get">GET</span> <code>/api/v1/teams</code></div>
+            <div class="endpoint"><span class="method post">POST</span> <code>/admin/clear-caches</code></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Synthetic Games Section -->
+      <section id="section-synthetic" class="section">
+        <div class="card">
+          <h3>Generate Synthetic Games</h3>
+          <p class="text-muted">Generate random matchups for testing the game engine. For large batches, use async mode.</p>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="syn-count">Number of Games</label>
+              <input type="number" id="syn-count" value="100" min="1" max="10000" />
+            </div>
+            <div class="form-group">
+              <label for="syn-level">League Level</label>
+              <select id="syn-level">
+                <option value="9" selected>9 - MLB</option>
+                <option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option>
+                <option value="6">6 - A+</option>
+                <option value="5">5 - A</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="syn-seed">Random Seed (optional)</label>
+              <input type="number" id="syn-seed" placeholder="Leave empty for random" />
+            </div>
+          </div>
+
+          <div class="button-group">
+            <button class="btn btn-primary" id="btn-syn-async">Generate (Async)</button>
+            <button class="btn btn-secondary" id="btn-syn-sync">Generate (Sync - small batches only)</button>
+          </div>
+        </div>
+
+        <div class="card" id="syn-progress-card" style="display:none">
+          <h3>Generation Progress</h3>
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div class="progress-fill" id="syn-progress-bar" style="width: 0%"></div>
+            </div>
+            <div class="progress-text">
+              <span id="syn-progress-text">0 / 0</span>
+              <span id="syn-progress-pct">0%</span>
+            </div>
+          </div>
+          <div class="progress-status" id="syn-status">Starting...</div>
+          <div class="button-group" id="syn-download-group" style="display:none">
+            <a class="btn btn-primary" id="syn-download-link" href="#" target="_blank">Download Results</a>
+            <button class="btn btn-secondary" onclick="App.goTo('tasks')">View All Tasks</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Background Tasks Section -->
+      <section id="section-tasks" class="section">
+        <div class="card">
+          <h3>Background Tasks</h3>
+          <div class="button-group" style="margin-bottom: 16px">
+            <button class="btn btn-secondary" id="btn-refresh-tasks">Refresh</button>
+          </div>
+
+          <div class="table-container">
+            <table class="data-table" id="tasks-table">
+              <thead>
+                <tr>
+                  <th>Task ID</th>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>Progress</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tasks-tbody">
+                <tr>
+                  <td colspan="6" class="text-center text-muted">Loading...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Simulate Week Section -->
+      <section id="section-simulate" class="section">
+        <div class="card">
+          <h3>Simulate Week</h3>
+          <p class="text-muted">Build game payloads for all games in a season week.</p>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="sim-year">League Year ID</label>
+              <input type="number" id="sim-year" value="1" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sim-week">Season Week</label>
+              <input type="number" id="sim-week" value="1" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sim-level">League Level (optional)</label>
+              <select id="sim-level">
+                <option value="">All levels</option>
+                <option value="9">9 - MLB</option>
+                <option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="button-group">
+            <button class="btn btn-primary" id="btn-sim-preview">Preview (GET)</button>
+            <button class="btn btn-warning" id="btn-sim-run">Run Simulation (POST)</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Result</h3>
+          <pre id="sim-result" class="result-box">No simulation run yet.</pre>
+        </div>
+      </section>
+
+      <!-- Timestamp Section -->
+      <section id="section-timestamp" class="section">
+        <div class="card">
+          <h3>Current Timestamp State</h3>
+          <button class="btn btn-secondary" id="btn-refresh-timestamp" style="margin-bottom: 16px">Refresh</button>
+          <div class="kv-table" id="timestamp-data">
+            <div class="kv-row"><div class="kv-key">Loading...</div><div class="kv-val"></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Timestamp Actions</h3>
+          <div class="button-group">
+            <button class="btn btn-warning" id="btn-advance-week">Advance Week</button>
+            <button class="btn btn-secondary" id="btn-reset-week">Reset Week Games</button>
+          </div>
+          <pre id="timestamp-result" class="result-box" style="margin-top: 16px"></pre>
+        </div>
+      </section>
+
+      <!-- Organizations Section -->
+      <section id="section-organizations" class="section">
+        <div class="card">
+          <h3>Organizations</h3>
+          <div class="form-row">
+            <select id="org-select" class="select-lg">
+              <option value="">Select an organization...</option>
+            </select>
+            <button class="btn btn-secondary" id="btn-refresh-orgs">Refresh List</button>
+          </div>
+        </div>
+
+        <div class="card" id="org-detail-card" style="display:none">
+          <h3>Organization Details</h3>
+          <div class="kv-table" id="org-detail"></div>
+        </div>
+      </section>
+
+      <!-- Teams Section -->
+      <section id="section-teams" class="section">
+        <div class="card">
+          <h3>Teams</h3>
+          <div class="form-row">
+            <select id="team-select" class="select-lg">
+              <option value="">Select a team...</option>
+            </select>
+            <button class="btn btn-secondary" id="btn-refresh-teams">Refresh List</button>
+          </div>
+        </div>
+
+        <div class="card" id="team-detail-card" style="display:none">
+          <h3>Team Details</h3>
+          <div class="kv-table" id="team-detail"></div>
+          <button class="btn btn-secondary" id="btn-team-players" style="margin-top: 16px">View Players</button>
+        </div>
+
+        <div class="card" id="team-players-card" style="display:none">
+          <h3>Team Players</h3>
+          <pre id="team-players" class="result-box"></pre>
+        </div>
+      </section>
+
+      <!-- Players Section -->
+      <section id="section-players" class="section">
+        <div class="card">
+          <h3>Player Lookup</h3>
+          <div class="form-row">
+            <input type="number" id="player-id" placeholder="Enter Player ID" />
+            <button class="btn btn-primary" id="btn-lookup-player">Lookup</button>
+          </div>
+        </div>
+
+        <div class="card" id="player-detail-card" style="display:none">
+          <h3>Player Details</h3>
+          <pre id="player-detail" class="result-box"></pre>
+        </div>
+      </section>
+
+      <!-- Cache Manager Section -->
+      <section id="section-cache" class="section">
+        <div class="card">
+          <h3>Cache Manager</h3>
+          <p class="text-muted">Clear in-memory caches after making database changes. This ensures the API returns fresh data.</p>
+
+          <div class="alert alert-info">
+            <strong>Cached data includes:</strong> Level configs, catch rates, game constants, injury types, player column categories, and reflected database tables.
+          </div>
+
+          <div class="button-group">
+            <button class="btn btn-warning" id="btn-clear-cache">Clear All Caches</button>
+          </div>
+
+          <pre id="cache-result" class="result-box" style="margin-top: 16px"></pre>
+        </div>
+      </section>
+
+      <!-- SQL Console Section -->
+      <section id="section-sql" class="section">
+        <div class="card">
+          <h3>SQL Console</h3>
+
+          <div class="form-row" style="margin-bottom: 16px">
+            <label>Presets:
+              <select id="sql-preset">
+                <option value="">-- Select preset --</option>
+              </select>
+            </label>
+            <button class="btn btn-secondary" id="btn-run-preset">Run Preset</button>
+          </div>
+
+          <div class="form-row" style="margin-bottom: 16px">
+            <label>Mode:
+              <select id="sql-mode">
+                <option value="read">Read-only</option>
+                <option value="write">Write (if enabled)</option>
+              </select>
+            </label>
+            <label>Row limit:
+              <input type="number" id="sql-limit" value="100" min="1" max="5000" style="width: 80px" />
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="sql-dry" checked />
+              Dry run (writes)
+            </label>
+          </div>
+
+          <textarea id="sql-query" placeholder="SELECT * FROM simbbPlayers LIMIT 10;"></textarea>
+
+          <div class="button-group">
+            <button class="btn btn-primary" id="btn-run-sql">Run Query</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Result</h3>
+          <pre id="sql-result" class="result-box">No query executed yet.</pre>
+        </div>
+      </section>
+
+      <!-- System Health Section -->
+      <section id="section-health" class="section">
+        <div class="grid-2">
+          <div class="card">
+            <h3>Health Check</h3>
+            <div class="health-status" id="health-status">
+              <span class="status-indicator" id="health-indicator"></span>
+              <span id="health-text">Checking...</span>
+            </div>
+            <button class="btn btn-secondary" id="btn-check-health" style="margin-top: 16px">Refresh</button>
+          </div>
+
+          <div class="card">
+            <h3>Database Info</h3>
+            <pre id="db-info" class="result-box">Loading...</pre>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Available Routes</h3>
+          <pre id="routes-list" class="result-box" style="max-height: 400px">Loading...</pre>
+        </div>
+      </section>
+
+    </div>
   </main>
 
-  <script src="{{ url_for('admin.static', filename='app.js') }}" defer></script>
+  <script src="{{ url_for('admin.static', filename='app.js') }}"></script>
 </body>
 
 </html>
