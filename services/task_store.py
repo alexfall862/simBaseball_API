@@ -12,8 +12,24 @@ import time
 import uuid
 import logging
 import gzip
+from decimal import Decimal
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 from enum import Enum
+
+
+class DatabaseJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles database types like Decimal, datetime, etc."""
+
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            # Convert Decimal to float for JSON serialization
+            return float(obj)
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8', errors='replace')
+        return super().default(obj)
 
 from sqlalchemy import (
     MetaData, Table, Column, String, Text, Integer, Float,
@@ -148,8 +164,8 @@ class DatabaseTaskStore:
     def set_complete(self, task_id: str, result: Any) -> bool:
         """Mark task as complete with result (compressed)."""
         try:
-            # Compress the result JSON
-            result_json = json.dumps(result, separators=(',', ':'))
+            # Compress the result JSON (use custom encoder for Decimal, datetime, etc.)
+            result_json = json.dumps(result, separators=(',', ':'), cls=DatabaseJSONEncoder)
             compressed = gzip.compress(result_json.encode('utf-8'))
 
             logger.info(
