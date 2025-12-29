@@ -162,32 +162,34 @@ class DatabaseTaskStore:
         return self._update_task(task_id, progress=progress)
 
     def set_complete(self, task_id: str, result: Any) -> bool:
-        """Mark task as complete with result (compressed)."""
-        try:
-            # Compress the result JSON (use custom encoder for Decimal, datetime, etc.)
-            result_json = json.dumps(result, separators=(',', ':'), cls=DatabaseJSONEncoder)
-            compressed = gzip.compress(result_json.encode('utf-8'))
+        """Mark task as complete with result (compressed).
 
-            logger.info(
-                f"Task {task_id} result: {len(result_json)} bytes -> "
-                f"{len(compressed)} bytes compressed ({len(compressed)/len(result_json)*100:.1f}%)"
-            )
+        Raises exceptions on failure so the caller can handle them appropriately.
+        """
+        # Compress the result JSON (use custom encoder for Decimal, datetime, etc.)
+        # This is outside try/except so serialization errors bubble up to caller
+        result_json = json.dumps(result, separators=(',', ':'), cls=DatabaseJSONEncoder)
+        compressed = gzip.compress(result_json.encode('utf-8'))
 
-            with self._engine.begin() as conn:
-                result = conn.execute(
-                    update(background_tasks)
-                    .where(background_tasks.c.id == task_id)
-                    .values(
-                        status=TaskStatus.COMPLETE.value,
-                        result_json=compressed,
-                        updated_at=time.time(),
-                    )
+        logger.info(
+            f"Task {task_id} result: {len(result_json)} bytes -> "
+            f"{len(compressed)} bytes compressed ({len(compressed)/len(result_json)*100:.1f}%)"
+        )
+
+        # Database update - let exceptions propagate to caller
+        with self._engine.begin() as conn:
+            db_result = conn.execute(
+                update(background_tasks)
+                .where(background_tasks.c.id == task_id)
+                .values(
+                    status=TaskStatus.COMPLETE.value,
+                    result_json=compressed,
+                    updated_at=time.time(),
                 )
-                return result.rowcount > 0
-
-        except SQLAlchemyError as e:
-            logger.error(f"Failed to set task {task_id} complete: {e}")
-            return False
+            )
+            if db_result.rowcount == 0:
+                raise ValueError(f"Task {task_id} not found in database")
+            return True
 
     def set_failed(self, task_id: str, error: str) -> bool:
         """Mark task as failed with error message."""

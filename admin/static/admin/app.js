@@ -272,11 +272,11 @@
         document.getElementById('dash-tasks').textContent = '--';
       });
 
-    // Check DB
-    fetch(`${API_BASE}/health`)
+    // Check DB - use /healthz endpoint
+    fetch('/healthz')
       .then(r => r.json())
       .then(data => {
-        document.getElementById('dash-db').textContent = data.status === 'healthy' ? 'OK' : 'Error';
+        document.getElementById('dash-db').textContent = data.status === 'ok' ? 'OK' : 'Error';
         document.getElementById('dash-db-status').textContent = data.status || 'Unknown';
       })
       .catch(() => {
@@ -596,8 +596,12 @@
         const teams = Array.isArray(data) ? data : (data.teams || []);
         select.innerHTML = '<option value="">Select a team...</option>' +
           teams.map(team => {
-            const id = team.team_id || team.id || team.abbreviation;
-            const name = team.name || team.team_name || team.abbreviation || 'Team ' + id;
+            // Handle both string abbreviations and object formats
+            if (typeof team === 'string') {
+              return `<option value="${team}">${team}</option>`;
+            }
+            const id = team.team_abbrev || team.team_id || team.id || team.abbreviation;
+            const name = team.name || team.team_name || team.team_abbrev || id;
             return `<option value="${id}">${name}</option>`;
           }).join('');
       })
@@ -622,7 +626,7 @@
     playersCard.style.display = 'none';
     detail.innerHTML = '<div class="kv-row"><div class="kv-key">Loading...</div></div>';
 
-    fetch(`${API_BASE}/teams/${teamId}`)
+    fetch(`${API_BASE}/teams/${teamId}/`)
       .then(r => r.json())
       .then(data => {
         const item = Array.isArray(data) ? data[0] : data;
@@ -780,10 +784,10 @@
     text.textContent = 'Checking...';
     indicator.className = 'status-indicator';
 
-    fetch(`${API_BASE}/health`)
+    fetch('/healthz')
       .then(r => r.json())
       .then(data => {
-        if (data.status === 'healthy') {
+        if (data.status === 'ok') {
           indicator.classList.add('healthy');
           text.textContent = 'Healthy';
         } else {
@@ -803,14 +807,10 @@
     const routesList = document.getElementById('routes-list');
     routesList.textContent = 'Loading...';
 
-    fetch(`${API_BASE}/routes`)
-      .then(r => r.json())
-      .then(data => {
-        if (Array.isArray(data)) {
-          routesList.textContent = data.map(r => `${r.methods ? r.methods.join(', ') : 'GET'} ${r.rule || r.path || r}`).join('\n');
-        } else {
-          routesList.textContent = JSON.stringify(data, null, 2);
-        }
+    fetch('/routes')
+      .then(r => r.text())
+      .then(text => {
+        routesList.textContent = text;
       })
       .catch(err => {
         routesList.textContent = 'Could not load routes: ' + err.message;
