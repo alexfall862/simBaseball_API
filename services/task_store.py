@@ -33,8 +33,9 @@ class DatabaseJSONEncoder(json.JSONEncoder):
 
 from sqlalchemy import (
     MetaData, Table, Column, String, Text, Integer, Float,
-    create_engine, select, delete, update, LargeBinary
+    create_engine, select, delete, update
 )
+from sqlalchemy.dialects.mysql import LONGBLOB
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ background_tasks = Table(
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
     Column("metadata_json", Text, nullable=True),
-    Column("result_json", LargeBinary, nullable=True),  # Compressed JSON
+    Column("result_json", LONGBLOB, nullable=True),  # Compressed JSON (up to 4GB)
     Column("error", Text, nullable=True),
 )
 
