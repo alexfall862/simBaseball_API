@@ -8,7 +8,6 @@
   const ADMIN_BASE = '/admin';
 
   // State
-  let adminPassword = '';
   let isAuthenticated = false;
   let currentSection = 'dashboard';
   let taskPollInterval = null;
@@ -171,42 +170,44 @@
     elements.sidebar.classList.remove('open');
   }
 
-  // Auth
+  // Auth - uses session-based login via /admin/login
   function login() {
-    adminPassword = elements.adminPassword.value;
-    if (!adminPassword) {
-      alert('Please enter a password');
-      return;
-    }
+    const password = elements.adminPassword.value;
 
-    // Test auth by making a request
-    fetch(`${ADMIN_BASE}/clear-caches`, {
+    fetch(`${ADMIN_BASE}/login`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+      credentials: 'include',  // Important for session cookies
     })
-      .then(r => {
-        if (r.status === 401) {
-          throw new Error('Invalid password');
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          isAuthenticated = true;
+          updateAuthUI();
+          alert('Logged in successfully');
+        } else {
+          throw new Error(data.error || 'Login failed');
         }
-        return r.json();
-      })
-      .then(() => {
-        isAuthenticated = true;
-        sessionStorage.setItem('adminPassword', adminPassword);
-        updateAuthUI();
-        alert('Logged in successfully');
       })
       .catch(err => {
-        adminPassword = '';
         alert('Login failed: ' + err.message);
       });
   }
 
   function logout() {
-    adminPassword = '';
-    isAuthenticated = false;
-    sessionStorage.removeItem('adminPassword');
-    updateAuthUI();
+    fetch(`${ADMIN_BASE}/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+      .then(() => {
+        isAuthenticated = false;
+        updateAuthUI();
+      })
+      .catch(() => {
+        isAuthenticated = false;
+        updateAuthUI();
+      });
   }
 
   function updateAuthUI() {
@@ -229,21 +230,18 @@
   }
 
   function checkAuth() {
-    // Check if there's a stored password
-    const stored = sessionStorage.getItem('adminPassword');
-    if (stored) {
-      adminPassword = stored;
-      isAuthenticated = true;
-      updateAuthUI();
-    }
-  }
-
-  function getAuthHeaders() {
-    const headers = { 'Content-Type': 'application/json' };
-    if (adminPassword) {
-      headers['X-Admin-Password'] = adminPassword;
-    }
-    return headers;
+    // Check if session is still valid by calling /admin/me
+    fetch(`${ADMIN_BASE}/me`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.admin === true) {
+          isAuthenticated = true;
+          updateAuthUI();
+        }
+      })
+      .catch(() => {
+        // Not logged in, that's fine
+      });
   }
 
   // Dashboard
@@ -435,7 +433,7 @@
 
     fetch(`${API_BASE}/games/tasks/${taskId}`, {
       method: 'DELETE',
-      headers: getAuthHeaders(),
+      credentials: 'include',
     })
       .then(r => r.json())
       .then(() => loadTasks())
@@ -456,8 +454,8 @@
 
     const options = execute ? {
       method: 'POST',
-      headers: getAuthHeaders(),
-    } : {};
+      credentials: 'include',
+    } : { credentials: 'include' };
 
     fetch(url, options)
       .then(r => r.json())
@@ -495,7 +493,7 @@
 
     fetch(`${API_BASE}/games/timestamp/advance`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      credentials: 'include',
     })
       .then(r => r.json())
       .then(data => {
@@ -513,7 +511,7 @@
 
     fetch(`${API_BASE}/games/timestamp/reset-week`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      credentials: 'include',
     })
       .then(r => r.json())
       .then(data => {
@@ -697,7 +695,7 @@
 
     fetch(`${ADMIN_BASE}/clear-caches`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      credentials: 'include',
     })
       .then(r => {
         if (r.status === 401) {
@@ -747,7 +745,8 @@
 
     fetch(`${ADMIN_BASE}/run_sql`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sql: query,
         mode,
