@@ -34,72 +34,111 @@ def reflect_view(view_name: str):
 
 
 
-def shape_org_report(row_dict: dict) -> dict:
-    return {
-        "id": row_dict.get("id"),
-        "org_abbrev": row_dict.get("org_abbrev"),
-        "cash": row_dict.get("cash"),
+def shape_org_report(row_dict: dict, role_overrides: dict | None = None) -> dict:
+    d = row_dict
+    if role_overrides:
+        d = {**row_dict, **role_overrides}
+
+    shaped = {
+        "id": d.get("id"),
+        "org_abbrev": d.get("org_abbrev"),
+        "cash": d.get("cash"),
+        "league": d.get("league", "mlb"),
         "teams": {
             "mlb": {
-                "team_id": row_dict.get("mlb_team_id"),
-                "team_city": row_dict.get("mlb_city"),
-                "team_nickname": row_dict.get("mlb_nickname"),
-                "team_full_name": row_dict.get("mlb_full_name"),
-                "team_abbrev": row_dict.get("mlb_abbrev")
-            }, 
+                "team_id": d.get("mlb_team_id"),
+                "team_city": d.get("mlb_city"),
+                "team_nickname": d.get("mlb_nickname"),
+                "team_full_name": d.get("mlb_full_name"),
+                "team_abbrev": d.get("mlb_abbrev")
+            },
             "aaa": {
-                "team_id": row_dict.get("aaa_team_id"),
-                "team_city": row_dict.get("aaa_city"),
-                "team_nickname": row_dict.get("aaa_nickname"),
-                "team_full_name": row_dict.get("aaa_full_name"),
-                "team_abbrev": row_dict.get("aaa_abbrev")
+                "team_id": d.get("aaa_team_id"),
+                "team_city": d.get("aaa_city"),
+                "team_nickname": d.get("aaa_nickname"),
+                "team_full_name": d.get("aaa_full_name"),
+                "team_abbrev": d.get("aaa_abbrev")
             },
             "aa": {
-                "team_id": row_dict.get("aa_team_id"),
-                "team_city": row_dict.get("aa_city"),
-                "team_nickname": row_dict.get("aa_nickname"),
-                "team_full_name": row_dict.get("aa_full_name"),
-                "team_abbrev": row_dict.get("aa_abbrev")
+                "team_id": d.get("aa_team_id"),
+                "team_city": d.get("aa_city"),
+                "team_nickname": d.get("aa_nickname"),
+                "team_full_name": d.get("aa_full_name"),
+                "team_abbrev": d.get("aa_abbrev")
             },
             "higha": {
-                "team_id": row_dict.get("higha_team_id"),
-                "team_city": row_dict.get("higha_city"),
-                "team_nickname": row_dict.get("higha_nickname"),
-                "team_full_name": row_dict.get("higha_full_name"),
-                "team_abbrev": row_dict.get("higha_abbrev")
+                "team_id": d.get("higha_team_id"),
+                "team_city": d.get("higha_city"),
+                "team_nickname": d.get("higha_nickname"),
+                "team_full_name": d.get("higha_full_name"),
+                "team_abbrev": d.get("higha_abbrev")
             },
             "a": {
-                "team_id": row_dict.get("a_team_id"),
-                "team_city": row_dict.get("a_city"),
-                "team_nickname": row_dict.get("a_nickname"),
-                "team_full_name": row_dict.get("a_full_name"),
-                "team_abbrev": row_dict.get("a_abbrev")
-            }, 
+                "team_id": d.get("a_team_id"),
+                "team_city": d.get("a_city"),
+                "team_nickname": d.get("a_nickname"),
+                "team_full_name": d.get("a_full_name"),
+                "team_abbrev": d.get("a_abbrev")
+            },
             "scraps": {
-                "team_id": row_dict.get("scraps_team_id"),
-                "team_city": row_dict.get("scraps_city"),
-                "team_nickname": row_dict.get("scraps_nickname"),
-                "team_full_name": row_dict.get("scraps_full_name"),
-                "team_abbrev": row_dict.get("scraps_abbrev")
+                "team_id": d.get("scraps_team_id"),
+                "team_city": d.get("scraps_city"),
+                "team_nickname": d.get("scraps_nickname"),
+                "team_full_name": d.get("scraps_full_name"),
+                "team_abbrev": d.get("scraps_abbrev")
             }
         }
-
     }
+
+    league = d.get("league", "mlb")
+    if league == "mlb":
+        shaped["owner_name"] = d.get("owner_name", "")
+        shaped["gm_name"] = d.get("gm_name", "")
+        shaped["manager_name"] = d.get("manager_name", "")
+        shaped["scout_name"] = d.get("scout_name", "")
+    elif league == "college":
+        shaped["coach"] = d.get("coach", "AI")
+
+    return shaped
 
 @orgs_bp.get("/org_report/")
 # @rate_limit()  # uncomment to apply your default rate limits
 def get_org_report():
     """
-    Return all rows from the MySQL view `organization_report` as JSON.
-    No URL params; this just dumps the full view.
+    Return all rows from the MySQL view `organization_report` as JSON,
+    enriched with role/coach columns from the organizations table.
     """
     try:
         vw = reflect_view("organization_report")
-        stmt = select(vw)
-        with get_engine().connect() as conn:
-            rows = conn.execute(stmt).all()
-        data = [_row_to_dict(r) for r in rows]
-        data = [shape_org_report(d) for d in data]
+        orgs_table = _reflect_orgs_table()
+        engine = get_engine()
+
+        with engine.connect() as conn:
+            view_rows = conn.execute(select(vw)).all()
+
+            # Fetch role columns that may not be in the view yet
+            role_stmt = select(
+                orgs_table.c.id,
+                orgs_table.c.league,
+                orgs_table.c.owner_name,
+                orgs_table.c.gm_name,
+                orgs_table.c.manager_name,
+                orgs_table.c.scout_name,
+                orgs_table.c.coach,
+            )
+            role_rows = conn.execute(role_stmt).all()
+
+        role_map = {}
+        for r in role_rows:
+            rd = _row_to_dict(r)
+            role_map[rd["id"]] = rd
+
+        data = []
+        for r in view_rows:
+            d = _row_to_dict(r)
+            overrides = role_map.get(d.get("id"))
+            data.append(shape_org_report(d, role_overrides=overrides))
+
         return jsonify(data), 200
     except SQLAlchemyError:
         return jsonify({

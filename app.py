@@ -198,6 +198,18 @@ def create_app(config_object=Config):
     except Exception as e:
         app.logger.exception("Failed to register games blueprint: %s", e)
 
+    try:
+        from mlb_requests import mlb_requests_bp
+        app.register_blueprint(mlb_requests_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register mlb_requests blueprint: %s", e)
+
+    try:
+        from college_requests import college_requests_bp
+        app.register_blueprint(college_requests_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register college_requests blueprint: %s", e)
+
     from admin import admin_bp
     # Secure session cookie
     app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))
