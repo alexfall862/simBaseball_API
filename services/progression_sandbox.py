@@ -173,17 +173,30 @@ def _progress_ability_inmem(growth_curves, age, grade):
 
 def _run_simulation(players, seasons, start_age, growth_curves, tracked_abilities):
     """
-    Run progression for N seasons and collect aggregated results.
+    Run progression for N seasons and collect aggregated results
+    plus per-player trajectories for individual variance analysis.
 
-    Returns: {ability: {grade: {ages, avg, p10, p25, p75, p90, count}}}
+    Returns: {ability: {grade: {ages, avg, p10-p90, count, players: [{id, trajectory}]}}}
     """
     # snapshots[ability][grade][age] = [base_values...]
     snapshots = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
+    # per-player tracking: trajectories[ability][player_index] = {grade, values: {age: base}}
+    trajectories = defaultdict(dict)
+
+    for pi, player in enumerate(players):
+        for ability in tracked_abilities:
+            ab = player["abilities"][ability]
+            trajectories[ability][pi] = {
+                "grade": ab["pot"],
+                "ptype": player["ptype"],
+                "values": {},
+            }
+
     for season in range(seasons):
         current_age = start_age + season + 1
 
-        for player in players:
+        for pi, player in enumerate(players):
             player["age"] = current_age
             for ability in tracked_abilities:
                 ab = player["abilities"][ability]
@@ -195,6 +208,7 @@ def _run_simulation(players, seasons, start_age, growth_curves, tracked_abilitie
                     ab["base"] += delta
 
                 snapshots[ability][ab["pot"]][current_age].append(ab["base"])
+                trajectories[ability][pi]["values"][current_age] = round(ab["base"], 2)
 
     # Aggregate into chartable data
     results = {}
@@ -219,15 +233,30 @@ def _run_simulation(players, seasons, start_age, growth_curves, tracked_abilitie
                 p75_vals.append(round(values[min(n - 1, int(n * 0.75))], 2))
                 p90_vals.append(round(values[min(n - 1, int(n * 0.90))], 2))
 
-            if avg_vals:
-                results[ability][grade] = {
-                    "ages": ages,
-                    "avg": avg_vals,
-                    "p10": p10_vals,
-                    "p25": p25_vals,
-                    "p75": p75_vals,
-                    "p90": p90_vals,
-                    "count": len(snapshots[ability][grade][ages[0]]) if ages else 0,
-                }
+            if not avg_vals:
+                continue
+
+            # Collect individual player trajectories for this grade
+            grade_players = []
+            for pi, tdata in trajectories[ability].items():
+                if tdata["grade"] != grade:
+                    continue
+                traj = [tdata["values"].get(a, 0.0) for a in ages]
+                grade_players.append({
+                    "id": pi,
+                    "ptype": tdata["ptype"],
+                    "trajectory": traj,
+                })
+
+            results[ability][grade] = {
+                "ages": ages,
+                "avg": avg_vals,
+                "p10": p10_vals,
+                "p25": p25_vals,
+                "p75": p75_vals,
+                "p90": p90_vals,
+                "count": len(grade_players),
+                "players": grade_players,
+            }
 
     return results

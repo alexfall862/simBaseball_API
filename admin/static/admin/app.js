@@ -181,8 +181,17 @@
 
     // Player Engine — Sandbox
     document.getElementById('btn-sandbox-run').addEventListener('click', runSandbox);
-    document.getElementById('sandbox-ability-select').addEventListener('change', renderSandboxChart);
+    document.getElementById('sandbox-ability-select').addEventListener('change', () => {
+      populateSandboxGradeFilter();
+      renderSandboxChart();
+    });
     document.getElementById('sandbox-show-bands').addEventListener('change', renderSandboxChart);
+    document.getElementById('sandbox-show-players').addEventListener('change', onTogglePlayerOverlay);
+    document.getElementById('sandbox-grade-filter').addEventListener('change', () => {
+      updateHighlightDropdown();
+      renderSandboxChart();
+    });
+    document.getElementById('sandbox-highlight-player').addEventListener('change', renderSandboxChart);
   }
 
   // Navigation
@@ -2543,10 +2552,13 @@
         statusEl.textContent = `Simulation complete — ${data.config.count} players, ${data.config.seasons} seasons.`;
 
         // Populate ability dropdown
-        const select = document.getElementById('sandbox-ability-select');
-        select.innerHTML = data.tracked_abilities.map(a =>
+        const abilitySelect = document.getElementById('sandbox-ability-select');
+        abilitySelect.innerHTML = data.tracked_abilities.map(a =>
           `<option value="${a}">${a}</option>`
         ).join('');
+
+        // Populate grade filter dropdown from available grades
+        populateSandboxGradeFilter();
 
         document.getElementById('sandbox-chart-card').style.display = 'block';
         document.getElementById('sandbox-summary-card').style.display = 'block';
@@ -2559,13 +2571,71 @@
       });
   }
 
+  function populateSandboxGradeFilter() {
+    if (!sandboxData) return;
+    const ability = document.getElementById('sandbox-ability-select').value;
+    const gradeData = sandboxData.results[ability];
+    if (!gradeData) return;
+
+    const gradeSelect = document.getElementById('sandbox-grade-filter');
+    const grades = Object.keys(gradeData);
+    gradeSelect.innerHTML = '<option value="__all__">All</option>' +
+      grades.map(g => `<option value="${g}">${g} (${gradeData[g].count})</option>`).join('');
+
+    // Reset highlight dropdown
+    updateHighlightDropdown();
+  }
+
+  function updateHighlightDropdown() {
+    const hlSelect = document.getElementById('sandbox-highlight-player');
+    const gradeFilter = document.getElementById('sandbox-grade-filter').value;
+    const ability = document.getElementById('sandbox-ability-select').value;
+    const gradeData = sandboxData?.results[ability];
+    if (!gradeData) return;
+
+    let players = [];
+    const gradesToShow = gradeFilter === '__all__' ? Object.keys(gradeData) : [gradeFilter];
+    for (const g of gradesToShow) {
+      if (!gradeData[g]?.players) continue;
+      for (const p of gradeData[g].players) {
+        const peak = Math.max(...p.trajectory);
+        players.push({ id: p.id, grade: g, ptype: p.ptype, peak });
+      }
+    }
+
+    // Sort by peak descending so best performers are on top
+    players.sort((a, b) => b.peak - a.peak);
+
+    hlSelect.innerHTML = '<option value="">None</option>' +
+      players.map(p =>
+        `<option value="${p.id}">P${p.id} (${p.grade}, ${p.ptype}, peak ${p.peak.toFixed(0)})</option>`
+      ).join('');
+  }
+
+  function onTogglePlayerOverlay() {
+    const show = document.getElementById('sandbox-show-players').checked;
+    document.getElementById('sandbox-grade-filter-label').style.display = show ? '' : 'none';
+    document.getElementById('sandbox-highlight-label').style.display = show ? '' : 'none';
+    if (show) {
+      populateSandboxGradeFilter();
+    }
+    renderSandboxChart();
+  }
+
   function renderSandboxChart() {
     if (!sandboxData) return;
 
     const ability = document.getElementById('sandbox-ability-select').value;
     const showBands = document.getElementById('sandbox-show-bands').checked;
+    const showPlayers = document.getElementById('sandbox-show-players').checked;
+    const gradeFilter = document.getElementById('sandbox-grade-filter').value;
+    const highlightId = document.getElementById('sandbox-highlight-player').value;
     const gradeData = sandboxData.results[ability];
     if (!gradeData) return;
+
+    // Re-populate grade filter when ability changes
+    const gradeSelect = document.getElementById('sandbox-grade-filter');
+    if (gradeSelect.options.length <= 1) populateSandboxGradeFilter();
 
     // Destroy old chart
     if (sandboxChart) {
@@ -2576,26 +2646,53 @@
     const datasets = [];
     const grades = Object.keys(gradeData);
 
+    // Draw individual player lines first (behind aggregate)
+    if (showPlayers) {
+      const gradesToDraw = gradeFilter === '__all__' ? grades : [gradeFilter];
+
+      for (const grade of gradesToDraw) {
+        const gd = gradeData[grade];
+        if (!gd?.players) continue;
+        const color = GRADE_COLORS[grade] || '#6b7280';
+
+        for (const p of gd.players) {
+          const isHighlighted = highlightId !== '' && String(p.id) === highlightId;
+          datasets.push({
+            label: `_p${p.id}`,
+            data: gd.ages.map((age, i) => ({ x: age, y: p.trajectory[i] })),
+            borderColor: isHighlighted ? color : color + '40',
+            backgroundColor: 'transparent',
+            borderWidth: isHighlighted ? 3 : 1,
+            pointRadius: isHighlighted ? 3 : 0,
+            tension: 0.3,
+            fill: false,
+            order: isHighlighted ? 0 : 2,
+            _playerMeta: { id: p.id, grade, ptype: p.ptype },
+          });
+        }
+      }
+    }
+
+    // Aggregate lines on top
     for (const grade of grades) {
       const gd = gradeData[grade];
       const color = GRADE_COLORS[grade] || '#6b7280';
 
-      // Average line
       datasets.push({
         label: grade,
         data: gd.ages.map((age, i) => ({ x: age, y: gd.avg[i] })),
         borderColor: color,
         backgroundColor: color,
-        borderWidth: 2,
+        borderWidth: 2.5,
         pointRadius: 2,
         tension: 0.3,
         fill: false,
+        order: 1,
       });
 
-      // P10-P90 band
       if (showBands) {
         datasets.push({
-          label: `${grade} P10-P90`,
+          label: `_${grade}_upper`,
           data: gd.ages.map((age, i) => ({ x: age, y: gd.p90[i] })),
           borderColor: 'transparent',
           backgroundColor: color + '18',
@@ -2603,6 +2700,7 @@
           pointRadius: 0,
           fill: '+1',
           showLine: true,
+          order: 3,
         });
         datasets.push({
           label: `_${grade}_lower`,
@@ -2613,6 +2711,7 @@
           pointRadius: 0,
           fill: false,
           showLine: true,
+          order: 3,
         });
       }
     }
@@ -2624,8 +2723,9 @@
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        animation: { duration: 0 },
         interaction: {
-          mode: 'index',
+          mode: 'nearest',
           intersect: false,
         },
         scales: {
@@ -2646,12 +2746,30 @@
           },
           tooltip: {
             filter: item => !item.dataset.label.startsWith('_'),
+            callbacks: {
+              afterBody: function (items) {
+                // Show player info when hovering a highlighted player
+                const ds = items[0]?.dataset;
+                if (ds?._playerMeta) {
+                  return `Player ${ds._playerMeta.id} | ${ds._playerMeta.grade} ${ds._playerMeta.ptype}`;
+                }
+                return '';
+              },
+            },
           },
+        },
+        onClick: function (_evt, elements) {
+          if (!elements.length) return;
+          const ds = sandboxChart.data.datasets[elements[0].datasetIndex];
+          if (ds._playerMeta) {
+            // Click a player line to highlight it
+            document.getElementById('sandbox-highlight-player').value = String(ds._playerMeta.id);
+            renderSandboxChart();
+          }
         },
       },
     });
 
-    // Render grade summary table
     renderSandboxSummary(gradeData);
   }
 
@@ -2662,11 +2780,24 @@
     for (const [grade, gd] of Object.entries(gradeData)) {
       const finalAvg = gd.avg[gd.avg.length - 1];
       const peakAvg = Math.max(...gd.avg);
+
+      // Compute best/worst individual by peak value
+      let bestPeak = -Infinity, worstPeak = Infinity;
+      if (gd.players) {
+        for (const p of gd.players) {
+          const peak = Math.max(...p.trajectory);
+          if (peak > bestPeak) bestPeak = peak;
+          if (peak < worstPeak) worstPeak = peak;
+        }
+      }
+
       rows.push(`<tr>
         <td><span style="color: ${GRADE_COLORS[grade] || '#6b7280'}; font-weight: 600;">${grade}</span></td>
         <td>${gd.count}</td>
         <td>${finalAvg.toFixed(1)}</td>
         <td>${peakAvg.toFixed(1)}</td>
+        <td>${bestPeak > -Infinity ? bestPeak.toFixed(1) : '--'}</td>
+        <td>${worstPeak < Infinity ? worstPeak.toFixed(1) : '--'}</td>
       </tr>`);
     }
 

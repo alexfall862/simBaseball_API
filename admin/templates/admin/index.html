@@ -1085,12 +1085,25 @@
         </div>
 
         <div class="card" id="sandbox-chart-card" style="display: none;">
-          <div class="form-row" style="margin-bottom: 12px; gap: 12px; align-items: center;">
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; align-items: center; flex-wrap: wrap;">
             <label>Ability:
               <select id="sandbox-ability-select" style="width: 150px"></select>
             </label>
             <label style="display: flex; align-items: center; gap: 4px;">
-              <input type="checkbox" id="sandbox-show-bands" checked /> Show P10-P90 bands
+              <input type="checkbox" id="sandbox-show-bands" checked /> P10-P90 bands
+            </label>
+            <label style="display: flex; align-items: center; gap: 4px;">
+              <input type="checkbox" id="sandbox-show-players" /> Individual players
+            </label>
+            <label id="sandbox-grade-filter-label" style="display: none;">Grade:
+              <select id="sandbox-grade-filter" style="width: 80px">
+                <option value="__all__">All</option>
+              </select>
+            </label>
+            <label id="sandbox-highlight-label" style="display: none;">Highlight:
+              <select id="sandbox-highlight-player" style="width: 100px">
+                <option value="">None</option>
+              </select>
             </label>
           </div>
           <div style="position: relative; height: 420px;">
@@ -1108,6 +1121,8 @@
                   <th>Players</th>
                   <th>Final Avg</th>
                   <th>Peak Avg</th>
+                  <th>Best Individual</th>
+                  <th>Worst Individual</th>
                 </tr>
               </thead>
               <tbody id="sandbox-grade-tbody"></tbody>
