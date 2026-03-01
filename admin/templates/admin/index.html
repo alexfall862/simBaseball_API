@@ -307,8 +307,41 @@
         </div>
 
         <div class="card">
-          <h3>Scale Config Editor</h3>
-          <p class="text-muted">The mean and std dev values here control the 20-80 scouting scale. Edit them directly, or use "Set All" to apply a master mean/std to every attribute at a given level. Quartile columns (P25, Median, P75) are read-only reference from the last analysis.</p>
+          <h3>Level Scale Config</h3>
+          <p class="text-muted">Set one mean and std dev per level/type. These values are applied uniformly to all attributes at that level for 20-80 scale conversion.</p>
+
+          <div class="button-group" style="margin-bottom: 16px">
+            <button class="btn btn-primary" id="btn-load-config">Load Current</button>
+            <button class="btn btn-warning" id="btn-save-config" style="display: none">Save Changes</button>
+          </div>
+
+          <div class="table-container">
+            <table class="data-table" id="rc-config-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Level</th>
+                  <th>Mean</th>
+                  <th>Std Dev</th>
+                  <th>20</th>
+                  <th>50</th>
+                  <th>80</th>
+                </tr>
+              </thead>
+              <tbody id="rc-config-tbody">
+                <tr>
+                  <td colspan="7" class="text-center text-muted">Click "Load Current" to view</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <pre id="rc-save-result" class="result-box" style="margin-top: 12px; display: none"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Attribute Analysis (Reference)</h3>
+          <p class="text-muted">Read-only breakdown from the last analysis. Use these numbers to inform your mean/std choices above.</p>
 
           <div class="form-row">
             <div class="form-group">
@@ -333,30 +366,15 @@
             </div>
             <div class="form-group">
               <label for="rc-attr-filter">Search Attribute</label>
-              <input type="text" id="rc-attr-filter" placeholder="e.g. power, pitch_pacc, c_rating" />
+              <input type="text" id="rc-attr-filter" placeholder="e.g. power, pitch_pacc" />
             </div>
             <div class="form-group" style="align-self: flex-end">
-              <button class="btn btn-primary" id="btn-load-config">Load</button>
-            </div>
-          </div>
-
-          <!-- Bulk Set -->
-          <div id="rc-bulk-set" class="form-row" style="display: none; background: var(--surface); padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid var(--border)">
-            <div class="form-group">
-              <label>Set All Mean</label>
-              <input type="number" step="0.1" id="rc-bulk-mean" style="width: 100px" />
-            </div>
-            <div class="form-group">
-              <label>Set All Std Dev</label>
-              <input type="number" step="0.1" id="rc-bulk-std" style="width: 100px" />
-            </div>
-            <div class="form-group" style="align-self: flex-end">
-              <button class="btn btn-secondary" id="btn-bulk-apply">Apply to All Visible</button>
+              <button class="btn btn-secondary" id="btn-load-analysis">Load</button>
             </div>
           </div>
 
           <div class="table-container">
-            <table class="data-table" id="rc-config-table">
+            <table class="data-table" id="rc-analysis-table">
               <thead>
                 <tr>
                   <th>Type</th>
@@ -365,25 +383,17 @@
                   <th>P25</th>
                   <th>Median</th>
                   <th>P75</th>
-                  <th>Mean</th>
-                  <th>Std Dev</th>
-                  <th>20</th>
-                  <th>50</th>
-                  <th>80</th>
+                  <th>Seed Mean</th>
+                  <th>Seed Std</th>
                 </tr>
               </thead>
-              <tbody id="rc-config-tbody">
+              <tbody id="rc-analysis-tbody">
                 <tr>
-                  <td colspan="11" class="text-center text-muted">Click "Load" to view data</td>
+                  <td colspan="8" class="text-center text-muted">Click "Load" to view data</td>
                 </tr>
               </tbody>
             </table>
           </div>
-
-          <div class="button-group" style="margin-top: 16px">
-            <button class="btn btn-warning" id="btn-save-config" style="display: none">Save Config Changes</button>
-          </div>
-          <pre id="rc-save-result" class="result-box" style="margin-top: 12px; display: none"></pre>
         </div>
 
         <div class="card">

@@ -114,10 +114,10 @@
 
     // Rating Config
     document.getElementById('btn-seed-config').addEventListener('click', seedRatingConfig);
-    document.getElementById('btn-load-config').addEventListener('click', loadRatingConfig);
-    document.getElementById('rc-attr-filter').addEventListener('input', filterRatingConfigTable);
-    document.getElementById('btn-save-config').addEventListener('click', saveRatingConfig);
-    document.getElementById('btn-bulk-apply').addEventListener('click', bulkApplyConfig);
+    document.getElementById('btn-load-config').addEventListener('click', loadLevelConfig);
+    document.getElementById('btn-save-config').addEventListener('click', saveLevelConfig);
+    document.getElementById('btn-load-analysis').addEventListener('click', loadAnalysis);
+    document.getElementById('rc-attr-filter').addEventListener('input', filterAnalysisTable);
 
     // Overall Weights
     document.getElementById('btn-load-weights').addEventListener('click', loadOverallWeights);
@@ -838,8 +838,6 @@
     '7': 'AA', '8': 'AAA', '9': 'MLB',
   };
 
-  let ratingConfigData = null; // cached after load
-
   function loadRatingConfigSummary() {
     // Quick check: load config to populate stat cards
     fetch(`${ADMIN_BASE}/rating-config`, { credentials: 'include' })
@@ -925,11 +923,200 @@
       });
   }
 
-  function loadRatingConfig() {
+  // ---------------------------------------------------------------------------
+  // Level Scale Config — one mean/std per (ptype, level)
+  // ---------------------------------------------------------------------------
+
+  function loadLevelConfig() {
+    const tbody = document.getElementById('rc-config-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Loading...</td></tr>';
+
+    fetch(`${ADMIN_BASE}/rating-config`, { credentials: 'include' })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok || !data.levels) {
+          tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No config data. Run "Analyze & Populate" first.</td></tr>';
+          return;
+        }
+        renderLevelConfigTable(data.levels);
+        document.getElementById('btn-save-config').style.display = 'inline-block';
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+  }
+
+  function renderLevelConfigTable(levels) {
+    // levels = { ptype: { level_id: { attr: {mean, std, ...} } } }
+    // Collapse to one row per (ptype, level) — take mean/std from first attribute
+    const tbody = document.getElementById('rc-config-tbody');
+    const rows = [];
+
+    for (const ptype of Object.keys(levels).sort()) {
+      const ptypeLevels = levels[ptype];
+      for (const levelId of Object.keys(ptypeLevels).sort((a, b) => Number(a) - Number(b))) {
+        const attrs = ptypeLevels[levelId];
+        const attrKeys = Object.keys(attrs);
+        if (attrKeys.length === 0) continue;
+
+        // Check if all attrs share the same mean/std (post bulk-set) or vary (post seed)
+        const vals = attrKeys.map(k => attrs[k]);
+        const firstMean = vals[0].mean;
+        const firstStd = vals[0].std;
+        const uniform = vals.every(v =>
+          Math.abs(v.mean - firstMean) < 0.001 && Math.abs(v.std - firstStd) < 0.001
+        );
+
+        rows.push({
+          ptype,
+          levelId,
+          levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
+          mean: uniform ? firstMean : null,
+          std: uniform ? firstStd : null,
+          uniform,
+        });
+      }
+    }
+
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No levels found</td></tr>';
+      return;
+    }
+
+    const inputStyle = 'width:80px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text-primary);font-size:0.85rem;text-align:right';
+
+    tbody.innerHTML = rows.map(r => {
+      const ptypeBadge = r.ptype === 'Pitcher' ? 'badge-info' : 'badge-success';
+      const meanVal = r.mean != null ? r.mean.toFixed(2) : '';
+      const stdVal = r.std != null ? r.std.toFixed(2) : '';
+      const low = r.std > 0 ? (r.mean - 3 * r.std).toFixed(1) : '--';
+      const mid = r.mean != null ? r.mean.toFixed(1) : '--';
+      const high = r.std > 0 ? (r.mean + 3 * r.std).toFixed(1) : '--';
+      const placeholder = r.uniform ? '' : 'placeholder="varies"';
+      return `
+        <tr>
+          <td><span class="badge ${ptypeBadge}">${r.ptype}</span></td>
+          <td><span class="badge badge-${getLevelBadge(r.levelId)}">${r.levelName}</span></td>
+          <td>
+            <input type="number" step="0.1"
+              class="rc-mean-input rc-scale-input"
+              data-ptype="${r.ptype}" data-level="${r.levelId}"
+              data-orig="${r.mean != null ? r.mean : ''}"
+              value="${meanVal}" ${placeholder}
+              style="${inputStyle}"
+            />
+          </td>
+          <td>
+            <input type="number" step="0.1" min="0"
+              class="rc-std-input rc-scale-input"
+              data-ptype="${r.ptype}" data-level="${r.levelId}"
+              data-orig="${r.std != null ? r.std : ''}"
+              value="${stdVal}" ${placeholder}
+              style="${inputStyle}"
+            />
+          </td>
+          <td class="text-muted rc-col-20">${low}</td>
+          <td><strong class="rc-col-50">${mid}</strong></td>
+          <td class="text-muted rc-col-80">${high}</td>
+        </tr>
+      `;
+    }).join('');
+
+    // Live recompute 20/50/80
+    tbody.querySelectorAll('.rc-scale-input').forEach(input => {
+      input.addEventListener('input', function () {
+        const tr = this.closest('tr');
+        const m = parseFloat(tr.querySelector('.rc-mean-input').value) || 0;
+        const s = parseFloat(tr.querySelector('.rc-std-input').value) || 0;
+        tr.querySelector('.rc-col-20').textContent = s > 0 ? (m - 3 * s).toFixed(1) : '--';
+        tr.querySelector('.rc-col-50').textContent = m.toFixed(1);
+        tr.querySelector('.rc-col-80').textContent = s > 0 ? (m + 3 * s).toFixed(1) : '--';
+      });
+    });
+  }
+
+  function saveLevelConfig() {
+    const tbody = document.getElementById('rc-config-tbody');
+    const meanInputs = tbody.querySelectorAll('.rc-mean-input');
+    const stdInputs = tbody.querySelectorAll('.rc-std-input');
+    const resultBox = document.getElementById('rc-save-result');
+
+    // Collect rows that have values
+    const levels = [];
+    meanInputs.forEach((input, i) => {
+      const stdInput = stdInputs[i];
+      const newMean = parseFloat(input.value);
+      const newStd = parseFloat(stdInput.value);
+      if (isNaN(newMean) || isNaN(newStd)) return;
+
+      const origMean = parseFloat(input.dataset.orig);
+      const origStd = parseFloat(stdInput.dataset.orig);
+      if (!isNaN(origMean) && !isNaN(origStd) &&
+          Math.abs(newMean - origMean) < 0.001 && Math.abs(newStd - origStd) < 0.001) return;
+
+      levels.push({
+        level_id: parseInt(input.dataset.level),
+        ptype: input.dataset.ptype,
+        mean_value: newMean,
+        std_dev: newStd,
+      });
+    });
+
+    if (levels.length === 0) {
+      resultBox.style.display = 'block';
+      resultBox.textContent = 'No changes detected.';
+      return;
+    }
+
+    const btn = document.getElementById('btn-save-config');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    resultBox.style.display = 'block';
+    resultBox.textContent = `Saving ${levels.length} level(s)...`;
+
+    fetch(`${ADMIN_BASE}/rating-config/levels`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ levels }),
+    })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (data.ok) {
+          resultBox.textContent = `Saved! ${data.updated} attribute row(s) updated across ${levels.length} level(s).`;
+          // Update orig values
+          meanInputs.forEach(input => { input.dataset.orig = input.value; });
+          stdInputs.forEach(input => { input.dataset.orig = input.value; });
+        } else {
+          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      })
+      .finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Save Changes';
+      });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Attribute Analysis — read-only reference table
+  // ---------------------------------------------------------------------------
+
+  let analysisData = null;
+
+  function loadAnalysis() {
     const levelFilter = document.getElementById('rc-level-filter').value;
     const ptypeFilter = document.getElementById('rc-ptype-filter').value;
-    const tbody = document.getElementById('rc-config-tbody');
-    tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">Loading...</td></tr>';
+    const tbody = document.getElementById('rc-analysis-tbody');
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">Loading...</td></tr>';
 
     let url = `${ADMIN_BASE}/rating-config`;
     const params = [];
@@ -944,217 +1131,62 @@
       })
       .then(data => {
         if (!data.ok || !data.levels) {
-          tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No config data. Run seed first.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No data. Run "Analyze & Populate" first.</td></tr>';
           return;
         }
-
-        ratingConfigData = data.levels;  // { ptype: { level_id: { attr: {mean,std,p25,median,p75} } } }
-        renderRatingConfigTable();
-
-        // Show bulk-set row and save button
-        document.getElementById('rc-bulk-set').style.display = 'flex';
-        document.getElementById('btn-save-config').style.display = 'inline-block';
+        analysisData = data.levels;
+        renderAnalysisTable();
       })
       .catch(err => {
-        tbody.innerHTML = `<tr><td colspan="11" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-danger">Error: ${err.message}</td></tr>`;
       });
   }
 
-  function renderRatingConfigTable() {
-    if (!ratingConfigData) return;
+  function renderAnalysisTable() {
+    if (!analysisData) return;
 
     const searchTerm = (document.getElementById('rc-attr-filter').value || '').toLowerCase().trim();
-    const tbody = document.getElementById('rc-config-tbody');
+    const tbody = document.getElementById('rc-analysis-tbody');
 
-    // Collect all rows sorted by ptype, level, then attribute
     const rows = [];
-    const sortedPtypes = Object.keys(ratingConfigData).sort();
-
-    for (const ptype of sortedPtypes) {
-      const ptypeLevels = ratingConfigData[ptype];
-      const sortedLevels = Object.keys(ptypeLevels).sort((a, b) => Number(a) - Number(b));
-
-      for (const levelId of sortedLevels) {
+    for (const ptype of Object.keys(analysisData).sort()) {
+      const ptypeLevels = analysisData[ptype];
+      for (const levelId of Object.keys(ptypeLevels).sort((a, b) => Number(a) - Number(b))) {
         const attrs = ptypeLevels[levelId];
-        const sortedAttrs = Object.keys(attrs).sort();
-
-        for (const attrKey of sortedAttrs) {
+        for (const attrKey of Object.keys(attrs).sort()) {
           if (searchTerm && !attrKey.toLowerCase().includes(searchTerm)) continue;
-
           const d = attrs[attrKey];
-          rows.push({
-            ptype,
-            levelId,
-            levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
-            attrKey,
-            mean: d.mean,
-            std: d.std,
-            p25: d.p25,
-            median: d.median,
-            p75: d.p75,
-          });
+          rows.push({ ptype, levelId, attrKey, ...d });
         }
       }
     }
 
     if (rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No matching attributes found</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No matching attributes</td></tr>';
       return;
     }
 
-    const inputStyle = 'width:72px;padding:3px 5px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text-primary);font-size:0.85rem;text-align:right';
     const fmtQ = (v) => v != null ? v.toFixed(1) : '--';
-
     tbody.innerHTML = rows.map(r => {
-      const attrClass = getAttrCategoryClass(r.attrKey);
       const ptypeBadge = r.ptype === 'Pitcher' ? 'badge-info' : 'badge-success';
-      const low = r.std > 0 ? (r.mean - 3 * r.std).toFixed(1) : '--';
-      const mid = r.mean.toFixed(1);
-      const high = r.std > 0 ? (r.mean + 3 * r.std).toFixed(1) : '--';
+      const attrClass = getAttrCategoryClass(r.attrKey);
       return `
         <tr>
           <td><span class="badge ${ptypeBadge}">${r.ptype}</span></td>
-          <td><span class="badge badge-${getLevelBadge(r.levelId)}">${r.levelName}</span></td>
+          <td><span class="badge badge-${getLevelBadge(r.levelId)}">${LEVEL_NAMES[r.levelId] || r.levelId}</span></td>
           <td><code class="${attrClass}">${r.attrKey}</code></td>
           <td class="text-muted">${fmtQ(r.p25)}</td>
           <td class="text-muted">${fmtQ(r.median)}</td>
           <td class="text-muted">${fmtQ(r.p75)}</td>
-          <td>
-            <input type="number" step="0.1"
-              class="rc-mean-input rc-scale-input"
-              data-ptype="${r.ptype}" data-level="${r.levelId}" data-attr="${r.attrKey}"
-              data-orig="${r.mean}"
-              value="${r.mean.toFixed(2)}"
-              style="${inputStyle}"
-            />
-          </td>
-          <td>
-            <input type="number" step="0.1" min="0"
-              class="rc-std-input rc-scale-input"
-              data-ptype="${r.ptype}" data-level="${r.levelId}" data-attr="${r.attrKey}"
-              data-orig="${r.std}"
-              value="${r.std.toFixed(2)}"
-              style="${inputStyle}"
-            />
-          </td>
-          <td class="text-muted rc-col-20">${low}</td>
-          <td><strong class="rc-col-50">${mid}</strong></td>
-          <td class="text-muted rc-col-80">${high}</td>
+          <td>${r.mean.toFixed(2)}</td>
+          <td>${r.std.toFixed(2)}</td>
         </tr>
       `;
     }).join('');
-
-    // Delegated input handler: recompute 20/50/80 when mean or std changes
-    tbody.querySelectorAll('.rc-scale-input').forEach(input => {
-      input.addEventListener('input', function () {
-        const tr = this.closest('tr');
-        const meanVal = parseFloat(tr.querySelector('.rc-mean-input').value) || 0;
-        const stdVal = parseFloat(tr.querySelector('.rc-std-input').value) || 0;
-        tr.querySelector('.rc-col-20').textContent = stdVal > 0 ? (meanVal - 3 * stdVal).toFixed(1) : '--';
-        tr.querySelector('.rc-col-50').textContent = meanVal.toFixed(1);
-        tr.querySelector('.rc-col-80').textContent = stdVal > 0 ? (meanVal + 3 * stdVal).toFixed(1) : '--';
-      });
-    });
   }
 
-  function saveRatingConfig() {
-    const tbody = document.getElementById('rc-config-tbody');
-    const meanInputs = tbody.querySelectorAll('.rc-mean-input');
-    const stdInputs = tbody.querySelectorAll('.rc-std-input');
-    const resultBox = document.getElementById('rc-save-result');
-
-    // Collect changed rows
-    const updates = [];
-    meanInputs.forEach((input, i) => {
-      const stdInput = stdInputs[i];
-      const newMean = parseFloat(input.value);
-      const newStd = parseFloat(stdInput.value);
-      const origMean = parseFloat(input.dataset.orig);
-      const origStd = parseFloat(stdInput.dataset.orig);
-
-      if (isNaN(newMean) || isNaN(newStd)) return;
-      if (Math.abs(newMean - origMean) < 0.0001 && Math.abs(newStd - origStd) < 0.0001) return;
-
-      updates.push({
-        level_id: parseInt(input.dataset.level),
-        ptype: input.dataset.ptype,
-        attribute_key: input.dataset.attr,
-        mean_value: newMean,
-        std_dev: newStd,
-      });
-    });
-
-    if (updates.length === 0) {
-      resultBox.style.display = 'block';
-      resultBox.textContent = 'No changes detected.';
-      return;
-    }
-
-    const btn = document.getElementById('btn-save-config');
-    btn.disabled = true;
-    btn.textContent = 'Saving...';
-    resultBox.style.display = 'block';
-    resultBox.textContent = `Saving ${updates.length} change(s)...`;
-
-    fetch(`${ADMIN_BASE}/rating-config`, {
-      method: 'PUT',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ updates }),
-    })
-      .then(r => {
-        if (r.status === 401) throw new Error('Unauthorized - please login first');
-        return r.json();
-      })
-      .then(data => {
-        if (data.ok) {
-          resultBox.textContent = `Saved! ${data.updated} row(s) updated.`;
-          // Update orig values so re-saving doesn't re-send unchanged rows
-          meanInputs.forEach(input => { input.dataset.orig = input.value; });
-          stdInputs.forEach(input => { input.dataset.orig = input.value; });
-        } else {
-          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
-        }
-      })
-      .catch(err => {
-        resultBox.textContent = 'Error: ' + err.message;
-      })
-      .finally(() => {
-        btn.disabled = false;
-        btn.textContent = 'Save Config Changes';
-      });
-  }
-
-  function bulkApplyConfig() {
-    const bulkMean = document.getElementById('rc-bulk-mean').value;
-    const bulkStd = document.getElementById('rc-bulk-std').value;
-    const tbody = document.getElementById('rc-config-tbody');
-
-    if (!bulkMean && !bulkStd) {
-      alert('Enter a mean and/or std dev value to apply.');
-      return;
-    }
-
-    // Apply to all visible mean/std inputs in the table
-    if (bulkMean !== '') {
-      tbody.querySelectorAll('.rc-mean-input').forEach(input => {
-        input.value = parseFloat(bulkMean).toFixed(2);
-      });
-    }
-    if (bulkStd !== '') {
-      tbody.querySelectorAll('.rc-std-input').forEach(input => {
-        input.value = parseFloat(bulkStd).toFixed(2);
-      });
-    }
-
-    // Trigger recomputation of 20/50/80 columns
-    tbody.querySelectorAll('.rc-scale-input').forEach(input => {
-      input.dispatchEvent(new Event('input'));
-    });
-  }
-
-  function filterRatingConfigTable() {
-    if (ratingConfigData) renderRatingConfigTable();
+  function filterAnalysisTable() {
+    if (analysisData) renderAnalysisTable();
   }
 
   function getLevelBadge(levelId) {

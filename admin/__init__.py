@@ -266,41 +266,49 @@ def admin_update_rating_config():
         return jsonify(ok=False, error="update_failed", message=str(e)), 500
 
 
-@admin_bp.put("/rating-config/bulk-set")
-def admin_bulk_set_rating_config():
+@admin_bp.put("/rating-config/levels")
+def admin_update_level_config():
     """
-    Set the SAME mean / std for ALL attributes at a given level + ptype.
+    Set mean / std per level + ptype (applied to ALL attributes at that level).
 
-    PUT /admin/rating-config/bulk-set
-    Body: { "level_id": 9, "ptype": "Pitcher", "mean_value": 50.0, "std_dev": 15.0 }
+    PUT /admin/rating-config/levels
+    Body: { "levels": [
+        { "level_id": 9, "ptype": "Pitcher", "mean_value": 50.0, "std_dev": 15.0 },
+        { "level_id": 9, "ptype": "Position", "mean_value": 50.0, "std_dev": 15.0 },
+        ...
+    ]}
     """
     guard = _require_admin()
     if guard:
         return guard
 
     body = request.get_json(force=True, silent=True) or {}
-    level_id = body.get("level_id")
-    ptype = body.get("ptype")
-    mean_val = body.get("mean_value")
-    std_val = body.get("std_dev")
-
-    if level_id is None or not ptype or mean_val is None or std_val is None:
-        return jsonify(ok=False, error="missing_fields",
-                       message="Required: level_id, ptype, mean_value, std_dev"), 400
+    levels = body.get("levels")
+    if not levels or not isinstance(levels, list):
+        return jsonify(ok=False, error="missing_levels",
+                       message="Body must contain 'levels' list"), 400
 
     try:
         from db import get_engine
         from services.rating_config import bulk_set_config
 
         engine = get_engine()
+        total = 0
         with engine.connect() as conn:
-            count = bulk_set_config(conn, int(level_id), ptype, float(mean_val), float(std_val))
+            for entry in levels:
+                level_id = entry.get("level_id")
+                ptype = entry.get("ptype")
+                mean_val = entry.get("mean_value")
+                std_val = entry.get("std_dev")
+                if level_id is None or not ptype or mean_val is None or std_val is None:
+                    continue
+                total += bulk_set_config(conn, int(level_id), ptype, float(mean_val), float(std_val))
             conn.commit()
 
-        return jsonify(ok=True, updated=count)
+        return jsonify(ok=True, updated=total)
 
     except Exception as e:
-        logging.exception("admin_bulk_set_rating_config failed")
+        logging.exception("admin_update_level_config failed")
         return jsonify(ok=False, error="update_failed", message=str(e)), 500
 
 
