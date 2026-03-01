@@ -665,6 +665,15 @@ textarea {
   color: var(--success);
 }
 
+/* Inline code */
+.data-table code {
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 0.8rem;
+  padding: 2px 6px;
+  background: var(--bg-dark);
+  border-radius: 4px;
+}
+
 /* Utility Classes */
 .text-center { text-align: center; }
 .text-muted { color: var(--text-muted); }

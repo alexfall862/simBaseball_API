@@ -37,6 +37,9 @@
       <a href="#" class="nav-item" data-section="timestamp">
         <span class="nav-icon">&#128339;</span> Timestamp
       </a>
+      <a href="#" class="nav-item" data-section="rating-config">
+        <span class="nav-icon">&#127919;</span> Rating Config
+      </a>
     </div>
 
     <div class="nav-section">
@@ -270,6 +273,86 @@
             <button class="btn btn-secondary" id="btn-reset-week">Reset Week Games</button>
           </div>
           <pre id="timestamp-result" class="result-box" style="margin-top: 16px"></pre>
+        </div>
+      </section>
+
+      <!-- Rating Config Section -->
+      <section id="section-rating-config" class="section">
+        <div class="grid-2">
+          <div class="stat-card">
+            <div class="stat-label">Config Status</div>
+            <div class="stat-value" id="rc-status">--</div>
+            <div class="stat-sub" id="rc-status-sub">Not loaded</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Levels Configured</div>
+            <div class="stat-value" id="rc-levels-count">--</div>
+            <div class="stat-sub" id="rc-attrs-count">--</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Seed / Refresh Config</h3>
+          <p class="text-muted">Compute mean and standard deviation for every player attribute at every level from current player data. This populates the <code>rating_scale_config</code> table used by the 20-80 scouting scale.</p>
+
+          <div class="alert alert-info">
+            <strong>When to seed:</strong> After importing new players, completing a draft, processing trades, or anytime you want to recalibrate the scale. Levels with no players (e.g. 1-3 before import) will be skipped.
+          </div>
+
+          <div class="button-group">
+            <button class="btn btn-warning" id="btn-seed-config">Seed / Refresh Config</button>
+          </div>
+
+          <pre id="rc-seed-result" class="result-box" style="margin-top: 16px; display: none"></pre>
+        </div>
+
+        <div class="card">
+          <h3>View Config</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="rc-level-filter">Filter by Level</label>
+              <select id="rc-level-filter">
+                <option value="">All Levels</option>
+                <option value="1">1 - High School</option>
+                <option value="2">2 - Int'l Amateur</option>
+                <option value="3">3 - College</option>
+                <option value="4">4 - Scraps</option>
+                <option value="5">5 - A</option>
+                <option value="6">6 - High-A</option>
+                <option value="7">7 - AA</option>
+                <option value="8">8 - AAA</option>
+                <option value="9">9 - MLB</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="rc-attr-filter">Search Attribute</label>
+              <input type="text" id="rc-attr-filter" placeholder="e.g. power, pitch_pacc, c_rating" />
+            </div>
+            <div class="form-group" style="align-self: flex-end">
+              <button class="btn btn-primary" id="btn-load-config">Load Config</button>
+            </div>
+          </div>
+
+          <div class="table-container">
+            <table class="data-table" id="rc-config-table">
+              <thead>
+                <tr>
+                  <th>Level</th>
+                  <th>Attribute</th>
+                  <th>Mean</th>
+                  <th>Std Dev</th>
+                  <th>20 (-3&sigma;)</th>
+                  <th>50 (avg)</th>
+                  <th>80 (+3&sigma;)</th>
+                </tr>
+              </thead>
+              <tbody id="rc-config-tbody">
+                <tr>
+                  <td colspan="7" class="text-center text-muted">Click "Load Config" to view data</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 

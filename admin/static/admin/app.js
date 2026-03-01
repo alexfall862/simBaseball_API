@@ -111,6 +111,11 @@
 
     // Health
     document.getElementById('btn-check-health').addEventListener('click', checkHealth);
+
+    // Rating Config
+    document.getElementById('btn-seed-config').addEventListener('click', seedRatingConfig);
+    document.getElementById('btn-load-config').addEventListener('click', loadRatingConfig);
+    document.getElementById('rc-attr-filter').addEventListener('input', filterRatingConfigTable);
   }
 
   // Navigation
@@ -140,6 +145,7 @@
       cache: 'Cache Manager',
       sql: 'SQL Console',
       health: 'System Health',
+      'rating-config': 'Rating Config',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -163,6 +169,9 @@
       case 'health':
         checkHealth();
         loadRoutes();
+        break;
+      case 'rating-config':
+        loadRatingConfigSummary();
         break;
     }
 
@@ -814,6 +823,188 @@
       .catch(err => {
         routesList.textContent = 'Could not load routes: ' + err.message;
       });
+  }
+
+  // Rating Config
+  const LEVEL_NAMES = {
+    '1': 'High School', '2': "Int'l Amateur", '3': 'College',
+    '4': 'Scraps', '5': 'A', '6': 'High-A',
+    '7': 'AA', '8': 'AAA', '9': 'MLB',
+  };
+
+  let ratingConfigData = null; // cached after load
+
+  function loadRatingConfigSummary() {
+    // Quick check: load config to populate stat cards
+    fetch(`${ADMIN_BASE}/rating-config`, { credentials: 'include' })
+      .then(r => {
+        if (r.status === 401) throw new Error('Login required');
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok || !data.levels) throw new Error('No config data');
+        const levels = data.levels;
+        const levelCount = Object.keys(levels).length;
+        let attrCount = 0;
+        for (const attrs of Object.values(levels)) {
+          attrCount += Object.keys(attrs).length;
+        }
+        document.getElementById('rc-status').textContent = levelCount > 0 ? 'Seeded' : 'Empty';
+        document.getElementById('rc-status-sub').textContent = levelCount > 0 ? 'Config loaded' : 'Run seed to populate';
+        document.getElementById('rc-levels-count').textContent = levelCount;
+        document.getElementById('rc-attrs-count').textContent = `${attrCount} total rows`;
+      })
+      .catch(() => {
+        document.getElementById('rc-status').textContent = 'Unknown';
+        document.getElementById('rc-status-sub').textContent = 'Login to check';
+        document.getElementById('rc-levels-count').textContent = '--';
+        document.getElementById('rc-attrs-count').textContent = '--';
+      });
+  }
+
+  function seedRatingConfig() {
+    const resultBox = document.getElementById('rc-seed-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Seeding config from player data...';
+
+    const btn = document.getElementById('btn-seed-config');
+    btn.disabled = true;
+    btn.textContent = 'Seeding...';
+
+    fetch(`${ADMIN_BASE}/rating-config/seed`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (data.ok) {
+          const levels = data.levels || {};
+          const levelDetails = Object.entries(levels)
+            .sort(([a], [b]) => Number(a) - Number(b))
+            .map(([lvl, count]) => `  Level ${lvl} (${LEVEL_NAMES[lvl] || '?'}): ${count} attributes`)
+            .join('\n');
+
+          resultBox.textContent =
+            `Success! ${data.rows_written} rows written across ${Object.keys(levels).length} levels.\n\n` +
+            levelDetails;
+
+          // Refresh the summary cards
+          loadRatingConfigSummary();
+        } else {
+          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      })
+      .finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Seed / Refresh Config';
+      });
+  }
+
+  function loadRatingConfig() {
+    const levelFilter = document.getElementById('rc-level-filter').value;
+    const tbody = document.getElementById('rc-config-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Loading...</td></tr>';
+
+    let url = `${ADMIN_BASE}/rating-config`;
+    if (levelFilter) url += `?level=${levelFilter}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok || !data.levels) {
+          tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No config data. Run seed first.</td></tr>';
+          return;
+        }
+
+        ratingConfigData = data.levels;
+        renderRatingConfigTable();
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+  }
+
+  function renderRatingConfigTable() {
+    if (!ratingConfigData) return;
+
+    const searchTerm = (document.getElementById('rc-attr-filter').value || '').toLowerCase().trim();
+    const tbody = document.getElementById('rc-config-tbody');
+
+    // Collect all rows sorted by level then attribute
+    const rows = [];
+    const sortedLevels = Object.keys(ratingConfigData).sort((a, b) => Number(a) - Number(b));
+
+    for (const levelId of sortedLevels) {
+      const attrs = ratingConfigData[levelId];
+      const sortedAttrs = Object.keys(attrs).sort();
+
+      for (const attrKey of sortedAttrs) {
+        if (searchTerm && !attrKey.toLowerCase().includes(searchTerm)) continue;
+
+        const { mean, std } = attrs[attrKey];
+        const low = std > 0 ? (mean - 3 * std).toFixed(1) : '--';
+        const high = std > 0 ? (mean + 3 * std).toFixed(1) : '--';
+
+        rows.push({
+          levelId,
+          levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
+          attrKey,
+          mean: mean.toFixed(2),
+          std: std.toFixed(2),
+          low,
+          mid: mean.toFixed(1),
+          high,
+        });
+      }
+    }
+
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No matching attributes found</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = rows.map(r => {
+      const attrClass = getAttrCategoryClass(r.attrKey);
+      return `
+        <tr>
+          <td><span class="badge badge-${getLevelBadge(r.levelId)}">${r.levelName}</span></td>
+          <td><code class="${attrClass}">${r.attrKey}</code></td>
+          <td>${r.mean}</td>
+          <td>${r.std}</td>
+          <td class="text-muted">${r.low}</td>
+          <td><strong>${r.mid}</strong></td>
+          <td class="text-muted">${r.high}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function filterRatingConfigTable() {
+    if (ratingConfigData) renderRatingConfigTable();
+  }
+
+  function getLevelBadge(levelId) {
+    const n = Number(levelId);
+    if (n <= 3) return 'info';
+    if (n <= 6) return 'warning';
+    if (n <= 8) return 'pending';
+    return 'success';
+  }
+
+  function getAttrCategoryClass(attrKey) {
+    if (attrKey.endsWith('_rating')) return 'text-warning';
+    if (attrKey.startsWith('pitch_')) return 'text-success';
+    if (attrKey.includes('_ovr')) return 'text-warning';
+    return '';
   }
 
   // Export public API
