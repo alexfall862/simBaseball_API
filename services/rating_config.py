@@ -28,6 +28,13 @@ PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
 PTYPE_PITCHER = "Pitcher"
 PTYPE_POSITION = "Position"
 
+# Position rating types stored in rating_overall_weights (configurable weights)
+POSITION_RATING_TYPES = frozenset({
+    "c_rating", "fb_rating", "sb_rating", "tb_rating", "ss_rating",
+    "lf_rating", "cf_rating", "rf_rating", "dh_rating",
+    "sp_rating", "rp_rating",
+})
+
 
 # ------------------------------------------------------------------
 # 20-80 conversion (shared utility)
@@ -255,11 +262,15 @@ def seed_rating_config(conn) -> Dict[str, Any]:
     base_cols = [c for c in col_names if c.endswith("_base")]
 
     # 3. Load overall weights from DB (if table exists)
-    overall_weights: Dict[str, Dict[str, float]] = {}
+    all_weights: Dict[str, Dict[str, float]] = {}
     try:
-        overall_weights = get_overall_weights(conn)
+        all_weights = get_overall_weights(conn)
     except Exception:
         logger.info("seed_rating_config: rating_overall_weights table not found, skipping overalls")
+
+    # Split into position rating weights vs pure overall weights
+    position_weights = {k: v for k, v in all_weights.items() if k in POSITION_RATING_TYPES}
+    overall_weights = {k: v for k, v in all_weights.items() if k not in POSITION_RATING_TYPES}
 
     # 4. Accumulate values by (level, ptype) — one pass through all players
     #    Key: (level_id, ptype) → { attr_key → [values] }
@@ -297,8 +308,8 @@ def seed_rating_config(conn) -> Dict[str, Any]:
                 dist_key = col
             bucket.setdefault(dist_key, []).append(num)
 
-        # --- Derived ratings (position ratings & pitch overalls) ---
-        raw_derived = _compute_derived_for_seed(m, base_cols)
+        # --- Derived ratings (pitch overalls + position ratings from DB weights) ---
+        raw_derived = _compute_derived_for_seed(m, base_cols, position_weights)
         for attr_name, val in raw_derived.items():
             if val is not None:
                 bucket.setdefault(attr_name, []).append(val)
@@ -437,11 +448,15 @@ def _weighted(components: List[Tuple[Optional[float], float]]) -> Optional[float
     return total_v / total_w
 
 
-def _compute_derived_for_seed(m, base_cols) -> Dict[str, Optional[float]]:
+def _compute_derived_for_seed(
+    m, base_cols, position_weights: Dict[str, Dict[str, float]]
+) -> Dict[str, Optional[float]]:
     """
-    Compute raw derived ratings (position ratings & pitch overalls)
-    from a player's base attributes.  Mirrors the weighting in
-    rosters/_compute_derived_raw_ratings exactly.
+    Compute raw derived ratings (pitch overalls + position ratings)
+    from a player's base attributes.
+
+    Pitch overalls are always an equal-weight average of 4 components.
+    Position ratings use configurable weights from rating_overall_weights.
     """
     derived = {}
 
@@ -462,119 +477,10 @@ def _compute_derived_for_seed(m, base_cols) -> Dict[str, Optional[float]]:
         if ovr is not None:
             derived[f"pitch{n}_ovr"] = ovr
 
-    # Common base values
-    power = g("power_base")
-    contact = g("contact_base")
-    discipline = g("discipline_base")
-    eye = g("eye_base")
-    speed = g("speed_base")
-    baserunning = g("baserunning_base")
-    basereaction = g("basereaction_base")
-    throwacc = g("throwacc_base")
-    throwpower = g("throwpower_base")
-    fieldcatch = g("fieldcatch_base")
-    fieldreact = g("fieldreact_base")
-    fieldspot = g("fieldspot_base")
-    catchframe = g("catchframe_base")
-    catchsequence = g("catchsequence_base")
-    pendurance = g("pendurance_base")
-    pgencontrol = g("pgencontrol_base")
-    psequencing = g("psequencing_base")
-    pthrowpower = g("pthrowpower_base")
-    pickoff = g("pickoff_base")
-
-    # Position ratings use DB-stored pitch_ovr (matching rosters behavior)
-    p1 = g("pitch1_ovr")
-    p2 = g("pitch2_ovr")
-    p3 = g("pitch3_ovr")
-    p4 = g("pitch4_ovr")
-    p5 = g("pitch5_ovr")
-
-    # -- Catcher --  (batting 10%, base 5%, throw 10%, catcher 50%, field 25%)
-    derived["c_rating"] = _weighted([
-        (power, 0.025), (contact, 0.025), (eye, 0.025), (discipline, 0.025),
-        (basereaction, 0.025), (baserunning, 0.025),
-        (throwacc, 0.05), (throwpower, 0.05),
-        (catchframe, 0.25), (catchsequence, 0.25),
-        (fieldcatch, 0.05), (fieldreact, 0.15), (fieldspot, 0.05),
-    ])
-
-    # -- First Base --  (batting 70%, base 7.5%, throw 2.5%, field 20%)
-    derived["fb_rating"] = _weighted([
-        (power, 0.175), (contact, 0.175), (eye, 0.175), (discipline, 0.175),
-        (basereaction, 0.025), (baserunning, 0.025), (speed, 0.025),
-        (throwacc, 0.025),
-        (fieldcatch, 0.05), (fieldreact, 0.10), (fieldspot, 0.05),
-    ])
-
-    # -- Second Base --  (batting 40%, base 10%, throw 20%, field 30%)
-    derived["sb_rating"] = _weighted([
-        (power, 0.1), (contact, 0.1), (eye, 0.1), (discipline, 0.1),
-        (basereaction, 0.025), (baserunning, 0.025), (speed, 0.050),
-        (throwacc, 0.15), (throwpower, 0.05),
-        (fieldcatch, 0.10), (fieldreact, 0.15), (fieldspot, 0.05),
-    ])
-
-    # -- Third Base --  (batting 50%, base 5%, throw 20%, field 25%)
-    derived["tb_rating"] = _weighted([
-        (power, 0.125), (contact, 0.125), (eye, 0.125), (discipline, 0.125),
-        (basereaction, 0.025), (baserunning, 0.025),
-        (throwacc, 0.10), (throwpower, 0.10),
-        (fieldcatch, 0.05), (fieldreact, 0.15), (fieldspot, 0.05),
-    ])
-
-    # -- Shortstop --  (batting 15%, base 15%, throw 30%, field 40%)
-    derived["ss_rating"] = _weighted([
-        (power, 0.0375), (contact, 0.0375), (eye, 0.0375), (discipline, 0.0375),
-        (basereaction, 0.025), (baserunning, 0.025), (speed, 0.10),
-        (throwacc, 0.15), (throwpower, 0.15),
-        (fieldcatch, 0.15), (fieldreact, 0.25), (fieldspot, 0.10),
-    ])
-
-    # -- Left Field --  (batting 40%, base 15%, throw 15%, field 30%)
-    derived["lf_rating"] = _weighted([
-        (power, 0.1), (contact, 0.1), (eye, 0.1), (discipline, 0.1),
-        (basereaction, 0.025), (baserunning, 0.025), (speed, 0.10),
-        (throwacc, 0.10), (throwpower, 0.05),
-        (fieldcatch, 0.10), (fieldreact, 0.05), (fieldspot, 0.15),
-    ])
-
-    # -- Center Field --  (batting 10%, base 15%, throw 25%, field 50%)
-    derived["cf_rating"] = _weighted([
-        (power, 0.025), (contact, 0.025), (eye, 0.025), (discipline, 0.025),
-        (basereaction, 0.025), (baserunning, 0.025), (speed, 0.15),
-        (throwacc, 0.10), (throwpower, 0.15),
-        (fieldcatch, 0.15), (fieldreact, 0.20), (fieldspot, 0.15),
-    ])
-
-    # -- Right Field --  (batting 40%, base 15%, throw 15%, field 30%)
-    derived["rf_rating"] = _weighted([
-        (power, 0.1), (contact, 0.1), (eye, 0.1), (discipline, 0.1),
-        (basereaction, 0.025), (baserunning, 0.025), (speed, 0.10),
-        (throwacc, 0.05), (throwpower, 0.10),
-        (fieldcatch, 0.10), (fieldreact, 0.05), (fieldspot, 0.15),
-    ])
-
-    # -- Designated Hitter --  (batting + base only)
-    derived["dh_rating"] = _weighted([
-        (power, 0.10), (contact, 0.10), (eye, 0.10), (discipline, 0.10),
-        (basereaction, 0.025), (baserunning, 0.025), (speed, 0.025),
-    ])
-
-    # -- Starting Pitcher --  (field 10%, pitching 60%, pitch quality 40%)
-    derived["sp_rating"] = _weighted([
-        (fieldcatch, 0.025), (fieldreact, 0.05), (fieldspot, 0.025),
-        (pendurance, 0.20), (pgencontrol, 0.10), (psequencing, 0.20),
-        (pthrowpower, 0.05), (pickoff, 0.05),
-        (p1, 0.10), (p2, 0.10), (p3, 0.10), (p4, 0.05), (p5, 0.05),
-    ])
-
-    # -- Relief Pitcher --  (field 10%, pitching 25%, pitch quality 75%)
-    derived["rp_rating"] = _weighted([
-        (fieldcatch, 0.025), (fieldreact, 0.05), (fieldspot, 0.025),
-        (pendurance, 0.05), (pgencontrol, 0.10), (psequencing, 0.025),
-        (pthrowpower, 0.05), (pickoff, 0.025),
-        (p1, 0.25), (p2, 0.20), (p3, 0.15), (p4, 0.10), (p5, 0.05),
-    ])
+    # -- Position ratings from configurable weights --
+    for rating_type, wt_map in position_weights.items():
+        val = _compute_overall_for_player(m, derived, wt_map)
+        if val is not None:
+            derived[rating_type] = val
 
     return derived

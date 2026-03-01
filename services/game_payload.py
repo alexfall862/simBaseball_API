@@ -53,7 +53,18 @@ class _DummyRow:
         self._mapping = mapping
 
 
-def _build_engine_player_view_from_mapping(mapping: Dict[str, Any]) -> Dict[str, Any]:
+def _load_position_weights(conn):
+    """Load position rating weights from DB, or None to use defaults."""
+    try:
+        from services.rating_config import get_overall_weights, POSITION_RATING_TYPES
+        all_weights = get_overall_weights(conn)
+        pos = {k: v for k, v in all_weights.items() if k in POSITION_RATING_TYPES}
+        return pos or None
+    except Exception:
+        return None
+
+
+def _build_engine_player_view_from_mapping(mapping: Dict[str, Any], position_weights=None) -> Dict[str, Any]:
     """
     Core logic for turning a player row mapping (already adjusted for injuries)
     into the engine-facing dict.
@@ -66,7 +77,7 @@ def _build_engine_player_view_from_mapping(mapping: Dict[str, Any]) -> Dict[str,
 
     # Let the existing rating logic operate on this adjusted mapping
     dummy_row = _DummyRow(mapping)
-    derived = _compute_derived_raw_ratings(dummy_row) or {}
+    derived = _compute_derived_raw_ratings(dummy_row, position_weights) or {}
 
     engine_player: Dict[str, Any] = {}
 
@@ -1172,7 +1183,9 @@ def build_engine_player_view(conn, player_id: int) -> EnginePlayerView:
                 delta_num = 0.0
             adjusted_mapping[attr] = base_num + delta_num
 
-    engine_player = _build_engine_player_view_from_mapping(adjusted_mapping)
+    # Load position weights from DB
+    pos_weights = _load_position_weights(conn)
+    engine_player = _build_engine_player_view_from_mapping(adjusted_mapping, pos_weights)
     return EnginePlayerView(engine_player)
 
 def build_engine_player_views_bulk(
@@ -1217,8 +1230,9 @@ def build_engine_player_views_bulk(
 
     results: Dict[int, Dict[str, Any]] = {}
 
-    # 2) Bulk-load injury maluses for all players
+    # 2) Bulk-load injury maluses and position weights
     malus_by_player = get_active_injury_malus_bulk(conn, ids)
+    pos_weights = _load_position_weights(conn)
 
     for pid in ids:
         raw_mapping = raw_by_id.get(pid)
@@ -1241,7 +1255,7 @@ def build_engine_player_views_bulk(
                     delta_num = 0.0
                 adjusted_mapping[attr] = base_num + delta_num
 
-        engine_player = _build_engine_player_view_from_mapping(adjusted_mapping)
+        engine_player = _build_engine_player_view_from_mapping(adjusted_mapping, pos_weights)
         results[pid] = engine_player
 
     return results

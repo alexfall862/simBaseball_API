@@ -1244,7 +1244,22 @@
       const sortedAttrs = Object.keys(attrs).sort();
       const total = sortedAttrs.reduce((sum, k) => sum + attrs[k], 0);
       const totalClass = Math.abs(total - 1.0) < 0.005 ? 'text-success' : 'text-danger';
-      const label = ratingType === 'pitcher_overall' ? 'Pitcher Overall' : 'Position Player Overall';
+      const RATING_TYPE_LABELS = {
+        pitcher_overall: 'Pitcher Overall',
+        position_overall: 'Position Player Overall',
+        sp_rating: 'Starting Pitcher',
+        rp_rating: 'Relief Pitcher',
+        c_rating: 'Catcher',
+        fb_rating: 'First Base',
+        sb_rating: 'Second Base',
+        tb_rating: 'Third Base',
+        ss_rating: 'Shortstop',
+        lf_rating: 'Left Field',
+        cf_rating: 'Center Field',
+        rf_rating: 'Right Field',
+        dh_rating: 'Designated Hitter',
+      };
+      const label = RATING_TYPE_LABELS[ratingType] || ratingType;
 
       return `
         <div class="card" style="margin: 0">
