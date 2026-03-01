@@ -847,15 +847,19 @@
       })
       .then(data => {
         if (!data.ok || !data.levels) throw new Error('No config data');
-        const levels = data.levels;
-        const levelCount = Object.keys(levels).length;
+        const levels = data.levels; // { ptype: { level_id: { attr: {mean,std} } } }
+        const ptypeCount = Object.keys(levels).length;
+        let levelSet = new Set();
         let attrCount = 0;
-        for (const attrs of Object.values(levels)) {
-          attrCount += Object.keys(attrs).length;
+        for (const ptypeLevels of Object.values(levels)) {
+          for (const [lvl, attrs] of Object.entries(ptypeLevels)) {
+            levelSet.add(lvl);
+            attrCount += Object.keys(attrs).length;
+          }
         }
-        document.getElementById('rc-status').textContent = levelCount > 0 ? 'Seeded' : 'Empty';
-        document.getElementById('rc-status-sub').textContent = levelCount > 0 ? 'Config loaded' : 'Run seed to populate';
-        document.getElementById('rc-levels-count').textContent = levelCount;
+        document.getElementById('rc-status').textContent = ptypeCount > 0 ? 'Seeded' : 'Empty';
+        document.getElementById('rc-status-sub').textContent = ptypeCount > 0 ? `${ptypeCount} player types` : 'Run seed to populate';
+        document.getElementById('rc-levels-count').textContent = levelSet.size;
         document.getElementById('rc-attrs-count').textContent = `${attrCount} total rows`;
       })
       .catch(() => {
@@ -885,15 +889,24 @@
       })
       .then(data => {
         if (data.ok) {
-          const levels = data.levels || {};
-          const levelDetails = Object.entries(levels)
-            .sort(([a], [b]) => Number(a) - Number(b))
-            .map(([lvl, count]) => `  Level ${lvl} (${LEVEL_NAMES[lvl] || '?'}): ${count} attributes`)
-            .join('\n');
+          const levels = data.levels || {};  // { ptype: { level_id: attr_count } }
+          const playerCounts = data.player_counts || {};
+
+          let details = '';
+          for (const [ptype, ptypeLevels] of Object.entries(levels).sort()) {
+            const ptypePlayers = playerCounts[ptype] || {};
+            details += `\n${ptype}:\n`;
+            details += Object.entries(ptypeLevels)
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([lvl, count]) => {
+                const pc = ptypePlayers[Number(lvl)] || 0;
+                return `  Level ${lvl} (${LEVEL_NAMES[lvl] || '?'}): ${count} attributes from ${pc} players`;
+              })
+              .join('\n');
+          }
 
           resultBox.textContent =
-            `Success! ${data.rows_written} rows written across ${Object.keys(levels).length} levels.\n\n` +
-            levelDetails;
+            `Success! ${data.rows_written} rows written.\n` + details;
 
           // Refresh the summary cards
           loadRatingConfigSummary();
@@ -912,11 +925,15 @@
 
   function loadRatingConfig() {
     const levelFilter = document.getElementById('rc-level-filter').value;
+    const ptypeFilter = document.getElementById('rc-ptype-filter').value;
     const tbody = document.getElementById('rc-config-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Loading...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">Loading...</td></tr>';
 
     let url = `${ADMIN_BASE}/rating-config`;
-    if (levelFilter) url += `?level=${levelFilter}`;
+    const params = [];
+    if (levelFilter) params.push(`level=${levelFilter}`);
+    if (ptypeFilter) params.push(`ptype=${encodeURIComponent(ptypeFilter)}`);
+    if (params.length) url += '?' + params.join('&');
 
     fetch(url, { credentials: 'include' })
       .then(r => {
@@ -925,15 +942,15 @@
       })
       .then(data => {
         if (!data.ok || !data.levels) {
-          tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No config data. Run seed first.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No config data. Run seed first.</td></tr>';
           return;
         }
 
-        ratingConfigData = data.levels;
+        ratingConfigData = data.levels;  // { ptype: { level_id: { attr: {mean,std} } } }
         renderRatingConfigTable();
       })
       .catch(err => {
-        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-danger">Error: ${err.message}</td></tr>`;
       });
   }
 
@@ -943,43 +960,51 @@
     const searchTerm = (document.getElementById('rc-attr-filter').value || '').toLowerCase().trim();
     const tbody = document.getElementById('rc-config-tbody');
 
-    // Collect all rows sorted by level then attribute
+    // Collect all rows sorted by ptype, level, then attribute
     const rows = [];
-    const sortedLevels = Object.keys(ratingConfigData).sort((a, b) => Number(a) - Number(b));
+    const sortedPtypes = Object.keys(ratingConfigData).sort();
 
-    for (const levelId of sortedLevels) {
-      const attrs = ratingConfigData[levelId];
-      const sortedAttrs = Object.keys(attrs).sort();
+    for (const ptype of sortedPtypes) {
+      const ptypeLevels = ratingConfigData[ptype];
+      const sortedLevels = Object.keys(ptypeLevels).sort((a, b) => Number(a) - Number(b));
 
-      for (const attrKey of sortedAttrs) {
-        if (searchTerm && !attrKey.toLowerCase().includes(searchTerm)) continue;
+      for (const levelId of sortedLevels) {
+        const attrs = ptypeLevels[levelId];
+        const sortedAttrs = Object.keys(attrs).sort();
 
-        const { mean, std } = attrs[attrKey];
-        const low = std > 0 ? (mean - 3 * std).toFixed(1) : '--';
-        const high = std > 0 ? (mean + 3 * std).toFixed(1) : '--';
+        for (const attrKey of sortedAttrs) {
+          if (searchTerm && !attrKey.toLowerCase().includes(searchTerm)) continue;
 
-        rows.push({
-          levelId,
-          levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
-          attrKey,
-          mean: mean.toFixed(2),
-          std: std.toFixed(2),
-          low,
-          mid: mean.toFixed(1),
-          high,
-        });
+          const { mean, std } = attrs[attrKey];
+          const low = std > 0 ? (mean - 3 * std).toFixed(1) : '--';
+          const high = std > 0 ? (mean + 3 * std).toFixed(1) : '--';
+
+          rows.push({
+            ptype,
+            levelId,
+            levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
+            attrKey,
+            mean: mean.toFixed(2),
+            std: std.toFixed(2),
+            low,
+            mid: mean.toFixed(1),
+            high,
+          });
+        }
       }
     }
 
     if (rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No matching attributes found</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No matching attributes found</td></tr>';
       return;
     }
 
     tbody.innerHTML = rows.map(r => {
       const attrClass = getAttrCategoryClass(r.attrKey);
+      const ptypeBadge = r.ptype === 'Pitcher' ? 'badge-info' : 'badge-success';
       return `
         <tr>
+          <td><span class="badge ${ptypeBadge}">${r.ptype}</span></td>
           <td><span class="badge badge-${getLevelBadge(r.levelId)}">${r.levelName}</span></td>
           <td><code class="${attrClass}">${r.attrKey}</code></td>
           <td>${r.mean}</td>

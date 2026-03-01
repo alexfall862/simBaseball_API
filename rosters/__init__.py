@@ -867,17 +867,24 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
           * for derived ratings (c_rating, fb_rating, pitchN_ovr)
       - potentials (_pot) as raw strings
       - contract: current active holding contract metadata
+
+    dist_by_level is keyed by ptype → level → attr → {mean, std}.
+    We select the distribution matching this player's ptype and level.
     """
     m = row._mapping
     level_key = m.get("league_level") or m.get("current_level")
     org_abbrev = m.get("org_abbrev")
     team_abbrev = m.get("team_abbrev")
+    ptype = (m.get("ptype") or "").strip()
 
     rating_cols = col_cats["rating"]
     pot_cols = col_cats["pot"]
     bio_cols = col_cats["bio"]
 
-    dist_for_level = dist_by_level.get(level_key, {})
+    # Look up distribution for this player's ptype, then level.
+    # Fallback chain: exact ptype → "all" (legacy fallback) → empty.
+    ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
+    dist_for_level = ptype_dist.get(level_key, {})
 
     def _num_or_none(val):
         if val is None:
@@ -980,6 +987,9 @@ def _load_dist_by_level(conn, col_cats):
 
     Returns:
         (dist_by_level dict, source string "config" | "computed")
+
+    The returned dict is keyed by ptype then level:
+        { ptype: { league_level: { attr: { "mean", "std" } } } }
     """
     try:
         from services.rating_config import get_rating_config_by_level_name
@@ -990,7 +1000,7 @@ def _load_dist_by_level(conn, col_cats):
         # Table may not exist yet; fall through to on-the-fly
         pass
 
-    # Fallback: compute from all active players (original behavior)
+    # Fallback: compute from all active players (original behavior, not ptype-split)
     all_stmt = _build_ratings_base_stmt(level_filter=(1, 9))
     all_rows = conn.execute(all_stmt).all()
     if not all_rows:
@@ -999,6 +1009,8 @@ def _load_dist_by_level(conn, col_cats):
     dist = _compute_distributions_by_level(
         all_rows, col_cats["rating"], include_derived=True,
     )
+    # Wrap in a ptype-agnostic "all" key for backward compat
+    dist = {"all": dist}
     return dist, "computed"
 
 

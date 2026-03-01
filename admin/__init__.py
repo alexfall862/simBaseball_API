@@ -203,14 +203,16 @@ def admin_get_rating_config():
 
     GET /admin/rating-config
     GET /admin/rating-config?level=9
+    GET /admin/rating-config?ptype=Pitcher
 
-    Response groups by level_id, each with attribute_key -> {mean, std}.
+    Response groups by ptype then level_id, each with attribute_key -> {mean, std}.
     """
     guard = _require_admin()
     if guard:
         return guard
 
     level_id = request.args.get("level", type=int)
+    ptype = request.args.get("ptype")
 
     try:
         from db import get_engine
@@ -218,10 +220,12 @@ def admin_get_rating_config():
 
         engine = get_engine()
         with engine.connect() as conn:
-            config = get_rating_config(conn, level_id=level_id)
+            config = get_rating_config(conn, level_id=level_id, ptype=ptype)
 
         # Convert int keys to strings for JSON
-        out = {str(k): v for k, v in config.items()}
+        out = {}
+        for pt, levels in config.items():
+            out[pt] = {str(k): v for k, v in levels.items()}
         return jsonify(ok=True, levels=out)
 
     except Exception as e:

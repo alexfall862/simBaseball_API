@@ -2,9 +2,10 @@
 """
 Pre-computed 20-80 scouting scale configuration.
 
-Stores mean / stddev for each rating attribute at each level in the
-`rating_scale_config` table.  Roster endpoints read from this table
-instead of recomputing distributions on every request.
+Stores mean / stddev for each rating attribute at each level, split by
+player type (Pitcher vs Position), in the `rating_scale_config` table.
+Roster endpoints read from this table instead of recomputing distributions
+on every request.
 
 Also manages configurable overall rating weights for pitcher and
 position player overalls via the `rating_overall_weights` table.
@@ -22,6 +23,10 @@ from db import get_engine
 logger = logging.getLogger("app")
 
 PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+
+# Canonical ptype values stored in rating_scale_config
+PTYPE_PITCHER = "Pitcher"
+PTYPE_POSITION = "Position"
 
 
 # ------------------------------------------------------------------
@@ -63,50 +68,68 @@ def to_20_80(raw_val, mean, std) -> Optional[int]:
 # Read scale config
 # ------------------------------------------------------------------
 
-def get_rating_config(conn, level_id: Optional[int] = None) -> Dict[int, Dict[str, Dict[str, float]]]:
+def get_rating_config(
+    conn,
+    level_id: Optional[int] = None,
+    ptype: Optional[str] = None,
+) -> Dict[str, Dict[int, Dict[str, Dict[str, float]]]]:
     """
     Read rating_scale_config into:
-        { level_id: { attribute_key: { "mean": float, "std": float } } }
+        { ptype: { level_id: { attribute_key: { "mean": float, "std": float } } } }
+
+    Optional filters narrow the result set.
     """
-    sql = "SELECT level_id, attribute_key, mean_value, std_dev FROM rating_scale_config"
-    params = {}
+    sql = "SELECT level_id, ptype, attribute_key, mean_value, std_dev FROM rating_scale_config WHERE 1=1"
+    params: dict = {}
     if level_id is not None:
-        sql += " WHERE level_id = :level_id"
+        sql += " AND level_id = :level_id"
         params["level_id"] = level_id
+    if ptype is not None:
+        sql += " AND ptype = :ptype"
+        params["ptype"] = ptype
 
     rows = conn.execute(text(sql), params).all()
 
-    config: Dict[int, Dict[str, Dict[str, float]]] = {}
+    config: Dict[str, Dict[int, Dict[str, Dict[str, float]]]] = {}
     for r in rows:
         lvl = int(r[0])
-        attr = str(r[1])
-        config.setdefault(lvl, {})[attr] = {
-            "mean": float(r[2]),
-            "std": float(r[3]),
+        pt = str(r[1])
+        attr = str(r[2])
+        config.setdefault(pt, {}).setdefault(lvl, {})[attr] = {
+            "mean": float(r[3]),
+            "std": float(r[4]),
         }
     return config
 
 
-def get_rating_config_by_level_name(conn) -> Dict[str, Dict[str, Dict[str, float]]]:
+def get_rating_config_by_level_name(conn, ptype: Optional[str] = None) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
     """
     Same as get_rating_config but keyed by league_level string
     (e.g. "mlb", "aaa") for use in roster endpoints.
+
+    Returns: { ptype: { league_level: { attribute_key: { "mean", "std" } } } }
     """
     sql = """
-        SELECT rc.level_id, l.league_level, rc.attribute_key,
+        SELECT rc.level_id, rc.ptype, l.league_level, rc.attribute_key,
                rc.mean_value, rc.std_dev
         FROM rating_scale_config rc
         JOIN levels l ON l.id = rc.level_id
     """
-    rows = conn.execute(text(sql)).all()
+    params: dict = {}
+    if ptype is not None:
+        sql += " WHERE rc.ptype = :ptype"
+        params["ptype"] = ptype
 
-    config: Dict[str, Dict[str, Dict[str, float]]] = {}
+    rows = conn.execute(text(sql), params).all()
+
+    config: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
     for r in rows:
-        level_name = str(r[1])
-        attr = str(r[2])
-        config.setdefault(level_name, {})[attr] = {
-            "mean": float(r[3]),
-            "std": float(r[4]),
+        pt = str(r[1])
+        level_name = str(r[2])
+        attr = str(r[3])
+        config.setdefault(pt, {}).setdefault(level_name, {})[attr] = {
+            "mean": float(r[4]),
+            "std": float(r[5]),
         }
     return config
 
@@ -145,17 +168,24 @@ def update_overall_weight(conn, rating_type: str, attribute_key: str, weight: fl
 # Seed / refresh config from live player data
 # ------------------------------------------------------------------
 
+# Map overall weight rating_type → which ptype should compute it
+_OVERALL_PTYPE_MAP = {
+    "pitcher_overall": PTYPE_PITCHER,
+    "position_overall": PTYPE_POSITION,
+}
+
 def seed_rating_config(conn) -> Dict[str, Any]:
     """
     Compute population mean & stddev for every base attribute, derived
-    rating, and overall rating at every level, then UPSERT into
-    rating_scale_config.
+    rating, and overall rating at every level, SPLIT BY PLAYER TYPE,
+    then UPSERT into rating_scale_config.
 
-    Uses a deduplicated subquery to ensure each player appears exactly
-    once per level.
+    Distributions are computed separately for Pitcher vs Position players
+    at each level. This avoids bimodal distributions caused by mixing
+    player types (e.g., pitchers have low power_base which would drag
+    down the combined mean and inflate stddev).
     """
     # 1. Fetch one row per player with their contract-based level.
-    #    The subquery deduplicates in case of multiple team shares.
     player_sql = text("""
         SELECT p.*, sub.current_level
         FROM simbbPlayers p
@@ -175,30 +205,35 @@ def seed_rating_config(conn) -> Dict[str, Any]:
         logger.warning("seed_rating_config: no active players found")
         return {"rows_written": 0, "levels": {}, "player_counts": {}}
 
-    # 2. Identify column categories from first row
+    # 2. Identify base columns from first row
     col_names = list(rows[0]._mapping.keys())
     base_cols = [c for c in col_names if c.endswith("_base")]
 
     # 3. Load overall weights from DB (if table exists)
-    overall_weights = {}
+    overall_weights: Dict[str, Dict[str, float]] = {}
     try:
         overall_weights = get_overall_weights(conn)
     except Exception:
         logger.info("seed_rating_config: rating_overall_weights table not found, skipping overalls")
 
-    # 4. Accumulate values by level — one pass through all players
-    level_attr_values: Dict[int, Dict[str, List[float]]] = {}
-    player_counts: Dict[int, int] = {}
+    # 4. Accumulate values by (level, ptype) — one pass through all players
+    #    Key: (level_id, ptype) → { attr_key → [values] }
+    bucket_values: Dict[Tuple[int, str], Dict[str, List[float]]] = {}
+    player_counts: Dict[str, Dict[int, int]] = {}  # ptype → level → count
 
     for row in rows:
         m = row._mapping
         level = m.get("current_level")
-        if level is None:
+        ptype = (m.get("ptype") or "").strip()
+        if level is None or ptype not in (PTYPE_PITCHER, PTYPE_POSITION):
             continue
         level = int(level)
 
-        player_counts[level] = player_counts.get(level, 0) + 1
-        bucket = level_attr_values.setdefault(level, {})
+        player_counts.setdefault(ptype, {})
+        player_counts[ptype][level] = player_counts[ptype].get(level, 0) + 1
+
+        bkey = (level, ptype)
+        bucket = bucket_values.setdefault(bkey, {})
 
         # --- Base attributes ---
         for col in base_cols:
@@ -224,25 +259,27 @@ def seed_rating_config(conn) -> Dict[str, Any]:
                 bucket.setdefault(attr_name, []).append(val)
 
         # --- Overall ratings from configurable weights ---
+        # Only compute the overall that matches this player's ptype
         for rating_type, wt_map in overall_weights.items():
+            expected_ptype = _OVERALL_PTYPE_MAP.get(rating_type)
+            if expected_ptype and expected_ptype != ptype:
+                continue
             ovr_val = _compute_overall_for_player(m, raw_derived, wt_map)
             if ovr_val is not None:
                 bucket.setdefault(rating_type, []).append(ovr_val)
 
-    # 5. Compute mean/std and UPSERT
+    # 5. Clear old data and write fresh
+    conn.execute(text("DELETE FROM rating_scale_config"))
+
     upsert_sql = text("""
-        INSERT INTO rating_scale_config (level_id, attribute_key, mean_value, std_dev)
-        VALUES (:level_id, :attribute_key, :mean_value, :std_dev)
-        ON DUPLICATE KEY UPDATE
-            mean_value = VALUES(mean_value),
-            std_dev    = VALUES(std_dev),
-            updated_at = CURRENT_TIMESTAMP
+        INSERT INTO rating_scale_config (level_id, ptype, attribute_key, mean_value, std_dev)
+        VALUES (:level_id, :ptype, :attribute_key, :mean_value, :std_dev)
     """)
 
     total_rows = 0
-    levels_summary: Dict[int, int] = {}
+    levels_summary: Dict[str, Dict[int, int]] = {}  # ptype → level → attr_count
 
-    for level_id, attrs in sorted(level_attr_values.items()):
+    for (level_id, ptype), attrs in sorted(bucket_values.items()):
         attr_count = 0
         for attr_key, vals in sorted(attrs.items()):
             if not vals:
@@ -257,18 +294,19 @@ def seed_rating_config(conn) -> Dict[str, Any]:
 
             conn.execute(upsert_sql, {
                 "level_id": level_id,
+                "ptype": ptype,
                 "attribute_key": attr_key,
                 "mean_value": round(mean, 6),
                 "std_dev": round(std, 6),
             })
             attr_count += 1
 
-        levels_summary[level_id] = attr_count
+        levels_summary.setdefault(ptype, {})[level_id] = attr_count
         total_rows += attr_count
 
     logger.info(
-        "seed_rating_config: wrote %d rows across %d levels, player counts: %s",
-        total_rows, len(levels_summary), player_counts,
+        "seed_rating_config: wrote %d rows, player counts: %s",
+        total_rows, player_counts,
     )
     return {
         "rows_written": total_rows,
