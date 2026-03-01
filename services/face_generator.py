@@ -149,7 +149,26 @@ _SHAVE_RANGE = (0.0, 0.2)
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_face(player_id: int, config: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+def get_team_jersey(team_id: int, config: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Determine the jersey for a team.
+
+    Checks jersey_overrides in config first (admin-set per-team),
+    then falls back to a deterministic pick seeded by team_id.
+    """
+    if config:
+        overrides = config.get("jersey_overrides") or {}
+        override = overrides.get(str(team_id))
+        if override and override in JERSEY_IDS:
+            return override
+    return random.Random(team_id).choice(JERSEY_IDS)
+
+
+def generate_face(
+    player_id: int,
+    config: Optional[Dict[str, Any]] = None,
+    jersey: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Generate a deterministic FaceDataResponse for one player.
 
@@ -157,6 +176,9 @@ def generate_face(player_id: int, config: Optional[Dict[str, float]] = None) -> 
         player_id: Unique player identifier (used as RNG seed).
         config: Optional probability overrides from face_gen_config table.
                 Falls back to DEFAULT_FREQUENCIES when None.
+        jersey: Team-level jersey override. When provided, all players on
+                the same team get this jersey. The RNG still consumes a
+                jersey pick to keep the sequence stable for all other fields.
 
     Returns:
         Flat dict with PascalCase keys matching the frontend FaceDataResponse.
@@ -177,6 +199,10 @@ def generate_face(player_id: int, config: Optional[Dict[str, float]] = None) -> 
         lo, hi = _NUMERIC_RANGES[key]
         return round(rng.uniform(lo, hi), 2)
 
+    # Consume the jersey RNG slot to keep the sequence stable,
+    # but use the team-level jersey if provided.
+    _rng_jersey = rng.choice(JERSEY_IDS)
+
     return {
         # Structure (always present)
         "Head":     rng.choice(HEAD_IDS),
@@ -187,7 +213,7 @@ def generate_face(player_id: int, config: Optional[Dict[str, float]] = None) -> 
         "Nose":     rng.choice(NOSE_IDS),
         "Mouth":    rng.choice(MOUTH_IDS),
         "Hair":     rng.choice(HAIR_IDS),
-        "Jersey":   rng.choice(JERSEY_IDS),
+        "Jersey":   jersey if jersey is not None else _rng_jersey,
 
         # Optional features (probability-controlled)
         "EyeLine":    _optional(EYELINE_IDS, "eyeLine_pct"),
@@ -221,17 +247,33 @@ def generate_face(player_id: int, config: Optional[Dict[str, float]] = None) -> 
     }
 
 
-def generate_faces_bulk(
-    player_ids: List[int],
-    config: Optional[Dict[str, float]] = None,
-) -> Dict[int, Dict[str, Any]]:
+def generate_faces_for_roster(
+    roster_map: Dict[Any, List[Dict[str, Any]]],
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
     """
-    Generate faces for a batch of players.
+    Generate faces for all players in a roster map keyed by team_id.
+
+    Each team gets a single jersey (from admin override or deterministic
+    from team_id). All players on that team share the same jersey.
+
+    Args:
+        roster_map: {team_id: [player_dict, ...]} as returned by bootstrap.
+        config: Face generation config (probabilities + jersey_overrides).
 
     Returns:
-        {player_id: FaceDataResponse, ...}
+        {str(player_id): FaceDataResponse, ...}
     """
-    return {pid: generate_face(pid, config) for pid in player_ids}
+    result: Dict[str, Dict[str, Any]] = {}
+    for team_id, players in roster_map.items():
+        if not isinstance(players, list):
+            continue
+        jersey = get_team_jersey(int(team_id), config)
+        for p in players:
+            pid = p.get("id")
+            if pid is not None:
+                result[str(pid)] = generate_face(int(pid), config, jersey=jersey)
+    return result
 
 
 # ---------------------------------------------------------------------------

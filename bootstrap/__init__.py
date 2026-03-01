@@ -104,19 +104,9 @@ def get_landing(org_id: int):
             # Face data — deterministic player portraits for facesjs
             face_data = {}
             try:
-                from services.face_generator import generate_faces_bulk, load_face_config
-                all_player_ids = []
-                for _level_key, players in roster_map.items():
-                    if isinstance(players, list):
-                        for p in players:
-                            pid = p.get("id")
-                            if pid is not None:
-                                all_player_ids.append(int(pid))
+                from services.face_generator import generate_faces_for_roster, load_face_config
                 face_config = load_face_config(conn)
-                face_data = {
-                    str(k): v
-                    for k, v in generate_faces_bulk(all_player_ids, config=face_config).items()
-                }
+                face_data = generate_faces_for_roster(roster_map, config=face_config)
             except Exception:
                 log.debug("bootstrap: face generation unavailable, skipping")
 

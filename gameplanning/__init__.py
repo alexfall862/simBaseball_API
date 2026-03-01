@@ -798,25 +798,31 @@ def put_bullpen(team_id: int):
 # 7. Face generation config (admin)
 # ---------------------------------------------------------------------------
 
-from services.face_generator import DEFAULT_FREQUENCIES
+from services.face_generator import DEFAULT_FREQUENCIES, JERSEY_IDS
 
 VALID_FREQ_KEYS = set(DEFAULT_FREQUENCIES.keys())
+
+_DEFAULT_CONFIG = {**DEFAULT_FREQUENCIES, "jersey_overrides": {}}
+
+
+def _load_full_config(conn):
+    """Load face config from DB, returning defaults if unavailable."""
+    row = conn.execute(
+        text("SELECT config FROM face_gen_config WHERE id = 1")
+    ).first()
+    if row and row[0]:
+        raw = row[0]
+        return json.loads(raw) if isinstance(raw, str) else dict(raw)
+    return dict(_DEFAULT_CONFIG)
 
 
 @gameplanning_bp.get("/gameplanning/face-config")
 def get_face_config():
-    """Return the current face generation probability settings."""
+    """Return the current face generation settings (probabilities + jersey overrides)."""
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT config FROM face_gen_config WHERE id = 1")
-            ).first()
-            if row and row[0]:
-                raw = row[0]
-                config = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            else:
-                config = dict(DEFAULT_FREQUENCIES)
+            config = _load_full_config(conn)
         return jsonify(config), 200
     except SQLAlchemyError:
         log.exception("gameplanning: get face-config db error")
@@ -826,15 +832,34 @@ def get_face_config():
 
 @gameplanning_bp.put("/gameplanning/face-config")
 def put_face_config():
-    """Update face generation probability settings (partial updates OK)."""
+    """Update face generation settings (partial updates OK).
+
+    Accepts probability keys (*_pct: float 0-1) and/or
+    jersey_overrides (dict of team_id string -> jersey ID string).
+    """
     body = request.get_json(silent=True) or {}
     if not body:
         return jsonify(error="bad_request",
                        message="Request body must be JSON"), 400
 
-    # Validate keys and values
+    # Validate
     errors = []
+    jersey_overrides_update = None
+
     for key, val in body.items():
+        if key == "jersey_overrides":
+            if not isinstance(val, dict):
+                errors.append("jersey_overrides must be an object {team_id: jersey_id}")
+                continue
+            for tid, jid in val.items():
+                if jid is not None and jid not in JERSEY_IDS:
+                    errors.append(
+                        f"jersey_overrides[{tid}]: '{jid}' is not a valid jersey. "
+                        f"Options: {', '.join(JERSEY_IDS)}"
+                    )
+            jersey_overrides_update = val
+            continue
+
         if key not in VALID_FREQ_KEYS:
             errors.append(f"Unknown setting: {key}")
             continue
@@ -852,19 +877,22 @@ def put_face_config():
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            # Load existing config
-            row = conn.execute(
-                text("SELECT config FROM face_gen_config WHERE id = 1")
-            ).first()
-            if row and row[0]:
-                raw = row[0]
-                existing = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            else:
-                existing = dict(DEFAULT_FREQUENCIES)
+            existing = _load_full_config(conn)
 
-            # Merge updates
-            existing.update({k: float(v) for k, v in body.items()
-                             if k in VALID_FREQ_KEYS})
+            # Merge frequency updates
+            for k, v in body.items():
+                if k in VALID_FREQ_KEYS:
+                    existing[k] = float(v)
+
+            # Merge jersey overrides (null value removes an override)
+            if jersey_overrides_update is not None:
+                overrides = existing.get("jersey_overrides") or {}
+                for tid, jid in jersey_overrides_update.items():
+                    if jid is None:
+                        overrides.pop(str(tid), None)
+                    else:
+                        overrides[str(tid)] = jid
+                existing["jersey_overrides"] = overrides
 
             config_json = json.dumps(existing)
             conn.execute(text("""
