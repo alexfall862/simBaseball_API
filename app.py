@@ -2,7 +2,7 @@ import os, json, logging, time, uuid, datetime
 from functools import wraps
 
 from flask import has_request_context
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, session
 from flask_cors import CORS
 from flask_sock import Sock
 from werkzeug.exceptions import HTTPException, BadRequest
@@ -521,6 +521,8 @@ def create_app(config_object=Config):
 
     @app.get("/admin/amateur-contracts-preview")
     def admin_amateur_contracts_preview():
+        if not session.get("admin"):
+            return jsonify(error="unauthorized", message="Not logged in."), 401
         if not getattr(app, "engine", None):
             return jsonify(error="no_db_engine", message="Database engine not initialized."), 500
         result = preview_amateur_need(app.engine)
@@ -532,22 +534,15 @@ def create_app(config_object=Config):
         log = logging.getLogger("app")
         log.info("seed_amateur_contracts: endpoint called")
 
+        if not session.get("admin"):
+            return jsonify(error="unauthorized", message="Not logged in."), 401
+
         if os.getenv("ALLOW_CONTRACT_SEEDING", "false").lower() != "true":
             log.info("seed_amateur_contracts: blocked by ALLOW_CONTRACT_SEEDING")
             return jsonify(
                 error="forbidden",
                 message="Contract seeding is disabled. Set ALLOW_CONTRACT_SEEDING=true to enable."
             ), 403
-
-        admin_pw = os.getenv("ADMIN_PASSWORD")
-        if admin_pw:
-            header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
-                log.info("seed_amateur_contracts: invalid admin password")
-                return jsonify(
-                    error="unauthorized",
-                    message="Invalid admin password."
-                ), 401
 
         if not getattr(app, "engine", None):
             log.error("seed_amateur_contracts: no app.engine")

@@ -2250,7 +2250,7 @@
     btn.disabled = true;
     btn.textContent = 'Scanning...';
 
-    fetch(`${ADMIN_BASE}/amateur-contracts-preview`)
+    fetch(`${ADMIN_BASE}/amateur-contracts-preview`, { credentials: 'include' })
       .then(r => r.json())
       .then(data => {
         btn.disabled = false;
@@ -2322,6 +2322,7 @@
     fetch(`${ADMIN_BASE}/seed-amateur-contracts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
     })
       .then(r => r.json())
       .then(data => {
