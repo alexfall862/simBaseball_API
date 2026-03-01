@@ -1271,11 +1271,11 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
     p = t["players"]
 
     # Get all active contracts where this org is the holder.
-    # Join to the first detail row (year_number=1) for salary display.
+    # Join to the first detail row (year=1) for salary display.
     q = (
         select(
-            c.c.contract_id,
-            c.c.player_id,
+            c.c.id.label("contract_id"),
+            c.c.playerID,
             c.c.current_level,
             c.c.onIR,
             p.c.firstName,
@@ -1284,16 +1284,16 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
             d.c.salary,
         )
         .select_from(
-            c.join(d, c.c.contract_id == d.c.contract_id)
-            .join(s, d.c.contractDetailsID == s.c.contractDetailsID)
-            .join(p, c.c.player_id == p.c.player_id)
+            c.join(d, d.c.contractID == c.c.id)
+            .join(s, s.c.contractDetailsID == d.c.id)
+            .join(p, c.c.playerID == p.c.id)
         )
         .where(
             and_(
                 s.c.orgID == org_id,
                 s.c.isHolder == 1,
                 c.c.isFinished == 0,
-                d.c.year_number == 1,
+                d.c.year == 1,
             )
         )
         .order_by(c.c.current_level.desc(), p.c.lastName, p.c.firstName)
@@ -1302,7 +1302,7 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
     return [
         {
             "contract_id": r._mapping["contract_id"],
-            "player_id": r._mapping["player_id"],
+            "player_id": r._mapping["playerID"],
             "player_name": f"{r._mapping['firstName']} {r._mapping['lastName']}",
             "position": r._mapping["position"],
             "current_level": r._mapping["current_level"],
