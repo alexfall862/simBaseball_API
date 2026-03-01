@@ -12,7 +12,7 @@ import logging
 from decimal import Decimal
 from typing import Any, Dict, List, Tuple
 
-from sqlalchemy import MetaData, Table, and_, select, update
+from sqlalchemy import MetaData, Table, and_, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
@@ -365,19 +365,7 @@ def seed_amateur_contracts(engine=None) -> Dict[str, Any]:
                 conn.execute(shares.insert(), shares_rows)
                 log.info("amateur_seed: inserted %d share rows", len(shares_rows))
 
-            # 8) Update simbbPlayers.level for all assigned players
-            level_map = {HS_LEVEL: "hs", INTAM_LEVEL: "intam", COLLEGE_LEVEL: "college"}
-            for p, org_id, level, years, is_redshirt in assignments:
-                level_str = level_map[level]
-                conn.execute(
-                    update(players)
-                    .where(players.c.id == p["id"])
-                    .values(level=level_str)
-                )
-
-            log.info("amateur_seed: updated player levels")
-
-            # 9) Build summary
+            # 8) Build summary
             hs_count = sum(1 for a in assignments if a[2] == HS_LEVEL)
             intam_count = sum(1 for a in assignments if a[2] == INTAM_LEVEL)
             college_count = sum(1 for a in assignments if a[2] == COLLEGE_LEVEL)
