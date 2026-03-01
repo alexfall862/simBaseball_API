@@ -216,23 +216,36 @@ def _get_org_team_ids(org):
 
 
 def _get_roster_map(conn, tables, org_id):
-    """Players keyed by team_id, using the same join pattern as rosters module."""
+    """
+    Players keyed by team_id, with 20-80 scaled ratings and position ratings.
+
+    Each player object includes:
+      - bio fields (firstname, lastname, ptype, age, etc.)
+      - contract fields (salary, onIR, current_level)
+      - ratings dict: {power_display: 70, c_rating: 65, pitch1_ovr: 72, ...}
+      - potentials dict: {power_pot: "B+", ...}
+    """
+    import re
+    from rosters import _compute_derived_raw_ratings, _load_position_weights
+
     c = tables["contracts"]
     cd = tables["contract_details"]
     cts = tables["contract_team_share"]
     p = tables["players"]
     t = tables["teams"]
+    lvl = tables["levels"]
 
+    # Select ALL player columns + contract / team metadata
     stmt = (
         select(
-            p.c.id, p.c.firstname, p.c.lastname, p.c.ptype,
-            p.c.bat_hand, p.c.pitch_hand, p.c.age,
-            p.c.displayovr,
+            p,
             c.c.current_level,
             c.c.onIR,
             cd.c.salary,
+            cts.c.salary_share,
             t.c.id.label("team_id"),
             t.c.team_abbrev,
+            lvl.c.league_level,
         )
         .select_from(
             c.join(cd, and_(cd.c.contractID == c.c.id,
@@ -241,24 +254,122 @@ def _get_roster_map(conn, tables, org_id):
              .join(p, p.c.id == c.c.playerID)
              .join(t, and_(t.c.orgID == cts.c.orgID,
                            t.c.team_level == c.c.current_level))
+             .join(lvl, lvl.c.id == c.c.current_level)
         )
         .where(and_(c.c.isActive == 1, cts.c.isHolder == 1, cts.c.orgID == org_id))
     )
 
     rows = conn.execute(stmt).all()
+    if not rows:
+        return {}
+
+    # Load rating distributions and position weights once
+    dist_by_level = {}
+    try:
+        from services.rating_config import get_rating_config_by_level_name
+        dist_by_level = get_rating_config_by_level_name(conn) or {}
+    except Exception:
+        pass
+
+    position_weights = _load_position_weights(conn)
+
+    # Classify player columns from the first row
+    pitch_comp_re = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+    col_names = [k for k in rows[0]._mapping.keys()]
+    base_cols = [n for n in col_names if n.endswith("_base")]
+    pot_cols = [n for n in col_names if n.endswith("_pot")]
+    derived_cols = [n for n in col_names
+                    if n.endswith("_rating") or re.match(r"^pitch\d+_ovr$", n)]
+    bio_skip = set(base_cols + pot_cols + derived_cols +
+                   ["team", "current_level", "onIR", "salary",
+                    "salary_share", "team_id", "team_abbrev", "league_level"])
+
+    def _to_20_80(raw_val, mean, std):
+        if raw_val is None or mean is None:
+            return None
+        try:
+            x = float(raw_val)
+        except (TypeError, ValueError):
+            return None
+        if std is None or std <= 0:
+            z = 0.0
+        else:
+            z = (x - mean) / std
+        z = max(-3.0, min(3.0, z))
+        raw_score = 50.0 + (z / 3.0) * 30.0
+        score = int(round(max(20.0, min(80.0, raw_score)) / 5.0) * 5)
+        return max(20, min(80, score))
 
     roster_map = {}
     seen = set()
     for row in rows:
-        d = _row_to_dict(row)
-        player_id = d["id"]
-        team_id = d.pop("team_id")
+        m = row._mapping
+        player_id = m["id"]
+        team_id = m["team_id"]
         if player_id in seen:
             continue
         seen.add(player_id)
-        if d.get("salary") is not None:
-            d["salary"] = float(d["salary"])
-        roster_map.setdefault(team_id, []).append(d)
+
+        ptype = (m.get("ptype") or "").strip()
+        league_level = m.get("league_level")
+
+        # Distribution lookup: player's ptype → level, fallback to "all"
+        ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
+        dist_for_level = ptype_dist.get(league_level, {})
+
+        # Bio fields
+        bio = {}
+        for k in col_names:
+            if k not in bio_skip:
+                bio[k] = m.get(k)
+
+        # 20-80 ratings for *_base columns
+        ratings = {}
+        for col in base_cols:
+            val = m.get(col)
+            mp = pitch_comp_re.match(col)
+            dist_key = f"pitch_{mp.group(1)}" if mp else col
+            d = dist_for_level.get(dist_key)
+            if d and d.get("mean") is not None:
+                ratings[col.replace("_base", "_display")] = _to_20_80(val, d["mean"], d["std"])
+            else:
+                ratings[col.replace("_base", "_display")] = None
+
+        # Derived ratings (position ratings + pitch overalls)
+        raw_derived = _compute_derived_raw_ratings(row, position_weights)
+        for attr_name, raw_val in raw_derived.items():
+            d = dist_for_level.get(attr_name)
+            if d and d.get("mean") is not None:
+                ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
+            else:
+                ratings[attr_name] = None
+
+        # Potentials
+        potentials = {}
+        for col in pot_cols:
+            potentials[col] = m.get(col)
+
+        # Salary
+        base_salary = m.get("salary")
+        share = m.get("salary_share")
+        salary = None
+        if base_salary is not None and share is not None:
+            try:
+                salary = float(base_salary) * float(share)
+            except (TypeError, ValueError):
+                pass
+
+        player = {
+            **bio,
+            "current_level": m.get("current_level"),
+            "league_level": league_level,
+            "team_abbrev": m.get("team_abbrev"),
+            "onIR": bool(m.get("onIR") or 0),
+            "salary": salary,
+            "ratings": ratings,
+            "potentials": potentials,
+        }
+        roster_map.setdefault(team_id, []).append(player)
 
     return roster_map
 
