@@ -7,6 +7,7 @@ from flask_cors import CORS
 from flask_sock import Sock
 from werkzeug.exceptions import HTTPException, BadRequest
 from seeding.contracts_seed import seed_initial_contracts
+from seeding.amateur_contracts_seed import seed_amateur_contracts, preview_amateur_need
 
 
 # ---- Rate limiting (lightweight) ----
@@ -518,7 +519,51 @@ def create_app(config_object=Config):
             details=result,
         ), 200
 
+    @app.get("/admin/amateur-contracts-preview")
+    def admin_amateur_contracts_preview():
+        if not getattr(app, "engine", None):
+            return jsonify(error="no_db_engine", message="Database engine not initialized."), 500
+        result = preview_amateur_need(app.engine)
+        return jsonify(result), 200
 
+    @app.post("/admin/seed-amateur-contracts")
+    @soft_timeout(app)
+    def admin_seed_amateur_contracts():
+        log = logging.getLogger("app")
+        log.info("seed_amateur_contracts: endpoint called")
+
+        if os.getenv("ALLOW_CONTRACT_SEEDING", "false").lower() != "true":
+            log.info("seed_amateur_contracts: blocked by ALLOW_CONTRACT_SEEDING")
+            return jsonify(
+                error="forbidden",
+                message="Contract seeding is disabled. Set ALLOW_CONTRACT_SEEDING=true to enable."
+            ), 403
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("seed_amateur_contracts: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("seed_amateur_contracts: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        log.info("seed_amateur_contracts: calling seed_amateur_contracts")
+        result = seed_amateur_contracts(app.engine)
+        log.info("seed_amateur_contracts: finished: %s", result)
+
+        return jsonify(
+            status="ok",
+            details=result,
+        ), 200
 
 
 # ----------------------------

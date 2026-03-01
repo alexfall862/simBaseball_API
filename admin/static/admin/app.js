@@ -161,6 +161,10 @@
     // Transactions — Log
     document.getElementById('btn-tx-load-log').addEventListener('click', loadTransactionLog);
 
+    // Amateur Seeding
+    document.getElementById('btn-amateur-preview').addEventListener('click', loadAmateurPreview);
+    document.getElementById('btn-amateur-seed').addEventListener('click', runAmateurSeed);
+
     // End of Season
     document.getElementById('btn-eos-run').addEventListener('click', runEndOfSeason);
     document.getElementById('btn-eos-load-overview').addEventListener('click', () => {
@@ -210,6 +214,7 @@
       'pe-generate': 'Player Generation',
       'pe-progress': 'Player Progression',
       'tx-eos': 'End of Season',
+      'tx-amateur': 'Amateur Seeding',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -248,6 +253,9 @@
         break;
       case 'tx-eos':
         loadEndOfSeason();
+        break;
+      case 'tx-amateur':
+        loadAmateurPreview();
         break;
       case 'pe-generate':
         loadGeneration();
@@ -2235,6 +2243,129 @@
   }
 
   // ── End of Season ──────────────────────────────────────────────────
+
+  // ── Amateur Seeding ──────────────────────────────────────────
+  function loadAmateurPreview() {
+    const btn = document.getElementById('btn-amateur-preview');
+    btn.disabled = true;
+    btn.textContent = 'Scanning...';
+
+    fetch(`${ADMIN_BASE}/amateur-contracts-preview`)
+      .then(r => r.json())
+      .then(data => {
+        btn.disabled = false;
+        btn.textContent = 'Scan Players';
+
+        if (data.error) {
+          alert('Error: ' + data.message);
+          return;
+        }
+
+        document.getElementById('amateur-preview').style.display = 'block';
+
+        // Summary cards
+        const cards = document.getElementById('amateur-summary-cards');
+        const total = (data.hs.total || 0) + (data.intam_young.total || 0) + (data.intam_older.total || 0) + (data.college.total || 0);
+        cards.innerHTML = `
+          <div class="stat-card">
+            <div class="stat-label">Total Uncontracted</div>
+            <div class="stat-value">${data.total_uncontracted.toLocaleString()}</div>
+            <div class="stat-sub">${total.toLocaleString()} assignable, ${data.skipped} skipped</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">College Eligible</div>
+            <div class="stat-value">${data.college.total.toLocaleString()}</div>
+            <div class="stat-sub">${data.college.avg_pitchers_per_org} P / ${data.college.avg_batters_per_org} B per org (target ${data.college.target_per_org})</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Pre-Professional</div>
+            <div class="stat-value">${(data.hs.total + data.intam_young.total + data.intam_older.total).toLocaleString()}</div>
+            <div class="stat-sub">${data.hs.total} HS + ${data.intam_young.total + data.intam_older.total} INTAM</div>
+          </div>
+        `;
+
+        // Breakdown table
+        const tbody = document.getElementById('amateur-breakdown-tbody');
+        tbody.innerHTML = [
+          { cat: 'High School', org: data.hs.org, range: '15-17', p: data.hs.pitchers, b: data.hs.batters, t: data.hs.total, notes: 'USA only, contracts expire at 18' },
+          { cat: 'INTAM (Young)', org: data.intam_young.org, range: data.intam_young.age_range, p: data.intam_young.pitchers, b: data.intam_young.batters, t: data.intam_young.total, notes: 'International, expire at 18' },
+          { cat: 'INTAM (Older)', org: data.intam_older.org, range: data.intam_older.age_range, p: data.intam_older.pitchers, b: data.intam_older.batters, t: data.intam_older.total, notes: 'International, expire at 23' },
+          { cat: 'College', org: `${data.college.orgs_available} orgs`, range: '18-23', p: data.college.pitchers, b: data.college.batters, t: data.college.total, notes: `~20% redshirt (+1yr), target ${data.college.target_per_org}/org` },
+        ].map(r => `
+          <tr>
+            <td><strong>${r.cat}</strong></td>
+            <td>${r.org}</td>
+            <td>${r.range}</td>
+            <td>${r.p.toLocaleString()}</td>
+            <td>${r.b.toLocaleString()}</td>
+            <td><strong>${r.t.toLocaleString()}</strong></td>
+            <td class="text-muted">${r.notes}</td>
+          </tr>
+        `).join('');
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = 'Scan Players';
+        alert('Error: ' + err.message);
+      });
+  }
+
+  function runAmateurSeed() {
+    if (!confirm('This will create contracts for all uncontracted amateur players (HS, INTAM, College). Continue?')) {
+      return;
+    }
+
+    const btn = document.getElementById('btn-amateur-seed');
+    btn.disabled = true;
+    btn.textContent = 'Seeding...';
+
+    fetch(`${ADMIN_BASE}/seed-amateur-contracts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(r => r.json())
+      .then(data => {
+        btn.disabled = false;
+        btn.textContent = 'Seed Amateur Contracts';
+
+        if (data.error) {
+          alert(`Error: ${data.message}`);
+          return;
+        }
+
+        const d = data.details || data;
+        const resultDiv = document.getElementById('amateur-seed-kv');
+        const card = document.getElementById('amateur-seed-result');
+        card.style.display = 'block';
+
+        const labels = {
+          hs_contracts: 'HS Contracts Created',
+          intam_contracts: 'INTAM Contracts Created',
+          college_contracts: 'College Contracts Created',
+          total_contracts: 'Total Contracts',
+          redshirt_count: 'Redshirt Players',
+          details_created: 'Contract Detail Rows',
+          shares_created: 'Team Share Rows',
+          skipped_no_age: 'Skipped (No Age)',
+          skipped_zero_years: 'Skipped (Zero Years)',
+        };
+
+        resultDiv.innerHTML = Object.entries(labels).map(([key, label]) => `
+          <div class="kv-row">
+            <div class="kv-key">${label}</div>
+            <div class="kv-val">${d[key] !== undefined ? d[key].toLocaleString() : '--'}</div>
+          </div>
+        `).join('');
+
+        // Refresh the preview
+        loadAmateurPreview();
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = 'Seed Amateur Contracts';
+        alert('Error: ' + err.message);
+      });
+  }
 
   function loadEndOfSeason() {
     fetchTxContext().then(() => {

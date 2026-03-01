@@ -69,6 +69,9 @@
       <a href="#" class="nav-item" data-section="tx-eos">
         <span class="nav-icon">&#128197;</span> End of Season
       </a>
+      <a href="#" class="nav-item" data-section="tx-amateur">
+        <span class="nav-icon">&#127891;</span> Amateur Seeding
+      </a>
     </div>
 
     <div class="nav-section">
@@ -916,6 +919,54 @@
                 <tr><td colspan="9" class="text-center text-muted">Select an org to view</td></tr>
               </tbody>
             </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Amateur Contract Seeding ────────────────────────── -->
+      <section id="section-tx-amateur" class="section">
+        <div class="card">
+          <h3>Amateur Player Need</h3>
+          <p class="text-muted">Scan uncontracted players by category to see how many need HS, INTAM, and College assignments.</p>
+          <div class="button-group" style="margin-bottom: 16px">
+            <button class="btn btn-secondary" id="btn-amateur-preview">Scan Players</button>
+          </div>
+          <div id="amateur-preview" style="display:none">
+            <div class="grid-3" id="amateur-summary-cards"></div>
+            <div class="card" style="margin-top: 16px">
+              <h4>Breakdown</h4>
+              <div class="table-container">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Category</th>
+                      <th>Org</th>
+                      <th>Age Range</th>
+                      <th>Pitchers</th>
+                      <th>Batters</th>
+                      <th>Total</th>
+                      <th>Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody id="amateur-breakdown-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Seed Amateur Contracts</h3>
+          <p class="text-muted">Create contracts for all uncontracted players, assigning them to HS, INTAM, and College organizations. This is idempotent — running again will only process newly uncontracted players.</p>
+          <div class="alert alert-info">
+            Requires <code>ALLOW_CONTRACT_SEEDING=true</code> environment variable.
+          </div>
+          <div class="button-group">
+            <button class="btn btn-warning" id="btn-amateur-seed">Seed Amateur Contracts</button>
+          </div>
+          <div id="amateur-seed-result" style="display:none; margin-top: 16px">
+            <h4>Seeding Summary</h4>
+            <div class="kv-table" id="amateur-seed-kv"></div>
           </div>
         </div>
       </section>
