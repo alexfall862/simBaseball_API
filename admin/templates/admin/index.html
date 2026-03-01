@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SimBaseball Admin</title>
   <link rel="stylesheet" href="{{ url_for('admin.static', filename='styles.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 
 <body>
@@ -81,6 +82,9 @@
       </a>
       <a href="#" class="nav-item" data-section="pe-progress">
         <span class="nav-icon">&#128200;</span> Progression
+      </a>
+      <a href="#" class="nav-item" data-section="pe-sandbox">
+        <span class="nav-icon">&#128300;</span> Sandbox
       </a>
     </div>
 
@@ -977,7 +981,7 @@
           <h3>Generate Players</h3>
           <div class="form-row" style="margin-bottom: 12px">
             <label>Count:
-              <input type="number" id="pe-gen-count" value="1" min="1" max="500" style="width: 80px" />
+              <input type="number" id="pe-gen-count" value="1" min="1" max="5000" style="width: 80px" />
             </label>
             <label>Starting Age:
               <input type="number" id="pe-gen-age" value="15" min="14" max="45" style="width: 80px" />
@@ -1045,6 +1049,70 @@
             <button class="btn btn-secondary" id="btn-pe-progress-one">Progress</button>
           </div>
           <div id="pe-prog-one-status" class="text-muted"></div>
+        </div>
+      </section>
+
+      <!-- ── Player Engine: Progression Sandbox ─────────────────── -->
+      <section id="section-pe-sandbox" class="section">
+        <div class="card">
+          <h3>Progression Sandbox</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Simulate player progression in-memory without affecting the database.
+            Generate synthetic players and chart their growth across multiple seasons.
+          </p>
+
+          <div class="form-row" style="margin-bottom: 12px; flex-wrap: wrap; gap: 12px;">
+            <label>Players:
+              <input type="number" id="sandbox-count" value="200" min="10" max="2000" style="width: 80px" />
+            </label>
+            <label>Seasons:
+              <input type="number" id="sandbox-seasons" value="20" min="1" max="30" style="width: 60px" />
+            </label>
+            <label>Start Age:
+              <input type="number" id="sandbox-start-age" value="15" min="14" max="30" style="width: 60px" />
+            </label>
+            <label>Player Type:
+              <select id="sandbox-ptype" style="width: 100px">
+                <option value="Both">Both</option>
+                <option value="Pitcher">Pitcher</option>
+                <option value="Position">Position</option>
+              </select>
+            </label>
+            <button class="btn btn-primary" id="btn-sandbox-run">Run Simulation</button>
+          </div>
+
+          <div id="sandbox-status" class="text-muted" style="margin-bottom: 8px"></div>
+        </div>
+
+        <div class="card" id="sandbox-chart-card" style="display: none;">
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; align-items: center;">
+            <label>Ability:
+              <select id="sandbox-ability-select" style="width: 150px"></select>
+            </label>
+            <label style="display: flex; align-items: center; gap: 4px;">
+              <input type="checkbox" id="sandbox-show-bands" checked /> Show P10-P90 bands
+            </label>
+          </div>
+          <div style="position: relative; height: 420px;">
+            <canvas id="sandbox-chart"></canvas>
+          </div>
+        </div>
+
+        <div class="card" id="sandbox-summary-card" style="display: none;">
+          <h3>Grade Distribution</h3>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Grade</th>
+                  <th>Players</th>
+                  <th>Final Avg</th>
+                  <th>Peak Avg</th>
+                </tr>
+              </thead>
+              <tbody id="sandbox-grade-tbody"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 

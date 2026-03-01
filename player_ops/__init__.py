@@ -26,8 +26,8 @@ def api_generate_players():
     count = data.get("count", 1)
     age = data.get("age", 15)
 
-    if not isinstance(count, int) or count < 1 or count > 500:
-        return jsonify(error="bad_request", message="count must be 1-500"), 400
+    if not isinstance(count, int) or count < 1 or count > 5000:
+        return jsonify(error="bad_request", message="count must be 1-5000"), 400
     if not isinstance(age, int) or age < 14 or age > 45:
         return jsonify(error="bad_request", message="age must be 14-45"), 400
 

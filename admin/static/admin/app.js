@@ -178,6 +178,11 @@
     // Player Engine — Progression
     document.getElementById('btn-pe-progress-all').addEventListener('click', progressAll);
     document.getElementById('btn-pe-progress-one').addEventListener('click', progressSingle);
+
+    // Player Engine — Sandbox
+    document.getElementById('btn-sandbox-run').addEventListener('click', runSandbox);
+    document.getElementById('sandbox-ability-select').addEventListener('change', renderSandboxChart);
+    document.getElementById('sandbox-show-bands').addEventListener('change', renderSandboxChart);
   }
 
   // Navigation
@@ -213,6 +218,7 @@
       'tx-log': 'Transaction Log',
       'pe-generate': 'Player Generation',
       'pe-progress': 'Player Progression',
+      'pe-sandbox': 'Progression Sandbox',
       'tx-eos': 'End of Season',
       'tx-amateur': 'Amateur Seeding',
     };
@@ -262,6 +268,8 @@
         break;
       case 'pe-progress':
         loadProgression();
+        break;
+      case 'pe-sandbox':
         break;
     }
 
@@ -2482,6 +2490,187 @@
       .catch(err => {
         tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted">Error: ${err.message}</td></tr>`;
       });
+  }
+
+  // ── Progression Sandbox ──────────────────────────────────────────────
+
+  // Grade color palette (consistent across charts)
+  const GRADE_COLORS = {
+    'A+': '#0d6a3a', 'A': '#16a34a', 'A-': '#4ade80',
+    'B+': '#0e7490', 'B': '#06b6d4', 'B-': '#67e8f9',
+    'C+': '#ca8a04', 'C': '#facc15', 'C-': '#fde68a',
+    'D+': '#ea580c', 'D': '#f97316', 'D-': '#fdba74',
+    'F': '#dc2626', 'N': '#9ca3af',
+  };
+
+  let sandboxData = null;
+  let sandboxChart = null;
+
+  function runSandbox() {
+    const count = parseInt(document.getElementById('sandbox-count').value) || 200;
+    const seasons = parseInt(document.getElementById('sandbox-seasons').value) || 20;
+    const startAge = parseInt(document.getElementById('sandbox-start-age').value) || 15;
+    const ptype = document.getElementById('sandbox-ptype').value;
+    const statusEl = document.getElementById('sandbox-status');
+    const btn = document.getElementById('btn-sandbox-run');
+
+    btn.disabled = true;
+    statusEl.textContent = `Simulating ${count} players over ${seasons} seasons...`;
+    document.getElementById('sandbox-chart-card').style.display = 'none';
+    document.getElementById('sandbox-summary-card').style.display = 'none';
+
+    fetch(`${ADMIN_BASE}/progression-sandbox`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        count,
+        seasons,
+        start_age: startAge,
+        player_type: ptype,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        btn.disabled = false;
+
+        if (data.error) {
+          statusEl.textContent = `Error: ${data.message}`;
+          return;
+        }
+
+        sandboxData = data;
+        statusEl.textContent = `Simulation complete — ${data.config.count} players, ${data.config.seasons} seasons.`;
+
+        // Populate ability dropdown
+        const select = document.getElementById('sandbox-ability-select');
+        select.innerHTML = data.tracked_abilities.map(a =>
+          `<option value="${a}">${a}</option>`
+        ).join('');
+
+        document.getElementById('sandbox-chart-card').style.display = 'block';
+        document.getElementById('sandbox-summary-card').style.display = 'block';
+
+        renderSandboxChart();
+      })
+      .catch(err => {
+        btn.disabled = false;
+        statusEl.textContent = `Error: ${err.message}`;
+      });
+  }
+
+  function renderSandboxChart() {
+    if (!sandboxData) return;
+
+    const ability = document.getElementById('sandbox-ability-select').value;
+    const showBands = document.getElementById('sandbox-show-bands').checked;
+    const gradeData = sandboxData.results[ability];
+    if (!gradeData) return;
+
+    // Destroy old chart
+    if (sandboxChart) {
+      sandboxChart.destroy();
+      sandboxChart = null;
+    }
+
+    const datasets = [];
+    const grades = Object.keys(gradeData);
+
+    for (const grade of grades) {
+      const gd = gradeData[grade];
+      const color = GRADE_COLORS[grade] || '#6b7280';
+
+      // Average line
+      datasets.push({
+        label: grade,
+        data: gd.ages.map((age, i) => ({ x: age, y: gd.avg[i] })),
+        borderColor: color,
+        backgroundColor: color,
+        borderWidth: 2,
+        pointRadius: 2,
+        tension: 0.3,
+        fill: false,
+      });
+
+      // P10-P90 band
+      if (showBands) {
+        datasets.push({
+          label: `${grade} P10-P90`,
+          data: gd.ages.map((age, i) => ({ x: age, y: gd.p90[i] })),
+          borderColor: 'transparent',
+          backgroundColor: color + '18',
+          borderWidth: 0,
+          pointRadius: 0,
+          fill: '+1',
+          showLine: true,
+        });
+        datasets.push({
+          label: `_${grade}_lower`,
+          data: gd.ages.map((age, i) => ({ x: age, y: gd.p10[i] })),
+          borderColor: 'transparent',
+          backgroundColor: 'transparent',
+          borderWidth: 0,
+          pointRadius: 0,
+          fill: false,
+          showLine: true,
+        });
+      }
+    }
+
+    const ctx = document.getElementById('sandbox-chart').getContext('2d');
+    sandboxChart = new Chart(ctx, {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+          mode: 'index',
+          intersect: false,
+        },
+        scales: {
+          x: {
+            type: 'linear',
+            title: { display: true, text: 'Age' },
+            ticks: { stepSize: 1 },
+          },
+          y: {
+            title: { display: true, text: 'Base Value' },
+          },
+        },
+        plugins: {
+          legend: {
+            labels: {
+              filter: item => !item.text.startsWith('_'),
+            },
+          },
+          tooltip: {
+            filter: item => !item.dataset.label.startsWith('_'),
+          },
+        },
+      },
+    });
+
+    // Render grade summary table
+    renderSandboxSummary(gradeData);
+  }
+
+  function renderSandboxSummary(gradeData) {
+    const tbody = document.getElementById('sandbox-grade-tbody');
+    const rows = [];
+
+    for (const [grade, gd] of Object.entries(gradeData)) {
+      const finalAvg = gd.avg[gd.avg.length - 1];
+      const peakAvg = Math.max(...gd.avg);
+      rows.push(`<tr>
+        <td><span style="color: ${GRADE_COLORS[grade] || '#6b7280'}; font-weight: 600;">${grade}</span></td>
+        <td>${gd.count}</td>
+        <td>${finalAvg.toFixed(1)}</td>
+        <td>${peakAvg.toFixed(1)}</td>
+      </tr>`);
+    }
+
+    tbody.innerHTML = rows.join('');
   }
 
   // Export public API

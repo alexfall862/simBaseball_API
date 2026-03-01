@@ -8,6 +8,7 @@ from flask_sock import Sock
 from werkzeug.exceptions import HTTPException, BadRequest
 from seeding.contracts_seed import seed_initial_contracts
 from seeding.amateur_contracts_seed import seed_amateur_contracts, preview_amateur_need
+from services.progression_sandbox import run_progression_sandbox
 
 
 # ---- Rate limiting (lightweight) ----
@@ -559,6 +560,48 @@ def create_app(config_object=Config):
             status="ok",
             details=result,
         ), 200
+
+# ----------------------------
+# Progression Sandbox
+# ----------------------------
+
+    @app.post("/admin/progression-sandbox")
+    def admin_progression_sandbox():
+        if not session.get("admin"):
+            return jsonify(error="unauthorized", message="Not logged in."), 401
+        if not getattr(app, "engine", None):
+            return jsonify(error="no_db_engine", message="Database engine not initialized."), 500
+
+        data = request.get_json(silent=True) or {}
+        count = data.get("count", 200)
+        seasons = data.get("seasons", 20)
+        start_age = data.get("start_age", 15)
+        player_type = data.get("player_type", "Both")
+        tracked = data.get("tracked_abilities", None)
+
+        if not isinstance(count, int) or count < 10 or count > 2000:
+            return jsonify(error="bad_request", message="count must be 10-2000"), 400
+        if not isinstance(seasons, int) or seasons < 1 or seasons > 30:
+            return jsonify(error="bad_request", message="seasons must be 1-30"), 400
+        if not isinstance(start_age, int) or start_age < 14 or start_age > 30:
+            return jsonify(error="bad_request", message="start_age must be 14-30"), 400
+        if player_type not in ("Both", "Pitcher", "Position"):
+            return jsonify(error="bad_request", message="player_type must be Both, Pitcher, or Position"), 400
+
+        try:
+            result = run_progression_sandbox(
+                count=count,
+                seasons=seasons,
+                start_age=start_age,
+                player_type=player_type,
+                tracked_abilities=tracked,
+                engine=app.engine,
+            )
+            return jsonify(result), 200
+        except Exception as e:
+            log = logging.getLogger("app")
+            log.exception("progression sandbox error: %s", str(e))
+            return jsonify(error="server_error", message=str(e)), 500
 
 
 # ----------------------------
