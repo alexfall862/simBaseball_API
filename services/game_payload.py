@@ -1800,6 +1800,21 @@ def build_week_payloads(
                 # TODO: Implement result storage
                 # _store_game_results(conn, results)
 
+                # Accumulate player stats from engine box scores
+                try:
+                    from services.stat_accumulator import accumulate_subweek_stats
+                    stat_counts = accumulate_subweek_stats(
+                        conn, results, league_year_id
+                    )
+                    conn.commit()
+                    logger.info(
+                        f"Stat accumulation for subweek '{subweek}': {stat_counts}"
+                    )
+                except Exception as stat_err:
+                    logger.exception(
+                        f"Stat accumulation failed for subweek '{subweek}': {stat_err}"
+                    )
+
                 # Update player state for next subweek
                 # TODO: Implement state updates
                 # _update_player_state_after_subweek(conn, results, league_year_id)

@@ -1,0 +1,67 @@
+-- MySQL dump 10.13  Distrib 8.0.41, for Win64 (x86_64)
+--
+-- Host: autorack.proxy.rlwy.net    Database: railway
+-- ------------------------------------------------------
+-- Server version	9.5.0
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+/*!50503 SET NAMES utf8 */;
+/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+/*!40103 SET TIME_ZONE='+00:00' */;
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
+SET @MYSQLDUMP_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;
+SET @@SESSION.SQL_LOG_BIN= 0;
+
+--
+-- GTID state at the beginning of the backup 
+--
+
+SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '';
+
+--
+-- Table structure for table `org_media_shares`
+--
+
+DROP TABLE IF EXISTS `org_media_shares`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `org_media_shares` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `league_year_id` int unsigned NOT NULL,
+  `org_id` int NOT NULL,
+  `media_share` decimal(5,3) DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_media_year_org` (`league_year_id`,`org_id`),
+  KEY `fk_media_orgs` (`org_id`),
+  CONSTRAINT `fk_media_league_years` FOREIGN KEY (`league_year_id`) REFERENCES `league_years` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_media_orgs` FOREIGN KEY (`org_id`) REFERENCES `organizations` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=31 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `org_media_shares`
+--
+
+LOCK TABLES `org_media_shares` WRITE;
+/*!40000 ALTER TABLE `org_media_shares` DISABLE KEYS */;
+INSERT INTO `org_media_shares` VALUES (1,1,1,0.078,'2025-11-17 02:33:12'),(2,1,2,0.033,'2025-11-17 02:33:13'),(3,1,3,0.024,'2025-11-17 02:33:13'),(4,1,4,0.030,'2025-11-17 02:33:14'),(5,1,5,0.078,'2025-11-17 02:33:14'),(6,1,6,0.023,'2025-11-17 02:33:15'),(7,1,7,0.019,'2025-11-17 02:33:15'),(8,1,8,0.038,'2025-11-17 02:33:16'),(9,1,9,0.025,'2025-11-17 02:33:16'),(10,1,10,0.017,'2025-11-17 02:33:16'),(11,1,11,0.024,'2025-11-17 02:33:17'),(12,1,12,0.059,'2025-11-17 02:33:17'),(13,1,13,0.032,'2025-11-17 02:33:18'),(14,1,14,0.037,'2025-11-17 02:33:18'),(15,1,15,0.024,'2025-11-17 02:33:19'),(16,1,16,0.040,'2025-11-17 02:33:19'),(17,1,17,0.037,'2025-11-17 02:33:20'),(18,1,18,0.018,'2025-11-17 02:33:20'),(19,1,19,0.026,'2025-11-17 02:33:21'),(20,1,20,0.034,'2025-11-17 02:33:21'),(21,1,21,0.021,'2025-11-17 02:33:22'),(22,1,22,0.040,'2025-11-17 02:33:22'),(23,1,23,0.036,'2025-11-17 02:33:23'),(24,1,24,0.019,'2025-11-17 02:33:23'),(25,1,25,0.029,'2025-11-17 02:33:24'),(26,1,26,0.022,'2025-11-17 02:33:24'),(27,1,27,0.059,'2025-11-17 02:33:25'),(28,1,28,0.027,'2025-11-17 02:33:25'),(29,1,29,0.017,'2025-11-17 02:33:25'),(30,1,30,0.036,'2025-11-17 02:33:26');
+/*!40000 ALTER TABLE `org_media_shares` ENABLE KEYS */;
+UNLOCK TABLES;
+SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
+
+/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+/*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+/*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+
+-- Dump completed on 2025-11-21  2:26:18

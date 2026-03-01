@@ -167,7 +167,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.025,
         "discipline_base":      0.025,
         #base offense 5 
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.000,
         #defense1 60
@@ -201,7 +201,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.175,
         "discipline_base":      0.175,
         #base offense 7.5 
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.025,
         #defense1 2.5
@@ -233,7 +233,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.1,
         "discipline_base":      0.1,
         #base offense 10
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.050,
         #defense1 20
@@ -265,7 +265,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.125,
         "discipline_base":      0.125,
         #base offense 5 
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.00,
         #defense1 20
@@ -297,7 +297,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.0375,
         "discipline_base":      0.0375,
         #base offense 15
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.10,
         #defense1 30
@@ -329,7 +329,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.1,
         "discipline_base":      0.1,
         #base offense 15
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.10,
         #defense1 15
@@ -361,7 +361,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.025,
         "discipline_base":      0.025,
         #base offense 15 
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.15,
         #defense1 25
@@ -393,7 +393,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.1,
         "discipline_base":      0.1,
         #base offense 15
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.10,
         #defense1 15
@@ -425,7 +425,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.10,
         "discipline_base":      0.10,
         #base offense 
-        "base_reaction_base":   0.025,
+        "basereaction_base":    0.025,
         "baserunning_base":     0.025,
         "speed_base":           0.025,
         #defense1
@@ -457,7 +457,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.00,
         "discipline_base":      0.00,
         #base offense 
-        "base_reaction_base":   0.00,
+        "basereaction_base":    0.00,
         "baserunning_base":     0.00,
         "speed_base":           0.00,
         #defense1
@@ -489,7 +489,7 @@ def _compute_derived_raw_ratings(row):
         "eye_base":             0.00,
         "discipline_base":      0.00,
         #base offense 
-        "base_reaction_base":   0.00,
+        "basereaction_base":    0.00,
         "baserunning_base":     0.00,
         "speed_base":           0.00,
         #defense1
@@ -973,6 +973,35 @@ def _build_player_with_ratings(row, dist_by_level, col_cats):
 # Roster Display Endpoints
 # -------------------------------------------------------------------
 
+def _load_dist_by_level(conn, col_cats):
+    """
+    Try to load pre-computed distributions from rating_scale_config.
+    Falls back to on-the-fly computation if the config table is empty.
+
+    Returns:
+        (dist_by_level dict, source string "config" | "computed")
+    """
+    try:
+        from services.rating_config import get_rating_config_by_level_name
+        config = get_rating_config_by_level_name(conn)
+        if config:
+            return config, "config"
+    except Exception:
+        # Table may not exist yet; fall through to on-the-fly
+        pass
+
+    # Fallback: compute from all active players (original behavior)
+    all_stmt = _build_ratings_base_stmt(level_filter=(1, 9))
+    all_rows = conn.execute(all_stmt).all()
+    if not all_rows:
+        return {}, "computed"
+
+    dist = _compute_distributions_by_level(
+        all_rows, col_cats["rating"], include_derived=True,
+    )
+    return dist, "computed"
+
+
 @rosters_bp.get("/ratings/teams")
 def get_team_ratings():
     """
@@ -1000,41 +1029,29 @@ def get_team_ratings():
         col_cats = _get_player_column_categories()
 
         with engine.connect() as conn:
-            # 1) Get all players at this level (for distributions across the league)
-            all_stmt = _build_ratings_base_stmt(level_filter=level)
-            all_rows = conn.execute(all_stmt).all()
+            dist_by_level, _ = _load_dist_by_level(conn, col_cats)
 
-            if not all_rows:
-                return jsonify(
-                    {
-                        "league_level": None,
-                        "league_level_id": level,
-                        "team": team_abbrev,
-                        "count": 0,
-                        "players": [],
-                    }
-                ), 200
-
-            # Include derived attributes in distributions
-            dist_by_level = _compute_distributions_by_level(
-                all_rows,
-                col_cats["rating"],
-                include_derived=True,
+            # Query only the players we need to return
+            stmt = _build_ratings_base_stmt(
+                level_filter=level,
+                team_abbrev=team_abbrev,
             )
-
-            # 2) Narrow to specific team, if requested
-            if team_abbrev:
-                team_stmt = _build_ratings_base_stmt(
-                    level_filter=level,
-                    team_abbrev=team_abbrev,
-                )
-                rows = conn.execute(team_stmt).all()
-            else:
-                rows = all_rows
+            rows = conn.execute(stmt).all()
 
     except SQLAlchemyError as e:
         current_app.logger.exception("get_team_ratings: db error")
         return jsonify(error="database_error", message=str(e)), 500
+
+    if not rows:
+        return jsonify(
+            {
+                "league_level": None,
+                "league_level_id": level,
+                "team": team_abbrev,
+                "count": 0,
+                "players": [],
+            }
+        ), 200
 
     players_out = [
         _build_player_with_ratings(row, dist_by_level, col_cats)
@@ -1091,25 +1108,9 @@ def get_org_ratings(org_abbrev: str):
 
             org_id = org_row[0]
 
-            # 1) All players at these levels league-wide (for distributions)
-            all_stmt = _build_ratings_base_stmt(level_filter=level_filter)
-            all_rows = conn.execute(all_stmt).all()
-            if not all_rows:
-                return jsonify(
-                    {
-                        "org": org_abbrev,
-                        "org_id": org_id,
-                        "levels": {},
-                    }
-                ), 200
+            dist_by_level, _ = _load_dist_by_level(conn, col_cats)
 
-            dist_by_level = _compute_distributions_by_level(
-                all_rows,
-                col_cats["rating"],
-                include_derived=True,
-            )
-
-            # 2) Players for this org only
+            # Query only this org's players
             org_stmt = _build_ratings_base_stmt(
                 level_filter=level_filter,
                 org_abbrev=org_abbrev,
@@ -1119,6 +1120,15 @@ def get_org_ratings(org_abbrev: str):
     except SQLAlchemyError as e:
         current_app.logger.exception("get_org_ratings: db error")
         return jsonify(error="database_error", message=str(e)), 500
+
+    if not org_rows:
+        return jsonify(
+            {
+                "org": org_abbrev,
+                "org_id": org_id,
+                "levels": {},
+            }
+        ), 200
 
     levels_out = {}
     for row in org_rows:
@@ -1164,14 +1174,13 @@ def get_league_ratings():
     """
     level_filter = (4, 9)
 
-    tables = _get_tables()
-    orgs = tables["organizations"]
-
     try:
         engine = get_engine()
         col_cats = _get_player_column_categories()
 
         with engine.connect() as conn:
+            dist_by_level, _ = _load_dist_by_level(conn, col_cats)
+
             stmt = _build_ratings_base_stmt(level_filter=level_filter)
             rows = conn.execute(stmt).all()
 
@@ -1186,13 +1195,6 @@ def get_league_ratings():
                 "orgs": {},
             }
         ), 200
-
-    # Compute distributions across the whole league (including derived ratings)
-    dist_by_level = _compute_distributions_by_level(
-        rows,
-        col_cats["rating"],
-        include_derived=True,
-    )
 
     orgs_out = {}
     level_names_set = set()

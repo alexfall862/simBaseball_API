@@ -162,6 +162,73 @@ def admin_clear_caches():
         logging.exception("admin_clear_caches failed")
         return jsonify(ok=False, error="clear_caches_failed", message=str(e)), 500
 
+# ---------------------------------------------------------------------------
+# Rating scale config management
+# ---------------------------------------------------------------------------
+
+@admin_bp.post("/rating-config/seed")
+def admin_seed_rating_config():
+    """
+    Compute mean/stddev for every attribute at every level from current
+    player data and UPSERT into rating_scale_config.
+
+    POST /admin/rating-config/seed
+
+    Levels with no players (e.g. 1-3 before import) are skipped.
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from services.rating_config import seed_rating_config
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = seed_rating_config(conn)
+            conn.commit()
+
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_seed_rating_config failed")
+        return jsonify(ok=False, error="seed_failed", message=str(e)), 500
+
+
+@admin_bp.get("/rating-config")
+def admin_get_rating_config():
+    """
+    Return current rating_scale_config contents.
+
+    GET /admin/rating-config
+    GET /admin/rating-config?level=9
+
+    Response groups by level_id, each with attribute_key -> {mean, std}.
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    level_id = request.args.get("level", type=int)
+
+    try:
+        from db import get_engine
+        from services.rating_config import get_rating_config
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            config = get_rating_config(conn, level_id=level_id)
+
+        # Convert int keys to strings for JSON
+        out = {str(k): v for k, v in config.items()}
+        return jsonify(ok=True, levels=out)
+
+    except Exception as e:
+        logging.exception("admin_get_rating_config failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
 def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
     if not sql:
         return jsonify(error="missing_sql"), 400

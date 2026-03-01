@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -l \"stats\\\\|stat_\\\\|accumulated\\\\|cumulative\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB/Dump20251121/*.sql)"
+    ]
+  }
+}
