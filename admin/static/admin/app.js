@@ -192,6 +192,39 @@
       renderSandboxChart();
     });
     document.getElementById('sandbox-highlight-player').addEventListener('change', renderSandboxChart);
+
+    // Arrow key navigation for sandbox chart
+    document.addEventListener('keydown', (e) => {
+      if (currentSection !== 'pe-sandbox' || !sandboxData) return;
+
+      const abilitySelect = document.getElementById('sandbox-ability-select');
+      const hlSelect = document.getElementById('sandbox-highlight-player');
+      const showPlayers = document.getElementById('sandbox-show-players').checked;
+
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        const opts = Array.from(abilitySelect.options);
+        let idx = abilitySelect.selectedIndex;
+        idx = e.key === 'ArrowUp' ? idx - 1 : idx + 1;
+        if (idx < 0) idx = opts.length - 1;
+        if (idx >= opts.length) idx = 0;
+        abilitySelect.selectedIndex = idx;
+        populateSandboxGradeFilter();
+        renderSandboxChart();
+      }
+
+      if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && showPlayers) {
+        e.preventDefault();
+        const opts = Array.from(hlSelect.options);
+        if (opts.length <= 1) return;
+        let idx = hlSelect.selectedIndex;
+        idx = e.key === 'ArrowLeft' ? idx - 1 : idx + 1;
+        if (idx < 0) idx = opts.length - 1;
+        if (idx >= opts.length) idx = 0;
+        hlSelect.selectedIndex = idx;
+        renderSandboxChart();
+      }
+    });
   }
 
   // Navigation
@@ -2648,6 +2681,10 @@
     const datasets = [];
     const grades = Object.keys(gradeData);
 
+    // When individual overlay is active, dim aggregate elements
+    const hasIndividualView = showPlayers;
+    const hasHighlight = showPlayers && highlightId !== '';
+
     // Draw individual player lines first (behind aggregate)
     if (showPlayers) {
       const gradesToDraw = gradeFilter === '__all__' ? grades : [gradeFilter];
@@ -2658,11 +2695,11 @@
         const color = GRADE_COLORS[grade] || '#6b7280';
 
         for (const p of gd.players) {
-          const isHighlighted = highlightId !== '' && String(p.id) === highlightId;
+          const isHighlighted = hasHighlight && String(p.id) === highlightId;
           datasets.push({
             label: `_p${p.id}`,
             data: gd.ages.map((age, i) => ({ x: age, y: p.trajectory[i] })),
-            borderColor: isHighlighted ? color : color + '40',
+            borderColor: isHighlighted ? color : color + (hasHighlight ? '20' : '40'),
             backgroundColor: 'transparent',
             borderWidth: isHighlighted ? 3 : 1,
             pointRadius: isHighlighted ? 3 : 0,
@@ -2675,7 +2712,7 @@
       }
     }
 
-    // Aggregate lines on top
+    // Aggregate lines — dimmed when individual overlay is active
     for (const grade of grades) {
       const gd = gradeData[grade];
       const color = GRADE_COLORS[grade] || '#6b7280';
@@ -2683,13 +2720,13 @@
       datasets.push({
         label: grade,
         data: gd.ages.map((age, i) => ({ x: age, y: gd.avg[i] })),
-        borderColor: color,
-        backgroundColor: color,
-        borderWidth: 2.5,
-        pointRadius: 2,
+        borderColor: hasIndividualView ? color + '30' : color,
+        backgroundColor: hasIndividualView ? color + '30' : color,
+        borderWidth: hasIndividualView ? 1.5 : 2.5,
+        pointRadius: hasIndividualView ? 0 : 2,
         tension: 0.3,
         fill: false,
-        order: 1,
+        order: hasIndividualView ? 3 : 1,
       });
 
       if (showBands) {
@@ -2697,12 +2734,12 @@
           label: `_${grade}_upper`,
           data: gd.ages.map((age, i) => ({ x: age, y: gd.p90[i] })),
           borderColor: 'transparent',
-          backgroundColor: color + '18',
+          backgroundColor: hasIndividualView ? color + '08' : color + '18',
           borderWidth: 0,
           pointRadius: 0,
           fill: '+1',
           showLine: true,
-          order: 3,
+          order: hasIndividualView ? 4 : 3,
         });
         datasets.push({
           label: `_${grade}_lower`,
@@ -2713,7 +2750,7 @@
           pointRadius: 0,
           fill: false,
           showLine: true,
-          order: 3,
+          order: hasIndividualView ? 4 : 3,
         });
       }
     }
