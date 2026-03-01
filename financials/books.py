@@ -17,6 +17,12 @@ from sqlalchemy import func
 
 INTEREST_RATE = Decimal("0.05")  # 5% annual
 
+# Performance revenue: 65% attributed to home games (gate/tickets),
+# 35% to away games (broadcast/merch). Season totals are preserved;
+# this only shifts *when* revenue is recognized week-to-week.
+HOME_REVENUE_WEIGHT = Decimal("0.65")
+AWAY_REVENUE_WEIGHT = Decimal("0.35")
+
 
 def _get_tables(engine):
     """
@@ -33,8 +39,10 @@ def _get_tables(engine):
         "contracts": Table("contracts", md, autoload_with=engine),
         "details": Table("contractDetails", md, autoload_with=engine),
         "shares": Table("contractTeamShare", md, autoload_with=engine),
-        # players optional; handy for audit/notes if you want more info
         "players": Table("simbbPlayers", md, autoload_with=engine),
+        "gamelist": Table("gamelist", md, autoload_with=engine),
+        "teams": Table("teams", md, autoload_with=engine),
+        "seasons": Table("seasons", md, autoload_with=engine),
     }
 
 
@@ -324,8 +332,12 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
             if salary_inserts:
                 conn.execute(ledger.insert(), salary_inserts)
 
-            # ---- PERFORMANCE REVENUE ----
-            weekly_pot = performance_budget / weeks_dec
+            # ---- PERFORMANCE REVENUE (home/away weighted) ----
+            # Rolling win share determines each org's season-long slice of the
+            # performance_budget.  Home/away game counts determine *when* that
+            # slice is recognised: 65 % attributed to home games (gate revenue),
+            # 35 % to away games (broadcast/merch).  Season totals per org are
+            # preserved; only the weekly timing shifts.
 
             ly_rows = conn.execute(
                 select(ly_tbl.c.id, ly_tbl.c.league_year)
@@ -366,7 +378,7 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
                 performance_entries = 0
                 total_performance_amount = Decimal("0.00")
             else:
-                # We have some results; compute rolling wins and shares
+                # Compute rolling wins per org
                 for row in rec_rows:
                     m = row._mapping
                     org_id = m["org_id"]
@@ -386,21 +398,81 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
                 performance_entries = 0
                 total_performance_amount = Decimal("0.00")
 
-                num_orgs = len(org_ids) if org_ids else 0
-
-                # If total_wins somehow ends up 0 even with rec_rows present (edge case):
-                # you can still choose a fallback policy; here we'll just skip payouts.
                 if total_wins == 0:
-                    # No payouts this week
                     pass
                 else:
+                    # --- Home/away game counts for weighted distribution ---
+                    gl = tables["gamelist"]
+                    teams_tbl = tables["teams"]
+                    seasons_tbl = tables["seasons"]
+
+                    # Resolve season IDs that correspond to this league_year
+                    season_rows = conn.execute(
+                        select(seasons_tbl.c.id)
+                        .where(seasons_tbl.c.year == league_year)
+                    ).all()
+                    season_ids = [r._mapping["id"] for r in season_rows]
+
+                    # Full-season home/away counts per org
+                    org_home_season: Dict[int, int] = {}
+                    org_away_season: Dict[int, int] = {}
+                    # This-week home/away counts per org
+                    org_home_week: Dict[int, int] = {}
+                    org_away_week: Dict[int, int] = {}
+
+                    if season_ids:
+                        for rows_dict, join_col, week_filter in [
+                            (org_home_season, gl.c.home_team, False),
+                            (org_away_season, gl.c.away_team, False),
+                            (org_home_week,   gl.c.home_team, True),
+                            (org_away_week,   gl.c.away_team, True),
+                        ]:
+                            conditions = [gl.c.season.in_(season_ids)]
+                            if week_filter:
+                                conditions.append(gl.c.season_week == week_index)
+                            qrows = conn.execute(
+                                select(
+                                    teams_tbl.c.orgID.label("org_id"),
+                                    func.count().label("cnt"),
+                                )
+                                .select_from(
+                                    gl.join(teams_tbl, join_col == teams_tbl.c.id)
+                                )
+                                .where(and_(*conditions))
+                                .group_by(teams_tbl.c.orgID)
+                            ).all()
+                            for r in qrows:
+                                rows_dict[r._mapping["org_id"]] = int(r._mapping["cnt"])
+
                     for org_id in org_ids:
                         org_w = org_wins.get(org_id, 0)
                         if org_w == 0:
-                            continue  # no share if no wins in window
+                            continue
 
-                        share_ratio = Decimal(org_w) / Decimal(total_wins)
-                        amount = weekly_pot * share_ratio
+                        win_share = Decimal(org_w) / Decimal(total_wins)
+                        org_season_share = performance_budget * win_share
+
+                        # Weighted season total for this org
+                        h_season = Decimal(org_home_season.get(org_id, 0))
+                        a_season = Decimal(org_away_season.get(org_id, 0))
+                        season_weight = (h_season * HOME_REVENUE_WEIGHT
+                                         + a_season * AWAY_REVENUE_WEIGHT)
+
+                        # Weighted count for this week
+                        h_week = Decimal(org_home_week.get(org_id, 0))
+                        a_week = Decimal(org_away_week.get(org_id, 0))
+                        week_weight = (h_week * HOME_REVENUE_WEIGHT
+                                       + a_week * AWAY_REVENUE_WEIGHT)
+
+                        if season_weight == 0:
+                            # No games scheduled — fall back to flat distribution
+                            amount = org_season_share / weeks_dec
+                        elif week_weight == 0:
+                            # Bye week for this org — no revenue
+                            continue
+                        else:
+                            amount = org_season_share * (week_weight / season_weight)
+
                         if amount == 0:
                             continue
 
@@ -472,8 +544,11 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
             ).all()
             id_to_year = {r._mapping["id"]: r._mapping["league_year"] for r in ly_rows}
 
-            org_rows = conn.execute(select(orgs_tbl.c.id)).all()
+            org_rows = conn.execute(
+                select(orgs_tbl.c.id, orgs_tbl.c.cash)
+            ).all()
             org_ids = [r._mapping["id"] for r in org_rows]
+            org_seed = {r._mapping["id"]: Decimal(r._mapping["cash"] or 0) for r in org_rows}
 
             for org_id in org_ids:
                 # Skip if we've already applied interest for this org in this year
@@ -492,10 +567,8 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
                     skipped += 1
                     continue
 
-                # Compute net balance up to and including this league year
-                # (using league_year_id -> league_year mapping)
-                # We will sum all entries where league_year <= target_year
-                balance = conn.execute(
+                # Compute net balance: seed capital + all ledger entries up to this year
+                ledger_balance = conn.execute(
                     select(func.coalesce(func.sum(ledger.c.amount), 0))
                     .select_from(ledger.join(ly_tbl, ledger.c.league_year_id == ly_tbl.c.id))
                     .where(
@@ -506,7 +579,7 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
                     )
                 ).scalar_one()
 
-                balance_dec = Decimal(balance)
+                balance_dec = org_seed.get(org_id, Decimal(0)) + Decimal(ledger_balance)
 
                 if balance_dec == 0:
                     continue
@@ -622,8 +695,14 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int) -> Dict
         league_year_id = ly_row["id"]
         weeks_in_season = int(ly_row["weeks_in_season"])
 
-        # --- Starting balance (all years < league_year) ---
-        starting_balance = conn.execute(
+        # Seed capital from organizations.cash (initial funds before any ledger activity)
+        seed_capital = conn.execute(
+            select(func.coalesce(orgs.c.cash, 0))
+            .where(orgs.c.id == org_id)
+        ).scalar_one()
+
+        # --- Starting balance: seed capital + all prior-year ledger entries ---
+        ledger_prior = conn.execute(
             select(func.coalesce(func.sum(ledger.c.amount), 0))
             .select_from(ledger.join(ly_tbl, ledger.c.league_year_id == ly_tbl.c.id))
             .where(
@@ -633,6 +712,7 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int) -> Dict
                 )
             )
         ).scalar_one()
+        starting_balance = Decimal(seed_capital) + Decimal(ledger_prior)
 
         # --- Year-level (non-week) entries for this year ---
         year_level_rows = conn.execute(

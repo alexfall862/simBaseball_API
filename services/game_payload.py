@@ -1009,9 +1009,6 @@ DEFAULT_PLAYER_STRATEGY = {
     "stealfreq": 1.87,          # Steal attempt frequency (0-100, represents %)
     "pickofffreq": 1.0,         # Pickoff attempt frequency (0-100, represents %)
     "pitchchoices": [1, 1, 1, 1, 1],  # Pitch mix weights for 5 pitch slots
-    "left_split": None,         # None = use player's natural spray from simbbPlayers
-    "center_split": None,
-    "right_split": None,
     "pitchpull": None,          # None = use team bullpen_cutoff default
     "pulltend": None,           # None = "normal"
 }
@@ -1097,11 +1094,6 @@ def _load_player_strategies_bulk(
             except (TypeError, json.JSONDecodeError):
                 strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
 
-        # Spray chart overrides (None = use player's natural spray)
-        for spray_key in ("left_split", "center_split", "right_split"):
-            spray_val = row.get(spray_key)
-            strat[spray_key] = float(spray_val) if spray_val is not None else None
-
         # Pitcher leash settings (None = use team defaults)
         pitchpull = row.get("pitchpull")
         strat["pitchpull"] = int(pitchpull) if pitchpull is not None else None
@@ -1157,11 +1149,6 @@ def _load_player_strategy(conn, player_id: int, org_id: int | None = None) -> Di
             strat["pitchchoices"] = json.loads(pitchchoices_raw)
         except (TypeError, json.JSONDecodeError):
             strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
-
-    # Spray chart overrides
-    for spray_key in ("left_split", "center_split", "right_split"):
-        spray_val = row.get(spray_key)
-        strat[spray_key] = float(spray_val) if spray_val is not None else None
 
     # Pitcher leash settings
     pitchpull = row.get("pitchpull")

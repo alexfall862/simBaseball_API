@@ -38,9 +38,6 @@ DEFAULT_PLAYER_STRATEGY = {
     "stealfreq": 1.87,
     "pickofffreq": 1.0,
     "pitchchoices": [1, 1, 1, 1, 1],
-    "left_split": None,
-    "center_split": None,
-    "right_split": None,
     "pitchpull": None,
     "pulltend": None,
 }
@@ -97,9 +94,6 @@ def _format_strategy(d: dict) -> dict:
         "stealfreq": float(d["stealfreq"]) if d.get("stealfreq") is not None else DEFAULT_PLAYER_STRATEGY["stealfreq"],
         "pickofffreq": float(d["pickofffreq"]) if d.get("pickofffreq") is not None else DEFAULT_PLAYER_STRATEGY["pickofffreq"],
         "pitchchoices": pitchchoices,
-        "left_split": float(d["left_split"]) if d.get("left_split") is not None else None,
-        "center_split": float(d["center_split"]) if d.get("center_split") is not None else None,
-        "right_split": float(d["right_split"]) if d.get("right_split") is not None else None,
         "pitchpull": int(d["pitchpull"]) if d.get("pitchpull") is not None else None,
         "pulltend": d.get("pulltend") or None,
     }
@@ -203,15 +197,6 @@ def put_player_strategy(org_id: int, player_id: int):
         if not isinstance(pc, list) or len(pc) != 5:
             errors.append("pitchchoices must be an array of exactly 5 numbers")
 
-    splits_provided = [k for k in ("left_split", "center_split", "right_split") if k in body and body[k] is not None]
-    if len(splits_provided) == 3:
-        try:
-            total = sum(float(body[k]) for k in splits_provided)
-            if abs(total - 1.0) > 0.01:
-                errors.append("left_split + center_split + right_split must sum to 1.0")
-        except (TypeError, ValueError):
-            errors.append("split values must be numbers")
-
     if "plate_approach" in body and body["plate_approach"] not in VALID_PLATE_APPROACH:
         errors.append(f"plate_approach must be one of: {', '.join(sorted(VALID_PLATE_APPROACH))}")
     if "pitching_approach" in body and body["pitching_approach"] not in VALID_PITCHING_APPROACH:
@@ -244,11 +229,6 @@ def put_player_strategy(org_id: int, player_id: int):
     for f, cast in num_fields.items():
         if f in body:
             values[f] = cast(body[f]) if body[f] is not None else None
-
-    dec_fields = ["left_split", "center_split", "right_split"]
-    for f in dec_fields:
-        if f in body:
-            values[f] = float(body[f]) if body[f] is not None else None
 
     if "pulltend" in body:
         values["pulltend"] = body["pulltend"]

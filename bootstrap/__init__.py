@@ -193,7 +193,7 @@ def _get_organization(conn, tables, org_id):
             "team_city": td.get("team_city"),
             "team_nickname": td.get("team_nickname"),
             "team_full_name": (
-                f"{td.get('team_city', '')} {td.get('team_nickname', '')}".strip()
+                f"{td.get('team_name', '')} {td.get('team_nickname', '')}".strip()
                 or None
             ),
             "color_one": td.get("color_one"),
@@ -463,8 +463,15 @@ def _get_financials(conn, tables, org_id, ctx):
 
     # ---- Financial Summary ----
 
-    # Starting balance: all prior years
-    starting_balance = float(conn.execute(
+    # Seed capital from organizations.cash (initial funds before any ledger activity)
+    orgs = tables["organizations"]
+    seed_capital = float(conn.execute(
+        select(func.coalesce(orgs.c.cash, 0))
+        .where(orgs.c.id == org_id)
+    ).scalar_one())
+
+    # Starting balance: seed capital + all prior-year ledger entries
+    starting_balance = seed_capital + float(conn.execute(
         select(func.coalesce(func.sum(ledger.c.amount), 0))
         .select_from(ledger.join(ly, ledger.c.league_year_id == ly.c.id))
         .where(and_(
@@ -968,6 +975,7 @@ def _get_all_teams(conn, tables):
             t.c.id.label("team_id"),
             t.c.team_abbrev,
             t.c.team_city,
+            t.c.team_name,
             t.c.team_nickname,
             t.c.orgID.label("org_id"),
             t.c.team_level,
@@ -984,9 +992,10 @@ def _get_all_teams(conn, tables):
     result = []
     for r in rows:
         d = _row_to_dict(r)
-        city = d.pop("team_city") or ""
+        d.pop("team_city", None)
+        name = d.pop("team_name") or ""
         nick = d.pop("team_nickname") or ""
-        d["team_full_name"] = f"{city} {nick}".strip() or None
+        d["team_full_name"] = f"{name} {nick}".strip() or None
         d["stadium_lat"] = float(d["stadium_lat"]) if d.get("stadium_lat") is not None else None
         d["stadium_long"] = float(d["stadium_long"]) if d.get("stadium_long") is not None else None
         result.append(d)
