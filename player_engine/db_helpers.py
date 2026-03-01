@@ -1,9 +1,16 @@
 """
 Database helper functions for weighted random selection from seed tables.
 All functions take a SQLAlchemy Core connection.
+
+The SeedCache class preloads all seed data to avoid per-player DB round-trips
+during batch generation. Single-player generation still works with direct queries.
 """
 import random
+from collections import defaultdict
 from sqlalchemy import text
+
+
+# ── Direct DB helpers (one query per call, used for single-player gen) ──────
 
 
 def weighted_random_row(conn, query, params=None):
@@ -122,3 +129,131 @@ def get_extra_pitches(conn, exclude_names):
     """
     result = conn.execute(text(query), params)
     return result.mappings().all()
+
+
+# ── SeedCache: preload all seed data for batch generation ───────────────────
+
+
+class SeedCache:
+    """
+    Preloads all seed tables into memory so batch player generation
+    avoids per-player DB round-trips (~49 queries/player → 0).
+
+    Usage:
+        cache = SeedCache(conn)
+        region = cache.pick_region()
+        city = cache.pick_city(region["id"])
+        ...
+    """
+
+    def __init__(self, conn):
+        self._load_regions(conn)
+        self._load_cities(conn)
+        self._load_names(conn)
+        self._load_potentials(conn)
+        self._load_pitches(conn)
+
+    # ── Loading ─────────────────────────────────────────────
+
+    def _load_regions(self, conn):
+        rows = conn.execute(
+            text("SELECT id, name, region_type, weight, name_pool FROM regions")
+        ).mappings().all()
+        self._regions = [dict(r) for r in rows]
+        self._region_weights = [r["weight"] for r in self._regions]
+
+    def _load_cities(self, conn):
+        rows = conn.execute(
+            text("SELECT id, region_id, name, weight FROM cities")
+        ).mappings().all()
+        self._cities_by_region = defaultdict(list)
+        self._city_weights_by_region = defaultdict(list)
+        for r in rows:
+            d = dict(r)
+            self._cities_by_region[d["region_id"]].append(d)
+            self._city_weights_by_region[d["region_id"]].append(d["weight"])
+
+    def _load_names(self, conn):
+        fnames = conn.execute(
+            text("SELECT name, weight, region FROM forenames")
+        ).mappings().all()
+        self._forenames_by_pool = defaultdict(list)
+        self._fname_weights_by_pool = defaultdict(list)
+        for r in fnames:
+            self._forenames_by_pool[r["region"]].append(r["name"])
+            self._fname_weights_by_pool[r["region"]].append(r["weight"])
+
+        lnames = conn.execute(
+            text("SELECT name, weight, region FROM surnames")
+        ).mappings().all()
+        self._surnames_by_pool = defaultdict(list)
+        self._lname_weights_by_pool = defaultdict(list)
+        for r in lnames:
+            self._surnames_by_pool[r["region"]].append(r["name"])
+            self._lname_weights_by_pool[r["region"]].append(r["weight"])
+
+    def _load_potentials(self, conn):
+        rows = conn.execute(
+            text(
+                "SELECT player_type, ability_class, grade, weight "
+                "FROM potential_weights WHERE weight > 0"
+            )
+        ).mappings().all()
+        self._pot_grades = defaultdict(list)
+        self._pot_weights = defaultdict(list)
+        for r in rows:
+            key = (r["player_type"], r["ability_class"])
+            self._pot_grades[key].append(r["grade"])
+            self._pot_weights[key].append(r["weight"])
+
+    def _load_pitches(self, conn):
+        rows = conn.execute(
+            text("SELECT name, pool, pool_weight, extra_weight FROM pitch_types")
+        ).mappings().all()
+        self._pitch_pools = defaultdict(list)
+        self._pitch_pool_weights = defaultdict(list)
+        self._all_pitches = []
+        for r in rows:
+            d = dict(r)
+            self._all_pitches.append(d)
+            if d["pool_weight"] and d["pool_weight"] > 0:
+                self._pitch_pools[d["pool"]].append(d)
+                self._pitch_pool_weights[d["pool"]].append(d["pool_weight"])
+
+    # ── Weighted random picks (in-memory, no DB) ───────────
+
+    def pick_region(self):
+        return random.choices(self._regions, self._region_weights, k=1)[0]
+
+    def pick_city(self, region_id):
+        cities = self._cities_by_region.get(region_id)
+        if not cities:
+            return {"name": "Unknown"}
+        weights = self._city_weights_by_region[region_id]
+        return random.choices(cities, weights, k=1)[0]
+
+    def pick_name(self, name_pool):
+        fnames = self._forenames_by_pool.get(name_pool)
+        lnames = self._surnames_by_pool.get(name_pool)
+        fn = random.choices(fnames, self._fname_weights_by_pool[name_pool], k=1)[0] if fnames else "Unknown"
+        ln = random.choices(lnames, self._lname_weights_by_pool[name_pool], k=1)[0] if lnames else "Unknown"
+        return fn, ln
+
+    def pick_potential(self, player_type, ability_class):
+        key = (player_type, ability_class)
+        grades = self._pot_grades.get(key)
+        if not grades:
+            return "F"
+        weights = self._pot_weights[key]
+        return random.choices(grades, weights, k=1)[0]
+
+    def get_pitch_pool(self, pool_num):
+        return self._pitch_pools.get(pool_num, [])
+
+    def get_pitch_pool_weights(self, pool_num):
+        return self._pitch_pool_weights.get(pool_num, [])
+
+    def get_extra_pitches(self, exclude_names):
+        exclude = set(exclude_names)
+        pitches = [p for p in self._all_pitches if p["extra_weight"] and p["extra_weight"] > 0 and p["name"] not in exclude]
+        return pitches

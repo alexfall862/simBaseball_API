@@ -33,6 +33,8 @@ def api_generate_players():
 
     try:
         players = svc_generate_players(count, age=age)
+        # Cap response detail at 500 rows to keep payload small for large batches
+        display_limit = 500
         summary = [
             {
                 "id": p["id"],
@@ -42,9 +44,13 @@ def api_generate_players():
                 "age": p["age"],
                 "area": p["area"],
             }
-            for p in players
+            for p in players[:display_limit]
         ]
-        return jsonify(created=len(summary), players=summary), 200
+        result = {"created": len(players), "players": summary}
+        if len(players) > display_limit:
+            result["truncated"] = True
+            result["showing"] = display_limit
+        return jsonify(result), 200
     except SQLAlchemyError:
         return jsonify(error="db_error", message="Database error during generation"), 500
 

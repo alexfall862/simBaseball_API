@@ -39,10 +39,11 @@ from .db_helpers import (
     get_pitch_pool,
     get_extra_pitches,
     weighted_random_row,
+    SeedCache,
 )
 
 
-def generate_player(conn, age=15):
+def generate_player(conn, age=15, seed_cache=None):
     """
     Generate a complete new player and INSERT into simbbPlayers.
     Returns the new player's data as a dict.
@@ -50,18 +51,26 @@ def generate_player(conn, age=15):
     Args:
         conn: SQLAlchemy Core connection
         age: Starting age (default 15)
+        seed_cache: Optional SeedCache for batch generation (avoids DB lookups)
     """
     ptype = _pick_position()
 
     # Location
-    region = pick_region(conn)
-    city_row = pick_city(conn, region["id"])
+    if seed_cache:
+        region = seed_cache.pick_region()
+        city_row = seed_cache.pick_city(region["id"])
+    else:
+        region = pick_region(conn)
+        city_row = pick_city(conn, region["id"])
     city = city_row["name"]
     area = region["name"]
     intorusa = region["region_type"]
 
     # Name (uses name_pool to map US states -> "United States")
-    firstname, lastname = pick_name(conn, region["name_pool"])
+    if seed_cache:
+        firstname, lastname = seed_cache.pick_name(region["name_pool"])
+    else:
+        firstname, lastname = pick_name(conn, region["name_pool"])
 
     # Physical attributes
     height = _generate_height()
@@ -97,12 +106,15 @@ def generate_player(conn, age=15):
 
     # Generate potentials for all standard abilities (base starts at 0)
     for ability_name, ability_class in ABILITY_CLASS_MAP.items():
-        pot = pick_potential(conn, ptype, ability_class)
+        if seed_cache:
+            pot = seed_cache.pick_potential(ptype, ability_class)
+        else:
+            pot = pick_potential(conn, ptype, ability_class)
         player[f"{ability_name}_base"] = 0.0
         player[f"{ability_name}_pot"] = pot
 
     # Generate pitch repertoire
-    repertoire = _generate_pitch_repertoire(conn)
+    repertoire = _generate_pitch_repertoire(conn, seed_cache=seed_cache)
     for i, slot in enumerate(PITCH_SLOTS):
         pitch_name = repertoire[i]
         player[f"{slot}_name"] = pitch_name
@@ -110,7 +122,10 @@ def generate_player(conn, age=15):
         # Each pitch has 4 sub-abilities, all PitchAbility class
         sub_bases = []
         for sub in PITCH_SUB_ABILITIES:
-            pot = pick_potential(conn, ptype, "PitchAbility")
+            if seed_cache:
+                pot = seed_cache.pick_potential(ptype, "PitchAbility")
+            else:
+                pot = pick_potential(conn, ptype, "PitchAbility")
             player[f"{slot}_{sub}_base"] = 0.0
             player[f"{slot}_{sub}_pot"] = pot
             sub_bases.append(0.0)
@@ -131,8 +146,9 @@ def generate_player(conn, age=15):
 
 
 def generate_players(conn, count, age=15):
-    """Generate multiple players. Returns list of player dicts."""
-    return [generate_player(conn, age=age) for _ in range(count)]
+    """Generate multiple players. Preloads seed data for batch performance."""
+    cache = SeedCache(conn)
+    return [generate_player(conn, age=age, seed_cache=cache) for _ in range(count)]
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +213,7 @@ def _generate_splits():
     return pull, center, oppo
 
 
-def _generate_pitch_repertoire(conn):
+def _generate_pitch_repertoire(conn, seed_cache=None):
     """
     Build a 5-pitch repertoire:
       Slot 1: Fastball pool
@@ -210,17 +226,25 @@ def _generate_pitch_repertoire(conn):
 
     # Slots 1-3 from their assigned pools
     for pool_num in [1, 2, 3]:
-        pool = get_pitch_pool(conn, pool_num)
-        chosen = random.choices(pool, [p["weight"] for p in pool], k=1)[0]
+        if seed_cache:
+            pool = seed_cache.get_pitch_pool(pool_num)
+            weights = seed_cache.get_pitch_pool_weights(pool_num)
+        else:
+            pool = get_pitch_pool(conn, pool_num)
+            weights = [p["weight"] for p in pool]
+        chosen = random.choices(pool, weights, k=1)[0]
         pitches.append(chosen["name"])
 
     # Slots 4-5 from remaining pitch types
     for _ in range(2):
-        available = get_extra_pitches(conn, pitches)
+        if seed_cache:
+            available = seed_cache.get_extra_pitches(pitches)
+        else:
+            available = get_extra_pitches(conn, pitches)
         if not available:
             break
         chosen = random.choices(
-            available, [p["weight"] for p in available], k=1
+            available, [p["extra_weight"] if "extra_weight" in p else p["weight"] for p in available], k=1
         )[0]
         pitches.append(chosen["name"])
 

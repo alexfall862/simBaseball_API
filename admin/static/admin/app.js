@@ -2180,7 +2180,9 @@
           tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">Generation failed</td></tr>';
           return;
         }
-        statusEl.textContent = `Generated ${data.created} player${data.created > 1 ? 's' : ''}.`;
+        let msg = `Generated ${data.created} player${data.created > 1 ? 's' : ''}.`;
+        if (data.truncated) msg += ` Showing first ${data.showing} in table.`;
+        statusEl.textContent = msg;
         if (!data.players || !data.players.length) {
           tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No results</td></tr>';
           return;
