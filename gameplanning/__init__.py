@@ -478,6 +478,9 @@ def get_defense(team_id: int):
                 "target_weight": float(d["target_weight"]),
                 "priority": d["priority"],
                 "locked": bool(d.get("locked", 0)),
+                "lineup_role": d.get("lineup_role", "balanced"),
+                "min_order": d.get("min_order"),
+                "max_order": d.get("max_order"),
             })
         return jsonify({"team_id": team_id, "assignments": assignments}), 200
     except SQLAlchemyError:
@@ -508,6 +511,19 @@ def put_defense(team_id: int):
                     errors.append(f"assignments[{i}].target_weight must be > 0")
             except (TypeError, ValueError):
                 errors.append(f"assignments[{i}].target_weight must be a number")
+        lr = a.get("lineup_role")
+        if lr is not None and lr not in VALID_LINEUP_ROLES:
+            errors.append(f"assignments[{i}].lineup_role must be one of: {', '.join(sorted(VALID_LINEUP_ROLES))}")
+        mn = a.get("min_order")
+        mx = a.get("max_order")
+        if mn is not None:
+            if not isinstance(mn, int) or mn < 1 or mn > 9:
+                errors.append(f"assignments[{i}].min_order must be 1-9")
+        if mx is not None:
+            if not isinstance(mx, int) or mx < 1 or mx > 9:
+                errors.append(f"assignments[{i}].max_order must be 1-9")
+        if isinstance(mn, int) and isinstance(mx, int) and mn > mx:
+            errors.append(f"assignments[{i}].min_order must be <= max_order")
 
     if errors:
         return jsonify(error="validation_error", message="; ".join(errors)), 400
@@ -526,6 +542,9 @@ def put_defense(team_id: int):
                     target_weight=float(a.get("target_weight", 1.0)),
                     priority=int(a.get("priority", 1)),
                     locked=1 if a.get("locked") else 0,
+                    lineup_role=a.get("lineup_role", "balanced"),
+                    min_order=a.get("min_order"),
+                    max_order=a.get("max_order"),
                 ))
             conn.commit()
 
@@ -533,15 +552,21 @@ def put_defense(team_id: int):
                 select(tbl).where(tbl.c.team_id == team_id)
                 .order_by(tbl.c.position_code, tbl.c.priority)
             ).all()
-        assignments = [{
-            "id": _row_to_dict(r)["id"],
-            "position_code": _row_to_dict(r)["position_code"],
-            "vs_hand": _row_to_dict(r)["vs_hand"],
-            "player_id": _row_to_dict(r)["player_id"],
-            "target_weight": float(_row_to_dict(r)["target_weight"]),
-            "priority": _row_to_dict(r)["priority"],
-            "locked": bool(_row_to_dict(r).get("locked", 0)),
-        } for r in rows]
+        assignments = []
+        for r in rows:
+            d = _row_to_dict(r)
+            assignments.append({
+                "id": d["id"],
+                "position_code": d["position_code"],
+                "vs_hand": d["vs_hand"],
+                "player_id": d["player_id"],
+                "target_weight": float(d["target_weight"]),
+                "priority": d["priority"],
+                "locked": bool(d.get("locked", 0)),
+                "lineup_role": d.get("lineup_role", "balanced"),
+                "min_order": d.get("min_order"),
+                "max_order": d.get("max_order"),
+            })
         return jsonify({"team_id": team_id, "assignments": assignments}), 200
     except SQLAlchemyError:
         log.exception("gameplanning: put defense db error")

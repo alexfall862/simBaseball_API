@@ -160,6 +160,20 @@
 
     // Transactions — Log
     document.getElementById('btn-tx-load-log').addEventListener('click', loadTransactionLog);
+
+    // End of Season
+    document.getElementById('btn-eos-run').addEventListener('click', runEndOfSeason);
+    document.getElementById('btn-eos-load-overview').addEventListener('click', () => {
+      const orgId = document.getElementById('eos-org-select').value;
+      if (orgId) loadServiceOverview(parseInt(orgId));
+    });
+
+    // Player Engine — Generation
+    document.getElementById('btn-pe-generate').addEventListener('click', generatePlayers);
+
+    // Player Engine — Progression
+    document.getElementById('btn-pe-progress-all').addEventListener('click', progressAll);
+    document.getElementById('btn-pe-progress-one').addEventListener('click', progressSingle);
   }
 
   // Navigation
@@ -193,6 +207,9 @@
       'tx-roster': 'Roster Moves',
       'tx-trades': 'Trades',
       'tx-log': 'Transaction Log',
+      'pe-generate': 'Player Generation',
+      'pe-progress': 'Player Progression',
+      'tx-eos': 'End of Season',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -228,6 +245,15 @@
         break;
       case 'tx-log':
         loadTransactionLog();
+        break;
+      case 'tx-eos':
+        loadEndOfSeason();
+        break;
+      case 'pe-generate':
+        loadGeneration();
+        break;
+      case 'pe-progress':
+        loadProgression();
         break;
     }
 
@@ -2074,6 +2100,255 @@
       })
       .catch(err => {
         detailBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // ── Player Engine: Generation ──────────────────────────────────────
+
+  function loadGeneration() {
+    // Load seed table status whenever this section is entered
+    loadSeedStatus();
+  }
+
+  function loadSeedStatus() {
+    const tbody = document.getElementById('pe-seed-tbody');
+    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Loading…</td></tr>';
+    fetch(`${API_BASE}/player-ops/seed-status`)
+      .then(r => r.json())
+      .then(tables => {
+        if (!tables.length) {
+          tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">No seed tables found</td></tr>';
+          return;
+        }
+        tbody.innerHTML = tables.map(t => {
+          const ok = t.rows > 0;
+          return `<tr>
+            <td><code>${t.table}</code></td>
+            <td>${t.rows >= 0 ? t.rows.toLocaleString() : 'Error'}</td>
+            <td><span class="badge ${ok ? 'badge-success' : 'badge-danger'}">${ok ? 'Ready' : 'Empty'}</span></td>
+          </tr>`;
+        }).join('');
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="3" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+  }
+
+  function generatePlayers() {
+    const count = parseInt(document.getElementById('pe-gen-count').value) || 1;
+    const age = parseInt(document.getElementById('pe-gen-age').value) || 15;
+    const statusEl = document.getElementById('pe-gen-status');
+    const tbody = document.getElementById('pe-gen-tbody');
+
+    statusEl.textContent = `Generating ${count} player${count > 1 ? 's' : ''}…`;
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">Working…</td></tr>';
+
+    fetch(`${API_BASE}/player-ops/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count, age }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          statusEl.textContent = `Error: ${data.message}`;
+          tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">Generation failed</td></tr>';
+          return;
+        }
+        statusEl.textContent = `Generated ${data.created} player${data.created > 1 ? 's' : ''}.`;
+        if (!data.players || !data.players.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No results</td></tr>';
+          return;
+        }
+        tbody.innerHTML = data.players.map(p => `<tr>
+          <td>${p.id}</td>
+          <td>${p.firstname} ${p.lastname}</td>
+          <td>${p.ptype}</td>
+          <td>${p.age}</td>
+          <td>${p.area}</td>
+        </tr>`).join('');
+      })
+      .catch(err => {
+        statusEl.textContent = `Error: ${err.message}`;
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">Request failed</td></tr>';
+      });
+  }
+
+  // ── Player Engine: Progression ────────────────────────────────────
+
+  function loadProgression() {
+    // Clear previous statuses on section load
+    document.getElementById('pe-prog-all-status').textContent = '';
+    document.getElementById('pe-prog-one-status').textContent = '';
+  }
+
+  function progressAll() {
+    const maxAge = parseInt(document.getElementById('pe-prog-max-age').value) || 45;
+    if (!confirm(`Progress ALL players (under age ${maxAge}) by one year? This may take a while.`)) return;
+
+    const statusEl = document.getElementById('pe-prog-all-status');
+    statusEl.textContent = 'Running batch progression…';
+
+    fetch(`${API_BASE}/player-ops/progress-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max_age: maxAge }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          statusEl.textContent = `Error: ${data.message}`;
+          return;
+        }
+        statusEl.textContent = `Done — progressed ${data.progressed} player${data.progressed !== 1 ? 's' : ''}.`;
+      })
+      .catch(err => {
+        statusEl.textContent = `Error: ${err.message}`;
+      });
+  }
+
+  function progressSingle() {
+    const pid = parseInt(document.getElementById('pe-prog-pid').value);
+    if (!pid || pid < 1) {
+      document.getElementById('pe-prog-one-status').textContent = 'Enter a valid player ID.';
+      return;
+    }
+
+    const statusEl = document.getElementById('pe-prog-one-status');
+    statusEl.textContent = `Progressing player ${pid}…`;
+
+    fetch(`${API_BASE}/player-ops/progress/${pid}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          statusEl.textContent = `Error: ${data.message}`;
+          return;
+        }
+        statusEl.textContent = `Player ${data.player_id} progressed successfully.`;
+      })
+      .catch(err => {
+        statusEl.textContent = `Error: ${err.message}`;
+      });
+  }
+
+  // ── End of Season ──────────────────────────────────────────────────
+
+  function loadEndOfSeason() {
+    fetchTxContext().then(() => {
+      const info = document.getElementById('eos-season-info');
+      info.innerHTML = `<strong>Current Season:</strong> League Year ID ${txLeagueYearId} &nbsp;|&nbsp; Week ${txGameWeekId}`;
+    });
+    populateTxOrgDropdown('eos-org-select');
+    document.getElementById('eos-result-card').style.display = 'none';
+  }
+
+  function runEndOfSeason() {
+    if (!txLeagueYearId) {
+      alert('Could not determine league year. Please wait for season info to load.');
+      return;
+    }
+    if (!confirm('This will process ALL end-of-season contract operations (service time, renewals, expirations). Continue?')) {
+      return;
+    }
+
+    const btn = document.getElementById('btn-eos-run');
+    btn.disabled = true;
+    btn.textContent = 'Processing...';
+
+    fetch(`${API_BASE}/transactions/end-of-season`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: txLeagueYearId }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        btn.disabled = false;
+        btn.textContent = 'Process End of Season';
+
+        if (data.error) {
+          alert(`Error: ${data.message}`);
+          return;
+        }
+
+        const resultDiv = document.getElementById('eos-result');
+        const card = document.getElementById('eos-result-card');
+        card.style.display = 'block';
+
+        const labels = {
+          league_year: 'League Year',
+          service_time_credited: 'Service Time Credited',
+          contracts_advanced: 'Contracts Advanced',
+          contracts_expired: 'Contracts Expired',
+          auto_renewed_minor: 'Auto-Renewed (Minor League)',
+          auto_renewed_pre_arb: 'Auto-Renewed (Pre-Arb MLB)',
+          became_free_agents: 'Became Free Agents',
+          extensions_activated: 'Extensions Activated',
+        };
+
+        resultDiv.innerHTML = Object.entries(labels).map(([key, label]) => `
+          <div class="kv-row">
+            <div class="kv-key">${label}</div>
+            <div class="kv-val">${data[key] !== undefined ? data[key] : '--'}</div>
+          </div>
+        `).join('');
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = 'Process End of Season';
+        alert('Error: ' + err.message);
+      });
+  }
+
+  function loadServiceOverview(orgId) {
+    const tbody = document.getElementById('eos-overview-tbody');
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">Loading...</td></tr>';
+
+    fetch(`${API_BASE}/transactions/contract-overview/${orgId}`)
+      .then(r => r.json())
+      .then(players => {
+        if (!Array.isArray(players) || players.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No active players found</td></tr>';
+          return;
+        }
+
+        const levelNames = { 9: 'MLB', 8: 'AAA', 7: 'AA', 6: 'High-A', 5: 'A', 4: 'Scraps' };
+        const phaseBadge = (phase) => {
+          const colors = {
+            minor: 'background:#2d7a4f;color:#fff',
+            pre_arb: 'background:#2563eb;color:#fff',
+            arb_eligible: 'background:#d97706;color:#fff',
+            fa_eligible: 'background:#dc2626;color:#fff',
+          };
+          const labels = {
+            minor: 'Minor',
+            pre_arb: 'Pre-Arb',
+            arb_eligible: 'Arb',
+            fa_eligible: 'FA Eligible',
+          };
+          const style = colors[phase] || 'background:#666;color:#fff';
+          return `<span style="padding:2px 8px;border-radius:4px;font-size:0.8em;${style}">${labels[phase] || phase}</span>`;
+        };
+
+        tbody.innerHTML = players.map(p => {
+          const salary = p.salary ? `$${Number(p.salary).toLocaleString()}` : '--';
+          return `<tr>
+            <td>${p.player_name}</td>
+            <td>${p.position || '--'}</td>
+            <td>${p.age}</td>
+            <td>${levelNames[p.current_level] || p.current_level}</td>
+            <td>${p.mlb_service_years}</td>
+            <td>${phaseBadge(p.contract_phase)}</td>
+            <td>Yr ${p.current_year}/${p.years}${p.years_to_arb != null ? ` (${p.years_to_arb} to arb)` : ''}${p.years_to_fa != null ? ` (${p.years_to_fa} to FA)` : ''}</td>
+            <td>${salary}</td>
+            <td>${p.is_expiring ? '<span style="color:var(--danger)">Yes</span>' : 'No'}</td>
+          </tr>`;
+        }).join('');
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted">Error: ${err.message}</td></tr>`;
       });
   }
 

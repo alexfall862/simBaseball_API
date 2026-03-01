@@ -65,7 +65,6 @@ def _get_player_column_categories():
       - pot_cols: potential grade columns (endswith _pot)
       - bio_cols: everything else (id, names, biographical stuff, pitchN_name, etc.)
 
-    We also skip the deprecated 'team' column entirely.
     """
     if hasattr(rosters_bp, "_player_col_cats"):
         return rosters_bp._player_col_cats
@@ -80,10 +79,6 @@ def _get_player_column_categories():
 
     for col in players.c:
         name = col.name
-
-        # Skip deprecated team column
-        if name == "team":
-            continue
 
         if name.endswith("_pot"):
             pot_cols.append(name)

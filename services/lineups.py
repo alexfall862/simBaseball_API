@@ -204,6 +204,9 @@ def _load_all_position_plans_for_team(
             tpp.c.target_weight,
             tpp.c.priority,
             tpp.c.locked,
+            tpp.c.lineup_role,
+            tpp.c.min_order,
+            tpp.c.max_order,
         )
         .where(and_(*conditions))
         .order_by(tpp.c.position_code.asc(), tpp.c.priority.asc(), tpp.c.id.asc())
@@ -220,6 +223,9 @@ def _load_all_position_plans_for_team(
             "target_weight": row["target_weight"],
             "priority": row["priority"],
             "locked": row["locked"],
+            "lineup_role": row.get("lineup_role", "balanced"),
+            "min_order": row.get("min_order"),
+            "max_order": row.get("max_order"),
         }
         if pos not in plans_by_position:
             plans_by_position[pos] = []
@@ -407,14 +413,14 @@ def _build_batting_order(
     starter_id: int,
     defense: Dict[str, Any],
     use_dh: bool,
+    plans_by_position: Dict[str, List[Dict[str, Any]]] | None = None,
 ) -> List[int]:
     """
-    Build batting order from starting players + team_lineup_roles.
+    Build batting order from starting players.
 
-    If no roles exist, falls back to sorting by offense descending.
+    Uses defense-assignment lineup prefs (lineup_role, min_order, max_order)
+    when available. Falls back to team_lineup_roles, then to offense sorting.
     """
-    roles_by_slot = _load_team_lineup_roles(conn, team_id)
-
     # Determine starting hitters
     starting_ids: List[int] = []
 
@@ -443,7 +449,43 @@ def _build_batting_order(
     if not unique_start_ids:
         return []
 
-    # If there are no lineup roles configured, just sort by offense descending
+    # Build player→lineup prefs from defense assignments
+    player_lineup_prefs: Dict[int, Dict[str, Any]] = {}
+    has_defense_lineup_data = False
+
+    if plans_by_position:
+        # Map each starter back to the assignment that placed them
+        for pos, plans in plans_by_position.items():
+            chosen_pid = defense.get(pos)
+            if chosen_pid is None or chosen_pid not in unique_start_ids:
+                continue
+            # Use the first matching plan entry for this player at this position
+            for plan in plans:
+                if plan["player_id"] == chosen_pid:
+                    role = plan.get("lineup_role", "balanced")
+                    mn = plan.get("min_order")
+                    mx = plan.get("max_order")
+                    # Only overwrite if we haven't already set prefs for this player,
+                    # or this entry has more specific data
+                    if chosen_pid not in player_lineup_prefs:
+                        player_lineup_prefs[chosen_pid] = {
+                            "lineup_role": role,
+                            "min_order": mn,
+                            "max_order": mx,
+                        }
+                        if role != "balanced" or mn is not None or mx is not None:
+                            has_defense_lineup_data = True
+                    break
+
+    # If defense assignments carry lineup data, use the new algorithm
+    if has_defense_lineup_data:
+        return _build_order_from_defense_prefs(
+            unique_start_ids, players_by_id, player_lineup_prefs
+        )
+
+    # Otherwise fall back to team_lineup_roles (legacy)
+    roles_by_slot = _load_team_lineup_roles(conn, team_id)
+
     if not roles_by_slot:
         return sorted(
             unique_start_ids,
@@ -451,21 +493,19 @@ def _build_batting_order(
             reverse=True,
         )
 
-    # Build a 9-slot lineup (some slots may be None if fewer than 9 starters)
+    # Legacy team_lineup_roles algorithm
     lineup: List[int | None] = [None] * min(9, len(unique_start_ids))
     assigned_players: set[int] = set()
 
-    # 1) Pre-assign locked players to their slots, if starting
-    for slot_idx in range(len(lineup)):  # 0-based index; slot number = idx+1
+    # 1) Pre-assign locked players to their slots
+    for slot_idx in range(len(lineup)):
         slot_num = slot_idx + 1
         role_row = roles_by_slot.get(slot_num)
         if not role_row:
             continue
-
         locked_pid = role_row.get("locked_player_id")
         if locked_pid is None:
             continue
-
         locked_pid = int(locked_pid)
         if locked_pid in unique_start_ids and locked_pid not in assigned_players:
             lineup[slot_idx] = locked_pid
@@ -475,25 +515,116 @@ def _build_batting_order(
     for slot_idx in range(len(lineup)):
         if lineup[slot_idx] is not None:
             continue
-
         slot_num = slot_idx + 1
         role_row = roles_by_slot.get(slot_num)
         role_name = role_row["role"] if role_row else "balanced"
 
-        # Choose the best remaining candidate for this role
         best_pid = None
         best_score = None
-
         for pid in unique_start_ids:
             if pid in assigned_players:
                 continue
-
             p = players_by_id[pid]
             score = _score_player_for_role(p, role_name)
-
-            # For 'bottom' role, we actually want lower offense at the bottom
             if role_name == "bottom":
                 score = -score
+            if best_pid is None or score > best_score:
+                best_pid = pid
+                best_score = score
+        if best_pid is not None:
+            lineup[slot_idx] = best_pid
+            assigned_players.add(best_pid)
+
+    # 3) Append remaining starters by offense
+    remaining_ids = [pid for pid in unique_start_ids if pid not in assigned_players]
+    remaining_sorted = sorted(
+        remaining_ids,
+        key=lambda pid: _compute_offense_score(players_by_id[pid]),
+        reverse=True,
+    )
+    final_lineup: List[int] = [pid for pid in lineup if pid is not None]
+    for pid in remaining_sorted:
+        if pid not in final_lineup:
+            final_lineup.append(pid)
+    return final_lineup
+
+
+def _build_order_from_defense_prefs(
+    starter_ids: List[int],
+    players_by_id: Dict[int, Dict[str, Any]],
+    prefs: Dict[int, Dict[str, Any]],
+) -> List[int]:
+    """
+    Build batting order using lineup prefs from defense assignments.
+
+    Algorithm:
+      1. Place constrained players (min/max_order) first, tightest range first
+      2. Fill remaining slots by role score
+      3. Append leftovers by offense
+    """
+    num_slots = min(9, len(starter_ids))
+    lineup: List[int | None] = [None] * num_slots
+    assigned: set[int] = set()
+
+    # Step 1: Place constrained players (those with min/max_order)
+    constrained = []
+    for pid in starter_ids:
+        p = prefs.get(pid, {})
+        mn = p.get("min_order")
+        mx = p.get("max_order")
+        if mn is not None or mx is not None:
+            lo = mn if mn is not None else 1
+            hi = mx if mx is not None else 9
+            # Clamp to actual lineup size
+            lo = max(1, min(lo, num_slots))
+            hi = max(1, min(hi, num_slots))
+            constrained.append((pid, lo, hi, hi - lo))
+
+    # Sort by range tightness (smallest range first)
+    constrained.sort(key=lambda x: x[3])
+
+    for pid, lo, hi, _ in constrained:
+        # Find best available slot within range
+        role = prefs.get(pid, {}).get("lineup_role", "balanced")
+        p = players_by_id[pid]
+        score = _score_player_for_role(p, role)
+
+        best_slot = None
+        for slot_idx in range(lo - 1, hi):  # convert to 0-based
+            if slot_idx < num_slots and lineup[slot_idx] is None:
+                best_slot = slot_idx
+                break
+
+        if best_slot is not None:
+            lineup[best_slot] = pid
+            assigned.add(pid)
+
+    # Step 2: Fill remaining slots by role score
+    unconstrained = [pid for pid in starter_ids if pid not in assigned]
+
+    for slot_idx in range(num_slots):
+        if lineup[slot_idx] is not None:
+            continue
+
+        best_pid = None
+        best_score = None
+
+        for pid in unconstrained:
+            if pid in assigned:
+                continue
+            p = players_by_id[pid]
+            role = prefs.get(pid, {}).get("lineup_role", "balanced")
+            score = _score_player_for_role(p, role)
+
+            # Bias by slot position: table_setter/on_base/speed prefer early slots,
+            # slugger prefers middle, bottom prefers late
+            slot_num = slot_idx + 1
+            if role in ("table_setter", "on_base", "speed") and slot_num <= 3:
+                score *= 1.2
+            elif role == "slugger" and 3 <= slot_num <= 5:
+                score *= 1.2
+            elif role == "bottom" and slot_num >= 7:
+                score *= 1.2
 
             if best_pid is None or score > best_score:
                 best_pid = pid
@@ -501,27 +632,21 @@ def _build_batting_order(
 
         if best_pid is not None:
             lineup[slot_idx] = best_pid
-            assigned_players.add(best_pid)
+            assigned.add(best_pid)
 
-    # 3) If any starters are left unassigned (more starters than slots),
-    # append them in order of offense.
-    remaining_ids = [pid for pid in unique_start_ids if pid not in assigned_players]
-    remaining_sorted = sorted(
-        remaining_ids,
+    # Step 3: Append any remaining starters by offense
+    remaining = [pid for pid in starter_ids if pid not in assigned]
+    remaining.sort(
         key=lambda pid: _compute_offense_score(players_by_id[pid]),
         reverse=True,
     )
 
-    final_lineup: List[int] = []
-    for pid in lineup:
-        if pid is not None:
-            final_lineup.append(pid)
+    final = [pid for pid in lineup if pid is not None]
+    for pid in remaining:
+        if pid not in final:
+            final.append(pid)
 
-    for pid in remaining_sorted:
-        if pid not in final_lineup:
-            final_lineup.append(pid)
-
-    return final_lineup
+    return final
 
 
 # -------------------------------------------------------------------
@@ -773,7 +898,7 @@ def build_defense_and_lineup(
             if best_pid in remaining_ids:
                 remaining_ids.remove(best_pid)
 
-    # Build batting order using roles (with safe fallback)
+    # Build batting order using defense-based prefs (with safe fallback)
     lineup_ids = _build_batting_order(
         conn=conn,
         team_id=team_id,
@@ -781,6 +906,7 @@ def build_defense_and_lineup(
         starter_id=starter_id,
         defense=defense,
         use_dh=use_dh,
+        plans_by_position=plans_by_position,
     )
 
     # Bench = everyone not in lineup and not the SP

@@ -234,6 +234,12 @@ def create_app(config_object=Config):
     except Exception as e:
         app.logger.exception("Failed to register transactions blueprint: %s", e)
 
+    try:
+        from player_ops import player_ops_bp
+        app.register_blueprint(player_ops_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register player_ops blueprint: %s", e)
+
     from admin import admin_bp
     # Secure session cookie
     app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))

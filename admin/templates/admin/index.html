@@ -66,6 +66,19 @@
       <a href="#" class="nav-item" data-section="tx-log">
         <span class="nav-icon">&#128220;</span> Transaction Log
       </a>
+      <a href="#" class="nav-item" data-section="tx-eos">
+        <span class="nav-icon">&#128197;</span> End of Season
+      </a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Player Engine</div>
+      <a href="#" class="nav-item" data-section="pe-generate">
+        <span class="nav-icon">&#9889;</span> Generation
+      </a>
+      <a href="#" class="nav-item" data-section="pe-progress">
+        <span class="nav-icon">&#128200;</span> Progression
+      </a>
     </div>
 
     <div class="nav-section">
@@ -853,6 +866,134 @@
             </table>
           </div>
           <pre id="tx-log-detail" class="result-box" style="margin-top: 12px; display:none"></pre>
+        </div>
+      </section>
+
+      <!-- ── End of Season ────────────────────────────────────── -->
+      <section id="section-tx-eos" class="section">
+        <div class="card">
+          <h3>Run End of Season</h3>
+          <p class="text-muted">Process all end-of-season contract operations: credit MLB service time, advance mid-contract years, handle expirations (extensions, auto-renewals, free agency).</p>
+
+          <div class="alert alert-info" id="eos-season-info">
+            Loading current season info...
+          </div>
+
+          <div class="button-group">
+            <button class="btn btn-warning" id="btn-eos-run">Process End of Season</button>
+          </div>
+
+          <div id="eos-result-card" style="display:none; margin-top: 16px">
+            <h4>Processing Summary</h4>
+            <div class="kv-table" id="eos-result"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Service Time Overview</h3>
+          <div class="form-row" style="margin-bottom: 12px">
+            <select id="eos-org-select" class="select-lg">
+              <option value="">Select an organization...</option>
+            </select>
+            <button class="btn btn-secondary" id="btn-eos-load-overview">Load</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Pos</th>
+                  <th>Age</th>
+                  <th>Level</th>
+                  <th>Svc Yrs</th>
+                  <th>Phase</th>
+                  <th>Contract</th>
+                  <th>Salary</th>
+                  <th>Expiring</th>
+                </tr>
+              </thead>
+              <tbody id="eos-overview-tbody">
+                <tr><td colspan="9" class="text-center text-muted">Select an org to view</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Player Engine: Generation ────────────────────────── -->
+      <section id="section-pe-generate" class="section">
+        <div class="card">
+          <h3>Generate Players</h3>
+          <div class="form-row" style="margin-bottom: 12px">
+            <label>Count:
+              <input type="number" id="pe-gen-count" value="1" min="1" max="500" style="width: 80px" />
+            </label>
+            <label>Starting Age:
+              <input type="number" id="pe-gen-age" value="15" min="14" max="45" style="width: 80px" />
+            </label>
+            <button class="btn btn-primary" id="btn-pe-generate">Generate</button>
+          </div>
+          <div id="pe-gen-status" class="text-muted" style="margin-bottom: 8px"></div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Age</th>
+                  <th>Region</th>
+                </tr>
+              </thead>
+              <tbody id="pe-gen-tbody">
+                <tr><td colspan="5" class="text-center text-muted">No players generated yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Seed Tables Status</h3>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Table</th>
+                  <th>Rows</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="pe-seed-tbody">
+                <tr><td colspan="3" class="text-center text-muted">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Player Engine: Progression ───────────────────────── -->
+      <section id="section-pe-progress" class="section">
+        <div class="card">
+          <h3>Batch Progression</h3>
+          <p class="text-muted" style="margin-bottom: 12px">Progress every player in the database by one year. This is a major operation — use with care.</p>
+          <div class="form-row" style="margin-bottom: 12px">
+            <label>Max Age:
+              <input type="number" id="pe-prog-max-age" value="45" min="16" max="60" style="width: 80px" />
+            </label>
+            <button class="btn btn-primary" id="btn-pe-progress-all">Progress All Players</button>
+          </div>
+          <div id="pe-prog-all-status" class="text-muted"></div>
+        </div>
+
+        <div class="card">
+          <h3>Single Player Progression</h3>
+          <div class="form-row" style="margin-bottom: 12px">
+            <label>Player ID:
+              <input type="number" id="pe-prog-pid" placeholder="e.g. 42" style="width: 100px" />
+            </label>
+            <button class="btn btn-secondary" id="btn-pe-progress-one">Progress</button>
+          </div>
+          <div id="pe-prog-one-status" class="text-muted"></div>
         </div>
       </section>
 

@@ -36,6 +36,12 @@ from services.transactions import (
     rollback_transaction,
     _get_signing_budget,
 )
+from services.contract_ops import (
+    get_player_contract_status,
+    get_org_contract_overview,
+    get_payroll_projection,
+    process_end_of_season,
+)
 
 transactions_bp = Blueprint("transactions", __name__)
 
@@ -558,6 +564,65 @@ def api_rollback():
                 transaction_id=int(body["transaction_id"]),
                 executed_by=body.get("executed_by"),
             )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+# -----------------------------------------------------------------------
+# Contract Status & End-of-Season
+# -----------------------------------------------------------------------
+
+@transactions_bp.get("/transactions/contract-status/<int:player_id>")
+def api_contract_status(player_id: int):
+    """Return enriched contract + service-time info for one player."""
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            status = get_player_contract_status(conn, player_id)
+        if status is None:
+            return jsonify(error="not_found", message="No active contract found"), 404
+        return jsonify(status), 200
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.get("/transactions/contract-overview/<int:org_id>")
+def api_contract_overview(org_id: int):
+    """Return contract status for all active players held by an org."""
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            overview = get_org_contract_overview(conn, org_id)
+        return jsonify(overview), 200
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.get("/transactions/payroll-projection/<int:org_id>")
+def api_payroll_projection(org_id: int):
+    """Return multi-year salary projection for an org."""
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            projection = get_payroll_projection(conn, org_id)
+        return jsonify(projection), 200
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.post("/transactions/end-of-season")
+def api_end_of_season():
+    """Run end-of-season contract processing."""
+    body, err = _require_json("league_year_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = process_end_of_season(conn, int(body["league_year_id"]))
         return jsonify(result), 200
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
