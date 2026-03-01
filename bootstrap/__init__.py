@@ -101,6 +101,25 @@ def get_landing(org_id: int):
             except Exception:
                 log.debug("bootstrap: financials unavailable, skipping")
 
+            # Face data — deterministic player portraits for facesjs
+            face_data = {}
+            try:
+                from services.face_generator import generate_faces_bulk, load_face_config
+                all_player_ids = []
+                for _level_key, players in roster_map.items():
+                    if isinstance(players, list):
+                        for p in players:
+                            pid = p.get("id")
+                            if pid is not None:
+                                all_player_ids.append(int(pid))
+                face_config = load_face_config(conn)
+                face_data = {
+                    str(k): v
+                    for k, v in generate_faces_bulk(all_player_ids, config=face_config).items()
+                }
+            except Exception:
+                log.debug("bootstrap: face generation unavailable, skipping")
+
         return jsonify({
             "Organization":  org,
             "RosterMap":     roster_map,
@@ -115,6 +134,7 @@ def get_landing(org_id: int):
             "AllTeams":      all_teams,
             "SeasonContext":  ctx,
             "Financials":    financials,
+            "FaceData":      face_data,
         }), 200
 
     except SQLAlchemyError:

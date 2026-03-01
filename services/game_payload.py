@@ -1536,6 +1536,7 @@ def build_team_game_side(
         "pregame_injuries": pregame_injuries,
         "team_strategy": team_strategy,
         "bullpen_order": bullpen_order,
+        "vs_hand": vs_hand,
     }
 
 # -------------------------------------------------------------------
@@ -1923,6 +1924,24 @@ def build_week_payloads(
                 except Exception as stat_err:
                     logger.exception(
                         f"Stat accumulation failed for subweek '{subweek}': {stat_err}"
+                    )
+
+                # Record defensive position usage from the payloads
+                # (payloads contain defense dicts + vs_hand built before simulation)
+                try:
+                    from services.stat_accumulator import record_subweek_position_usage
+                    usage_count = record_subweek_position_usage(
+                        conn, payloads, league_year_id
+                    )
+                    conn.commit()
+                    logger.info(
+                        f"Position usage tracking for subweek '{subweek}': "
+                        f"{usage_count} rows upserted"
+                    )
+                except Exception as usage_err:
+                    logger.exception(
+                        f"Position usage tracking failed for subweek "
+                        f"'{subweek}': {usage_err}"
                     )
 
                 # Update player state for next subweek

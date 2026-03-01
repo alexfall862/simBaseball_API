@@ -706,8 +706,8 @@ def build_defense_and_lineup(
       - offensive ability
       - team_lineup_roles for batting order (if present)
 
-    It does NOT yet use:
-      - player_position_usage_week (weekly targets)
+    It uses:
+      - player_position_usage_week (weekly starts, written post-game)
     """
     # Bulk-load position plans and weekly usage for all positions at once
     # This replaces 8-16 individual queries with just 2 queries

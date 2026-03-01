@@ -792,3 +792,90 @@ def put_bullpen(team_id: int):
     except SQLAlchemyError:
         log.exception("gameplanning: put bullpen db error")
         return jsonify(error="db_unavailable", message="Database temporarily unavailable"), 503
+
+
+# ---------------------------------------------------------------------------
+# 7. Face generation config (admin)
+# ---------------------------------------------------------------------------
+
+from services.face_generator import DEFAULT_FREQUENCIES
+
+VALID_FREQ_KEYS = set(DEFAULT_FREQUENCIES.keys())
+
+
+@gameplanning_bp.get("/gameplanning/face-config")
+def get_face_config():
+    """Return the current face generation probability settings."""
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT config FROM face_gen_config WHERE id = 1")
+            ).first()
+            if row and row[0]:
+                raw = row[0]
+                config = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            else:
+                config = dict(DEFAULT_FREQUENCIES)
+        return jsonify(config), 200
+    except SQLAlchemyError:
+        log.exception("gameplanning: get face-config db error")
+        return jsonify(error="db_unavailable",
+                       message="Database temporarily unavailable"), 503
+
+
+@gameplanning_bp.put("/gameplanning/face-config")
+def put_face_config():
+    """Update face generation probability settings (partial updates OK)."""
+    body = request.get_json(silent=True) or {}
+    if not body:
+        return jsonify(error="bad_request",
+                       message="Request body must be JSON"), 400
+
+    # Validate keys and values
+    errors = []
+    for key, val in body.items():
+        if key not in VALID_FREQ_KEYS:
+            errors.append(f"Unknown setting: {key}")
+            continue
+        try:
+            fval = float(val)
+            if fval < 0.0 or fval > 1.0:
+                errors.append(f"{key} must be between 0.0 and 1.0")
+        except (TypeError, ValueError):
+            errors.append(f"{key} must be a number")
+
+    if errors:
+        return jsonify(error="validation_error",
+                       message="; ".join(errors)), 400
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            # Load existing config
+            row = conn.execute(
+                text("SELECT config FROM face_gen_config WHERE id = 1")
+            ).first()
+            if row and row[0]:
+                raw = row[0]
+                existing = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            else:
+                existing = dict(DEFAULT_FREQUENCIES)
+
+            # Merge updates
+            existing.update({k: float(v) for k, v in body.items()
+                             if k in VALID_FREQ_KEYS})
+
+            config_json = json.dumps(existing)
+            conn.execute(text("""
+                INSERT INTO face_gen_config (id, config)
+                VALUES (1, :config)
+                ON DUPLICATE KEY UPDATE config = :config
+            """), {"config": config_json})
+            conn.commit()
+
+        return jsonify(existing), 200
+    except SQLAlchemyError:
+        log.exception("gameplanning: put face-config db error")
+        return jsonify(error="db_unavailable",
+                       message="Database temporarily unavailable"), 503

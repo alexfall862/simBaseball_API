@@ -5,6 +5,7 @@ UPSERTs them into the season accumulation tables:
   - player_batting_stats
   - player_pitching_stats
   - player_fielding_stats
+  - player_position_usage_week  (defensive starts tracking)
 
 Called from game_payload.build_week_payloads() after each subweek's
 results come back from the engine.
@@ -241,3 +242,145 @@ def _upsert_fielding(
                 player_id_str,
             )
     return count
+
+
+# ---------------------------------------------------------------------------
+# Position usage tracking  (player_position_usage_week)
+# ---------------------------------------------------------------------------
+
+# Position codes in the defense dict that map to the usage table's enum.
+# "startingpitcher" → "p"; all others match directly.
+_DEFENSE_POS_TO_USAGE = {
+    "startingpitcher": "p",
+    "c": "c",
+    "fb": "fb",
+    "sb": "sb",
+    "tb": "tb",
+    "ss": "ss",
+    "lf": "lf",
+    "cf": "cf",
+    "rf": "rf",
+    "dh": "dh",
+}
+
+_USAGE_UPSERT = text("""
+    INSERT INTO player_position_usage_week
+        (league_year_id, season_week, team_id, player_id, position_code, vs_hand,
+         starts_this_week)
+    VALUES
+        (:league_year_id, :season_week, :team_id, :player_id, :position_code, :vs_hand,
+         1)
+    ON DUPLICATE KEY UPDATE
+        starts_this_week = starts_this_week + 1
+""")
+
+
+def record_game_position_usage(
+    conn,
+    defense: Dict[str, Any],
+    team_id: int,
+    vs_hand: str,
+    league_year_id: int,
+    season_week: int,
+) -> int:
+    """
+    Record one defensive start per position assignment for a single team
+    in a single game.
+
+    Args:
+        conn: Active SQLAlchemy connection (caller manages commit).
+        defense: Position→player_id dict from the game payload.
+        team_id: The team whose defense is being recorded.
+        vs_hand: Opponent SP throw hand ('L' or 'R').
+        league_year_id: Current league year.
+        season_week: Current season week.
+
+    Returns:
+        Number of position rows upserted.
+    """
+    if not vs_hand or vs_hand.upper() not in ("L", "R"):
+        logger.warning(
+            "stat_accumulator: skipping usage tracking for team %d — "
+            "invalid vs_hand=%r", team_id, vs_hand,
+        )
+        return 0
+
+    count = 0
+    for def_key, usage_pos in _DEFENSE_POS_TO_USAGE.items():
+        player_id = defense.get(def_key)
+        if player_id is None:
+            continue
+        try:
+            conn.execute(_USAGE_UPSERT, {
+                "league_year_id": league_year_id,
+                "season_week":    season_week,
+                "team_id":        team_id,
+                "player_id":      int(player_id),
+                "position_code":  usage_pos,
+                "vs_hand":        vs_hand.upper(),
+            })
+            count += 1
+        except Exception:
+            logger.exception(
+                "stat_accumulator: usage upsert failed for player %s "
+                "at %s (team %d)", player_id, usage_pos, team_id,
+            )
+    return count
+
+
+def record_subweek_position_usage(
+    conn,
+    payloads: List[Dict[str, Any]],
+    league_year_id: int,
+) -> int:
+    """
+    Record position usage for all games in a subweek.
+
+    Reads the defense dict and vs_hand from each payload's home_side
+    and away_side and UPSERTs a start into player_position_usage_week.
+
+    Args:
+        conn: Active SQLAlchemy connection (caller manages commit).
+        payloads: List of game payloads (each containing home_side/away_side).
+        league_year_id: Current league year.
+
+    Returns:
+        Total number of position rows upserted across all games.
+    """
+    total = 0
+    for payload in payloads:
+        game_id = payload.get("game_id", "?")
+        season_week = payload.get("season_week")
+        if season_week is None:
+            logger.warning(
+                "stat_accumulator: no season_week in payload for game %s, "
+                "skipping usage tracking", game_id,
+            )
+            continue
+
+        for side_key in ("home_side", "away_side"):
+            side = payload.get(side_key) or {}
+            defense = side.get("defense") or {}
+            team_id = side.get("team_id")
+            vs_hand = side.get("vs_hand")
+
+            if not team_id or not defense:
+                continue
+
+            try:
+                n = record_game_position_usage(
+                    conn, defense, int(team_id), vs_hand,
+                    league_year_id, int(season_week),
+                )
+                total += n
+            except Exception:
+                logger.exception(
+                    "stat_accumulator: usage tracking failed for game %s "
+                    "%s (team %s)", game_id, side_key, team_id,
+                )
+
+    logger.info(
+        "stat_accumulator: subweek usage tracking — %d position rows upserted",
+        total,
+    )
+    return total
