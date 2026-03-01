@@ -242,6 +242,12 @@ def create_app(config_object=Config):
     except Exception as e:
         app.logger.exception("Failed to register player_ops blueprint: %s", e)
 
+    try:
+        from scouting import scouting_bp
+        app.register_blueprint(scouting_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register scouting blueprint: %s", e)
+
     from admin import admin_bp
     # Secure session cookie
     app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))
@@ -579,8 +585,8 @@ def create_app(config_object=Config):
         player_type = data.get("player_type", "Both")
         tracked = data.get("tracked_abilities", None)
 
-        if not isinstance(count, int) or count < 10 or count > 2000:
-            return jsonify(error="bad_request", message="count must be 10-2000"), 400
+        if not isinstance(count, int) or count < 10 or count > 30050:
+            return jsonify(error="bad_request", message="count must be 10-30050"), 400
         if not isinstance(seasons, int) or seasons < 1 or seasons > 30:
             return jsonify(error="bad_request", message="seasons must be 1-30"), 400
         if not isinstance(start_age, int) or start_age < 14 or start_age > 30:

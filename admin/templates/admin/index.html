@@ -329,7 +329,7 @@
           <p class="text-muted">Compute statistical breakdowns from current player data. This populates the config table with suggested mean/std values and quartile reference data. You can then edit the values below.</p>
 
           <div class="alert alert-info">
-            <strong>When to analyze:</strong> After importing new players, completing a draft, processing trades, or anytime you want fresh baseline numbers. Levels with no players (e.g. 1-3 before import) will be skipped.
+            <strong>When to analyze:</strong> After importing new players, completing a draft, processing trades, or anytime you want fresh baseline numbers. Levels with no players will be skipped.
           </div>
 
           <div class="button-group">
@@ -389,6 +389,9 @@
               <label for="rc-level-filter">Filter by Level</label>
               <select id="rc-level-filter">
                 <option value="">All Levels</option>
+                <option value="1">1 - High School</option>
+                <option value="2">2 - Int'l Amateur</option>
+                <option value="3">3 - College</option>
                 <option value="4">4 - Scraps</option>
                 <option value="5">5 - A</option>
                 <option value="6">6 - High-A</option>
