@@ -1446,8 +1446,8 @@
     return fetch(`${API_BASE}/games/timestamp`)
       .then(r => r.json())
       .then(data => {
-        txLeagueYearId = data.league_year_id || data.leagueYearId || 1;
-        txGameWeekId = data.game_week_id || data.gameWeekId || 1;
+        txLeagueYearId = data.SeasonID || data.league_year_id || 1;
+        txGameWeekId = data.WeekID || data.Week || data.game_week_id || 1;
         return data;
       })
       .catch(() => {
@@ -1464,10 +1464,11 @@
       return Promise.resolve();
     }
     sel.innerHTML = '<option value="">Loading...</option>';
-    return fetch(`${API_BASE}/organizations`)
+    // Use org_report which returns objects with numeric id + org_abbrev
+    return fetch(`${API_BASE}/org_report/`)
       .then(r => r.json())
       .then(data => {
-        txOrgList = Array.isArray(data) ? data : (data.organizations || []);
+        txOrgList = Array.isArray(data) ? data : [];
         renderOrgOptions(sel, txOrgList);
       })
       .catch(() => {
@@ -1476,12 +1477,23 @@
   }
 
   function renderOrgOptions(sel, orgs) {
+    const sorted = [...orgs].sort((a, b) =>
+      (a.org_abbrev || '').localeCompare(b.org_abbrev || '')
+    );
+    // MLB orgs first, then the rest
+    const mlb = sorted.filter(o => o.league === 'mlb');
+    const other = sorted.filter(o => o.league !== 'mlb');
     sel.innerHTML = '<option value="">Select org...</option>';
-    orgs.forEach(org => {
-      const id = org.organization_id || org.id || org.abbreviation;
-      const name = org.name || org.organization_name || org.abbreviation || `Org ${id}`;
-      sel.innerHTML += `<option value="${id}">${name}</option>`;
-    });
+    if (mlb.length) {
+      sel.innerHTML += '<optgroup label="MLB Organizations">' +
+        mlb.map(o => `<option value="${o.id}">${o.org_abbrev}</option>`).join('') +
+        '</optgroup>';
+    }
+    if (other.length) {
+      sel.innerHTML += '<optgroup label="Other Organizations">' +
+        other.map(o => `<option value="${o.id}">${o.org_abbrev}</option>`).join('') +
+        '</optgroup>';
+    }
   }
 
   // -----------------------------------------------------------------------
