@@ -1,7 +1,7 @@
 # bootstrap/__init__.py
 import logging
 from flask import Blueprint, jsonify
-from sqlalchemy import MetaData, Table, select, and_, text
+from sqlalchemy import MetaData, Table, select, and_, text, func, literal
 from sqlalchemy.exc import SQLAlchemyError
 from db import get_engine
 
@@ -13,8 +13,11 @@ MIN_AT_BATS = 20
 MIN_IP_OUTS = 30       # ~10 innings
 MIN_FIELDING_GAMES = 5
 
-# Level IDs: 4=scraps, 5=a, 6=higha, 7=aa, 8=aaa, 9=mlb
-LEVEL_MAP = {9: "mlb", 8: "aaa", 7: "aa", 6: "higha", 5: "a", 4: "scraps"}
+# Level IDs: 1=hs, 2=intam, 3=college, 4=scraps, 5=a, 6=higha, 7=aa, 8=aaa, 9=mlb
+LEVEL_MAP = {
+    9: "mlb", 8: "aaa", 7: "aa", 6: "higha", 5: "a", 4: "scraps",
+    3: "college", 2: "intam", 1: "hs",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +49,7 @@ def _get_tables():
             "injury_state":        Table("player_injury_state", md, autoload_with=engine),
             "injury_events":       Table("player_injury_events", md, autoload_with=engine),
             "injury_types":        Table("injury_types", md, autoload_with=engine),
+            "org_ledger":          Table("org_ledger_entries", md, autoload_with=engine),
         }
     return bootstrap_bp._tables
 
@@ -90,6 +94,13 @@ def get_landing(org_id: int):
             injury_report = _get_injury_report(conn, tables, org_id)
             all_teams     = _get_all_teams(conn, tables)
 
+            # Financials — graceful fallback if ledger table is empty/missing
+            financials = None
+            try:
+                financials = _get_financials(conn, tables, org_id, ctx)
+            except Exception:
+                log.debug("bootstrap: financials unavailable, skipping")
+
         return jsonify({
             "Organization":  org,
             "RosterMap":     roster_map,
@@ -103,6 +114,7 @@ def get_landing(org_id: int):
             "InjuryReport":  injury_report,
             "AllTeams":      all_teams,
             "SeasonContext":  ctx,
+            "Financials":    financials,
         }), 200
 
     except SQLAlchemyError:
@@ -171,18 +183,26 @@ def _get_organization(conn, tables, org_id):
         td = _row_to_dict(tr)
         teams_by_level[td["team_level"]] = td
 
+    # Only include levels the org actually has teams for
     shaped_teams = {}
-    for level_id, level_name in LEVEL_MAP.items():
-        t = teams_by_level.get(level_id, {})
+    for level_id, td in teams_by_level.items():
+        level_name = LEVEL_MAP.get(level_id, f"level_{level_id}")
         shaped_teams[level_name] = {
-            "team_id": t.get("id"),
-            "team_abbrev": t.get("team_abbrev"),
-            "team_city": t.get("team_city"),
-            "team_nickname": t.get("team_nickname"),
+            "team_id": td.get("id"),
+            "team_abbrev": td.get("team_abbrev"),
+            "team_city": td.get("team_city"),
+            "team_nickname": td.get("team_nickname"),
             "team_full_name": (
-                f"{t.get('team_city', '')} {t.get('team_nickname', '')}".strip()
-                if t else None
+                f"{td.get('team_city', '')} {td.get('team_nickname', '')}".strip()
+                or None
             ),
+            "color_one": td.get("color_one"),
+            "color_two": td.get("color_two"),
+            "color_three": td.get("color_three"),
+            "conference": td.get("conference"),
+            "division": td.get("division"),
+            "stadium_lat": float(td["stadium_lat"]) if td.get("stadium_lat") is not None else None,
+            "stadium_long": float(td["stadium_long"]) if td.get("stadium_long") is not None else None,
         }
 
     result = {
@@ -235,12 +255,23 @@ def _get_roster_map(conn, tables, org_id):
     t = tables["teams"]
     lvl = tables["levels"]
 
-    # Select ALL player columns + contract / team metadata
+    # Select ALL player columns + full contract / team metadata
     stmt = (
         select(
             p,
+            c.c.id.label("contract_id"),
+            c.c.years.label("contract_years"),
+            c.c.current_year.label("contract_current_year"),
+            c.c.leagueYearSigned,
+            c.c.isActive.label("contract_isActive"),
+            c.c.isBuyout.label("contract_isBuyout"),
+            c.c.isExtension.label("contract_isExtension"),
+            c.c.isFinished.label("contract_isFinished"),
+            c.c.bonus.label("contract_bonus"),
             c.c.current_level,
             c.c.onIR,
+            cd.c.id.label("detail_id"),
+            cd.c.year.label("year_index"),
             cd.c.salary,
             cts.c.salary_share,
             t.c.id.label("team_id"),
@@ -282,7 +313,11 @@ def _get_roster_map(conn, tables, org_id):
                     if n.endswith("_rating") or re.match(r"^pitch\d+_ovr$", n)]
     bio_skip = set(base_cols + pot_cols + derived_cols +
                    ["team", "current_level", "onIR", "salary",
-                    "salary_share", "team_id", "team_abbrev", "league_level"])
+                    "salary_share", "team_id", "team_abbrev", "league_level",
+                    "contract_id", "contract_years", "contract_current_year",
+                    "leagueYearSigned", "contract_isActive", "contract_isBuyout",
+                    "contract_isExtension", "contract_isFinished", "contract_bonus",
+                    "detail_id", "year_index"])
 
     def _to_20_80(raw_val, mean, std):
         if raw_val is None or mean is None:
@@ -349,29 +384,354 @@ def _get_roster_map(conn, tables, org_id):
         for col in pot_cols:
             potentials[col] = m.get(col)
 
-        # Salary
+        # Contract details
         base_salary = m.get("salary")
         share = m.get("salary_share")
-        salary = None
+        salary_for_org = None
         if base_salary is not None and share is not None:
             try:
-                salary = float(base_salary) * float(share)
+                salary_for_org = float(base_salary) * float(share)
             except (TypeError, ValueError):
                 pass
+
+        contract = {
+            "id": m.get("contract_id"),
+            "years": m.get("contract_years"),
+            "current_year": m.get("contract_current_year"),
+            "league_year_signed": m.get("leagueYearSigned"),
+            "is_active": bool(m.get("contract_isActive") or 0),
+            "is_buyout": bool(m.get("contract_isBuyout") or 0),
+            "is_extension": bool(m.get("contract_isExtension") or 0),
+            "is_finished": bool(m.get("contract_isFinished") or 0),
+            "on_ir": bool(m.get("onIR") or 0),
+            "bonus": float(m.get("contract_bonus") or 0),
+            "current_year_detail": {
+                "id": m.get("detail_id"),
+                "year_index": m.get("year_index"),
+                "base_salary": float(base_salary) if base_salary is not None else None,
+                "salary_share": float(share) if share is not None else None,
+                "salary_for_org": salary_for_org,
+            },
+        }
 
         player = {
             **bio,
             "current_level": m.get("current_level"),
             "league_level": league_level,
             "team_abbrev": m.get("team_abbrev"),
-            "onIR": bool(m.get("onIR") or 0),
-            "salary": salary,
+            "contract": contract,
             "ratings": ratings,
             "potentials": potentials,
         }
         roster_map.setdefault(team_id, []).append(player)
 
     return roster_map
+
+
+def _get_financials(conn, tables, org_id, ctx):
+    """
+    Org financial summary + obligations for the current league year.
+
+    Returns dict with:
+      - summary: P&L, weekly cashflow, starting/ending balance
+      - obligations: current-year salary + bonus obligations
+      - future_obligations: committed salary by future league year
+    Returns None if league_year data is unavailable.
+    """
+    league_year = ctx["league_year"]
+
+    ledger = tables["org_ledger"]
+    ly = tables["league_years"]
+    gw = tables["game_weeks"]
+    contracts = tables["contracts"]
+    details = tables["contract_details"]
+    shares = tables["contract_team_share"]
+    players = tables["players"]
+
+    # Resolve league_year -> league_year_id, weeks_in_season
+    ly_row = conn.execute(
+        select(ly.c.id, ly.c.weeks_in_season)
+        .where(ly.c.league_year == league_year)
+        .limit(1)
+    ).first()
+    if not ly_row:
+        return None
+
+    ly_m = ly_row._mapping
+    league_year_id = ly_m["id"]
+    weeks_in_season = int(ly_m["weeks_in_season"])
+
+    # ---- Financial Summary ----
+
+    # Starting balance: all prior years
+    starting_balance = float(conn.execute(
+        select(func.coalesce(func.sum(ledger.c.amount), 0))
+        .select_from(ledger.join(ly, ledger.c.league_year_id == ly.c.id))
+        .where(and_(
+            ledger.c.org_id == org_id,
+            ly.c.league_year < league_year,
+        ))
+    ).scalar_one())
+
+    # Year-level entries (no game_week_id) — media, bonus, buyout, interest
+    year_level_rows = conn.execute(
+        select(
+            ledger.c.entry_type,
+            func.coalesce(func.sum(ledger.c.amount), 0).label("total"),
+        )
+        .where(and_(
+            ledger.c.org_id == org_id,
+            ledger.c.league_year_id == league_year_id,
+            ledger.c.game_week_id.is_(None),
+        ))
+        .group_by(ledger.c.entry_type)
+    ).all()
+
+    year_level_totals = {
+        r._mapping["entry_type"]: float(r._mapping["total"])
+        for r in year_level_rows
+    }
+
+    year_start_events = {
+        k: v for k, v in year_level_totals.items()
+        if k in ("media", "bonus", "buyout")
+    }
+    interest_events = {
+        k: v for k, v in year_level_totals.items()
+        if k in ("interest_income", "interest_expense")
+    }
+
+    year_start_net = sum(year_start_events.values())
+    interest_net = sum(interest_events.values())
+
+    season_revenue = 0.0
+    season_expenses = 0.0
+    for v in year_level_totals.values():
+        if v > 0:
+            season_revenue += v
+        elif v < 0:
+            season_expenses += -v
+
+    balance_after_year_start = starting_balance + year_start_net
+
+    # Weekly entries grouped by week_index + entry_type
+    weekly_rows = conn.execute(
+        select(
+            gw.c.week_index,
+            ledger.c.entry_type,
+            func.coalesce(func.sum(ledger.c.amount), 0).label("total"),
+        )
+        .select_from(ledger.join(gw, ledger.c.game_week_id == gw.c.id))
+        .where(and_(
+            ledger.c.org_id == org_id,
+            ledger.c.league_year_id == league_year_id,
+        ))
+        .group_by(gw.c.week_index, ledger.c.entry_type)
+    ).all()
+
+    week_type_totals = {}
+    for row in weekly_rows:
+        m = row._mapping
+        week = m["week_index"]
+        etype = m["entry_type"]
+        total = float(m["total"])
+        week_type_totals.setdefault(week, {})[etype] = total
+        if total > 0:
+            season_revenue += total
+        elif total < 0:
+            season_expenses += -total
+
+    weeks_summary = []
+    cumulative = balance_after_year_start
+    for week_index in range(1, weeks_in_season + 1):
+        by_type = week_type_totals.get(week_index, {})
+        salary_total = by_type.get("salary", 0.0)
+        performance_total = by_type.get("performance", 0.0)
+        other_types = {
+            k: v for k, v in by_type.items()
+            if k not in ("salary", "performance")
+        }
+        other_in = sum(v for v in other_types.values() if v > 0)
+        other_out = -sum(v for v in other_types.values() if v < 0)
+        week_net = sum(by_type.values())
+        cumulative += week_net
+        weeks_summary.append({
+            "week_index": week_index,
+            "salary_out": -salary_total,
+            "performance_in": performance_total,
+            "other_in": other_in,
+            "other_out": other_out,
+            "net": week_net,
+            "cumulative_balance": cumulative,
+            "by_type": by_type,
+        })
+
+    ending_balance_before_interest = cumulative
+    ending_balance = ending_balance_before_interest + interest_net
+
+    # ---- Current-Year Obligations ----
+
+    league_year_expr = contracts.c.leagueYearSigned + (details.c.year - literal(1))
+
+    salary_stmt = (
+        select(
+            contracts.c.id.label("contract_id"),
+            contracts.c.leagueYearSigned,
+            contracts.c.isActive,
+            contracts.c.isBuyout,
+            contracts.c.bonus,
+            contracts.c.signingOrg,
+            details.c.year.label("year_index"),
+            details.c.salary,
+            shares.c.salary_share,
+            shares.c.isHolder,
+            players.c.id.label("player_id"),
+            players.c.firstname,
+            players.c.lastname,
+        )
+        .select_from(
+            contracts.join(details, details.c.contractID == contracts.c.id)
+            .join(shares, shares.c.contractDetailsID == details.c.id)
+            .join(players, players.c.id == contracts.c.playerID)
+        )
+        .where(and_(
+            league_year_expr == league_year,
+            shares.c.orgID == org_id,
+            shares.c.salary_share > 0,
+        ))
+    )
+    salary_rows = conn.execute(salary_stmt).all()
+
+    bonus_stmt = (
+        select(
+            contracts.c.id.label("contract_id"),
+            contracts.c.leagueYearSigned,
+            contracts.c.isActive,
+            contracts.c.isBuyout,
+            contracts.c.bonus,
+            players.c.id.label("player_id"),
+            players.c.firstname,
+            players.c.lastname,
+        )
+        .select_from(contracts.join(players, players.c.id == contracts.c.playerID))
+        .where(and_(
+            contracts.c.leagueYearSigned == league_year,
+            contracts.c.signingOrg == org_id,
+            contracts.c.bonus > 0,
+        ))
+    )
+    bonus_rows = conn.execute(bonus_stmt).all()
+
+    def _num(val):
+        return float(val) if val is not None else 0.0
+
+    obligations = []
+    ob_totals = {
+        "active_salary": 0.0,
+        "inactive_salary": 0.0,
+        "buyout": 0.0,
+        "signing_bonus": 0.0,
+        "overall": 0.0,
+    }
+
+    for row in salary_rows:
+        m = row._mapping
+        salary = _num(m["salary"])
+        share = _num(m["salary_share"])
+        base_amount = salary * share
+        is_buyout = bool(m.get("isBuyout") or False)
+        is_active = bool(m.get("isActive") or False)
+        is_holder = bool(m.get("isHolder") or False)
+
+        if is_buyout:
+            category = "buyout"
+        elif is_active and is_holder:
+            category = "active_salary"
+        else:
+            category = "inactive_salary"
+
+        obligations.append({
+            "type": "salary",
+            "category": category,
+            "player": {
+                "id": m["player_id"],
+                "firstname": m["firstname"],
+                "lastname": m["lastname"],
+            },
+            "contract_id": m["contract_id"],
+            "year_index": m["year_index"],
+            "salary": salary,
+            "salary_share": share,
+            "amount": base_amount,
+        })
+        ob_totals["overall"] += base_amount
+        ob_totals[category] += base_amount
+
+    for row in bonus_rows:
+        m = row._mapping
+        bonus = _num(m["bonus"])
+        if bonus <= 0:
+            continue
+        is_buyout = bool(m.get("isBuyout") or False)
+        category = "buyout" if is_buyout else "signing_bonus"
+
+        obligations.append({
+            "type": "bonus",
+            "category": category,
+            "player": {
+                "id": m["player_id"],
+                "firstname": m["firstname"],
+                "lastname": m["lastname"],
+            },
+            "contract_id": m["contract_id"],
+            "amount": bonus,
+        })
+        ob_totals["overall"] += bonus
+        ob_totals[category] += bonus
+
+    # ---- Future Year Obligations ----
+
+    future_stmt = (
+        select(
+            (contracts.c.leagueYearSigned + (details.c.year - literal(1))).label("future_year"),
+            func.sum(details.c.salary * shares.c.salary_share).label("total_salary"),
+        )
+        .select_from(
+            contracts.join(details, details.c.contractID == contracts.c.id)
+            .join(shares, shares.c.contractDetailsID == details.c.id)
+        )
+        .where(and_(
+            (contracts.c.leagueYearSigned + (details.c.year - literal(1))) > league_year,
+            shares.c.orgID == org_id,
+            shares.c.salary_share > 0,
+        ))
+        .group_by(text("future_year"))
+        .order_by(text("future_year"))
+    )
+    future_rows = conn.execute(future_stmt).all()
+    future_obligations = {
+        int(r._mapping["future_year"]): float(r._mapping["total_salary"] or 0)
+        for r in future_rows
+    }
+
+    return {
+        "summary": {
+            "starting_balance": starting_balance,
+            "season_revenue": season_revenue,
+            "season_expenses": season_expenses,
+            "year_start_events": year_start_events,
+            "weeks": weeks_summary,
+            "interest_events": interest_events,
+            "ending_balance_before_interest": ending_balance_before_interest,
+            "ending_balance": ending_balance,
+        },
+        "obligations": {
+            "league_year": league_year,
+            "totals": ob_totals,
+            "items": obligations,
+        },
+        "future_obligations": future_obligations,
+    }
 
 
 def _get_standings(conn, tables, ctx):
@@ -386,6 +746,8 @@ def _get_standings(conn, tables, ctx):
             t.team_abbrev,
             t.orgID      AS org_id,
             t.team_level,
+            t.conference,
+            t.division,
             COALESCE(w.wins, 0)   AS wins,
             COALESCE(l.losses, 0) AS losses
         FROM teams t
@@ -609,12 +971,23 @@ def _get_all_teams(conn, tables):
             t.c.team_nickname,
             t.c.orgID.label("org_id"),
             t.c.team_level,
+            t.c.color_one,
+            t.c.color_two,
+            t.c.color_three,
+            t.c.conference,
+            t.c.division,
+            t.c.stadium_lat,
+            t.c.stadium_long,
         )
     ).all()
 
     result = []
     for r in rows:
         d = _row_to_dict(r)
-        d["team_full_name"] = f"{d.pop('team_city')} {d.pop('team_nickname')}".strip()
+        city = d.pop("team_city") or ""
+        nick = d.pop("team_nickname") or ""
+        d["team_full_name"] = f"{city} {nick}".strip() or None
+        d["stadium_lat"] = float(d["stadium_lat"]) if d.get("stadium_lat") is not None else None
+        d["stadium_long"] = float(d["stadium_long"]) if d.get("stadium_long") is not None else None
         result.append(d)
     return result

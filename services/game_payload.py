@@ -294,6 +294,10 @@ def _get_core_tables():
     level_fielding_weights = Table("level_fielding_weights", md, autoload_with=engine)
     level_catch_rates = Table("level_catch_rates", md, autoload_with=engine)
 
+    # Gameplanning tables
+    team_strategy = Table("team_strategy", md, autoload_with=engine)
+    team_bullpen_order = Table("team_bullpen_order", md, autoload_with=engine)
+
     _CORE_METADATA = md
     _CORE_TABLES = {
         "gamelist": gamelist,
@@ -324,6 +328,9 @@ def _get_core_tables():
         "level_distance_weights": level_distance_weights,
         "level_fielding_weights": level_fielding_weights,
         "level_catch_rates": level_catch_rates,
+        # Gameplanning tables
+        "team_strategy": team_strategy,
+        "team_bullpen_order": team_bullpen_order,
     }
     return _CORE_TABLES
 
@@ -1002,6 +1009,11 @@ DEFAULT_PLAYER_STRATEGY = {
     "stealfreq": 1.87,          # Steal attempt frequency (0-100, represents %)
     "pickofffreq": 1.0,         # Pickoff attempt frequency (0-100, represents %)
     "pitchchoices": [1, 1, 1, 1, 1],  # Pitch mix weights for 5 pitch slots
+    "left_split": None,         # None = use player's natural spray from simbbPlayers
+    "center_split": None,
+    "right_split": None,
+    "pitchpull": None,          # None = use team bullpen_cutoff default
+    "pulltend": None,           # None = "normal"
 }
 
 def _load_player_strategies_bulk(
@@ -1085,6 +1097,18 @@ def _load_player_strategies_bulk(
             except (TypeError, json.JSONDecodeError):
                 strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
 
+        # Spray chart overrides (None = use player's natural spray)
+        for spray_key in ("left_split", "center_split", "right_split"):
+            spray_val = row.get(spray_key)
+            strat[spray_key] = float(spray_val) if spray_val is not None else None
+
+        # Pitcher leash settings (None = use team defaults)
+        pitchpull = row.get("pitchpull")
+        strat["pitchpull"] = int(pitchpull) if pitchpull is not None else None
+
+        pulltend = row.get("pulltend")
+        strat["pulltend"] = pulltend if pulltend else None
+
         out[pid] = strat
 
     return out
@@ -1134,7 +1158,78 @@ def _load_player_strategy(conn, player_id: int, org_id: int | None = None) -> Di
         except (TypeError, json.JSONDecodeError):
             strat["pitchchoices"] = DEFAULT_PLAYER_STRATEGY["pitchchoices"].copy()
 
+    # Spray chart overrides
+    for spray_key in ("left_split", "center_split", "right_split"):
+        spray_val = row.get(spray_key)
+        strat[spray_key] = float(spray_val) if spray_val is not None else None
+
+    # Pitcher leash settings
+    pitchpull = row.get("pitchpull")
+    strat["pitchpull"] = int(pitchpull) if pitchpull is not None else None
+
+    pulltend = row.get("pulltend")
+    strat["pulltend"] = pulltend if pulltend else None
+
     return strat
+
+
+# -------------------------------------------------------------------
+# Team-level strategy + bullpen loading
+# -------------------------------------------------------------------
+
+_DEFAULT_TEAM_STRATEGY = {
+    "outfield_spacing": "normal",
+    "infield_spacing": "normal",
+    "bullpen_cutoff": 100,
+    "bullpen_priority": "rest",
+    "emergency_pitcher_id": None,
+    "intentional_walk_list": [],
+}
+
+
+def _load_team_strategy(conn, team_id: int) -> Dict[str, Any]:
+    """Load team strategy from team_strategy table, or return defaults."""
+    tables = _get_core_tables()
+    ts = tables["team_strategy"]
+
+    row = conn.execute(
+        select(ts).where(ts.c.team_id == team_id).limit(1)
+    ).mappings().first()
+
+    if not row:
+        return {**_DEFAULT_TEAM_STRATEGY, "team_id": team_id}
+
+    d = dict(row)
+    iwl = d.get("intentional_walk_list")
+    if iwl is None:
+        d["intentional_walk_list"] = []
+    elif isinstance(iwl, str):
+        try:
+            d["intentional_walk_list"] = json.loads(iwl)
+        except (TypeError, json.JSONDecodeError):
+            d["intentional_walk_list"] = []
+
+    return {
+        "team_id": team_id,
+        "outfield_spacing": d.get("outfield_spacing", "normal"),
+        "infield_spacing": d.get("infield_spacing", "normal"),
+        "bullpen_cutoff": int(d.get("bullpen_cutoff") or 100),
+        "bullpen_priority": d.get("bullpen_priority", "rest"),
+        "emergency_pitcher_id": d.get("emergency_pitcher_id"),
+        "intentional_walk_list": d["intentional_walk_list"],
+    }
+
+
+def _load_bullpen_order(conn, team_id: int) -> List[Dict[str, Any]]:
+    """Load ordered bullpen preference list from team_bullpen_order."""
+    tables = _get_core_tables()
+    bo = tables["team_bullpen_order"]
+
+    rows = conn.execute(
+        select(bo).where(bo.c.team_id == team_id).order_by(bo.c.slot.asc())
+    ).mappings().all()
+
+    return [{"slot": int(r["slot"]), "player_id": int(r["player_id"]), "role": r["role"]} for r in rows]
 
 
 # -------------------------------------------------------------------
@@ -1364,6 +1459,10 @@ def build_team_game_side(
     strategies_by_player = _load_player_strategies_bulk(conn, player_ids, org_id=org_id)
     xp_by_player = compute_defensive_xp_mod_for_players(conn, player_ids, league_level_id)
 
+    # Team-level strategy + bullpen ordering
+    team_strategy = _load_team_strategy(conn, team_id)
+    bullpen_order = _load_bullpen_order(conn, team_id)
+
     # Engine-facing base views (players + injuries + derived ratings)
     engine_views_by_player = build_engine_player_views_bulk(conn, player_ids)
 
@@ -1409,10 +1508,18 @@ def build_team_game_side(
 
     # 2) We are given the starting pitcher for this team
     # 3) Available pitchers: all pitchers except starter
-    available_pitcher_ids: List[int] = [
+    #    Respect bullpen ordering if configured, append any unordered pitchers after
+    all_pitcher_ids = {
         pid for pid, pdata in players_by_id.items()
         if (pdata.get("ptype") or "").lower() == "pitcher" and pid != starter_id
-    ]
+    }
+    if bullpen_order:
+        ordered_ids = [bp["player_id"] for bp in bullpen_order
+                       if bp["player_id"] in all_pitcher_ids]
+        remaining = [pid for pid in all_pitcher_ids if pid not in set(ordered_ids)]
+        available_pitcher_ids: List[int] = ordered_ids + remaining
+    else:
+        available_pitcher_ids: List[int] = list(all_pitcher_ids)
 
     # 4) Defensive alignment + batting order (depth chart aware, with fallback)
     defense, lineup_ids, bench_ids = build_defense_and_lineup(
@@ -1440,6 +1547,8 @@ def build_team_game_side(
         "lineup": lineup_ids,
         "bench": bench_ids,
         "pregame_injuries": pregame_injuries,
+        "team_strategy": team_strategy,
+        "bullpen_order": bullpen_order,
     }
 
 # -------------------------------------------------------------------

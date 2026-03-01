@@ -222,6 +222,12 @@ def create_app(config_object=Config):
     except Exception as e:
         app.logger.exception("Failed to register notifications blueprint: %s", e)
 
+    try:
+        from gameplanning import gameplanning_bp
+        app.register_blueprint(gameplanning_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register gameplanning blueprint: %s", e)
+
     from admin import admin_bp
     # Secure session cookie
     app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))
