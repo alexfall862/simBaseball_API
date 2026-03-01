@@ -754,3 +754,20 @@ textarea {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-light);
 }
+
+/* Transaction trade builder */
+.trade-builder {
+  display: flex;
+  gap: 24px;
+}
+.trade-side {
+  flex: 1;
+  min-width: 0;
+}
+.trade-side h4 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+}
+@media (max-width: 768px) {
+  .trade-builder { flex-direction: column; }
+}

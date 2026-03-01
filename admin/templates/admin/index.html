@@ -56,6 +56,19 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Transactions</div>
+      <a href="#" class="nav-item" data-section="tx-roster">
+        <span class="nav-icon">&#128259;</span> Roster Moves
+      </a>
+      <a href="#" class="nav-item" data-section="tx-trades">
+        <span class="nav-icon">&#128257;</span> Trades
+      </a>
+      <a href="#" class="nav-item" data-section="tx-log">
+        <span class="nav-icon">&#128220;</span> Transaction Log
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Administration</div>
       <a href="#" class="nav-item" data-section="cache">
         <span class="nav-icon">&#128451;</span> Cache Manager
@@ -553,6 +566,293 @@
         <div class="card">
           <h3>Available Routes</h3>
           <pre id="routes-list" class="result-box" style="max-height: 400px">Loading...</pre>
+        </div>
+      </section>
+
+      <!-- Roster Moves Section -->
+      <section id="section-tx-roster" class="section">
+        <div class="grid-2">
+          <div class="card">
+            <h3>Select Organization</h3>
+            <div class="form-row">
+              <select id="tx-org-select" class="select-lg">
+                <option value="">Select an organization...</option>
+              </select>
+              <button class="btn btn-secondary" id="btn-tx-load-roster">Load Roster</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Roster Status</h3>
+            <div id="tx-roster-status" class="text-muted">Select an org to view roster counts.</div>
+          </div>
+        </div>
+
+        <div class="card" id="tx-roster-card" style="display:none">
+          <h3>Roster</h3>
+          <div class="form-row" style="margin-bottom: 12px">
+            <label>Filter Level:
+              <select id="tx-roster-level-filter">
+                <option value="">All Levels</option>
+                <option value="9">MLB</option>
+                <option value="8">AAA</option>
+                <option value="7">AA</option>
+                <option value="6">High-A</option>
+                <option value="5">A</option>
+                <option value="4">Scraps</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Pos</th>
+                  <th>Level</th>
+                  <th>Contract</th>
+                  <th>Salary</th>
+                  <th>IR</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tx-roster-tbody">
+                <tr><td colspan="7" class="text-center text-muted">No roster loaded</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" id="tx-action-card" style="display:none">
+          <h3>Player Action: <span id="tx-action-player-name"></span></h3>
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Action</label>
+              <select id="tx-action-type">
+                <option value="">Select action...</option>
+                <option value="promote">Promote</option>
+                <option value="demote">Demote</option>
+                <option value="ir_place">Place on IR</option>
+                <option value="ir_activate">Activate from IR</option>
+                <option value="release">Release</option>
+                <option value="buyout">Buyout</option>
+                <option value="extend">Extend Contract</option>
+              </select>
+            </div>
+            <div class="form-group" id="tx-target-level-group" style="display:none">
+              <label>Target Level</label>
+              <select id="tx-target-level">
+                <option value="9">MLB</option>
+                <option value="8">AAA</option>
+                <option value="7">AA</option>
+                <option value="6">High-A</option>
+                <option value="5">A</option>
+                <option value="4">Scraps</option>
+              </select>
+            </div>
+            <div class="form-group" id="tx-buyout-group" style="display:none">
+              <label>Buyout Amount ($)</label>
+              <input type="number" id="tx-buyout-amount" min="0" step="1000" />
+            </div>
+          </div>
+          <div id="tx-extend-group" style="display:none">
+            <div class="form-grid">
+              <div class="form-group">
+                <label>Extension Years</label>
+                <input type="number" id="tx-ext-years" min="1" max="5" value="1" />
+              </div>
+              <div class="form-group">
+                <label>Signing Bonus ($)</label>
+                <input type="number" id="tx-ext-bonus" min="0" step="1000" value="0" />
+              </div>
+            </div>
+            <div id="tx-ext-salaries" class="form-grid"></div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-warning" id="btn-tx-execute-action">Execute</button>
+          </div>
+          <pre id="tx-action-result" class="result-box" style="margin-top: 12px; display:none"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Free Agent Signing</h3>
+          <div class="button-group" style="margin-bottom: 12px">
+            <button class="btn btn-secondary" id="btn-tx-load-fa">Load Free Agents</button>
+            <span id="tx-signing-budget" class="text-muted" style="margin-left: 16px"></span>
+          </div>
+          <div class="table-container" id="tx-fa-table-wrap" style="display:none">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Pos</th>
+                  <th>Age</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tx-fa-tbody"></tbody>
+            </table>
+          </div>
+          <div id="tx-sign-form" style="display:none; margin-top: 16px">
+            <h4>Sign: <span id="tx-sign-player-name"></span></h4>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>Years</label>
+                <input type="number" id="tx-sign-years" min="1" max="5" value="1" />
+              </div>
+              <div class="form-group">
+                <label>Bonus ($)</label>
+                <input type="number" id="tx-sign-bonus" min="0" step="1000" value="0" />
+              </div>
+              <div class="form-group">
+                <label>Assign Level</label>
+                <select id="tx-sign-level">
+                  <option value="9">MLB</option>
+                  <option value="8">AAA</option>
+                  <option value="7">AA</option>
+                  <option value="6">High-A</option>
+                  <option value="5">A</option>
+                  <option value="4">Scraps</option>
+                </select>
+              </div>
+            </div>
+            <div id="tx-sign-salaries" class="form-grid"></div>
+            <div class="button-group" style="margin-top: 8px">
+              <button class="btn btn-primary" id="btn-tx-sign">Sign Player</button>
+            </div>
+            <pre id="tx-sign-result" class="result-box" style="margin-top: 12px; display:none"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Trades Section -->
+      <section id="section-tx-trades" class="section">
+        <div class="card">
+          <h3>Trade Builder</h3>
+          <p class="text-muted">Select two organizations and build a trade package.</p>
+          <div class="trade-builder">
+            <div class="trade-side">
+              <h4>Organization A</h4>
+              <select id="tx-trade-org-a" class="select-lg">
+                <option value="">Select org...</option>
+              </select>
+              <div class="table-container" style="margin-top: 8px">
+                <table class="data-table">
+                  <thead><tr><th></th><th>Player</th><th>Pos</th><th>Level</th></tr></thead>
+                  <tbody id="tx-trade-roster-a">
+                    <tr><td colspan="4" class="text-center text-muted">Select org</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="trade-side">
+              <h4>Organization B</h4>
+              <select id="tx-trade-org-b" class="select-lg">
+                <option value="">Select org...</option>
+              </select>
+              <div class="table-container" style="margin-top: 8px">
+                <table class="data-table">
+                  <thead><tr><th></th><th>Player</th><th>Pos</th><th>Level</th></tr></thead>
+                  <tbody id="tx-trade-roster-b">
+                    <tr><td colspan="4" class="text-center text-muted">Select org</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="form-grid" style="margin-top: 16px">
+            <div class="form-group">
+              <label>Cash A sends to B ($)</label>
+              <input type="number" id="tx-trade-cash" value="0" step="10000" />
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-warning" id="btn-tx-execute-trade">Execute Trade (Admin)</button>
+          </div>
+          <pre id="tx-trade-result" class="result-box" style="margin-top: 12px; display:none"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Trade Proposals</h3>
+          <div class="form-row" style="margin-bottom: 12px">
+            <label>Filter Status:
+              <select id="tx-proposal-status-filter">
+                <option value="">All</option>
+                <option value="proposed">Proposed</option>
+                <option value="counterparty_accepted">Awaiting Admin</option>
+                <option value="executed">Executed</option>
+                <option value="counterparty_rejected">Rejected</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </label>
+            <button class="btn btn-secondary" id="btn-tx-load-proposals">Refresh</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Status</th>
+                  <th>Proposed</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tx-proposals-tbody">
+                <tr><td colspan="6" class="text-center text-muted">Click Refresh to load</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <pre id="tx-proposal-result" class="result-box" style="margin-top: 12px; display:none"></pre>
+        </div>
+      </section>
+
+      <!-- Transaction Log Section -->
+      <section id="section-tx-log" class="section">
+        <div class="card">
+          <h3>Transaction Log</h3>
+          <div class="form-row" style="margin-bottom: 12px">
+            <label>Type:
+              <select id="tx-log-type-filter">
+                <option value="">All Types</option>
+                <option value="promote">Promote</option>
+                <option value="demote">Demote</option>
+                <option value="ir_place">IR Place</option>
+                <option value="ir_activate">IR Activate</option>
+                <option value="release">Release</option>
+                <option value="buyout">Buyout</option>
+                <option value="signing">Signing</option>
+                <option value="extension">Extension</option>
+                <option value="trade">Trade</option>
+              </select>
+            </label>
+            <label>Org ID:
+              <input type="number" id="tx-log-org-filter" placeholder="Any" style="width: 80px" />
+            </label>
+            <label>Limit:
+              <input type="number" id="tx-log-limit" value="50" min="1" max="500" style="width: 80px" />
+            </label>
+            <button class="btn btn-secondary" id="btn-tx-load-log">Refresh</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Time</th>
+                  <th>Type</th>
+                  <th>Org</th>
+                  <th>Player</th>
+                  <th>Notes</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tx-log-tbody">
+                <tr><td colspan="7" class="text-center text-muted">Click Refresh to load</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <pre id="tx-log-detail" class="result-box" style="margin-top: 12px; display:none"></pre>
         </div>
       </section>
 

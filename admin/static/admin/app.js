@@ -13,6 +13,13 @@
   let taskPollInterval = null;
   let syntheticTaskId = null;
 
+  // Transaction state
+  let txLeagueYearId = null;
+  let txGameWeekId = null;
+  let txSelectedPlayer = null;   // { contract_id, player_id, player_name, ... }
+  let txSelectedFA = null;       // { player_id, player_name, ... }
+  let txOrgList = [];            // cached org list for dropdowns
+
   // SQL Presets
   const SQL_PRESETS = [
     { name: 'All Players (limit 100)', query: 'SELECT * FROM simbbPlayers LIMIT 100' },
@@ -122,6 +129,37 @@
     // Overall Weights
     document.getElementById('btn-load-weights').addEventListener('click', loadOverallWeights);
     document.getElementById('btn-save-weights').addEventListener('click', saveOverallWeights);
+
+    // Transactions — Roster Moves
+    document.getElementById('btn-tx-load-roster').addEventListener('click', () => {
+      const orgId = document.getElementById('tx-org-select').value;
+      if (orgId) loadOrgRoster(parseInt(orgId));
+    });
+    document.getElementById('tx-action-type').addEventListener('change', onActionTypeChange);
+    document.getElementById('btn-tx-execute-action').addEventListener('click', executeRosterAction);
+    document.getElementById('tx-ext-years').addEventListener('change', renderExtSalaryInputs);
+    document.getElementById('btn-tx-load-fa').addEventListener('click', loadFreeAgents);
+    document.getElementById('btn-tx-sign').addEventListener('click', signFreeAgent);
+    document.getElementById('tx-sign-years').addEventListener('change', renderSignSalaryInputs);
+    document.getElementById('tx-roster-level-filter').addEventListener('change', () => {
+      const orgId = document.getElementById('tx-org-select').value;
+      if (orgId) loadOrgRoster(parseInt(orgId));
+    });
+
+    // Transactions — Trades
+    document.getElementById('tx-trade-org-a').addEventListener('change', () => {
+      const orgId = document.getElementById('tx-trade-org-a').value;
+      if (orgId) loadTradeOrgRoster('a', parseInt(orgId));
+    });
+    document.getElementById('tx-trade-org-b').addEventListener('change', () => {
+      const orgId = document.getElementById('tx-trade-org-b').value;
+      if (orgId) loadTradeOrgRoster('b', parseInt(orgId));
+    });
+    document.getElementById('btn-tx-execute-trade').addEventListener('click', executeTrade);
+    document.getElementById('btn-tx-load-proposals').addEventListener('click', loadTradeProposals);
+
+    // Transactions — Log
+    document.getElementById('btn-tx-load-log').addEventListener('click', loadTransactionLog);
   }
 
   // Navigation
@@ -152,6 +190,9 @@
       sql: 'SQL Console',
       health: 'System Health',
       'rating-config': 'Rating Config',
+      'tx-roster': 'Roster Moves',
+      'tx-trades': 'Trades',
+      'tx-log': 'Transaction Log',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -178,6 +219,15 @@
         break;
       case 'rating-config':
         loadRatingConfigSummary();
+        break;
+      case 'tx-roster':
+        loadRosterMoves();
+        break;
+      case 'tx-trades':
+        loadTradeBuilder();
+        break;
+      case 'tx-log':
+        loadTransactionLog();
         break;
     }
 
@@ -1387,11 +1437,645 @@
       });
   }
 
+  // -----------------------------------------------------------------------
+  // Transactions — Shared Helpers
+  // -----------------------------------------------------------------------
+
+  function fetchTxContext() {
+    // Fetch current timestamp to populate league_year_id and game_week_id
+    return fetch(`${API_BASE}/games/timestamp`)
+      .then(r => r.json())
+      .then(data => {
+        txLeagueYearId = data.league_year_id || data.leagueYearId || 1;
+        txGameWeekId = data.game_week_id || data.gameWeekId || 1;
+        return data;
+      })
+      .catch(() => {
+        // fallback
+        txLeagueYearId = txLeagueYearId || 1;
+        txGameWeekId = txGameWeekId || 1;
+      });
+  }
+
+  function populateTxOrgDropdown(selectId) {
+    const sel = document.getElementById(selectId);
+    if (txOrgList.length > 0) {
+      renderOrgOptions(sel, txOrgList);
+      return Promise.resolve();
+    }
+    sel.innerHTML = '<option value="">Loading...</option>';
+    return fetch(`${API_BASE}/organizations`)
+      .then(r => r.json())
+      .then(data => {
+        txOrgList = Array.isArray(data) ? data : (data.organizations || []);
+        renderOrgOptions(sel, txOrgList);
+      })
+      .catch(() => {
+        sel.innerHTML = '<option value="">Error loading orgs</option>';
+      });
+  }
+
+  function renderOrgOptions(sel, orgs) {
+    sel.innerHTML = '<option value="">Select org...</option>';
+    orgs.forEach(org => {
+      const id = org.organization_id || org.id || org.abbreviation;
+      const name = org.name || org.organization_name || org.abbreviation || `Org ${id}`;
+      sel.innerHTML += `<option value="${id}">${name}</option>`;
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // Transactions — Roster Moves
+  // -----------------------------------------------------------------------
+
+  function loadRosterMoves() {
+    fetchTxContext();
+    populateTxOrgDropdown('tx-org-select');
+    // Reset state
+    txSelectedPlayer = null;
+    document.getElementById('tx-action-card').style.display = 'none';
+    document.getElementById('tx-roster-card').style.display = 'none';
+  }
+
+  function loadOrgRoster(orgId) {
+    const tbody = document.getElementById('tx-roster-tbody');
+    const card = document.getElementById('tx-roster-card');
+    const statusDiv = document.getElementById('tx-roster-status');
+    card.style.display = 'block';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Loading...</td></tr>';
+    document.getElementById('tx-action-card').style.display = 'none';
+    txSelectedPlayer = null;
+
+    // Load roster status
+    fetch(`${API_BASE}/transactions/roster-status/${orgId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data)) {
+          statusDiv.innerHTML = data
+            .filter(l => l.max_roster > 0)
+            .map(l => `<span><strong>${l.level_name}:</strong> ${l.count}/${l.max_roster}${l.over_limit ? ' <span style="color:var(--danger)">OVER</span>' : ''}</span>`)
+            .join(' &nbsp;|&nbsp; ');
+        }
+      })
+      .catch(() => { statusDiv.textContent = 'Could not load roster status'; });
+
+    // Load roster players
+    const levelFilter = document.getElementById('tx-roster-level-filter').value;
+    fetch(`${API_BASE}/transactions/roster/${orgId}`)
+      .then(r => r.json())
+      .then(players => {
+        let filtered = players;
+        if (levelFilter) {
+          filtered = players.filter(p => p.current_level === parseInt(levelFilter));
+        }
+        if (filtered.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No players found</td></tr>';
+          return;
+        }
+        tbody.innerHTML = filtered.map(p => {
+          const levelNames = { 9: 'MLB', 8: 'AAA', 7: 'AA', 6: 'High-A', 5: 'A', 4: 'Scraps' };
+          return `<tr>
+            <td>${p.player_name}</td>
+            <td>${p.position}</td>
+            <td>${levelNames[p.current_level] || p.current_level}</td>
+            <td><code>${p.contract_id}</code></td>
+            <td>$${Number(p.salary).toLocaleString()}</td>
+            <td>${p.onIR ? '<span class="badge badge-danger">IR</span>' : '--'}</td>
+            <td><button class="btn btn-sm btn-primary" onclick="App.selectPlayer(${p.contract_id}, '${p.player_name.replace(/'/g, "\\'")}', ${p.current_level}, ${p.onIR ? 1 : 0}, ${p.player_id})">Select</button></td>
+          </tr>`;
+        }).join('');
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+
+    // Update signing budget display
+    fetch(`${API_BASE}/transactions/signing-budget/${orgId}?league_year_id=${txLeagueYearId || 1}`)
+      .then(r => r.json())
+      .then(data => {
+        document.getElementById('tx-signing-budget').textContent =
+          `Signing budget: $${Number(data.available_budget || 0).toLocaleString()}`;
+      })
+      .catch(() => {});
+  }
+
+  function selectPlayer(contractId, playerName, currentLevel, onIR, playerId) {
+    txSelectedPlayer = { contract_id: contractId, player_name: playerName, current_level: currentLevel, onIR: onIR, player_id: playerId };
+    const card = document.getElementById('tx-action-card');
+    card.style.display = 'block';
+    document.getElementById('tx-action-player-name').textContent = playerName;
+    document.getElementById('tx-action-type').value = '';
+    document.getElementById('tx-target-level-group').style.display = 'none';
+    document.getElementById('tx-buyout-group').style.display = 'none';
+    document.getElementById('tx-extend-group').style.display = 'none';
+    document.getElementById('tx-action-result').style.display = 'none';
+  }
+
+  function onActionTypeChange() {
+    const action = document.getElementById('tx-action-type').value;
+    document.getElementById('tx-target-level-group').style.display =
+      (action === 'promote' || action === 'demote') ? 'block' : 'none';
+    document.getElementById('tx-buyout-group').style.display =
+      action === 'buyout' ? 'block' : 'none';
+    document.getElementById('tx-extend-group').style.display =
+      action === 'extend' ? 'block' : 'none';
+    if (action === 'extend') renderExtSalaryInputs();
+  }
+
+  function renderExtSalaryInputs() {
+    const years = parseInt(document.getElementById('tx-ext-years').value) || 1;
+    const container = document.getElementById('tx-ext-salaries');
+    container.innerHTML = '';
+    for (let i = 1; i <= years; i++) {
+      container.innerHTML += `<div class="form-group"><label>Year ${i} Salary ($)</label><input type="number" id="tx-ext-sal-${i}" min="0" step="1000" value="0" /></div>`;
+    }
+  }
+
+  function renderSignSalaryInputs() {
+    const years = parseInt(document.getElementById('tx-sign-years').value) || 1;
+    const container = document.getElementById('tx-sign-salaries');
+    container.innerHTML = '';
+    for (let i = 1; i <= years; i++) {
+      container.innerHTML += `<div class="form-group"><label>Year ${i} Salary ($)</label><input type="number" id="tx-sign-sal-${i}" min="0" step="1000" value="0" /></div>`;
+    }
+  }
+
+  function executeRosterAction() {
+    if (!txSelectedPlayer) { alert('No player selected'); return; }
+    const action = document.getElementById('tx-action-type').value;
+    if (!action) { alert('Select an action'); return; }
+    const resultBox = document.getElementById('tx-action-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Executing...';
+
+    const orgId = parseInt(document.getElementById('tx-org-select').value);
+    const base = { league_year_id: txLeagueYearId, executed_by: 'admin' };
+    let url, body;
+
+    switch (action) {
+      case 'promote':
+        url = '/transactions/promote';
+        body = { ...base, contract_id: txSelectedPlayer.contract_id, target_level_id: parseInt(document.getElementById('tx-target-level').value) };
+        break;
+      case 'demote':
+        url = '/transactions/demote';
+        body = { ...base, contract_id: txSelectedPlayer.contract_id, target_level_id: parseInt(document.getElementById('tx-target-level').value) };
+        break;
+      case 'ir_place':
+        url = '/transactions/ir/place';
+        body = { ...base, contract_id: txSelectedPlayer.contract_id };
+        break;
+      case 'ir_activate':
+        url = '/transactions/ir/activate';
+        body = { ...base, contract_id: txSelectedPlayer.contract_id };
+        break;
+      case 'release':
+        if (!confirm(`Release ${txSelectedPlayer.player_name}? This cannot be easily undone.`)) return;
+        url = '/transactions/release';
+        body = { ...base, contract_id: txSelectedPlayer.contract_id, org_id: orgId };
+        break;
+      case 'buyout':
+        if (!confirm(`Buyout ${txSelectedPlayer.player_name}?`)) return;
+        url = '/transactions/buyout';
+        body = { ...base, contract_id: txSelectedPlayer.contract_id, org_id: orgId, buyout_amount: parseFloat(document.getElementById('tx-buyout-amount').value) || 0, game_week_id: txGameWeekId };
+        break;
+      case 'extend': {
+        const years = parseInt(document.getElementById('tx-ext-years').value) || 1;
+        const salaries = [];
+        for (let i = 1; i <= years; i++) {
+          salaries.push(parseFloat(document.getElementById(`tx-ext-sal-${i}`).value) || 0);
+        }
+        url = '/transactions/extend';
+        body = { ...base, contract_id: txSelectedPlayer.contract_id, org_id: orgId, years: years, salaries: salaries, bonus: parseFloat(document.getElementById('tx-ext-bonus').value) || 0, game_week_id: txGameWeekId };
+        break;
+      }
+      default:
+        resultBox.textContent = 'Unknown action: ' + action;
+        return;
+    }
+
+    fetch(`${API_BASE}${url}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = `Error: ${data.message || data.error}`;
+        } else {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          // Reload roster
+          loadOrgRoster(orgId);
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // -----------------------------------------------------------------------
+  // Transactions — Free Agents
+  // -----------------------------------------------------------------------
+
+  function loadFreeAgents() {
+    const tbody = document.getElementById('tx-fa-tbody');
+    const wrap = document.getElementById('tx-fa-table-wrap');
+    wrap.style.display = 'block';
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Loading...</td></tr>';
+    document.getElementById('tx-sign-form').style.display = 'none';
+
+    fetch(`${API_BASE}/transactions/free-agents`)
+      .then(r => r.json())
+      .then(players => {
+        if (!players.length) {
+          tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No free agents found</td></tr>';
+          return;
+        }
+        tbody.innerHTML = players.map(p => `<tr>
+          <td>${p.player_name || (p.firstName + ' ' + p.lastName)}</td>
+          <td>${p.position}</td>
+          <td>${p.age || '--'}</td>
+          <td><button class="btn btn-sm btn-primary" onclick="App.selectFA(${p.player_id}, '${(p.player_name || (p.firstName + ' ' + p.lastName)).replace(/'/g, "\\'")}')">Sign</button></td>
+        </tr>`).join('');
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+  }
+
+  function selectFA(playerId, playerName) {
+    txSelectedFA = { player_id: playerId, player_name: playerName };
+    const form = document.getElementById('tx-sign-form');
+    form.style.display = 'block';
+    document.getElementById('tx-sign-player-name').textContent = playerName;
+    document.getElementById('tx-sign-years').value = 1;
+    document.getElementById('tx-sign-bonus').value = 0;
+    document.getElementById('tx-sign-result').style.display = 'none';
+    renderSignSalaryInputs();
+  }
+
+  function signFreeAgent() {
+    if (!txSelectedFA) { alert('No free agent selected'); return; }
+    const orgId = parseInt(document.getElementById('tx-org-select').value);
+    if (!orgId) { alert('Select an organization first (in the org selector above)'); return; }
+
+    const years = parseInt(document.getElementById('tx-sign-years').value) || 1;
+    const salaries = [];
+    for (let i = 1; i <= years; i++) {
+      salaries.push(parseFloat(document.getElementById(`tx-sign-sal-${i}`).value) || 0);
+    }
+    const resultBox = document.getElementById('tx-sign-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Signing...';
+
+    fetch(`${API_BASE}/transactions/sign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        player_id: txSelectedFA.player_id,
+        org_id: orgId,
+        years: years,
+        salaries: salaries,
+        bonus: parseFloat(document.getElementById('tx-sign-bonus').value) || 0,
+        level_id: parseInt(document.getElementById('tx-sign-level').value),
+        league_year_id: txLeagueYearId,
+        game_week_id: txGameWeekId,
+        executed_by: 'admin',
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = `Error: ${data.message || data.error}`;
+        } else {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          loadOrgRoster(orgId);
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // -----------------------------------------------------------------------
+  // Transactions — Trade Builder
+  // -----------------------------------------------------------------------
+
+  function loadTradeBuilder() {
+    fetchTxContext();
+    populateTxOrgDropdown('tx-trade-org-a');
+    populateTxOrgDropdown('tx-trade-org-b');
+    loadTradeProposals();
+  }
+
+  function loadTradeOrgRoster(side, orgId) {
+    const tbody = document.getElementById(`tx-trade-roster-${side}`);
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Loading...</td></tr>';
+
+    fetch(`${API_BASE}/transactions/roster/${orgId}`)
+      .then(r => r.json())
+      .then(players => {
+        if (!players.length) {
+          tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No players</td></tr>';
+          return;
+        }
+        tbody.innerHTML = players.map(p => `<tr>
+          <td><input type="checkbox" class="trade-check-${side}" value="${p.player_id}" data-contract="${p.contract_id}" /></td>
+          <td>${p.player_name}</td>
+          <td>${p.position}</td>
+          <td>${{ 9: 'MLB', 8: 'AAA', 7: 'AA', 6: 'High-A', 5: 'A', 4: 'Scraps' }[p.current_level] || p.current_level}</td>
+        </tr>`).join('');
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+  }
+
+  function executeTrade() {
+    const orgA = parseInt(document.getElementById('tx-trade-org-a').value);
+    const orgB = parseInt(document.getElementById('tx-trade-org-b').value);
+    if (!orgA || !orgB) { alert('Select both organizations'); return; }
+    if (orgA === orgB) { alert('Cannot trade with same org'); return; }
+
+    const playersToB = [];
+    document.querySelectorAll('.trade-check-a:checked').forEach(cb => {
+      playersToB.push(parseInt(cb.value));
+    });
+    const playersToA = [];
+    document.querySelectorAll('.trade-check-b:checked').forEach(cb => {
+      playersToA.push(parseInt(cb.value));
+    });
+
+    if (playersToA.length === 0 && playersToB.length === 0) {
+      alert('Select at least one player to trade');
+      return;
+    }
+
+    if (!confirm(`Execute trade: ${playersToB.length} player(s) to Org B, ${playersToA.length} player(s) to Org A?`)) return;
+
+    const resultBox = document.getElementById('tx-trade-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Executing trade...';
+
+    fetch(`${API_BASE}/transactions/trade/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        org_a_id: orgA,
+        org_b_id: orgB,
+        players_to_b: playersToB,
+        players_to_a: playersToA,
+        cash_a_to_b: parseFloat(document.getElementById('tx-trade-cash').value) || 0,
+        league_year_id: txLeagueYearId,
+        game_week_id: txGameWeekId,
+        executed_by: 'admin',
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = `Error: ${data.message || data.error}`;
+        } else {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          // Reload both rosters
+          loadTradeOrgRoster('a', orgA);
+          loadTradeOrgRoster('b', orgB);
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // -----------------------------------------------------------------------
+  // Transactions — Trade Proposals
+  // -----------------------------------------------------------------------
+
+  function loadTradeProposals() {
+    const tbody = document.getElementById('tx-proposals-tbody');
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Loading...</td></tr>';
+
+    const statusFilter = document.getElementById('tx-proposal-status-filter').value;
+    let url = `${API_BASE}/transactions/trade/proposals`;
+    if (statusFilter) url += `?status=${statusFilter}`;
+
+    fetch(url)
+      .then(r => r.json())
+      .then(proposals => {
+        if (!proposals.length) {
+          tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No proposals found</td></tr>';
+          return;
+        }
+        tbody.innerHTML = proposals.map(p => {
+          const statusBadge = {
+            proposed: 'badge-info',
+            counterparty_accepted: 'badge-warning',
+            admin_approved: 'badge-success',
+            executed: 'badge-success',
+            counterparty_rejected: 'badge-danger',
+            admin_rejected: 'badge-danger',
+            cancelled: 'badge-secondary',
+          }[p.status] || '';
+
+          let actions = '';
+          if (p.status === 'counterparty_accepted') {
+            actions = `<button class="btn btn-sm btn-primary" onclick="App.adminApproveProposal(${p.id})">Approve</button> `;
+            actions += `<button class="btn btn-sm btn-danger" onclick="App.adminRejectProposal(${p.id})">Reject</button>`;
+          } else if (p.status === 'proposed') {
+            actions = `<button class="btn btn-sm btn-secondary" onclick="App.adminRejectProposal(${p.id})">Reject</button>`;
+          }
+
+          const created = p.created_at ? new Date(p.created_at).toLocaleDateString() : '--';
+          return `<tr>
+            <td>${p.id}</td>
+            <td>${p.proposing_org_id}</td>
+            <td>${p.receiving_org_id}</td>
+            <td><span class="badge ${statusBadge}">${p.status}</span></td>
+            <td>${created}</td>
+            <td>${actions}</td>
+          </tr>`;
+        }).join('');
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+  }
+
+  function adminApproveProposal(proposalId) {
+    if (!confirm(`Approve and execute trade proposal #${proposalId}?`)) return;
+    const resultBox = document.getElementById('tx-proposal-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Approving...';
+
+    fetch(`${API_BASE}/transactions/trade/proposals/${proposalId}/admin-approve`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        league_year_id: txLeagueYearId,
+        game_week_id: txGameWeekId,
+        executed_by: 'admin',
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = `Error: ${data.message || data.error}`;
+        } else {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          loadTradeProposals();
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  function adminRejectProposal(proposalId) {
+    if (!confirm(`Reject trade proposal #${proposalId}?`)) return;
+    const resultBox = document.getElementById('tx-proposal-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Rejecting...';
+
+    fetch(`${API_BASE}/transactions/trade/proposals/${proposalId}/admin-reject`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({}),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = `Error: ${data.message || data.error}`;
+        } else {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          loadTradeProposals();
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // -----------------------------------------------------------------------
+  // Transactions — Transaction Log
+  // -----------------------------------------------------------------------
+
+  function loadTransactionLog() {
+    fetchTxContext();
+    const tbody = document.getElementById('tx-log-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Loading...</td></tr>';
+
+    const typeFilter = document.getElementById('tx-log-type-filter').value;
+    const orgFilter = document.getElementById('tx-log-org-filter').value;
+    const limit = document.getElementById('tx-log-limit').value || 50;
+
+    let url = `${API_BASE}/transactions/log?limit=${limit}`;
+    if (typeFilter) url += `&type=${typeFilter}`;
+    if (orgFilter) url += `&org_id=${orgFilter}`;
+
+    fetch(url)
+      .then(r => r.json())
+      .then(entries => {
+        if (!entries.length) {
+          tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No transactions found</td></tr>';
+          return;
+        }
+        tbody.innerHTML = entries.map(e => {
+          const ts = e.created_at ? new Date(e.created_at).toLocaleString() : '--';
+          const typeBadge = {
+            promote: 'badge-info', demote: 'badge-info',
+            ir_place: 'badge-warning', ir_activate: 'badge-warning',
+            release: 'badge-danger', buyout: 'badge-danger',
+            signing: 'badge-success', extension: 'badge-success',
+            trade: 'badge-primary',
+          }[e.transaction_type] || '';
+
+          const notes = e.notes || '';
+          const isRollback = notes.includes('ROLLBACK');
+
+          return `<tr${isRollback ? ' style="opacity: 0.6"' : ''}>
+            <td>${e.id}</td>
+            <td>${ts}</td>
+            <td><span class="badge ${typeBadge}">${e.transaction_type}</span></td>
+            <td>${e.primary_org_id || '--'}</td>
+            <td>${e.player_id || '--'}</td>
+            <td title="${notes}">${notes.length > 40 ? notes.substring(0, 40) + '...' : notes || '--'}</td>
+            <td>
+              <button class="btn btn-sm btn-secondary" onclick="App.viewTxDetail(${e.id})">Detail</button>
+              ${!isRollback ? `<button class="btn btn-sm btn-danger" onclick="App.rollbackTx(${e.id})">Rollback</button>` : ''}
+            </td>
+          </tr>`;
+        }).join('');
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+      });
+  }
+
+  function viewTxDetail(txId) {
+    const detailBox = document.getElementById('tx-log-detail');
+    detailBox.style.display = 'block';
+    detailBox.textContent = 'Loading...';
+
+    // The log entries already contain details — find it from the table or re-fetch
+    fetch(`${API_BASE}/transactions/log?limit=1&tx_id=${txId}`)
+      .then(r => r.json())
+      .then(entries => {
+        // If single-fetch doesn't work, show what we have
+        if (entries.length > 0) {
+          detailBox.textContent = JSON.stringify(entries[0], null, 2);
+        } else {
+          detailBox.textContent = 'Transaction not found';
+        }
+      })
+      .catch(() => {
+        detailBox.textContent = 'Could not load detail';
+      });
+  }
+
+  function rollbackTx(txId) {
+    if (!confirm(`Rollback transaction #${txId}? This will reverse the operation.`)) return;
+
+    const detailBox = document.getElementById('tx-log-detail');
+    detailBox.style.display = 'block';
+    detailBox.textContent = 'Rolling back...';
+
+    fetch(`${API_BASE}/transactions/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ transaction_id: txId, executed_by: 'admin' }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          detailBox.textContent = `Error: ${data.message || data.error}`;
+        } else {
+          detailBox.textContent = JSON.stringify(data, null, 2);
+          loadTransactionLog();
+        }
+      })
+      .catch(err => {
+        detailBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
   // Export public API
   window.App = {
     goTo,
     refreshDashboard,
     deleteTask,
+    selectPlayer,
+    selectFA,
+    adminApproveProposal,
+    adminRejectProposal,
+    viewTxDetail,
+    rollbackTx,
   };
 
   // Initialize on DOM ready
