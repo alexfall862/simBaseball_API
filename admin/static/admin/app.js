@@ -1706,10 +1706,10 @@
           return;
         }
         tbody.innerHTML = players.map(p => `<tr>
-          <td>${p.player_name || (p.firstName + ' ' + p.lastName)}</td>
+          <td>${p.player_name}</td>
           <td>${p.position}</td>
           <td>${p.age || '--'}</td>
-          <td><button class="btn btn-sm btn-primary" onclick="App.selectFA(${p.player_id}, '${(p.player_name || (p.firstName + ' ' + p.lastName)).replace(/'/g, "\\'")}')">Sign</button></td>
+          <td><button class="btn btn-sm btn-primary" onclick="App.selectFA(${p.player_id}, '${p.player_name.replace(/'/g, "\\'")}')">Sign</button></td>
         </tr>`).join('');
       })
       .catch(err => {

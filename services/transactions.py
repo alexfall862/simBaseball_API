@@ -611,19 +611,27 @@ def get_free_agents(conn) -> List[Dict[str, Any]]:
     rows = conn.execute(
         select(
             players.c.id,
-            players.c.firstName,
-            players.c.lastName,
+            players.c.firstname,
+            players.c.lastname,
             players.c.age,
-            players.c.position,
+            players.c.ptype,
         )
         .where(and_(
             players.c.id.in_(select(has_contract_subq.c.playerID)),
             players.c.id.notin_(select(held_subq.c.playerID)),
         ))
-        .order_by(players.c.lastName, players.c.firstName)
+        .order_by(players.c.lastname, players.c.firstname)
     ).all()
 
-    return [dict(r._mapping) for r in rows]
+    return [
+        {
+            "player_id": r._mapping["id"],
+            "player_name": f"{r._mapping['firstname']} {r._mapping['lastname']}",
+            "age": r._mapping["age"],
+            "position": r._mapping["ptype"],
+        }
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1278,9 +1286,9 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
             c.c.playerID,
             c.c.current_level,
             c.c.onIR,
-            p.c.firstName,
-            p.c.lastName,
-            p.c.position,
+            p.c.firstname,
+            p.c.lastname,
+            p.c.ptype,
             d.c.salary,
         )
         .select_from(
@@ -1296,15 +1304,15 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
                 d.c.year == 1,
             )
         )
-        .order_by(c.c.current_level.desc(), p.c.lastName, p.c.firstName)
+        .order_by(c.c.current_level.desc(), p.c.lastname, p.c.firstname)
     )
     rows = conn.execute(q).all()
     return [
         {
             "contract_id": r._mapping["contract_id"],
             "player_id": r._mapping["playerID"],
-            "player_name": f"{r._mapping['firstName']} {r._mapping['lastName']}",
-            "position": r._mapping["position"],
+            "player_name": f"{r._mapping['firstname']} {r._mapping['lastname']}",
+            "position": r._mapping["ptype"],
             "current_level": r._mapping["current_level"],
             "onIR": r._mapping["onIR"],
             "salary": float(r._mapping["salary"]) if r._mapping["salary"] else 0,
