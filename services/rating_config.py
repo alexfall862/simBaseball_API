@@ -72,14 +72,14 @@ def get_rating_config(
     conn,
     level_id: Optional[int] = None,
     ptype: Optional[str] = None,
-) -> Dict[str, Dict[int, Dict[str, Dict[str, float]]]]:
+) -> Dict[str, Dict[int, Dict[str, Any]]]:
     """
     Read rating_scale_config into:
-        { ptype: { level_id: { attribute_key: { "mean": float, "std": float } } } }
+        { ptype: { level_id: { attribute_key: { "mean", "std", "p25", "median", "p75" } } } }
 
     Optional filters narrow the result set.
     """
-    sql = "SELECT level_id, ptype, attribute_key, mean_value, std_dev FROM rating_scale_config WHERE 1=1"
+    sql = "SELECT level_id, ptype, attribute_key, mean_value, std_dev, p25, median, p75 FROM rating_scale_config WHERE 1=1"
     params: dict = {}
     if level_id is not None:
         sql += " AND level_id = :level_id"
@@ -90,7 +90,7 @@ def get_rating_config(
 
     rows = conn.execute(text(sql), params).all()
 
-    config: Dict[str, Dict[int, Dict[str, Dict[str, float]]]] = {}
+    config: Dict[str, Dict[int, Dict[str, Any]]] = {}
     for r in rows:
         lvl = int(r[0])
         pt = str(r[1])
@@ -98,6 +98,9 @@ def get_rating_config(
         config.setdefault(pt, {}).setdefault(lvl, {})[attr] = {
             "mean": float(r[3]),
             "std": float(r[4]),
+            "p25": float(r[5]) if r[5] is not None else None,
+            "median": float(r[6]) if r[6] is not None else None,
+            "p75": float(r[7]) if r[7] is not None else None,
         }
     return config
 
@@ -162,6 +165,48 @@ def update_overall_weight(conn, rating_type: str, attribute_key: str, weight: fl
         VALUES (:rt, :ak, :w)
         ON DUPLICATE KEY UPDATE weight = :w, updated_at = CURRENT_TIMESTAMP
     """), {"rt": rating_type, "ak": attribute_key, "w": weight})
+
+
+# ------------------------------------------------------------------
+# Admin config editing
+# ------------------------------------------------------------------
+
+def update_config_rows(conn, updates: List[Dict[str, Any]]) -> int:
+    """
+    Bulk-update mean_value / std_dev for existing config rows.
+
+    Each update dict: { "level_id", "ptype", "attribute_key", "mean_value", "std_dev" }
+    Returns count of rows affected.
+    """
+    sql = text("""
+        UPDATE rating_scale_config
+        SET mean_value = :mean_value, std_dev = :std_dev
+        WHERE level_id = :level_id AND ptype = :ptype AND attribute_key = :attribute_key
+    """)
+    count = 0
+    for u in updates:
+        result = conn.execute(sql, {
+            "level_id": u["level_id"],
+            "ptype": u["ptype"],
+            "attribute_key": u["attribute_key"],
+            "mean_value": float(u["mean_value"]),
+            "std_dev": float(u["std_dev"]),
+        })
+        count += result.rowcount
+    return count
+
+
+def bulk_set_config(conn, level_id: int, ptype: str, mean_value: float, std_dev: float) -> int:
+    """
+    Set the SAME mean_value and std_dev for ALL attributes at a given level/ptype.
+    Returns count of rows affected.
+    """
+    result = conn.execute(text("""
+        UPDATE rating_scale_config
+        SET mean_value = :mean, std_dev = :std
+        WHERE level_id = :level_id AND ptype = :ptype
+    """), {"level_id": level_id, "ptype": ptype, "mean": mean_value, "std": std_dev})
+    return result.rowcount
 
 
 # ------------------------------------------------------------------
@@ -271,9 +316,11 @@ def seed_rating_config(conn) -> Dict[str, Any]:
     # 5. Clear old data and write fresh
     conn.execute(text("DELETE FROM rating_scale_config"))
 
-    upsert_sql = text("""
-        INSERT INTO rating_scale_config (level_id, ptype, attribute_key, mean_value, std_dev)
-        VALUES (:level_id, :ptype, :attribute_key, :mean_value, :std_dev)
+    insert_sql = text("""
+        INSERT INTO rating_scale_config
+            (level_id, ptype, attribute_key, mean_value, std_dev, p25, median, p75)
+        VALUES
+            (:level_id, :ptype, :attribute_key, :mean_value, :std_dev, :p25, :median, :p75)
     """)
 
     total_rows = 0
@@ -292,12 +339,21 @@ def seed_rating_config(conn) -> Dict[str, Any]:
                 var = sum((v - mean) ** 2 for v in vals) / len(vals)
                 std = math.sqrt(var)
 
-            conn.execute(upsert_sql, {
+            # Quartiles
+            sorted_vals = sorted(vals)
+            p25 = _percentile(sorted_vals, 25)
+            median = _percentile(sorted_vals, 50)
+            p75 = _percentile(sorted_vals, 75)
+
+            conn.execute(insert_sql, {
                 "level_id": level_id,
                 "ptype": ptype,
                 "attribute_key": attr_key,
                 "mean_value": round(mean, 6),
                 "std_dev": round(std, 6),
+                "p25": round(p25, 4),
+                "median": round(median, 4),
+                "p75": round(p75, 4),
             })
             attr_count += 1
 
@@ -343,6 +399,21 @@ def _compute_overall_for_player(
 # ------------------------------------------------------------------
 # Lightweight derived-rating computation for seeding
 # ------------------------------------------------------------------
+
+def _percentile(sorted_vals: List[float], pct: float) -> float:
+    """Compute percentile from a pre-sorted list using linear interpolation."""
+    n = len(sorted_vals)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return sorted_vals[0]
+    k = (pct / 100.0) * (n - 1)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_vals[int(k)]
+    return sorted_vals[int(f)] * (c - k) + sorted_vals[int(c)] * (k - f)
+
 
 def _safe_float(val) -> Optional[float]:
     if val is None:

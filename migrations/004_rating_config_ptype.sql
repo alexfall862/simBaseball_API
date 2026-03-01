@@ -1,12 +1,11 @@
 -- 004_rating_config_ptype.sql
--- Add ptype column to rating_scale_config so distributions are computed
--- separately for pitchers vs position players.
+-- Recreate rating_scale_config with:
+--   1. ptype column  — separate distributions for Pitcher vs Position
+--   2. quartile columns (p25, median, p75) — reference data from seed analysis
 --
--- Without this, mixing both player types produces bimodal distributions
--- with inflated stddev and means that don't vary across levels.
-
--- Easiest approach: drop and recreate with the new schema.
--- Data is ephemeral (regenerated on every seed), so no data loss.
+-- The admin ASSIGNS mean_value / std_dev (the values used for 20-80 conversion).
+-- The seed populates initial values + quartiles as a ballpark reference.
+-- Data is ephemeral (regenerated on every seed), so drop+recreate is safe.
 
 DROP TABLE IF EXISTS rating_scale_config;
 
@@ -17,6 +16,9 @@ CREATE TABLE rating_scale_config (
     attribute_key   VARCHAR(50) NOT NULL,
     mean_value      DOUBLE NOT NULL DEFAULT 0,
     std_dev         DOUBLE NOT NULL DEFAULT 0,
+    p25             DOUBLE DEFAULT NULL,
+    median          DOUBLE DEFAULT NULL,
+    p75             DOUBLE DEFAULT NULL,
     updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
     UNIQUE KEY uq_level_ptype_attr (level_id, ptype, attribute_key)

@@ -116,6 +116,8 @@
     document.getElementById('btn-seed-config').addEventListener('click', seedRatingConfig);
     document.getElementById('btn-load-config').addEventListener('click', loadRatingConfig);
     document.getElementById('rc-attr-filter').addEventListener('input', filterRatingConfigTable);
+    document.getElementById('btn-save-config').addEventListener('click', saveRatingConfig);
+    document.getElementById('btn-bulk-apply').addEventListener('click', bulkApplyConfig);
 
     // Overall Weights
     document.getElementById('btn-load-weights').addEventListener('click', loadOverallWeights);
@@ -919,7 +921,7 @@
       })
       .finally(() => {
         btn.disabled = false;
-        btn.textContent = 'Seed / Refresh Config';
+        btn.textContent = 'Analyze & Populate';
       });
   }
 
@@ -927,7 +929,7 @@
     const levelFilter = document.getElementById('rc-level-filter').value;
     const ptypeFilter = document.getElementById('rc-ptype-filter').value;
     const tbody = document.getElementById('rc-config-tbody');
-    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">Loading...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">Loading...</td></tr>';
 
     let url = `${ADMIN_BASE}/rating-config`;
     const params = [];
@@ -942,15 +944,19 @@
       })
       .then(data => {
         if (!data.ok || !data.levels) {
-          tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No config data. Run seed first.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No config data. Run seed first.</td></tr>';
           return;
         }
 
-        ratingConfigData = data.levels;  // { ptype: { level_id: { attr: {mean,std} } } }
+        ratingConfigData = data.levels;  // { ptype: { level_id: { attr: {mean,std,p25,median,p75} } } }
         renderRatingConfigTable();
+
+        // Show bulk-set row and save button
+        document.getElementById('rc-bulk-set').style.display = 'flex';
+        document.getElementById('btn-save-config').style.display = 'inline-block';
       })
       .catch(err => {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-danger">Error: ${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="text-center text-danger">Error: ${err.message}</td></tr>`;
       });
   }
 
@@ -975,46 +981,176 @@
         for (const attrKey of sortedAttrs) {
           if (searchTerm && !attrKey.toLowerCase().includes(searchTerm)) continue;
 
-          const { mean, std } = attrs[attrKey];
-          const low = std > 0 ? (mean - 3 * std).toFixed(1) : '--';
-          const high = std > 0 ? (mean + 3 * std).toFixed(1) : '--';
-
+          const d = attrs[attrKey];
           rows.push({
             ptype,
             levelId,
             levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
             attrKey,
-            mean: mean.toFixed(2),
-            std: std.toFixed(2),
-            low,
-            mid: mean.toFixed(1),
-            high,
+            mean: d.mean,
+            std: d.std,
+            p25: d.p25,
+            median: d.median,
+            p75: d.p75,
           });
         }
       }
     }
 
     if (rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No matching attributes found</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No matching attributes found</td></tr>';
       return;
     }
+
+    const inputStyle = 'width:72px;padding:3px 5px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text-primary);font-size:0.85rem;text-align:right';
+    const fmtQ = (v) => v != null ? v.toFixed(1) : '--';
 
     tbody.innerHTML = rows.map(r => {
       const attrClass = getAttrCategoryClass(r.attrKey);
       const ptypeBadge = r.ptype === 'Pitcher' ? 'badge-info' : 'badge-success';
+      const low = r.std > 0 ? (r.mean - 3 * r.std).toFixed(1) : '--';
+      const mid = r.mean.toFixed(1);
+      const high = r.std > 0 ? (r.mean + 3 * r.std).toFixed(1) : '--';
       return `
         <tr>
           <td><span class="badge ${ptypeBadge}">${r.ptype}</span></td>
           <td><span class="badge badge-${getLevelBadge(r.levelId)}">${r.levelName}</span></td>
           <td><code class="${attrClass}">${r.attrKey}</code></td>
-          <td>${r.mean}</td>
-          <td>${r.std}</td>
-          <td class="text-muted">${r.low}</td>
-          <td><strong>${r.mid}</strong></td>
-          <td class="text-muted">${r.high}</td>
+          <td class="text-muted">${fmtQ(r.p25)}</td>
+          <td class="text-muted">${fmtQ(r.median)}</td>
+          <td class="text-muted">${fmtQ(r.p75)}</td>
+          <td>
+            <input type="number" step="0.1"
+              class="rc-mean-input rc-scale-input"
+              data-ptype="${r.ptype}" data-level="${r.levelId}" data-attr="${r.attrKey}"
+              data-orig="${r.mean}"
+              value="${r.mean.toFixed(2)}"
+              style="${inputStyle}"
+            />
+          </td>
+          <td>
+            <input type="number" step="0.1" min="0"
+              class="rc-std-input rc-scale-input"
+              data-ptype="${r.ptype}" data-level="${r.levelId}" data-attr="${r.attrKey}"
+              data-orig="${r.std}"
+              value="${r.std.toFixed(2)}"
+              style="${inputStyle}"
+            />
+          </td>
+          <td class="text-muted rc-col-20">${low}</td>
+          <td><strong class="rc-col-50">${mid}</strong></td>
+          <td class="text-muted rc-col-80">${high}</td>
         </tr>
       `;
     }).join('');
+
+    // Delegated input handler: recompute 20/50/80 when mean or std changes
+    tbody.querySelectorAll('.rc-scale-input').forEach(input => {
+      input.addEventListener('input', function () {
+        const tr = this.closest('tr');
+        const meanVal = parseFloat(tr.querySelector('.rc-mean-input').value) || 0;
+        const stdVal = parseFloat(tr.querySelector('.rc-std-input').value) || 0;
+        tr.querySelector('.rc-col-20').textContent = stdVal > 0 ? (meanVal - 3 * stdVal).toFixed(1) : '--';
+        tr.querySelector('.rc-col-50').textContent = meanVal.toFixed(1);
+        tr.querySelector('.rc-col-80').textContent = stdVal > 0 ? (meanVal + 3 * stdVal).toFixed(1) : '--';
+      });
+    });
+  }
+
+  function saveRatingConfig() {
+    const tbody = document.getElementById('rc-config-tbody');
+    const meanInputs = tbody.querySelectorAll('.rc-mean-input');
+    const stdInputs = tbody.querySelectorAll('.rc-std-input');
+    const resultBox = document.getElementById('rc-save-result');
+
+    // Collect changed rows
+    const updates = [];
+    meanInputs.forEach((input, i) => {
+      const stdInput = stdInputs[i];
+      const newMean = parseFloat(input.value);
+      const newStd = parseFloat(stdInput.value);
+      const origMean = parseFloat(input.dataset.orig);
+      const origStd = parseFloat(stdInput.dataset.orig);
+
+      if (isNaN(newMean) || isNaN(newStd)) return;
+      if (Math.abs(newMean - origMean) < 0.0001 && Math.abs(newStd - origStd) < 0.0001) return;
+
+      updates.push({
+        level_id: parseInt(input.dataset.level),
+        ptype: input.dataset.ptype,
+        attribute_key: input.dataset.attr,
+        mean_value: newMean,
+        std_dev: newStd,
+      });
+    });
+
+    if (updates.length === 0) {
+      resultBox.style.display = 'block';
+      resultBox.textContent = 'No changes detected.';
+      return;
+    }
+
+    const btn = document.getElementById('btn-save-config');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    resultBox.style.display = 'block';
+    resultBox.textContent = `Saving ${updates.length} change(s)...`;
+
+    fetch(`${ADMIN_BASE}/rating-config`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (data.ok) {
+          resultBox.textContent = `Saved! ${data.updated} row(s) updated.`;
+          // Update orig values so re-saving doesn't re-send unchanged rows
+          meanInputs.forEach(input => { input.dataset.orig = input.value; });
+          stdInputs.forEach(input => { input.dataset.orig = input.value; });
+        } else {
+          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      })
+      .finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Save Config Changes';
+      });
+  }
+
+  function bulkApplyConfig() {
+    const bulkMean = document.getElementById('rc-bulk-mean').value;
+    const bulkStd = document.getElementById('rc-bulk-std').value;
+    const tbody = document.getElementById('rc-config-tbody');
+
+    if (!bulkMean && !bulkStd) {
+      alert('Enter a mean and/or std dev value to apply.');
+      return;
+    }
+
+    // Apply to all visible mean/std inputs in the table
+    if (bulkMean !== '') {
+      tbody.querySelectorAll('.rc-mean-input').forEach(input => {
+        input.value = parseFloat(bulkMean).toFixed(2);
+      });
+    }
+    if (bulkStd !== '') {
+      tbody.querySelectorAll('.rc-std-input').forEach(input => {
+        input.value = parseFloat(bulkStd).toFixed(2);
+      });
+    }
+
+    // Trigger recomputation of 20/50/80 columns
+    tbody.querySelectorAll('.rc-scale-input').forEach(input => {
+      input.dispatchEvent(new Event('input'));
+    });
   }
 
   function filterRatingConfigTable() {

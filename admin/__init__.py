@@ -233,6 +233,77 @@ def admin_get_rating_config():
         return jsonify(ok=False, error="read_failed", message=str(e)), 500
 
 
+@admin_bp.put("/rating-config")
+def admin_update_rating_config():
+    """
+    Update mean_value / std_dev for specific config rows.
+
+    PUT /admin/rating-config
+    Body: { "updates": [ { "level_id": 9, "ptype": "Pitcher", "attribute_key": "power_base", "mean_value": 50.0, "std_dev": 15.0 }, ... ] }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    updates = body.get("updates")
+    if not updates or not isinstance(updates, list):
+        return jsonify(ok=False, error="missing_updates", message="Body must contain 'updates' list"), 400
+
+    try:
+        from db import get_engine
+        from services.rating_config import update_config_rows
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            count = update_config_rows(conn, updates)
+            conn.commit()
+
+        return jsonify(ok=True, updated=count)
+
+    except Exception as e:
+        logging.exception("admin_update_rating_config failed")
+        return jsonify(ok=False, error="update_failed", message=str(e)), 500
+
+
+@admin_bp.put("/rating-config/bulk-set")
+def admin_bulk_set_rating_config():
+    """
+    Set the SAME mean / std for ALL attributes at a given level + ptype.
+
+    PUT /admin/rating-config/bulk-set
+    Body: { "level_id": 9, "ptype": "Pitcher", "mean_value": 50.0, "std_dev": 15.0 }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    level_id = body.get("level_id")
+    ptype = body.get("ptype")
+    mean_val = body.get("mean_value")
+    std_val = body.get("std_dev")
+
+    if level_id is None or not ptype or mean_val is None or std_val is None:
+        return jsonify(ok=False, error="missing_fields",
+                       message="Required: level_id, ptype, mean_value, std_dev"), 400
+
+    try:
+        from db import get_engine
+        from services.rating_config import bulk_set_config
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            count = bulk_set_config(conn, int(level_id), ptype, float(mean_val), float(std_val))
+            conn.commit()
+
+        return jsonify(ok=True, updated=count)
+
+    except Exception as e:
+        logging.exception("admin_bulk_set_rating_config failed")
+        return jsonify(ok=False, error="update_failed", message=str(e)), 500
+
+
 @admin_bp.get("/rating-config/overall-weights")
 def admin_get_overall_weights():
     """

@@ -292,22 +292,24 @@
         </div>
 
         <div class="card">
-          <h3>Seed / Refresh Config</h3>
-          <p class="text-muted">Compute mean and standard deviation for every player attribute at every level from current player data. This populates the <code>rating_scale_config</code> table used by the 20-80 scouting scale.</p>
+          <h3>Analyze Player Data</h3>
+          <p class="text-muted">Compute statistical breakdowns from current player data. This populates the config table with suggested mean/std values and quartile reference data. You can then edit the values below.</p>
 
           <div class="alert alert-info">
-            <strong>When to seed:</strong> After importing new players, completing a draft, processing trades, or anytime you want to recalibrate the scale. Levels with no players (e.g. 1-3 before import) will be skipped.
+            <strong>When to analyze:</strong> After importing new players, completing a draft, processing trades, or anytime you want fresh baseline numbers. Levels with no players (e.g. 1-3 before import) will be skipped.
           </div>
 
           <div class="button-group">
-            <button class="btn btn-warning" id="btn-seed-config">Seed / Refresh Config</button>
+            <button class="btn btn-warning" id="btn-seed-config">Analyze &amp; Populate</button>
           </div>
 
           <pre id="rc-seed-result" class="result-box" style="margin-top: 16px; display: none"></pre>
         </div>
 
         <div class="card">
-          <h3>View Config</h3>
+          <h3>Scale Config Editor</h3>
+          <p class="text-muted">The mean and std dev values here control the 20-80 scouting scale. Edit them directly, or use "Set All" to apply a master mean/std to every attribute at a given level. Quartile columns (P25, Median, P75) are read-only reference from the last analysis.</p>
+
           <div class="form-row">
             <div class="form-group">
               <label for="rc-ptype-filter">Player Type</label>
@@ -321,9 +323,6 @@
               <label for="rc-level-filter">Filter by Level</label>
               <select id="rc-level-filter">
                 <option value="">All Levels</option>
-                <option value="1">1 - High School</option>
-                <option value="2">2 - Int'l Amateur</option>
-                <option value="3">3 - College</option>
                 <option value="4">4 - Scraps</option>
                 <option value="5">5 - A</option>
                 <option value="6">6 - High-A</option>
@@ -337,7 +336,22 @@
               <input type="text" id="rc-attr-filter" placeholder="e.g. power, pitch_pacc, c_rating" />
             </div>
             <div class="form-group" style="align-self: flex-end">
-              <button class="btn btn-primary" id="btn-load-config">Load Config</button>
+              <button class="btn btn-primary" id="btn-load-config">Load</button>
+            </div>
+          </div>
+
+          <!-- Bulk Set -->
+          <div id="rc-bulk-set" class="form-row" style="display: none; background: var(--surface); padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid var(--border)">
+            <div class="form-group">
+              <label>Set All Mean</label>
+              <input type="number" step="0.1" id="rc-bulk-mean" style="width: 100px" />
+            </div>
+            <div class="form-group">
+              <label>Set All Std Dev</label>
+              <input type="number" step="0.1" id="rc-bulk-std" style="width: 100px" />
+            </div>
+            <div class="form-group" style="align-self: flex-end">
+              <button class="btn btn-secondary" id="btn-bulk-apply">Apply to All Visible</button>
             </div>
           </div>
 
@@ -348,20 +362,28 @@
                   <th>Type</th>
                   <th>Level</th>
                   <th>Attribute</th>
+                  <th>P25</th>
+                  <th>Median</th>
+                  <th>P75</th>
                   <th>Mean</th>
                   <th>Std Dev</th>
-                  <th>20 (-3&sigma;)</th>
-                  <th>50 (avg)</th>
-                  <th>80 (+3&sigma;)</th>
+                  <th>20</th>
+                  <th>50</th>
+                  <th>80</th>
                 </tr>
               </thead>
               <tbody id="rc-config-tbody">
                 <tr>
-                  <td colspan="8" class="text-center text-muted">Click "Load Config" to view data</td>
+                  <td colspan="11" class="text-center text-muted">Click "Load" to view data</td>
                 </tr>
               </tbody>
             </table>
           </div>
+
+          <div class="button-group" style="margin-top: 16px">
+            <button class="btn btn-warning" id="btn-save-config" style="display: none">Save Config Changes</button>
+          </div>
+          <pre id="rc-save-result" class="result-box" style="margin-top: 12px; display: none"></pre>
         </div>
 
         <div class="card">
