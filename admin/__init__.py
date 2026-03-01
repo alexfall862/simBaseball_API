@@ -229,6 +229,73 @@ def admin_get_rating_config():
         return jsonify(ok=False, error="read_failed", message=str(e)), 500
 
 
+@admin_bp.get("/rating-config/overall-weights")
+def admin_get_overall_weights():
+    """
+    Return current overall rating weights.
+
+    GET /admin/rating-config/overall-weights
+
+    Response: { ok: true, weights: { "pitcher_overall": { attr: weight }, ... } }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from services.rating_config import get_overall_weights
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            weights = get_overall_weights(conn)
+
+        return jsonify(ok=True, weights=weights)
+
+    except Exception as e:
+        logging.exception("admin_get_overall_weights failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
+@admin_bp.put("/rating-config/overall-weights")
+def admin_update_overall_weights():
+    """
+    Update overall rating weights.
+
+    PUT /admin/rating-config/overall-weights
+    Body: { "weights": { "pitcher_overall": { "attr": weight, ... }, ... } }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    weights = body.get("weights")
+    if not weights or not isinstance(weights, dict):
+        return jsonify(ok=False, error="missing_weights", message="Body must contain 'weights' dict"), 400
+
+    try:
+        from db import get_engine
+        from services.rating_config import update_overall_weight
+
+        engine = get_engine()
+        count = 0
+        with engine.connect() as conn:
+            for rating_type, attr_map in weights.items():
+                if not isinstance(attr_map, dict):
+                    continue
+                for attr_key, weight in attr_map.items():
+                    update_overall_weight(conn, rating_type, attr_key, float(weight))
+                    count += 1
+            conn.commit()
+
+        return jsonify(ok=True, updated=count)
+
+    except Exception as e:
+        logging.exception("admin_update_overall_weights failed")
+        return jsonify(ok=False, error="update_failed", message=str(e)), 500
+
+
 def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
     if not sql:
         return jsonify(error="missing_sql"), 400

@@ -6,9 +6,8 @@ Stores mean / stddev for each rating attribute at each level in the
 `rating_scale_config` table.  Roster endpoints read from this table
 instead of recomputing distributions on every request.
 
-Admins can manually tweak mean/std values in the DB and the changes
-take effect immediately (the config is read fresh on each request, but
-cached within a single request's lifetime).
+Also manages configurable overall rating weights for pitcher and
+position player overalls via the `rating_overall_weights` table.
 """
 
 import logging
@@ -16,7 +15,7 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import MetaData, Table, text, select, and_
+from sqlalchemy import text
 
 from db import get_engine
 
@@ -51,7 +50,6 @@ def to_20_80(raw_val, mean, std) -> Optional[int]:
     else:
         z = (x - mean) / std
 
-    # Clamp z between -3 and 3
     z = max(-3.0, min(3.0, z))
 
     raw_score = 50.0 + (z / 3.0) * 30.0
@@ -62,20 +60,13 @@ def to_20_80(raw_val, mean, std) -> Optional[int]:
 
 
 # ------------------------------------------------------------------
-# Read config
+# Read scale config
 # ------------------------------------------------------------------
 
 def get_rating_config(conn, level_id: Optional[int] = None) -> Dict[int, Dict[str, Dict[str, float]]]:
     """
-    Read the rating_scale_config table into a nested dict:
+    Read rating_scale_config into:
         { level_id: { attribute_key: { "mean": float, "std": float } } }
-
-    Args:
-        conn: Active SQLAlchemy connection.
-        level_id: If given, only return config for that single level.
-
-    Returns:
-        Nested dict keyed by level_id -> attribute_key -> {mean, std}.
     """
     sql = "SELECT level_id, attribute_key, mean_value, std_dev FROM rating_scale_config"
     params = {}
@@ -93,15 +84,13 @@ def get_rating_config(conn, level_id: Optional[int] = None) -> Dict[int, Dict[st
             "mean": float(r[2]),
             "std": float(r[3]),
         }
-
     return config
 
 
 def get_rating_config_by_level_name(conn) -> Dict[str, Dict[str, Dict[str, float]]]:
     """
     Same as get_rating_config but keyed by league_level string
-    (e.g. "mlb", "aaa") instead of level_id int.  This matches the
-    key format that _build_player_with_ratings expects in dist_by_level.
+    (e.g. "mlb", "aaa") for use in roster endpoints.
     """
     sql = """
         SELECT rc.level_id, l.league_level, rc.attribute_key,
@@ -119,8 +108,37 @@ def get_rating_config_by_level_name(conn) -> Dict[str, Dict[str, Dict[str, float
             "mean": float(r[3]),
             "std": float(r[4]),
         }
-
     return config
+
+
+# ------------------------------------------------------------------
+# Overall rating weights (read / write)
+# ------------------------------------------------------------------
+
+def get_overall_weights(conn) -> Dict[str, Dict[str, float]]:
+    """
+    Read rating_overall_weights into:
+        { rating_type: { attribute_key: weight } }
+    e.g. { "pitcher_overall": {"pendurance_base": 0.12, ...}, ... }
+    """
+    sql = "SELECT rating_type, attribute_key, weight FROM rating_overall_weights ORDER BY rating_type, attribute_key"
+    rows = conn.execute(text(sql)).all()
+
+    weights: Dict[str, Dict[str, float]] = {}
+    for r in rows:
+        rt = str(r[0])
+        ak = str(r[1])
+        weights.setdefault(rt, {})[ak] = float(r[2])
+    return weights
+
+
+def update_overall_weight(conn, rating_type: str, attribute_key: str, weight: float):
+    """Update a single overall weight row."""
+    conn.execute(text("""
+        INSERT INTO rating_overall_weights (rating_type, attribute_key, weight)
+        VALUES (:rt, :ak, :w)
+        ON DUPLICATE KEY UPDATE weight = :w, updated_at = CURRENT_TIMESTAMP
+    """), {"rt": rating_type, "ak": attribute_key, "w": weight})
 
 
 # ------------------------------------------------------------------
@@ -129,39 +147,48 @@ def get_rating_config_by_level_name(conn) -> Dict[str, Dict[str, Dict[str, float
 
 def seed_rating_config(conn) -> Dict[str, Any]:
     """
-    Compute population mean & stddev for every base attribute (and
-    derived ratings) at every level from current player data, then
-    UPSERT into rating_scale_config.
+    Compute population mean & stddev for every base attribute, derived
+    rating, and overall rating at every level, then UPSERT into
+    rating_scale_config.
 
-    Levels with no players are skipped (levels 1-3 may be empty).
-
-    Args:
-        conn: Active SQLAlchemy connection.  Caller manages commit.
-
-    Returns:
-        Summary dict: { "rows_written": int, "levels": { level_id: attr_count } }
+    Uses a deduplicated subquery to ensure each player appears exactly
+    once per level.
     """
-    # 1. Fetch all active players with their level
+    # 1. Fetch one row per player with their contract-based level.
+    #    The subquery deduplicates in case of multiple team shares.
     player_sql = text("""
-        SELECT p.*, c.current_level
+        SELECT p.*, sub.current_level
         FROM simbbPlayers p
-        JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
-        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
-        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        JOIN (
+            SELECT DISTINCT c.playerID, c.current_level
+            FROM contracts c
+            JOIN contractDetails cd
+              ON cd.contractID = c.id AND cd.year = c.current_year
+            JOIN contractTeamShare cts
+              ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+            WHERE c.isActive = 1
+        ) sub ON sub.playerID = p.id
     """)
     rows = conn.execute(player_sql).all()
 
     if not rows:
         logger.warning("seed_rating_config: no active players found")
-        return {"rows_written": 0, "levels": {}}
+        return {"rows_written": 0, "levels": {}, "player_counts": {}}
 
-    # 2. Identify _base columns from the first row
+    # 2. Identify column categories from first row
     col_names = list(rows[0]._mapping.keys())
     base_cols = [c for c in col_names if c.endswith("_base")]
-    derived_col_names = [c for c in col_names if c.endswith("_rating") or re.match(r"^pitch\d+_ovr$", c)]
 
-    # 3. Accumulate values by level
+    # 3. Load overall weights from DB (if table exists)
+    overall_weights = {}
+    try:
+        overall_weights = get_overall_weights(conn)
+    except Exception:
+        logger.info("seed_rating_config: rating_overall_weights table not found, skipping overalls")
+
+    # 4. Accumulate values by level — one pass through all players
     level_attr_values: Dict[int, Dict[str, List[float]]] = {}
+    player_counts: Dict[int, int] = {}
 
     for row in rows:
         m = row._mapping
@@ -170,9 +197,10 @@ def seed_rating_config(conn) -> Dict[str, Any]:
             continue
         level = int(level)
 
+        player_counts[level] = player_counts.get(level, 0) + 1
         bucket = level_attr_values.setdefault(level, {})
 
-        # Base attributes
+        # --- Base attributes ---
         for col in base_cols:
             val = m.get(col)
             if val is None:
@@ -182,22 +210,26 @@ def seed_rating_config(conn) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 continue
 
-            # Pool pitch components
             mp = PITCH_COMPONENT_RE.match(col)
             if mp:
                 dist_key = f"pitch_{mp.group(1)}"
             else:
                 dist_key = col
-
             bucket.setdefault(dist_key, []).append(num)
 
-        # Derived ratings (position ratings & pitch overalls)
+        # --- Derived ratings (position ratings & pitch overalls) ---
         raw_derived = _compute_derived_for_seed(m, base_cols)
         for attr_name, val in raw_derived.items():
             if val is not None:
                 bucket.setdefault(attr_name, []).append(val)
 
-    # 4. Compute mean/std and UPSERT
+        # --- Overall ratings from configurable weights ---
+        for rating_type, wt_map in overall_weights.items():
+            ovr_val = _compute_overall_for_player(m, raw_derived, wt_map)
+            if ovr_val is not None:
+                bucket.setdefault(rating_type, []).append(ovr_val)
+
+    # 5. Compute mean/std and UPSERT
     upsert_sql = text("""
         INSERT INTO rating_scale_config (level_id, attribute_key, mean_value, std_dev)
         VALUES (:level_id, :attribute_key, :mean_value, :std_dev)
@@ -235,18 +267,44 @@ def seed_rating_config(conn) -> Dict[str, Any]:
         total_rows += attr_count
 
     logger.info(
-        "seed_rating_config: wrote %d rows across %d levels",
-        total_rows, len(levels_summary),
+        "seed_rating_config: wrote %d rows across %d levels, player counts: %s",
+        total_rows, len(levels_summary), player_counts,
     )
-    return {"rows_written": total_rows, "levels": levels_summary}
+    return {
+        "rows_written": total_rows,
+        "levels": levels_summary,
+        "player_counts": player_counts,
+    }
+
+
+# ------------------------------------------------------------------
+# Overall rating computation for a single player
+# ------------------------------------------------------------------
+
+def _compute_overall_for_player(
+    m, raw_derived: Dict[str, Optional[float]], wt_map: Dict[str, float]
+) -> Optional[float]:
+    """
+    Compute a single overall value for one player using the given weights.
+    Weights can reference _base columns (from m) or derived keys (from raw_derived).
+    """
+    components = []
+    for attr_key, weight in wt_map.items():
+        if weight <= 0:
+            continue
+        # Try derived first (pitch1_ovr, c_rating, etc.), then raw columns
+        val = raw_derived.get(attr_key)
+        if val is None:
+            val = _safe_float(m.get(attr_key))
+        if val is not None:
+            components.append((val, weight))
+
+    return _weighted(components)
 
 
 # ------------------------------------------------------------------
 # Lightweight derived-rating computation for seeding
 # ------------------------------------------------------------------
-# We replicate the weighting logic from rosters/_compute_derived_raw_ratings
-# but operate on a plain mapping dict rather than a SQLAlchemy Row,
-# so we don't need to import the rosters module.
 
 def _safe_float(val) -> Optional[float]:
     if val is None:
@@ -275,11 +333,6 @@ def _compute_derived_for_seed(m, base_cols) -> Dict[str, Optional[float]]:
     Compute raw derived ratings (position ratings & pitch overalls)
     from a player's base attributes.  Mirrors the weighting in
     rosters/_compute_derived_raw_ratings exactly.
-
-    NOTE: The rosters module references "base_reaction_base" but the
-    actual DB column is "basereaction_base".  We use the correct DB
-    column name here so distributions are accurate.  The rosters
-    module should be updated to match.
     """
     derived = {}
 

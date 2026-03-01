@@ -354,6 +354,22 @@
             </table>
           </div>
         </div>
+
+        <div class="card">
+          <h3>Overall Rating Weights</h3>
+          <p class="text-muted">Configure the weighted average formula for pitcher and position player overall ratings. Weights should sum to 1.0. After editing, click Save then re-seed the config.</p>
+
+          <div class="button-group" style="margin-bottom: 16px">
+            <button class="btn btn-primary" id="btn-load-weights">Load Weights</button>
+            <button class="btn btn-warning" id="btn-save-weights" style="display:none">Save Weights</button>
+          </div>
+
+          <div id="rc-weights-container" class="grid-2">
+            <div class="text-center text-muted">Click "Load Weights" to view</div>
+          </div>
+
+          <pre id="rc-weights-result" class="result-box" style="margin-top: 16px; display: none"></pre>
+        </div>
       </section>
 
       <!-- Organizations Section -->

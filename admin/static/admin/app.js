@@ -116,6 +116,10 @@
     document.getElementById('btn-seed-config').addEventListener('click', seedRatingConfig);
     document.getElementById('btn-load-config').addEventListener('click', loadRatingConfig);
     document.getElementById('rc-attr-filter').addEventListener('input', filterRatingConfigTable);
+
+    // Overall Weights
+    document.getElementById('btn-load-weights').addEventListener('click', loadOverallWeights);
+    document.getElementById('btn-save-weights').addEventListener('click', saveOverallWeights);
   }
 
   // Navigation
@@ -1005,6 +1009,174 @@
     if (attrKey.startsWith('pitch_')) return 'text-success';
     if (attrKey.includes('_ovr')) return 'text-warning';
     return '';
+  }
+
+  // Overall Weights
+  let overallWeightsData = null; // cached after load
+
+  function loadOverallWeights() {
+    const container = document.getElementById('rc-weights-container');
+    const resultBox = document.getElementById('rc-weights-result');
+    resultBox.style.display = 'none';
+    container.innerHTML = '<div class="text-center text-muted">Loading weights...</div>';
+
+    fetch(`${ADMIN_BASE}/rating-config/overall-weights`, { credentials: 'include' })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok || !data.weights) {
+          container.innerHTML = '<div class="text-center text-muted">No weights found. Run the migration first.</div>';
+          return;
+        }
+
+        overallWeightsData = data.weights;
+        renderOverallWeights();
+        document.getElementById('btn-save-weights').style.display = 'inline-block';
+      })
+      .catch(err => {
+        container.innerHTML = `<div class="text-center text-danger">Error: ${err.message}</div>`;
+      });
+  }
+
+  function renderOverallWeights() {
+    if (!overallWeightsData) return;
+
+    const container = document.getElementById('rc-weights-container');
+    const sortedTypes = Object.keys(overallWeightsData).sort();
+
+    container.innerHTML = sortedTypes.map(ratingType => {
+      const attrs = overallWeightsData[ratingType];
+      const sortedAttrs = Object.keys(attrs).sort();
+      const total = sortedAttrs.reduce((sum, k) => sum + attrs[k], 0);
+      const totalClass = Math.abs(total - 1.0) < 0.005 ? 'text-success' : 'text-danger';
+      const label = ratingType === 'pitcher_overall' ? 'Pitcher Overall' : 'Position Player Overall';
+
+      return `
+        <div class="card" style="margin: 0">
+          <h4>${label}</h4>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Sum: <strong class="${totalClass}">${total.toFixed(3)}</strong>
+            ${Math.abs(total - 1.0) >= 0.005 ? ' (should be 1.000)' : ''}
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Attribute</th>
+                <th style="width: 100px">Weight</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sortedAttrs.map(attrKey => `
+                <tr>
+                  <td><code>${attrKey}</code></td>
+                  <td>
+                    <input type="number" step="0.01" min="0" max="1"
+                      class="weight-input"
+                      data-rating-type="${ratingType}"
+                      data-attr-key="${attrKey}"
+                      value="${attrs[attrKey]}"
+                      style="width: 80px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-primary); font-size: 0.85rem"
+                    />
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }).join('');
+
+    // Live sum recalculation on input change
+    container.querySelectorAll('.weight-input').forEach(input => {
+      input.addEventListener('input', recalcWeightSums);
+    });
+  }
+
+  function recalcWeightSums() {
+    const container = document.getElementById('rc-weights-container');
+    const inputs = container.querySelectorAll('.weight-input');
+
+    // Group by rating type
+    const sums = {};
+    inputs.forEach(input => {
+      const rt = input.dataset.ratingType;
+      sums[rt] = (sums[rt] || 0) + (parseFloat(input.value) || 0);
+    });
+
+    // Update the sum displays in each card
+    const cards = container.querySelectorAll('.card');
+    cards.forEach(card => {
+      const firstInput = card.querySelector('.weight-input');
+      if (!firstInput) return;
+      const rt = firstInput.dataset.ratingType;
+      const total = sums[rt] || 0;
+      const strong = card.querySelector('p strong');
+      if (strong) {
+        strong.textContent = total.toFixed(3);
+        strong.className = Math.abs(total - 1.0) < 0.005 ? 'text-success' : 'text-danger';
+        const note = Math.abs(total - 1.0) >= 0.005 ? ' (should be 1.000)' : '';
+        strong.parentElement.innerHTML = `Sum: <strong class="${strong.className}">${total.toFixed(3)}</strong>${note}`;
+      }
+    });
+  }
+
+  function saveOverallWeights() {
+    const container = document.getElementById('rc-weights-container');
+    const inputs = container.querySelectorAll('.weight-input');
+    const resultBox = document.getElementById('rc-weights-result');
+
+    // Collect weights from inputs
+    const weights = {};
+    inputs.forEach(input => {
+      const rt = input.dataset.ratingType;
+      const ak = input.dataset.attrKey;
+      const w = parseFloat(input.value) || 0;
+      if (!weights[rt]) weights[rt] = {};
+      weights[rt][ak] = w;
+    });
+
+    // Validate sums
+    for (const [rt, attrs] of Object.entries(weights)) {
+      const total = Object.values(attrs).reduce((s, v) => s + v, 0);
+      if (Math.abs(total - 1.0) >= 0.05) {
+        if (!confirm(`${rt} weights sum to ${total.toFixed(3)} (not 1.0). Save anyway?`)) {
+          return;
+        }
+      }
+    }
+
+    const btn = document.getElementById('btn-save-weights');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Saving weights...';
+
+    fetch(`${ADMIN_BASE}/rating-config/overall-weights`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weights }),
+    })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (data.ok) {
+          resultBox.textContent = `Saved! ${data.updated} weight(s) updated. Re-seed the config to recalculate overall distributions.`;
+        } else {
+          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      })
+      .finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Save Weights';
+      });
   }
 
   // Export public API
