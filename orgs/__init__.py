@@ -66,6 +66,9 @@ def _build_teams_by_org(conn):
             "org_id": org_id,
             "conference": td.get("conference"),
             "division": td.get("division"),
+            "color_one": td.get("color_one"),
+            "color_two": td.get("color_two"),
+            "color_three": td.get("color_three"),
         }
     return teams_by_org
 
