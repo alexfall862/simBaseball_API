@@ -32,6 +32,9 @@
       <a href="#" class="nav-item" data-section="tasks">
         <span class="nav-icon">&#9203;</span> Background Tasks
       </a>
+      <a href="#" class="nav-item" data-section="schedule-gen">
+        <span class="nav-icon">&#128197;</span> Schedule Generator
+      </a>
       <a href="#" class="nav-item" data-section="simulate">
         <span class="nav-icon">&#9654;</span> Simulate Week
       </a>
@@ -1191,6 +1194,108 @@
               <tbody id="sandbox-grade-tbody"></tbody>
             </table>
           </div>
+        </div>
+      </section>
+
+      <!-- Schedule Generator Section -->
+      <section id="section-schedule-gen" class="section">
+        <div class="card">
+          <h3>Schedule Report</h3>
+          <p class="text-muted" style="margin-bottom: 12px">Current schedule status across all levels and seasons.</p>
+          <button class="btn btn-secondary" id="btn-sched-report">Refresh Report</button>
+          <div id="sched-report-container" style="margin-top: 16px">
+            <p class="text-muted">Click Refresh to load schedule data.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Generate Schedule</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Generate a full season schedule for the selected level. MLB uses all 52 weeks.
+            MiLB and College use a configurable start week.
+          </p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="sched-year">League Year</label>
+              <input type="number" id="sched-year" value="2027" min="2025" max="2050" />
+            </div>
+            <div class="form-group">
+              <label for="sched-level">League Level</label>
+              <select id="sched-level">
+                <option value="9">9 - MLB (162 games)</option>
+                <option value="8">8 - AAA (120 games)</option>
+                <option value="7">7 - AA (120 games)</option>
+                <option value="6">6 - High-A (120 games)</option>
+                <option value="5">5 - A (120 games)</option>
+                <option value="4">4 - Scraps (120 games)</option>
+                <option value="3">3 - College (50 games)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="sched-start-week">Start Week</label>
+              <input type="number" id="sched-start-week" value="1" min="1" max="52" />
+            </div>
+            <div class="form-group">
+              <label for="sched-seed">Random Seed (optional)</label>
+              <input type="number" id="sched-seed" placeholder="Leave empty for random" />
+            </div>
+          </div>
+          <div class="form-group" style="margin: 12px 0">
+            <label>
+              <input type="checkbox" id="sched-clear-existing" /> Clear existing schedule first
+            </label>
+          </div>
+          <div class="button-group">
+            <button class="btn btn-secondary" id="btn-sched-validate">Validate</button>
+            <button class="btn btn-primary" id="btn-sched-generate">Generate</button>
+            <button class="btn btn-warning" id="btn-sched-clear">Clear Schedule</button>
+          </div>
+          <pre id="sched-result" class="result-box" style="margin-top: 16px; display: none"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Add Single Series</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Insert a one-off series (playoffs, exhibitions, specialty matchups).
+          </p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="sched-add-year">League Year</label>
+              <input type="number" id="sched-add-year" value="2027" min="2025" max="2050" />
+            </div>
+            <div class="form-group">
+              <label for="sched-add-level">League Level</label>
+              <select id="sched-add-level">
+                <option value="9">9 - MLB</option>
+                <option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option>
+                <option value="6">6 - High-A</option>
+                <option value="5">5 - A</option>
+                <option value="4">4 - Scraps</option>
+                <option value="3">3 - College</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="sched-add-home">Home Team ID</label>
+              <input type="number" id="sched-add-home" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sched-add-away">Away Team ID</label>
+              <input type="number" id="sched-add-away" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sched-add-week">Week</label>
+              <input type="number" id="sched-add-week" value="1" min="1" max="60" />
+            </div>
+            <div class="form-group">
+              <label for="sched-add-games">Games (1-4)</label>
+              <input type="number" id="sched-add-games" value="3" min="1" max="4" />
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-primary" id="btn-sched-add-series">Add Series</button>
+          </div>
+          <pre id="sched-add-result" class="result-box" style="margin-top: 16px; display: none"></pre>
         </div>
       </section>
 

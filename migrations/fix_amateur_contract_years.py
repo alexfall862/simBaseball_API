@@ -224,7 +224,7 @@ def migrate_amateur_contract_years(engine=None):
             "college_updated": college_count,
             "moved_to_hs": moved_to_hs,
             "details_rebuilt": len(details_rows),
-            "shares_rebuilt": len(shares_rows),
+            "shares_rebuilt": len(details_rows),
         }
 
         log.info("migrate_contracts: done — %s", summary)

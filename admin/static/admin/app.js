@@ -201,6 +201,14 @@
     });
     document.getElementById('sandbox-highlight-player').addEventListener('change', renderSandboxChart);
 
+    // Schedule Generator
+    document.getElementById('btn-sched-report').addEventListener('click', loadScheduleReport);
+    document.getElementById('btn-sched-validate').addEventListener('click', validateSchedule);
+    document.getElementById('btn-sched-generate').addEventListener('click', generateSchedule);
+    document.getElementById('btn-sched-clear').addEventListener('click', clearSchedule);
+    document.getElementById('btn-sched-add-series').addEventListener('click', addScheduleSeries);
+    document.getElementById('sched-level').addEventListener('change', onSchedLevelChange);
+
     // Arrow key navigation for sandbox chart
     document.addEventListener('keydown', (e) => {
       if (currentSection !== 'pe-sandbox' || !sandboxData) return;
@@ -271,6 +279,7 @@
       'pe-sandbox': 'Progression Sandbox',
       'tx-eos': 'End of Season',
       'tx-amateur': 'Amateur Seeding',
+      'schedule-gen': 'Schedule Generator',
       migrations: 'Migrations',
     };
     elements.pageTitle.textContent = titles[section] || section;
@@ -321,6 +330,9 @@
         loadProgression();
         break;
       case 'pe-sandbox':
+        break;
+      case 'schedule-gen':
+        loadScheduleReport();
         break;
     }
 
@@ -3008,6 +3020,235 @@
     }
 
     tbody.innerHTML = rows.join('');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Schedule Generator
+  // ---------------------------------------------------------------------------
+
+  const LEVEL_NAMES = {
+    9: 'MLB', 8: 'AAA', 7: 'AA', 6: 'High-A', 5: 'A',
+    4: 'Scraps', 3: 'College', 2: 'INTAM', 1: 'HS',
+  };
+
+  function onSchedLevelChange() {
+    const level = parseInt(document.getElementById('sched-level').value);
+    const startWeekInput = document.getElementById('sched-start-week');
+    if (level === 9) {
+      startWeekInput.value = '1';
+      startWeekInput.disabled = true;
+    } else if (level === 3) {
+      startWeekInput.value = '1';
+      startWeekInput.disabled = false;
+    } else {
+      startWeekInput.disabled = false;
+      if (startWeekInput.value === '1') startWeekInput.value = '10';
+    }
+  }
+
+  function loadScheduleReport() {
+    const container = document.getElementById('sched-report-container');
+    container.innerHTML = '<p class="text-muted">Loading...</p>';
+
+    fetch(`${ADMIN_BASE}/schedule/report`, { credentials: 'include' })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok) {
+          container.innerHTML = `<p class="text-error">${data.message || data.error}</p>`;
+          return;
+        }
+
+        const seasons = data.seasons || {};
+        const years = Object.keys(seasons).sort();
+
+        if (years.length === 0) {
+          container.innerHTML = '<p class="text-muted">No schedules found in the database.</p>';
+          return;
+        }
+
+        let html = '<table class="data-table"><thead><tr><th>Year</th><th>Level</th><th>Games</th><th>Teams</th><th>Weeks</th></tr></thead><tbody>';
+        for (const year of years) {
+          const levels = seasons[year];
+          const levelKeys = Object.keys(levels).sort((a, b) => parseInt(b) - parseInt(a));
+          for (const lk of levelKeys) {
+            const info = levels[lk];
+            html += `<tr>
+              <td>${year}</td>
+              <td>${info.level_name || LEVEL_NAMES[parseInt(lk)] || lk}</td>
+              <td>${info.games}</td>
+              <td>${info.teams}</td>
+              <td>${info.weeks}</td>
+            </tr>`;
+          }
+        }
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(err => {
+        container.innerHTML = `<p class="text-error">Error: ${err.message}</p>`;
+      });
+  }
+
+  function _showSchedResult(text, isError) {
+    const box = document.getElementById('sched-result');
+    box.style.display = 'block';
+    box.textContent = text;
+    box.style.color = isError ? '#f44336' : '#4caf50';
+  }
+
+  function validateSchedule() {
+    const year = document.getElementById('sched-year').value;
+    const level = document.getElementById('sched-level').value;
+
+    fetch(`${ADMIN_BASE}/schedule/validate?league_year=${year}&league_level=${level}`, {
+      credentials: 'include',
+    })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        let msg = `Valid: ${data.valid}\nTeams: ${data.team_count}\nExisting games: ${data.existing_games}`;
+        if (data.errors && data.errors.length) msg += '\n\nErrors:\n- ' + data.errors.join('\n- ');
+        if (data.warnings && data.warnings.length) msg += '\n\nWarnings:\n- ' + data.warnings.join('\n- ');
+        _showSchedResult(msg, !data.valid);
+      })
+      .catch(err => _showSchedResult('Error: ' + err.message, true));
+  }
+
+  function generateSchedule() {
+    const year = document.getElementById('sched-year').value;
+    const level = document.getElementById('sched-level').value;
+    const startWeek = document.getElementById('sched-start-week').value;
+    const seedVal = document.getElementById('sched-seed').value;
+    const clearExisting = document.getElementById('sched-clear-existing').checked;
+
+    const levelName = LEVEL_NAMES[parseInt(level)] || level;
+    if (!confirm(`Generate ${levelName} schedule for ${year}?\n\nThis may take a moment for large leagues.${clearExisting ? '\n\nExisting schedule will be cleared first.' : ''}`)) {
+      return;
+    }
+
+    _showSchedResult('Generating schedule...', false);
+
+    fetch(`${ADMIN_BASE}/schedule/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        league_year: parseInt(year),
+        league_level: parseInt(level),
+        start_week: parseInt(startWeek),
+        seed: seedVal ? parseInt(seedVal) : null,
+        clear_existing: clearExisting,
+      }),
+    })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok) {
+          _showSchedResult('Failed: ' + (data.message || data.error), true);
+          return;
+        }
+        let msg = 'Schedule generated successfully!\n\n';
+        msg += `Total games: ${data.total_games}\n`;
+        msg += `Total series: ${data.total_series}\n`;
+        msg += `Weeks: ${data.weeks}`;
+        if (data.start_week) msg += ` (starting week ${data.start_week})`;
+        if (data.games_per_team) msg += `\nGames per team: ${data.games_per_team}`;
+        _showSchedResult(msg, false);
+        loadScheduleReport();
+      })
+      .catch(err => _showSchedResult('Error: ' + err.message, true));
+  }
+
+  function clearSchedule() {
+    const year = document.getElementById('sched-year').value;
+    const level = document.getElementById('sched-level').value;
+    const levelName = LEVEL_NAMES[parseInt(level)] || level;
+
+    if (!confirm(`Delete ALL ${levelName} games for ${year}?\n\nThis action cannot be undone.`)) {
+      return;
+    }
+
+    _showSchedResult('Clearing schedule...', false);
+
+    fetch(`${ADMIN_BASE}/schedule/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        league_year: parseInt(year),
+        league_level: parseInt(level),
+      }),
+    })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok) {
+          _showSchedResult('Failed: ' + (data.message || data.error), true);
+          return;
+        }
+        _showSchedResult(`Cleared ${data.deleted} games.`, false);
+        loadScheduleReport();
+      })
+      .catch(err => _showSchedResult('Error: ' + err.message, true));
+  }
+
+  function addScheduleSeries() {
+    const year = document.getElementById('sched-add-year').value;
+    const level = document.getElementById('sched-add-level').value;
+    const home = document.getElementById('sched-add-home').value;
+    const away = document.getElementById('sched-add-away').value;
+    const week = document.getElementById('sched-add-week').value;
+    const games = document.getElementById('sched-add-games').value;
+
+    if (!home || !away) {
+      alert('Home and Away team IDs are required.');
+      return;
+    }
+
+    const resultBox = document.getElementById('sched-add-result');
+
+    fetch(`${ADMIN_BASE}/schedule/add-series`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        league_year: parseInt(year),
+        league_level: parseInt(level),
+        home_team_id: parseInt(home),
+        away_team_id: parseInt(away),
+        week: parseInt(week),
+        games: parseInt(games),
+      }),
+    })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        resultBox.style.display = 'block';
+        if (!data.ok) {
+          resultBox.textContent = 'Failed: ' + (data.message || data.error);
+          resultBox.style.color = '#f44336';
+          return;
+        }
+        resultBox.textContent = `Added ${data.games_added}-game series in week ${data.week}: team ${data.home_team_id} vs ${data.away_team_id}`;
+        resultBox.style.color = '#4caf50';
+        loadScheduleReport();
+      })
+      .catch(err => {
+        resultBox.style.display = 'block';
+        resultBox.textContent = 'Error: ' + err.message;
+        resultBox.style.color = '#f44336';
+      });
   }
 
   // Export public API

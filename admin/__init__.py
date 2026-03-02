@@ -508,6 +508,234 @@ def admin_fix_amateur_contracts():
         return jsonify(ok=False, error="migration_failed", message=str(e)), 500
 
 
+# ---------------------------------------------------------------------------
+# Schedule generator endpoints
+# ---------------------------------------------------------------------------
+
+@admin_bp.get("/schedule/report")
+def admin_schedule_report():
+    """
+    Summary of existing schedules across all levels and seasons.
+
+    GET /admin/schedule/report
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from services.schedule_generator import _get_tables, schedule_report
+
+        engine = get_engine()
+        tables = _get_tables(engine)
+        with engine.connect() as conn:
+            report = schedule_report(conn, tables)
+
+        return jsonify(ok=True, **report)
+
+    except Exception as e:
+        logging.exception("admin_schedule_report failed")
+        return jsonify(ok=False, error="report_failed", message=str(e)), 500
+
+
+@admin_bp.get("/schedule/validate")
+def admin_schedule_validate():
+    """
+    Validate prerequisites for schedule generation.
+
+    GET /admin/schedule/validate?league_year=2027&league_level=9
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    league_year = request.args.get("league_year", type=int)
+    league_level = request.args.get("league_level", type=int)
+
+    if not league_year or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year and league_level are required"), 400
+
+    try:
+        from db import get_engine
+        from services.schedule_generator import (
+            _get_tables, _resolve_season_id, validate_schedule_generation,
+        )
+
+        engine = get_engine()
+        tables = _get_tables(engine)
+        with engine.connect() as conn:
+            season_id = _resolve_season_id(conn, tables, league_year)
+            result = validate_schedule_generation(conn, tables, season_id, league_level)
+
+        return jsonify(ok=True, **result)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="validation_error", message=str(e)), 400
+    except Exception as e:
+        logging.exception("admin_schedule_validate failed")
+        return jsonify(ok=False, error="validate_failed", message=str(e)), 500
+
+
+@admin_bp.post("/schedule/generate")
+def admin_schedule_generate():
+    """
+    Generate a schedule for the given level and year.
+
+    POST /admin/schedule/generate
+    Body: { "league_year": 2027, "league_level": 9, "start_week": 1, "seed": null, "clear_existing": false }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    league_year = body.get("league_year")
+    league_level = body.get("league_level")
+    start_week = body.get("start_week", 1)
+    seed = body.get("seed")
+    clear_existing = bool(body.get("clear_existing", False))
+
+    if not league_year or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year and league_level are required"), 400
+
+    try:
+        from db import get_engine
+        from services.schedule_generator import (
+            LEVEL_MLB, LEVEL_COLLEGE, MINOR_LEVELS,
+            generate_mlb_schedule,
+            generate_college_schedule,
+            generate_minor_league_schedule,
+        )
+
+        engine = get_engine()
+        league_level = int(league_level)
+
+        if league_level == LEVEL_MLB:
+            result = generate_mlb_schedule(
+                engine, int(league_year), seed=seed, clear_existing=clear_existing,
+            )
+        elif league_level == LEVEL_COLLEGE:
+            result = generate_college_schedule(
+                engine, int(league_year), start_week=int(start_week),
+                seed=seed, clear_existing=clear_existing,
+            )
+        elif league_level in MINOR_LEVELS:
+            result = generate_minor_league_schedule(
+                engine, int(league_year), level=league_level,
+                start_week=int(start_week), seed=seed,
+                clear_existing=clear_existing,
+            )
+        else:
+            return jsonify(ok=False, error="invalid_level",
+                           message="Level %d is not supported" % league_level), 400
+
+        return jsonify(ok=True, **result)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="generation_error", message=str(e)), 400
+    except RuntimeError as e:
+        return jsonify(ok=False, error="generation_failed", message=str(e)), 500
+    except Exception as e:
+        logging.exception("admin_schedule_generate failed")
+        return jsonify(ok=False, error="schedule_generate_failed", message=str(e)), 500
+
+
+@admin_bp.post("/schedule/clear")
+def admin_schedule_clear():
+    """
+    Clear an existing schedule for a given level and year.
+
+    POST /admin/schedule/clear
+    Body: { "league_year": 2027, "league_level": 9 }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_disabled"), 403
+
+    body = request.get_json(force=True, silent=True) or {}
+    league_year = body.get("league_year")
+    league_level = body.get("league_level")
+
+    if not league_year or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year and league_level are required"), 400
+
+    try:
+        from db import get_engine
+        from services.schedule_generator import (
+            _get_tables, _resolve_season_id, _clear_existing_schedule,
+        )
+
+        engine = get_engine()
+        tables = _get_tables(engine)
+        with engine.begin() as conn:
+            season_id = _resolve_season_id(conn, tables, int(league_year))
+            deleted = _clear_existing_schedule(conn, tables, season_id, int(league_level))
+
+        return jsonify(ok=True, deleted=deleted)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="clear_error", message=str(e)), 400
+    except Exception as e:
+        logging.exception("admin_schedule_clear failed")
+        return jsonify(ok=False, error="clear_failed", message=str(e)), 500
+
+
+@admin_bp.post("/schedule/add-series")
+def admin_schedule_add_series():
+    """
+    Insert a single series into the schedule.
+
+    POST /admin/schedule/add-series
+    Body: { "league_year": 2027, "league_level": 9, "home_team_id": 1, "away_team_id": 5, "week": 53, "games": 4 }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    league_year = body.get("league_year")
+    league_level = body.get("league_level")
+    home_team_id = body.get("home_team_id")
+    away_team_id = body.get("away_team_id")
+    week = body.get("week")
+    games = body.get("games", 3)
+
+    missing = []
+    if not league_year: missing.append("league_year")
+    if not league_level: missing.append("league_level")
+    if not home_team_id: missing.append("home_team_id")
+    if not away_team_id: missing.append("away_team_id")
+    if not week: missing.append("week")
+    if missing:
+        return jsonify(ok=False, error="missing_params",
+                       message="Missing: %s" % ", ".join(missing)), 400
+
+    try:
+        from db import get_engine
+        from services.schedule_generator import add_series
+
+        engine = get_engine()
+        result = add_series(
+            engine, int(league_year), int(league_level),
+            int(home_team_id), int(away_team_id), int(week), int(games),
+        )
+
+        return jsonify(ok=True, **result)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="add_series_error", message=str(e)), 400
+    except Exception as e:
+        logging.exception("admin_schedule_add_series failed")
+        return jsonify(ok=False, error="add_series_failed", message=str(e)), 500
+
+
 def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
     if not sql:
         return jsonify(error="missing_sql"), 400
