@@ -7,9 +7,11 @@ from db import get_engine
 
 orgs_bp = Blueprint("orgs", __name__)
 
-
-# Optional: If you have a global rate limit decorator, import and use it.
-# from app import rate_limit # Uncomment if available and won’t cause circular imports
+# Level ID → key name (mirrors bootstrap LEVEL_MAP)
+LEVEL_MAP = {
+    9: "mlb", 8: "aaa", 7: "aa", 6: "higha", 5: "a", 4: "scraps",
+    3: "college", 2: "intam", 1: "hs",
+}
 
 
 def _reflect_orgs_table():
@@ -17,14 +19,23 @@ def _reflect_orgs_table():
     if not hasattr(orgs_bp, "_orgs_table"):
         engine = get_engine()
         metadata = MetaData()
-        # Reflect only the one table we need
         orgs_table = Table("organizations", metadata, autoload_with=engine)
         setattr(orgs_bp, "_orgs_table", orgs_table)
     return getattr(orgs_bp, "_orgs_table")
 
+
+def _reflect_teams_table():
+    """Reflect the teams table and cache it on the blueprint."""
+    if not hasattr(orgs_bp, "_teams_table"):
+        engine = get_engine()
+        metadata = MetaData()
+        orgs_bp._teams_table = Table("teams", metadata, autoload_with=engine)
+    return orgs_bp._teams_table
+
+
 def _row_to_dict(row):
-# row is a RowMapping with ._mapping in SQLAlchemy 2.x
     return dict(row._mapping)
+
 
 def reflect_view(view_name: str):
     engine = get_engine()
@@ -33,61 +44,46 @@ def reflect_view(view_name: str):
     return vw
 
 
+def _build_teams_by_org(conn):
+    """Query all teams and return {org_id: {level_name: team_dict}}."""
+    teams_table = _reflect_teams_table()
+    rows = conn.execute(select(teams_table)).all()
 
-def shape_org_report(row_dict: dict, role_overrides: dict | None = None) -> dict:
-    d = row_dict
-    if role_overrides:
-        d = {**row_dict, **role_overrides}
+    teams_by_org = {}
+    for r in rows:
+        td = _row_to_dict(r)
+        org_id = td["orgID"]
+        level_name = LEVEL_MAP.get(td["team_level"], "level_%s" % td["team_level"])
+        team_name = td.get("team_name") or ""
+        team_nick = td.get("team_nickname") or ""
+        teams_by_org.setdefault(org_id, {})[level_name] = {
+            "team_id": td.get("id"),
+            "team_full_name": f"{team_name} {team_nick}".strip() or None,
+            "team_nickname": td.get("team_nickname"),
+            "team_abbrev": td.get("team_abbrev"),
+            "team_city": td.get("team_city"),
+            "team_level": td.get("team_level"),
+            "org_id": org_id,
+            "conference": td.get("conference"),
+            "division": td.get("division"),
+        }
+    return teams_by_org
 
+
+def shape_org_report(org_dict: dict, teams: dict | None = None) -> dict:
+    """Shape an organization row into the org_report response format.
+
+    Args:
+        org_dict: Row from organizations table (with role columns).
+        teams: Pre-built teams dict keyed by level name, or None for empty.
+    """
+    d = org_dict
     shaped = {
         "id": d.get("id"),
         "org_abbrev": d.get("org_abbrev"),
         "cash": d.get("cash"),
         "league": d.get("league", "mlb"),
-        "teams": {
-            "mlb": {
-                "team_id": d.get("mlb_team_id"),
-                "team_city": d.get("mlb_city"),
-                "team_nickname": d.get("mlb_nickname"),
-                "team_full_name": d.get("mlb_full_name"),
-                "team_abbrev": d.get("mlb_abbrev")
-            },
-            "aaa": {
-                "team_id": d.get("aaa_team_id"),
-                "team_city": d.get("aaa_city"),
-                "team_nickname": d.get("aaa_nickname"),
-                "team_full_name": d.get("aaa_full_name"),
-                "team_abbrev": d.get("aaa_abbrev")
-            },
-            "aa": {
-                "team_id": d.get("aa_team_id"),
-                "team_city": d.get("aa_city"),
-                "team_nickname": d.get("aa_nickname"),
-                "team_full_name": d.get("aa_full_name"),
-                "team_abbrev": d.get("aa_abbrev")
-            },
-            "higha": {
-                "team_id": d.get("higha_team_id"),
-                "team_city": d.get("higha_city"),
-                "team_nickname": d.get("higha_nickname"),
-                "team_full_name": d.get("higha_full_name"),
-                "team_abbrev": d.get("higha_abbrev")
-            },
-            "a": {
-                "team_id": d.get("a_team_id"),
-                "team_city": d.get("a_city"),
-                "team_nickname": d.get("a_nickname"),
-                "team_full_name": d.get("a_full_name"),
-                "team_abbrev": d.get("a_abbrev")
-            },
-            "scraps": {
-                "team_id": d.get("scraps_team_id"),
-                "team_city": d.get("scraps_city"),
-                "team_nickname": d.get("scraps_nickname"),
-                "team_full_name": d.get("scraps_full_name"),
-                "team_abbrev": d.get("scraps_abbrev")
-            }
-        }
+        "teams": teams or {},
     }
 
     league = d.get("league", "mlb")
@@ -101,43 +97,30 @@ def shape_org_report(row_dict: dict, role_overrides: dict | None = None) -> dict
 
     return shaped
 
+
 @orgs_bp.get("/org_report/")
-# @rate_limit()  # uncomment to apply your default rate limits
 def get_org_report():
     """
-    Return all rows from the MySQL view `organization_report` as JSON,
-    enriched with role/coach columns from the organizations table.
+    Return all organizations as JSON, each with fully populated teams dict.
+    Teams are queried directly from the teams table so every org type
+    (MLB, college, INTAM, HS) gets its teams populated.
     """
     try:
-        vw = reflect_view("organization_report")
         orgs_table = _reflect_orgs_table()
         engine = get_engine()
 
         with engine.connect() as conn:
-            view_rows = conn.execute(select(vw)).all()
+            # All orgs with role/coach columns
+            org_rows = conn.execute(select(orgs_table)).all()
 
-            # Fetch role columns that may not be in the view yet
-            role_stmt = select(
-                orgs_table.c.id,
-                orgs_table.c.league,
-                orgs_table.c.owner_name,
-                orgs_table.c.gm_name,
-                orgs_table.c.manager_name,
-                orgs_table.c.scout_name,
-                orgs_table.c.coach,
-            )
-            role_rows = conn.execute(role_stmt).all()
-
-        role_map = {}
-        for r in role_rows:
-            rd = _row_to_dict(r)
-            role_map[rd["id"]] = rd
+            # All teams grouped by org_id
+            teams_by_org = _build_teams_by_org(conn)
 
         data = []
-        for r in view_rows:
+        for r in org_rows:
             d = _row_to_dict(r)
-            overrides = role_map.get(d.get("id"))
-            data.append(shape_org_report(d, role_overrides=overrides))
+            org_id = d["id"]
+            data.append(shape_org_report(d, teams=teams_by_org.get(org_id)))
 
         return jsonify(data), 200
     except SQLAlchemyError:
