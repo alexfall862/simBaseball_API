@@ -3026,11 +3026,6 @@
   // Schedule Generator
   // ---------------------------------------------------------------------------
 
-  const LEVEL_NAMES = {
-    9: 'MLB', 8: 'AAA', 7: 'AA', 6: 'High-A', 5: 'A',
-    4: 'Scraps', 3: 'College', 2: 'INTAM', 1: 'HS',
-  };
-
   function onSchedLevelChange() {
     const level = parseInt(document.getElementById('sched-level').value);
     const startWeekInput = document.getElementById('sched-start-week');
@@ -3077,7 +3072,7 @@
             const info = levels[lk];
             html += `<tr>
               <td>${year}</td>
-              <td>${info.level_name || LEVEL_NAMES[parseInt(lk)] || lk}</td>
+              <td>${info.level_name || LEVEL_NAMES[lk] || lk}</td>
               <td>${info.games}</td>
               <td>${info.teams}</td>
               <td>${info.weeks}</td>
@@ -3126,7 +3121,7 @@
     const seedVal = document.getElementById('sched-seed').value;
     const clearExisting = document.getElementById('sched-clear-existing').checked;
 
-    const levelName = LEVEL_NAMES[parseInt(level)] || level;
+    const levelName = LEVEL_NAMES[level] || level;
     if (!confirm(`Generate ${levelName} schedule for ${year}?\n\nThis may take a moment for large leagues.${clearExisting ? '\n\nExisting schedule will be cleared first.' : ''}`)) {
       return;
     }
@@ -3169,7 +3164,7 @@
   function clearSchedule() {
     const year = document.getElementById('sched-year').value;
     const level = document.getElementById('sched-level').value;
-    const levelName = LEVEL_NAMES[parseInt(level)] || level;
+    const levelName = LEVEL_NAMES[level] || level;
 
     if (!confirm(`Delete ALL ${levelName} games for ${year}?\n\nThis action cannot be undone.`)) {
       return;
