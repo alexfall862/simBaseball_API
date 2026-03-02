@@ -973,7 +973,10 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
       .then(data => {
         btn.disabled = false;
         btn.textContent = 'Run Migration';
