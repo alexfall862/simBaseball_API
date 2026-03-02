@@ -136,20 +136,23 @@ def migrate_amateur_contract_years(engine=None):
             len(updates), moved_to_hs,
         )
 
-        # ── Step 3: Update contracts table ──
+        # ── Step 3: Batch-update contracts table (single round-trip) ──
 
-        for cid, new_years, new_cy, new_level, new_org, new_is_ext in updates:
-            conn.execute(
-                contracts.update()
-                .where(contracts.c.id == cid)
-                .values(
-                    years=new_years,
-                    current_year=new_cy,
-                    current_level=new_level,
-                    signingOrg=new_org,
-                    isExtension=new_is_ext,
-                )
-            )
+        conn.execute(
+            text("""
+                UPDATE contracts
+                SET years = :years,
+                    current_year = :cy,
+                    current_level = :lvl,
+                    signingOrg = :org,
+                    isExtension = :ext
+                WHERE id = :cid
+            """),
+            [
+                {"cid": cid, "years": y, "cy": cy, "lvl": lvl, "org": org, "ext": ext}
+                for cid, y, cy, lvl, org, ext in updates
+            ],
+        )
 
         # ── Step 4: Rebuild contractDetails + contractTeamShare ──
 
@@ -159,24 +162,22 @@ def migrate_amateur_contract_years(engine=None):
             for u in updates
         }
 
-        # Delete existing shares (must go first — FK to details)
-        existing_detail_ids = conn.execute(
-            select(details.c.id)
-            .where(details.c.contractID.in_(contract_ids))
-        ).all()
-        detail_ids = [r[0] for r in existing_detail_ids]
+        # Build IN-clause placeholders for raw SQL
+        ph = ", ".join(":c%d" % i for i in range(len(contract_ids)))
+        cid_params = {"c%d" % i: cid for i, cid in enumerate(contract_ids)}
 
-        if detail_ids:
-            conn.execute(
-                shares.delete().where(shares.c.contractDetailsID.in_(detail_ids))
-            )
-            log.info("migrate_contracts: deleted %d old share rows", len(detail_ids))
-
-        # Delete existing details
+        # Delete existing shares + details in two bulk statements
         conn.execute(
-            details.delete().where(details.c.contractID.in_(contract_ids))
+            text("DELETE cts FROM contractTeamShare cts"
+                 " JOIN contractDetails cd ON cd.id = cts.contractDetailsID"
+                 " WHERE cd.contractID IN (%s)" % ph),
+            cid_params,
         )
-        log.info("migrate_contracts: deleted old detail rows for %d contracts", len(contract_ids))
+        conn.execute(
+            text("DELETE FROM contractDetails WHERE contractID IN (%s)" % ph),
+            cid_params,
+        )
+        log.info("migrate_contracts: deleted old details/shares for %d contracts", len(contract_ids))
 
         # Insert new details
         details_rows = []
@@ -192,26 +193,26 @@ def migrate_amateur_contract_years(engine=None):
             conn.execute(details.insert(), details_rows)
             log.info("migrate_contracts: inserted %d new detail rows", len(details_rows))
 
-        # Re-query to get generated detail IDs
-        new_details = conn.execute(
-            select(details.c.id, details.c.contractID)
-            .where(details.c.contractID.in_(contract_ids))
-        ).all()
+        # Insert shares for every new detail row via INSERT…SELECT
+        conn.execute(
+            text("INSERT INTO contractTeamShare (contractDetailsID, orgID, isHolder, salary_share)"
+                 " SELECT cd.id, :default_org, 1, 1.00"
+                 " FROM contractDetails cd"
+                 " WHERE cd.contractID IN (%s)" % ph),
+            {**cid_params, "default_org": HS_ORG_ID},
+        )
 
-        shares_rows = []
-        for drow in new_details:
-            dm = drow._mapping
-            org_id = cid_to_info[dm["contractID"]]["org"]
-            shares_rows.append({
-                "contractDetailsID": dm["id"],
-                "orgID": org_id,
-                "isHolder": 1,
-                "salary_share": Decimal("1.00"),
-            })
-
-        if shares_rows:
-            conn.execute(shares.insert(), shares_rows)
-            log.info("migrate_contracts: inserted %d new share rows", len(shares_rows))
+        # Fix orgID for contracts that aren't HS (override the default)
+        non_hs = [(cid, info["org"]) for cid, info in cid_to_info.items()
+                  if info["org"] != HS_ORG_ID]
+        if non_hs:
+            conn.execute(
+                text("UPDATE contractTeamShare cts"
+                     " JOIN contractDetails cd ON cd.id = cts.contractDetailsID"
+                     " SET cts.orgID = :org"
+                     " WHERE cd.contractID = :cid"),
+                [{"cid": cid, "org": org} for cid, org in non_hs],
+            )
 
         # ── Summary ──
 
