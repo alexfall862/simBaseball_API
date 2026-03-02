@@ -43,7 +43,7 @@ from .db_helpers import (
 )
 
 
-def generate_player(conn, age=15, seed_cache=None):
+def generate_player(conn, age=15, seed_cache=None, next_id=None):
     """
     Generate a complete new player and INSERT into simbbPlayers.
     Returns the new player's data as a dict.
@@ -52,6 +52,7 @@ def generate_player(conn, age=15, seed_cache=None):
         conn: SQLAlchemy Core connection
         age: Starting age (default 15)
         seed_cache: Optional SeedCache for batch generation (avoids DB lookups)
+        next_id: Explicit ID to assign (avoids relying on AUTO_INCREMENT)
     """
     ptype = _pick_position()
 
@@ -135,22 +136,37 @@ def generate_player(conn, age=15, seed_cache=None):
         # Pitch OVR = mean of sub-ability bases (all 0 at creation)
         player[f"{slot}_ovr"] = 0.0
 
+    # Assign explicit ID if provided (table may lack AUTO_INCREMENT)
+    if next_id is not None:
+        player["id"] = next_id
+    elif seed_cache is None:
+        # Single-player generation without pre-fetched ID — compute it now
+        max_id = conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM simbbPlayers")).scalar()
+        player["id"] = max_id + 1
+
     # INSERT into simbbPlayers
     columns = ", ".join(player.keys())
     placeholders = ", ".join(f":{k}" for k in player.keys())
-    result = conn.execute(
+    conn.execute(
         text(f"INSERT INTO simbbPlayers ({columns}) VALUES ({placeholders})"),
         player,
     )
 
-    player["id"] = result.lastrowid
     return player
 
 
 def generate_players(conn, count, age=15):
     """Generate multiple players. Preloads seed data for batch performance."""
     cache = SeedCache(conn)
-    return [generate_player(conn, age=age, seed_cache=cache) for _ in range(count)]
+    # Pre-fetch the next available ID so we don't rely on AUTO_INCREMENT
+    max_id = conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM simbbPlayers")).scalar()
+    next_id = max_id + 1
+    players = []
+    for _ in range(count):
+        p = generate_player(conn, age=age, seed_cache=cache, next_id=next_id)
+        next_id = p["id"] + 1
+        players.append(p)
+    return players
 
 
 # ---------------------------------------------------------------------------

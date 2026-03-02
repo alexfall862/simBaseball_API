@@ -20,31 +20,11 @@ SEED_TABLES = [
     "potential_weights",
 ]
 
-_auto_inc_checked = False
-
-
-def _ensure_auto_increment(conn):
-    """Make sure simbbPlayers.id has AUTO_INCREMENT (self-healing, runs once)."""
-    global _auto_inc_checked
-    if _auto_inc_checked:
-        return
-    row = conn.execute(
-        text("SHOW COLUMNS FROM simbbPlayers WHERE Field = 'id'")
-    ).mappings().first()
-    if row and "auto_increment" not in (row.get("Extra", "") or "").lower():
-        log.info("player_engine: fixing simbbPlayers.id to AUTO_INCREMENT")
-        conn.execute(text(
-            "ALTER TABLE simbbPlayers MODIFY COLUMN id INT NOT NULL AUTO_INCREMENT"
-        ))
-    _auto_inc_checked = True
-
-
 def svc_generate_players(count: int, age: int = 15) -> list[dict]:
     """Generate *count* new players at the given starting age.
     Returns list of player dicts (each includes the new ``id``)."""
     engine = get_engine()
     with engine.begin() as conn:
-        _ensure_auto_increment(conn)
         players = generate_players(conn, count, age=age)
     log.info("player_engine: generated %d players (age=%d)", len(players), age)
     return players
