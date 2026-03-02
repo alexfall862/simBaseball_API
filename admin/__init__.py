@@ -379,6 +379,33 @@ def admin_update_overall_weights():
         return jsonify(ok=False, error="update_failed", message=str(e)), 500
 
 
+@admin_bp.post("/migrations/fix-amateur-contracts")
+def admin_fix_amateur_contracts():
+    """
+    Fix HS/College contract years and current_year for class year derivation.
+
+    POST /admin/migrations/fix-amateur-contracts
+
+    Moves 18yo USA players from College to HS, sets correct years/current_year
+    based on age, and rebuilds contractDetails + contractTeamShare.
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from migrations.fix_amateur_contract_years import migrate_amateur_contract_years
+
+        engine = get_engine()
+        result = migrate_amateur_contract_years(engine)
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_fix_amateur_contracts failed")
+        return jsonify(ok=False, error="migration_failed", message=str(e)), 500
+
+
 def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
     if not sql:
         return jsonify(error="missing_sql"), 400

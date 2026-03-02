@@ -119,6 +119,9 @@
     // Health
     document.getElementById('btn-check-health').addEventListener('click', checkHealth);
 
+    // Migrations
+    document.getElementById('btn-migrate-amateur').addEventListener('click', runMigrateAmateur);
+
     // Rating Config
     document.getElementById('btn-seed-config').addEventListener('click', seedRatingConfig);
     document.getElementById('btn-load-config').addEventListener('click', loadLevelConfig);
@@ -263,6 +266,7 @@
       'pe-sandbox': 'Progression Sandbox',
       'tx-eos': 'End of Season',
       'tx-amateur': 'Amateur Seeding',
+      migrations: 'Migrations',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -948,6 +952,39 @@
         indicator.classList.add('unhealthy');
         text.textContent = 'Error';
         dbInfo.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // ── Migrations ──────────────────────────────────────────
+  function runMigrateAmateur() {
+    const btn = document.getElementById('btn-migrate-amateur');
+    const resultBox = document.getElementById('migrate-amateur-result');
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Migration in progress...';
+
+    fetch('/admin/migrations/fix-amateur-contracts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(r => r.json())
+      .then(data => {
+        btn.disabled = false;
+        btn.textContent = 'Run Migration';
+        if (data.ok) {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          resultBox.style.color = '#4caf50';
+        } else {
+          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+          resultBox.style.color = '#f44336';
+        }
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = 'Run Migration';
+        resultBox.textContent = 'Request failed: ' + err.message;
+        resultBox.style.color = '#f44336';
       });
   }
 

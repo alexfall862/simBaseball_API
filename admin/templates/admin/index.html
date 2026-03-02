@@ -99,6 +99,9 @@
       <a href="#" class="nav-item" data-section="health">
         <span class="nav-icon">&#128153;</span> System Health
       </a>
+      <a href="#" class="nav-item" data-section="migrations">
+        <span class="nav-icon">&#128295;</span> Migrations
+      </a>
     </div>
 
     <div class="sidebar-footer">
@@ -589,6 +592,25 @@
         <div class="card">
           <h3>Available Routes</h3>
           <pre id="routes-list" class="result-box" style="max-height: 400px">Loading...</pre>
+        </div>
+      </section>
+
+      <!-- Migrations Section -->
+      <section id="section-migrations" class="section">
+        <div class="card">
+          <h3>Fix Amateur Contract Years</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Recalculates <code>years</code> and <code>current_year</code> for all active HS and College contracts
+            so the frontend can derive class year correctly. Also moves 18-year-old college players back to HS.
+          </p>
+          <ul style="margin: 0 0 16px 20px; font-size: 13px; color: #aaa; line-height: 1.7">
+            <li>HS contracts &rarr; 4-year, current_year = age &minus; 14</li>
+            <li>College (non-RS) &rarr; 4-year, current_year = age &minus; 18</li>
+            <li>College (redshirt) &rarr; 5-year, current_year = age &minus; 18</li>
+            <li>Rebuilds contractDetails + contractTeamShare rows</li>
+          </ul>
+          <button class="btn btn-primary" id="btn-migrate-amateur">Run Migration</button>
+          <pre id="migrate-amateur-result" class="result-box" style="margin-top: 16px; display: none"></pre>
         </div>
       </section>
 

@@ -89,9 +89,9 @@ def preview_amateur_need(engine=None) -> Dict[str, Any]:
                 else:
                     skipped += 1
             elif origin == "usa":
-                if 15 <= age <= 17:
+                if 15 <= age <= 18:
                     hs[ptype] += 1
-                elif 18 <= age <= 23:
+                elif 19 <= age <= 23:
                     college[ptype] += 1
                 else:
                     skipped += 1
@@ -108,6 +108,7 @@ def preview_amateur_need(engine=None) -> Dict[str, Any]:
                 "batters": hs["Position"],
                 "total": hs["Pitcher"] + hs["Position"],
                 "org": "USHS (340)",
+                "age_range": "15-18",
             },
             "intam_young": {
                 "pitchers": intam_young["Pitcher"],
@@ -127,6 +128,7 @@ def preview_amateur_need(engine=None) -> Dict[str, Any]:
                 "pitchers": college["Pitcher"],
                 "batters": college["Position"],
                 "total": college_total,
+                "age_range": "19-23",
                 "orgs_available": college_orgs,
                 "avg_pitchers_per_org": round(college["Pitcher"] / college_orgs, 1) if college_orgs else 0,
                 "avg_batters_per_org": round(college["Position"] / college_orgs, 1) if college_orgs else 0,
@@ -205,9 +207,9 @@ def seed_amateur_contracts(engine=None) -> Dict[str, Any]:
                     else:
                         skipped += 1
                 elif origin == "usa":
-                    if 15 <= age <= 17:
+                    if 15 <= age <= 18:
                         hs.append(p)
-                    elif 18 <= age <= 23:
+                    elif 19 <= age <= 23:
                         college.append(p)
                     else:
                         skipped += 1
@@ -219,17 +221,18 @@ def seed_amateur_contracts(engine=None) -> Dict[str, Any]:
                 len(hs), len(intam_young), len(intam_older), len(college), skipped,
             )
 
-            # 3) Build assignments: list of (player, org_id, level, years, is_redshirt)
+            # 3) Build assignments: list of (player, org_id, level, years, current_year, is_redshirt)
             assignments = []
             skipped_zero = 0
 
-            # HS
+            # HS — 4-year contract, current_year = age - 14
             for p in hs:
-                years = 18 - p["age"]
-                if years <= 0:
+                years = 4
+                current_year = p["age"] - 14
+                if current_year <= 0 or current_year > years:
                     skipped_zero += 1
                     continue
-                assignments.append((p, HS_ORG_ID, HS_LEVEL, years, False))
+                assignments.append((p, HS_ORG_ID, HS_LEVEL, years, current_year, False))
 
             # INTAM young (15-17, expire at 18)
             for p in intam_young:
@@ -237,7 +240,7 @@ def seed_amateur_contracts(engine=None) -> Dict[str, Any]:
                 if years <= 0:
                     skipped_zero += 1
                     continue
-                assignments.append((p, INTAM_ORG_ID, INTAM_LEVEL, years, False))
+                assignments.append((p, INTAM_ORG_ID, INTAM_LEVEL, years, 1, False))
 
             # INTAM older (18-22, expire at 23)
             for p in intam_older:
@@ -245,20 +248,27 @@ def seed_amateur_contracts(engine=None) -> Dict[str, Any]:
                 if years <= 0:
                     skipped_zero += 1
                     continue
-                assignments.append((p, INTAM_ORG_ID, INTAM_LEVEL, years, False))
+                assignments.append((p, INTAM_ORG_ID, INTAM_LEVEL, years, 1, False))
 
-            # College — round-robin distribution
+            # College — round-robin, 4-year (or 5 redshirt), current_year = age - 18
             college_assignments = _distribute_college_players(college)
             redshirt_count = 0
             for p, org_id in college_assignments:
                 is_redshirt = random.random() < REDSHIRT_RATE
-                years = (24 if is_redshirt else 23) - p["age"]
-                if years <= 0:
+                years = 5 if is_redshirt else 4
+                current_year = p["age"] - 18
+
+                # Force redshirt if over-age for non-redshirt contract
+                if current_year > years:
+                    is_redshirt = True
+                    years = 5
+
+                if current_year <= 0 or current_year > years:
                     skipped_zero += 1
                     continue
                 if is_redshirt:
                     redshirt_count += 1
-                assignments.append((p, org_id, COLLEGE_LEVEL, years, is_redshirt))
+                assignments.append((p, org_id, COLLEGE_LEVEL, years, current_year, is_redshirt))
 
             log.info(
                 "amateur_seed: total assignments=%d, skipped_zero_years=%d, redshirts=%d",
@@ -277,11 +287,11 @@ def seed_amateur_contracts(engine=None) -> Dict[str, Any]:
 
             # 4) Bulk-insert contracts
             contract_rows = []
-            for p, org_id, level, years, is_redshirt in assignments:
+            for p, org_id, level, years, current_year, is_redshirt in assignments:
                 contract_rows.append({
                     "playerID": p["id"],
                     "years": years,
-                    "current_year": 1,
+                    "current_year": current_year,
                     "isExtension": 1 if is_redshirt else 0,
                     "isBuyout": 0,
                     "isActive": 1,
