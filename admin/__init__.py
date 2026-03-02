@@ -379,6 +379,108 @@ def admin_update_overall_weights():
         return jsonify(ok=False, error="update_failed", message=str(e)), 500
 
 
+# ---------------------------------------------------------------------------
+# Growth curves management
+# ---------------------------------------------------------------------------
+
+@admin_bp.get("/growth-curves")
+def admin_get_growth_curves():
+    """
+    Return all growth_curves rows grouped by grade.
+
+    GET /admin/growth-curves
+    GET /admin/growth-curves?grade=A
+
+    Response: { ok: true, grades: ["A+","A",...], curves: { "A+": [{age, prog_min, prog_mode, prog_max}, ...], ... } }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    grade_filter = request.args.get("grade")
+
+    try:
+        from db import get_engine
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            query = "SELECT grade, age, prog_min, prog_mode, prog_max FROM growth_curves"
+            params = {}
+            if grade_filter:
+                query += " WHERE grade = :grade"
+                params["grade"] = grade_filter
+            query += " ORDER BY grade, age"
+            rows = conn.execute(text(query), params).mappings().all()
+
+        curves = {}
+        for r in rows:
+            g = r["grade"]
+            if g not in curves:
+                curves[g] = []
+            curves[g].append({
+                "age": int(r["age"]),
+                "prog_min": float(r["prog_min"]),
+                "prog_mode": float(r["prog_mode"]),
+                "prog_max": float(r["prog_max"]),
+            })
+
+        return jsonify(ok=True, grades=sorted(curves.keys()), curves=curves)
+
+    except Exception as e:
+        logging.exception("admin_get_growth_curves failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
+@admin_bp.put("/growth-curves")
+def admin_update_growth_curves():
+    """
+    Bulk update growth_curves rows.
+
+    PUT /admin/growth-curves
+    Body: { "updates": [ { "grade": "A+", "age": 20, "prog_min": 1.0, "prog_mode": 3.0, "prog_max": 5.0 }, ... ] }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    updates = body.get("updates")
+    if not updates or not isinstance(updates, list):
+        return jsonify(ok=False, error="missing_updates", message="Body must contain 'updates' list"), 400
+
+    try:
+        from db import get_engine
+
+        engine = get_engine()
+        count = 0
+        with engine.connect() as conn:
+            for entry in updates:
+                grade = entry.get("grade")
+                age = entry.get("age")
+                prog_min = entry.get("prog_min")
+                prog_mode = entry.get("prog_mode")
+                prog_max = entry.get("prog_max")
+                if grade is None or age is None:
+                    continue
+                conn.execute(
+                    text("""
+                        UPDATE growth_curves
+                        SET prog_min = :prog_min, prog_mode = :prog_mode, prog_max = :prog_max
+                        WHERE grade = :grade AND age = :age
+                    """),
+                    {"grade": grade, "age": int(age),
+                     "prog_min": float(prog_min), "prog_mode": float(prog_mode), "prog_max": float(prog_max)},
+                )
+                count += 1
+            conn.commit()
+
+        return jsonify(ok=True, updated=count)
+
+    except Exception as e:
+        logging.exception("admin_update_growth_curves failed")
+        return jsonify(ok=False, error="update_failed", message=str(e)), 500
+
+
 @admin_bp.post("/migrations/fix-amateur-contracts")
 def admin_fix_amateur_contracts():
     """

@@ -133,6 +133,11 @@
     document.getElementById('btn-load-weights').addEventListener('click', loadOverallWeights);
     document.getElementById('btn-save-weights').addEventListener('click', saveOverallWeights);
 
+    // Growth Curves
+    document.getElementById('btn-load-gc').addEventListener('click', loadGrowthCurves);
+    document.getElementById('btn-save-gc').addEventListener('click', saveGrowthCurves);
+    document.getElementById('gc-grade-filter').addEventListener('change', filterGrowthCurves);
+
     // Transactions — Roster Moves
     document.getElementById('btn-tx-load-roster').addEventListener('click', () => {
       const orgId = document.getElementById('tx-org-select').value;
@@ -1558,6 +1563,125 @@
       });
   }
 
+  // ── Growth Curves ───────────────────────────────────────────────────
+
+  let _gcData = null; // cached full dataset
+
+  function loadGrowthCurves() {
+    const tbody = document.getElementById('gc-tbody');
+    const gradeSelect = document.getElementById('gc-grade-filter');
+    const resultBox = document.getElementById('gc-result');
+    resultBox.style.display = 'none';
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">Loading…</td></tr>';
+
+    fetch(`${ADMIN_BASE}/growth-curves`, { credentials: 'include' })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok) throw new Error(data.message || 'Failed to load');
+        _gcData = data.curves;
+
+        // Populate grade filter dropdown
+        const current = gradeSelect.value;
+        gradeSelect.innerHTML = '<option value="">All</option>';
+        data.grades.forEach(g => {
+          const opt = document.createElement('option');
+          opt.value = g;
+          opt.textContent = g;
+          gradeSelect.appendChild(opt);
+        });
+        gradeSelect.value = current;
+
+        renderGrowthCurves();
+        document.getElementById('btn-save-gc').style.display = '';
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger">${err.message}</td></tr>`;
+      });
+  }
+
+  function renderGrowthCurves() {
+    if (!_gcData) return;
+    const tbody = document.getElementById('gc-tbody');
+    const filter = document.getElementById('gc-grade-filter').value;
+    const grades = filter ? [filter] : Object.keys(_gcData).sort();
+
+    let html = '';
+    for (const grade of grades) {
+      const rows = _gcData[grade] || [];
+      for (const r of rows) {
+        html += `<tr>
+          <td>${grade}</td>
+          <td>${r.age}</td>
+          <td><input type="number" step="0.1" class="gc-input" data-grade="${grade}" data-age="${r.age}" data-field="prog_min" value="${r.prog_min}" style="width:70px" /></td>
+          <td><input type="number" step="0.1" class="gc-input" data-grade="${grade}" data-age="${r.age}" data-field="prog_mode" value="${r.prog_mode}" style="width:70px" /></td>
+          <td><input type="number" step="0.1" class="gc-input" data-grade="${grade}" data-age="${r.age}" data-field="prog_max" value="${r.prog_max}" style="width:70px" /></td>
+        </tr>`;
+      }
+    }
+    tbody.innerHTML = html || '<tr><td colspan="5" class="text-center text-muted">No data</td></tr>';
+  }
+
+  function filterGrowthCurves() {
+    renderGrowthCurves();
+  }
+
+  function saveGrowthCurves() {
+    const inputs = document.querySelectorAll('.gc-input');
+    const resultBox = document.getElementById('gc-result');
+    const btn = document.getElementById('btn-save-gc');
+
+    // Collect changes into a map keyed by grade+age
+    const updateMap = {};
+    inputs.forEach(inp => {
+      const key = `${inp.dataset.grade}|${inp.dataset.age}`;
+      if (!updateMap[key]) {
+        updateMap[key] = { grade: inp.dataset.grade, age: parseInt(inp.dataset.age) };
+      }
+      updateMap[key][inp.dataset.field] = parseFloat(inp.value) || 0;
+    });
+
+    const updates = Object.values(updateMap);
+    if (!updates.length) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    resultBox.style.display = 'block';
+    resultBox.textContent = `Saving ${updates.length} row(s)…`;
+    resultBox.style.color = '';
+
+    fetch(`${ADMIN_BASE}/growth-curves`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    })
+      .then(r => {
+        if (r.status === 401) throw new Error('Unauthorized - please login first');
+        return r.json();
+      })
+      .then(data => {
+        if (data.ok) {
+          resultBox.textContent = `Saved! ${data.updated} row(s) updated. Re-run the sandbox to see the effect.`;
+          resultBox.style.color = '#4caf50';
+          loadGrowthCurves(); // refresh
+        } else {
+          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+          resultBox.style.color = '#f44336';
+        }
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+        resultBox.style.color = '#f44336';
+      })
+      .finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Save Changes';
+      });
+  }
+
   // -----------------------------------------------------------------------
   // Transactions — Shared Helpers
   // -----------------------------------------------------------------------
@@ -2243,7 +2367,10 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ count, age }),
     })
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(`${r.status}: ${t.slice(0, 300)}`); });
+        return r.json();
+      })
       .then(data => {
         if (data.error) {
           statusEl.textContent = `Error: ${data.message}`;

@@ -62,7 +62,9 @@ def generate_player(conn, age=15, seed_cache=None):
     else:
         region = pick_region(conn)
         city_row = pick_city(conn, region["id"])
-    city = city_row["name"]
+    if not region:
+        raise RuntimeError("No regions found in seed data — is the regions table populated?")
+    city = city_row["name"] if city_row else "Unknown"
     area = region["name"]
     intorusa = region["region_type"]
 
@@ -232,6 +234,8 @@ def _generate_pitch_repertoire(conn, seed_cache=None):
         else:
             pool = get_pitch_pool(conn, pool_num)
             weights = [p["weight"] for p in pool]
+        if not pool:
+            raise RuntimeError(f"No pitch types found for pool {pool_num} — is the pitch_types table populated?")
         chosen = random.choices(pool, weights, k=1)[0]
         pitches.append(chosen["name"])
 

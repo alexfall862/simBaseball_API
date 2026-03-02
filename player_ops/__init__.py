@@ -4,6 +4,7 @@ Player operations blueprint — generation and progression endpoints.
 All endpoints under /player-ops/.
 """
 
+import logging
 from flask import Blueprint, jsonify, request
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -51,8 +52,9 @@ def api_generate_players():
             result["truncated"] = True
             result["showing"] = display_limit
         return jsonify(result), 200
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error during generation"), 500
+    except Exception as exc:
+        logging.exception("player generation failed")
+        return jsonify(error="generation_failed", message=str(exc)), 500
 
 
 # ── Progression ───────────────────────────────────────────────────────
@@ -63,8 +65,9 @@ def api_progress_player(player_id: int):
     try:
         result = svc_progress_single(player_id)
         return jsonify(result), 200
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error during progression"), 500
+    except Exception as exc:
+        logging.exception("single progression failed for player %s", player_id)
+        return jsonify(error="progression_failed", message=str(exc)), 500
 
 
 @player_ops_bp.post("/player-ops/progress-all")
@@ -79,8 +82,9 @@ def api_progress_all():
     try:
         result = svc_progress_all(max_age=max_age)
         return jsonify(result), 200
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error during batch progression"), 500
+    except Exception as exc:
+        logging.exception("batch progression failed")
+        return jsonify(error="progression_failed", message=str(exc)), 500
 
 
 # ── Seed table status ─────────────────────────────────────────────────
@@ -91,5 +95,6 @@ def api_seed_status():
     try:
         status = svc_seed_table_status()
         return jsonify(status), 200
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error"), 500
+    except Exception as exc:
+        logging.exception("seed status check failed")
+        return jsonify(error="seed_status_failed", message=str(exc)), 500
