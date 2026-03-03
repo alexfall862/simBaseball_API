@@ -699,7 +699,163 @@ def _expand_to_game_rows(
 
 
 # =====================================================================
-# Minor league matchup pool
+# Round-based scheduling (circle method)
+# =====================================================================
+
+def _circle_method_rounds(
+    team_ids: List[int],
+    num_rounds: int,
+    rng: random.Random,
+) -> List[List[Tuple[int, int]]]:
+    """
+    Generate perfect matchings using the circle method.
+
+    Fix one team in place and rotate the rest to produce n-1 unique
+    rounds, each pairing every team exactly once.  If num_rounds > n-1,
+    the cycle repeats (giving some pairs a second meeting).
+
+    Returns a list of rounds, each round being a list of (team_a, team_b) pairs.
+    """
+    n = len(team_ids)
+    if n < 2:
+        raise ValueError("Need at least 2 teams for circle method")
+    if n % 2 != 0:
+        raise ValueError("Circle method requires an even number of teams, got %d" % n)
+
+    ids = list(team_ids)
+    rng.shuffle(ids)
+
+    fixed = ids[0]
+    circle = ids[1:]  # n-1 elements
+
+    rounds = []
+    for r in range(num_rounds):
+        rot = r % (n - 1)
+        rotated = circle[rot:] + circle[:rot]
+        pairs = [(fixed, rotated[0])]
+        for i in range(1, n // 2):
+            pairs.append((rotated[i], rotated[n - 1 - i]))
+        rounds.append(pairs)
+
+    return rounds
+
+
+def _compute_week_lengths(games_per_team: int) -> List[int]:
+    """
+    Determine the series length for each week so every team reaches
+    exactly games_per_team total games.
+
+    All series within a given week share the same length.
+    Returns a list like [4, 4, 4, ..., 4] or [4, 4, ..., 3, 3, 3].
+    """
+    # Try all 4-game weeks first
+    if games_per_team % 4 == 0:
+        return [4] * (games_per_team // 4)
+    # Try all 3-game weeks
+    if games_per_team % 3 == 0:
+        return [3] * (games_per_team // 3)
+    # Mix of 4 and 3: solve  4*f + 3*t = games_per_team
+    # where f = num 4-game weeks, t = num 3-game weeks
+    # f = games_per_team mod 3 gives a small f that satisfies:
+    #   games_per_team - 4*f must be divisible by 3
+    num_4 = games_per_team % 3  # 1 or 2
+    num_3 = (games_per_team - 4 * num_4) // 3
+    return [4] * num_4 + [3] * num_3
+
+
+def _generate_round_based_schedule(
+    team_ids: List[int],
+    week_lengths: List[int],
+    start_week: int,
+    season_id: int,
+    league_level: int,
+    rng: random.Random,
+) -> Tuple[List[Dict], int]:
+    """
+    Build a complete round-based schedule using the circle method.
+
+    Each week is one round from the circle method rotation.
+    All series in a week share the same length (from week_lengths).
+    Home/away is balanced via random assignment + iterative repair.
+
+    Returns (game_rows, total_series).
+    """
+    num_weeks = len(week_lengths)
+
+    # Generate rounds via circle method
+    rounds = _circle_method_rounds(team_ids, num_weeks, rng)
+
+    # ── Phase 1: collect all series ──────────────────────────────────
+    all_series = []
+    for week_idx, (round_pairs, length) in enumerate(zip(rounds, week_lengths)):
+        week_num = start_week + week_idx
+        for team_a, team_b in round_pairs:
+            all_series.append({
+                "team_a": team_a,
+                "team_b": team_b,
+                "length": length,
+                "week_num": week_num,
+                "home": team_a,
+                "away": team_b,
+            })
+
+    # ── Phase 2: balance home/away ───────────────────────────────────
+    # Random initial assignment
+    home_series = {tid: 0 for tid in team_ids}
+    for s in all_series:
+        if rng.random() < 0.5:
+            s["home"], s["away"] = s["team_b"], s["team_a"]
+        home_series[s["home"]] += 1
+
+    # Target: each team hosts half their series (±1)
+    target = num_weeks // 2
+
+    # Iterative repair: swap home/away to reduce imbalance
+    for _ in range(2000):
+        worst = max(team_ids, key=lambda t: abs(home_series[t] - target))
+        deviation = abs(home_series[worst] - target)
+        if deviation <= 1:
+            break
+
+        if home_series[worst] > target:
+            # Too many home — flip a series so worst becomes away
+            candidates = [
+                s for s in all_series
+                if s["home"] == worst and home_series[s["away"]] < target
+            ]
+        else:
+            # Too few home — flip a series so worst becomes home
+            candidates = [
+                s for s in all_series
+                if s["away"] == worst and home_series[s["home"]] > target
+            ]
+
+        if not candidates:
+            break
+        s = rng.choice(candidates)
+        home_series[s["home"]] -= 1
+        s["home"], s["away"] = s["away"], s["home"]
+        home_series[s["home"]] += 1
+
+    # ── Phase 3: expand to game rows ─────────────────────────────────
+    rows = []
+    for s in all_series:
+        for game_idx in range(s["length"]):
+            rows.append({
+                "away_team": s["away"],
+                "home_team": s["home"],
+                "season_week": s["week_num"],
+                "season_subweek": SUBWEEK_LABELS[game_idx],
+                "league_level": league_level,
+                "season": season_id,
+                "random_seed": None,
+            })
+
+    return rows, len(all_series)
+
+
+# =====================================================================
+# Minor league matchup pool (legacy — kept for reference)
 # =====================================================================
 
 def _build_minor_matchup_pool(
@@ -1008,7 +1164,17 @@ def generate_minor_league_schedule(
     seed: int = None,
     clear_existing: bool = False,
 ) -> Dict[str, Any]:
-    """Generate a minor league schedule (levels 4-8)."""
+    """
+    Generate a minor league schedule (levels 4-8).
+
+    Uses the circle method: each week is a perfect matching where every
+    team plays exactly one series.  All series in a week share the same
+    length, so the schedule is built round-by-round rather than via
+    constraint satisfaction.
+
+    30 teams, 120 games → 30 weeks of 4-game series.
+    Circle method gives 29 unique rounds + 1 repeat = 30 rounds.
+    """
     if level not in MINOR_LEVELS:
         raise ValueError("Level %d is not a minor league level" % level)
 
@@ -1031,22 +1197,35 @@ def generate_minor_league_schedule(
             )
 
         all_teams = _load_minor_teams(conn, tables, level)
-        if len(all_teams) < 2:
-            raise ValueError("Need at least 2 teams at level %d, found %d" % (level, len(all_teams)))
+        n = len(all_teams)
+        if n < 2:
+            raise ValueError("Need at least 2 teams at level %d, found %d" % (level, n))
+        if n % 2 != 0:
+            raise ValueError(
+                "Round-based scheduling requires even team count, got %d at level %d"
+                % (n, level)
+            )
 
-        pool = _build_minor_matchup_pool(all_teams, MILB_GAMES_PER_TEAM, rng)
-        _balance_home_away(pool, rng)
+        team_ids = [t["id"] for t in all_teams]
+        week_lengths = _compute_week_lengths(MILB_GAMES_PER_TEAM)
+        num_weeks = len(week_lengths)
 
-        # Calculate weeks needed
-        series_per_team = len([s for s in pool if s["team_a"] == all_teams[0]["id"]
-                               or s["team_b"] == all_teams[0]["id"]])
-        num_weeks = series_per_team + 1  # +1 for a bye week
-        max_per_week = len(all_teams) // 2
-
-        week_assignments = _assign_series_to_weeks(
-            pool, num_weeks, max_per_week, start_week=start_week, rng=rng,
+        rows, total_series = _generate_round_based_schedule(
+            team_ids, week_lengths, start_week, season_id, level, rng,
         )
-        rows = _expand_to_game_rows(week_assignments, season_id, level)
+
+        # Validate per-team game counts
+        team_games = {}
+        for r in rows:
+            team_games[r["home_team"]] = team_games.get(r["home_team"], 0) + 1
+            team_games[r["away_team"]] = team_games.get(r["away_team"], 0) + 1
+        for t in all_teams:
+            count = team_games.get(t["id"], 0)
+            if count != MILB_GAMES_PER_TEAM:
+                log.warning(
+                    "schedule: level-%d team %s has %d games (target %d)",
+                    level, t.get("team_abbrev", t["id"]), count, MILB_GAMES_PER_TEAM,
+                )
 
         gamelist = tables["gamelist"]
         conn.execute(gamelist.insert(), rows)
@@ -1061,7 +1240,7 @@ def generate_minor_league_schedule(
             "league_level": level,
             "season_id": season_id,
             "total_games": len(rows),
-            "total_series": len(pool),
+            "total_series": total_series,
             "weeks": num_weeks,
             "start_week": start_week,
             "games_per_team": MILB_GAMES_PER_TEAM,
