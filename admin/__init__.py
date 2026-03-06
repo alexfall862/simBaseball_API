@@ -49,8 +49,10 @@ def _mask(sql: str) -> str:
     return s[:1000] + ("..." if len(s) > 1000 else "")
 
 def _writes_allowed() -> bool:
-    # Global toggle via env; you can add a time-box mechanism if desired
-    return os.getenv("ADMIN_ALLOW_WRITE", "false").lower() == "true"
+    """Check if destructive writes are enabled (env var OR session toggle)."""
+    if os.getenv("ADMIN_ALLOW_WRITE", "false").lower() == "true":
+        return True
+    return session.get("admin_write_mode") is True
 
 def _require_admin():
     if session.get("admin") is True:
@@ -84,7 +86,19 @@ def admin_me():
        admin=session.get("admin"),
        secure=current_app.config.get("SESSION_COOKIE_SECURE"),
        samesite=current_app.config.get("SESSION_COOKIE_SAMESITE"),
+       write_mode=_writes_allowed(),
     )
+
+@admin_bp.post("/write-mode")
+def admin_toggle_write_mode():
+    """Toggle write mode on/off for the current admin session."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    body = request.get_json(force=True, silent=True) or {}
+    enabled = bool(body.get("enabled", False))
+    session["admin_write_mode"] = enabled
+    return jsonify(ok=True, write_mode=enabled)
 
 @admin_bp.get("/presets")
 def admin_presets():

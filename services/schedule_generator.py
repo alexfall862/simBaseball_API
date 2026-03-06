@@ -370,10 +370,16 @@ def schedule_viewer(
                g.away_team  AS away_team_id,
                at.team_name AS away_team_name,
                at.team_abbrev AS away_team_abbrev,
-               g.random_seed
+               g.random_seed,
+               gr.home_score,
+               gr.away_score,
+               gr.game_outcome,
+               gr.winning_team_id,
+               gr.completed_at
         FROM gamelist g
         JOIN teams ht ON ht.id = g.home_team
         JOIN teams at ON at.id = g.away_team
+        LEFT JOIN game_results gr ON gr.game_id = g.id
         WHERE %s
         ORDER BY g.season_week, g.season_subweek, g.id
         LIMIT :limit OFFSET :offset
@@ -383,6 +389,9 @@ def schedule_viewer(
     for r in games_rows:
         m = dict(r._mapping)
         m["level_name"] = LEVEL_NAMES.get(m["league_level"], "Level %d" % m["league_level"])
+        # Convert completed_at to string for JSON serialization
+        if m.get("completed_at") is not None:
+            m["completed_at"] = str(m["completed_at"])
         games.append(m)
 
     # Weeks summary (un-paginated)

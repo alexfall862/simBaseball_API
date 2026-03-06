@@ -78,6 +78,20 @@
     // Auth
     elements.btnLogin.addEventListener('click', login);
     elements.btnLogout.addEventListener('click', logout);
+
+    // Write mode toggle
+    document.getElementById('write-mode-cb').addEventListener('change', (e) => {
+      const enabled = e.target.checked;
+      fetch(`${ADMIN_BASE}/write-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ enabled }),
+      })
+        .then(r => r.json())
+        .then(data => { _updateWriteLabel(data.write_mode); })
+        .catch(() => { e.target.checked = !enabled; });
+    });
     elements.adminPassword.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') login();
     });
@@ -396,6 +410,7 @@
 
   function updateAuthUI() {
     const statusDot = elements.authStatus.querySelector('.status-dot');
+    const writeToggle = document.getElementById('write-mode-toggle');
     if (isAuthenticated) {
       statusDot.classList.remove('offline');
       statusDot.classList.add('online');
@@ -403,6 +418,7 @@
       elements.btnLogin.style.display = 'none';
       elements.btnLogout.style.display = 'inline-block';
       elements.adminPassword.style.display = 'none';
+      writeToggle.style.display = '';
     } else {
       statusDot.classList.remove('online');
       statusDot.classList.add('offline');
@@ -410,6 +426,7 @@
       elements.btnLogin.style.display = 'inline-block';
       elements.btnLogout.style.display = 'none';
       elements.adminPassword.style.display = 'inline-block';
+      writeToggle.style.display = 'none';
     }
   }
 
@@ -421,11 +438,21 @@
         if (data.admin === true) {
           isAuthenticated = true;
           updateAuthUI();
+          // Sync write mode checkbox
+          const cb = document.getElementById('write-mode-cb');
+          cb.checked = !!data.write_mode;
+          _updateWriteLabel(cb.checked);
         }
       })
       .catch(() => {
         // Not logged in, that's fine
       });
+  }
+
+  function _updateWriteLabel(on) {
+    const label = document.getElementById('write-mode-label');
+    label.textContent = on ? 'Write Mode ON' : 'Write Mode';
+    label.style.color = on ? '#ff9800' : '#bbb';
   }
 
   // Dashboard
@@ -3317,24 +3344,32 @@
         document.getElementById('btn-sv-next').disabled = svCurrentPage >= totalPages;
 
         if (data.games.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888">No games found</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#888">No games found</td></tr>';
           return;
         }
 
-        tbody.innerHTML = data.games.map(g => `
-          <tr>
+        tbody.innerHTML = data.games.map(g => {
+          const hasResult = g.game_outcome != null;
+          const scoreText = hasResult
+            ? `${g.away_score} - ${g.home_score}`
+            : '<span class="text-muted">--</span>';
+          const resultText = hasResult
+            ? `<span style="color:${g.game_outcome === 'CANCELLED' ? '#f44336' : '#4caf50'}">${g.game_outcome}</span>`
+            : '<span class="text-muted">Pending</span>';
+          return `<tr>
             <td>${g.id}</td>
             <td>${g.season_week}</td>
             <td>${g.season_subweek || ''}</td>
             <td><span class="badge">${g.level_name}</span></td>
             <td>${g.away_team_abbrev || g.away_team_name} <span class="text-muted">(${g.away_team_id})</span></td>
-            <td>@</td>
+            <td style="text-align:center">${scoreText}</td>
             <td>${g.home_team_abbrev || g.home_team_name} <span class="text-muted">(${g.home_team_id})</span></td>
+            <td>${resultText}</td>
             <td>
               <button class="btn btn-sm btn-secondary" onclick="App.editGame(${g.id}, ${g.home_team_id}, ${g.away_team_id}, ${g.season_week}, '${g.season_subweek || ''}')">Edit</button>
             </td>
-          </tr>
-        `).join('');
+          </tr>`;
+        }).join('');
       })
       .catch(err => alert('Schedule viewer error: ' + err.message));
   }
