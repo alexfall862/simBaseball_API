@@ -13,6 +13,10 @@
   let taskPollInterval = null;
   let syntheticTaskId = null;
 
+  // Schedule Viewer state
+  let svCurrentPage = 1;
+  const svPageSize = 200;
+
   // Transaction state
   let txLeagueYearId = null;
   let txGameWeekId = null;
@@ -209,6 +213,13 @@
     document.getElementById('btn-sched-add-series').addEventListener('click', addScheduleSeries);
     document.getElementById('sched-level').addEventListener('change', onSchedLevelChange);
 
+    // Schedule Viewer
+    document.getElementById('btn-sv-load').addEventListener('click', () => { svCurrentPage = 1; loadScheduleViewer(); });
+    document.getElementById('btn-sv-prev').addEventListener('click', () => { svCurrentPage--; loadScheduleViewer(); });
+    document.getElementById('btn-sv-next').addEventListener('click', () => { svCurrentPage++; loadScheduleViewer(); });
+    document.getElementById('btn-sv-quality').addEventListener('click', loadScheduleQuality);
+    document.getElementById('btn-sv-add-series').addEventListener('click', addViewerSeries);
+
     // Arrow key navigation for sandbox chart
     document.addEventListener('keydown', (e) => {
       if (currentSection !== 'pe-sandbox' || !sandboxData) return;
@@ -280,6 +291,7 @@
       'tx-eos': 'End of Season',
       'tx-amateur': 'Amateur Seeding',
       'schedule-gen': 'Schedule Generator',
+      'schedule-viewer': 'Schedule Viewer',
       migrations: 'Migrations',
     };
     elements.pageTitle.textContent = titles[section] || section;
@@ -333,6 +345,8 @@
         break;
       case 'schedule-gen':
         loadScheduleReport();
+        break;
+      case 'schedule-viewer':
         break;
     }
 
@@ -3246,6 +3260,207 @@
       });
   }
 
+  // ── Schedule Viewer ──────────────────────────────────────────────
+
+  function loadScheduleViewer() {
+    const year = document.getElementById('sv-year').value;
+    const level = document.getElementById('sv-level').value;
+    const team = document.getElementById('sv-team').value;
+    const weekStart = document.getElementById('sv-week-start').value;
+    const weekEnd = document.getElementById('sv-week-end').value;
+
+    let url = `${ADMIN_BASE}/schedule/viewer?season_year=${year}&page=${svCurrentPage}&page_size=${svPageSize}`;
+    if (level) url += `&league_level=${level}`;
+    if (team) url += `&team_id=${team}`;
+    if (weekStart) url += `&week_start=${weekStart}`;
+    if (weekEnd) url += `&week_end=${weekEnd}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok) { alert('Error: ' + (data.message || data.error)); return; }
+
+        const totalPages = Math.ceil(data.total / svPageSize) || 1;
+
+        // Weeks summary
+        const summaryCard = document.getElementById('sv-summary-card');
+        const summaryContainer = document.getElementById('sv-summary-container');
+        const weeks = data.weeks_summary || {};
+        const weekNums = Object.keys(weeks).map(Number).sort((a, b) => a - b);
+
+        if (weekNums.length > 0) {
+          let shtml = '<table class="data-table"><thead><tr><th>Week</th><th>Games</th><th>Series</th></tr></thead><tbody>';
+          for (const w of weekNums) {
+            shtml += `<tr><td>${w}</td><td>${weeks[w].games}</td><td>${weeks[w].series_count}</td></tr>`;
+          }
+          shtml += '</tbody></table>';
+          summaryContainer.innerHTML = shtml;
+          summaryCard.style.display = '';
+        } else {
+          summaryCard.style.display = 'none';
+        }
+
+        // Show quality card only when a level is selected
+        document.getElementById('sv-quality-card').style.display = level ? '' : 'none';
+
+        // Games table
+        const gamesCard = document.getElementById('sv-games-card');
+        const tbody = document.getElementById('sv-games-tbody');
+        gamesCard.style.display = '';
+
+        document.getElementById('sv-total-label').textContent = `(${data.total} games)`;
+        document.getElementById('sv-page-label').textContent = `Page ${svCurrentPage} of ${totalPages}`;
+        document.getElementById('btn-sv-prev').disabled = svCurrentPage <= 1;
+        document.getElementById('btn-sv-next').disabled = svCurrentPage >= totalPages;
+
+        if (data.games.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888">No games found</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = data.games.map(g => `
+          <tr>
+            <td>${g.id}</td>
+            <td>${g.season_week}</td>
+            <td>${g.season_subweek || ''}</td>
+            <td><span class="badge">${g.level_name}</span></td>
+            <td>${g.away_team_abbrev || g.away_team_name} <span class="text-muted">(${g.away_team_id})</span></td>
+            <td>@</td>
+            <td>${g.home_team_abbrev || g.home_team_name} <span class="text-muted">(${g.home_team_id})</span></td>
+            <td>
+              <button class="btn btn-sm btn-secondary" onclick="App.editGame(${g.id}, ${g.home_team_id}, ${g.away_team_id}, ${g.season_week}, '${g.season_subweek || ''}')">Edit</button>
+            </td>
+          </tr>
+        `).join('');
+      })
+      .catch(err => alert('Schedule viewer error: ' + err.message));
+  }
+
+  function loadScheduleQuality() {
+    const year = document.getElementById('sv-year').value;
+    const level = document.getElementById('sv-level').value;
+
+    if (!level) { alert('Select a league level to view quality metrics.'); return; }
+
+    fetch(`${ADMIN_BASE}/schedule/quality?season_year=${year}&league_level=${level}`, { credentials: 'include' })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok) { alert('Error: ' + (data.message || data.error)); return; }
+
+        document.getElementById('sv-quality-stats').style.display = '';
+        document.getElementById('sv-avg-games').textContent = data.avg_games_per_team;
+        document.getElementById('sv-std-games').textContent = data.std_games_per_team;
+        document.getElementById('sv-team-count').textContent = data.team_count;
+
+        const teams = data.games_per_team;
+        const tids = Object.keys(teams).sort((a, b) => teams[b].total - teams[a].total);
+
+        const container = document.getElementById('sv-quality-table-container');
+        container.style.display = '';
+        const tbody = document.getElementById('sv-quality-tbody');
+
+        tbody.innerHTML = tids.map(tid => {
+          const t = teams[tid];
+          const cls = t.home_pct < 40 || t.home_pct > 60 ? 'style="color:#f44336"' : '';
+          return `<tr>
+            <td>${t.team_name}</td>
+            <td>${t.team_abbrev}</td>
+            <td>${t.total}</td>
+            <td>${t.home}</td>
+            <td>${t.away}</td>
+            <td ${cls}>${t.home_pct}%</td>
+          </tr>`;
+        }).join('');
+      })
+      .catch(err => alert('Quality metrics error: ' + err.message));
+  }
+
+  function editGame(gameId, homeTeam, awayTeam, week, subweek) {
+    const newHome = prompt('Home Team ID:', homeTeam);
+    if (newHome === null) return;
+    const newAway = prompt('Away Team ID:', awayTeam);
+    if (newAway === null) return;
+    const newWeek = prompt('Week:', week);
+    if (newWeek === null) return;
+    const newSub = prompt('Subweek (a/b/c/d):', subweek);
+    if (newSub === null) return;
+
+    fetch(`${ADMIN_BASE}/schedule/game/${gameId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        home_team: parseInt(newHome),
+        away_team: parseInt(newAway),
+        season_week: parseInt(newWeek),
+        season_subweek: newSub,
+      }),
+    })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        if (!data.ok) { alert('Update failed: ' + (data.message || data.error)); return; }
+        alert('Game updated.');
+        loadScheduleViewer();
+      })
+      .catch(err => alert('Edit error: ' + err.message));
+  }
+
+  function addViewerSeries() {
+    const year = document.getElementById('sv-add-year').value;
+    const level = document.getElementById('sv-add-level').value;
+    const home = document.getElementById('sv-add-home').value;
+    const away = document.getElementById('sv-add-away').value;
+    const week = document.getElementById('sv-add-week').value;
+    const games = document.getElementById('sv-add-games').value;
+
+    if (!home || !away) { alert('Home and Away team IDs are required.'); return; }
+
+    const resultBox = document.getElementById('sv-add-result');
+
+    fetch(`${ADMIN_BASE}/schedule/add-series`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        league_year: parseInt(year),
+        league_level: parseInt(level),
+        home_team_id: parseInt(home),
+        away_team_id: parseInt(away),
+        week: parseInt(week),
+        games: parseInt(games),
+      }),
+    })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        resultBox.style.display = 'block';
+        if (!data.ok) {
+          resultBox.textContent = 'Failed: ' + (data.message || data.error);
+          resultBox.style.color = '#f44336';
+          return;
+        }
+        resultBox.textContent = `Added ${data.games_added}-game series in week ${data.week}`;
+        resultBox.style.color = '#4caf50';
+        loadScheduleViewer();
+      })
+      .catch(err => {
+        resultBox.style.display = 'block';
+        resultBox.textContent = 'Error: ' + err.message;
+        resultBox.style.color = '#f44336';
+      });
+  }
+
   // Export public API
   window.App = {
     goTo,
@@ -3257,6 +3472,7 @@
     adminRejectProposal,
     viewTxDetail,
     rollbackTx,
+    editGame,
   };
 
   // Initialize on DOM ready

@@ -389,6 +389,60 @@ def get_timestamp_endpoint():
         ), 500
 
 
+@games_bp.get("/schedule")
+def get_schedule():
+    """
+    View schedule data with filtering. Used by frontend for schedule display.
+
+    Query parameters:
+      - season_year (required): The league year
+      - league_level (optional): Filter by level
+      - team_id (optional): Filter to games involving this team
+      - week_start / week_end (optional): Week range filter
+      - page (optional): Page number (default 1)
+      - page_size (optional): Results per page (default 200, max 500)
+    """
+    season_year = request.args.get("season_year", type=int)
+    if not season_year:
+        return jsonify(error="missing_field", message="season_year is required"), 400
+
+    league_level = request.args.get("league_level", type=int)
+    team_id = request.args.get("team_id", type=int)
+    week_start = request.args.get("week_start", type=int)
+    week_end = request.args.get("week_end", type=int)
+    page = request.args.get("page", 1, type=int)
+    page_size = min(request.args.get("page_size", 200, type=int), 500)
+
+    try:
+        from services.schedule_generator import _get_tables, schedule_viewer
+
+        engine = get_engine()
+        tables = _get_tables(engine)
+        with engine.connect() as conn:
+            result = schedule_viewer(
+                conn, tables,
+                season_year=season_year,
+                league_level=league_level,
+                team_id=team_id,
+                week_start=week_start,
+                week_end=week_end,
+                page=page,
+                page_size=page_size,
+            )
+
+        return jsonify(result), 200
+
+    except ValueError as e:
+        current_app.logger.warning("get_schedule validation error: %s", e)
+        return jsonify(error="validation_error", message=str(e)), 400
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_schedule: database error")
+        return jsonify(error="database_error", message=str(e)), 500
+    except Exception as e:
+        current_app.logger.exception("get_schedule: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
 @games_bp.get("/games/debug/synthetic")
 def get_synthetic_matchups():
     """

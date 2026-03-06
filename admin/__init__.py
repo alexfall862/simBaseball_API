@@ -637,6 +637,9 @@ def admin_schedule_generate():
     except ValueError as e:
         return jsonify(ok=False, error="generation_error", message=str(e)), 400
     except RuntimeError as e:
+        from services.schedule_generator import ScheduleTimeout
+        if isinstance(e, ScheduleTimeout):
+            return jsonify(ok=False, error="generation_timeout", message=str(e)), 504
         return jsonify(ok=False, error="generation_failed", message=str(e)), 500
     except Exception as e:
         logging.exception("admin_schedule_generate failed")
@@ -734,6 +737,142 @@ def admin_schedule_add_series():
     except Exception as e:
         logging.exception("admin_schedule_add_series failed")
         return jsonify(ok=False, error="add_series_failed", message=str(e)), 500
+
+
+# ── Schedule Viewer endpoints ────────────────────────────────────────
+
+@admin_bp.get("/schedule/viewer")
+def admin_schedule_viewer():
+    """
+    View schedule data with filtering and pagination.
+
+    GET /admin/schedule/viewer?season_year=2027&league_level=9&team_id=1&week_start=1&week_end=10&page=1&page_size=200
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    season_year = request.args.get("season_year", type=int)
+    if not season_year:
+        return jsonify(ok=False, error="missing_params",
+                       message="season_year is required"), 400
+
+    league_level = request.args.get("league_level", type=int)
+    team_id = request.args.get("team_id", type=int)
+    week_start = request.args.get("week_start", type=int)
+    week_end = request.args.get("week_end", type=int)
+    page = request.args.get("page", 1, type=int)
+    page_size = min(request.args.get("page_size", 200, type=int), 1000)
+
+    try:
+        from db import get_engine
+        from services.schedule_generator import _get_tables, schedule_viewer
+
+        engine = get_engine()
+        tables = _get_tables(engine)
+        with engine.connect() as conn:
+            result = schedule_viewer(
+                conn, tables,
+                season_year=season_year,
+                league_level=league_level,
+                team_id=team_id,
+                week_start=week_start,
+                week_end=week_end,
+                page=page,
+                page_size=page_size,
+            )
+
+        return jsonify(ok=True, **result)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="viewer_error", message=str(e)), 400
+    except Exception as e:
+        logging.exception("admin_schedule_viewer failed")
+        return jsonify(ok=False, error="viewer_failed", message=str(e)), 500
+
+
+@admin_bp.get("/schedule/quality")
+def admin_schedule_quality():
+    """
+    Schedule quality metrics (games per team, home/away balance).
+
+    GET /admin/schedule/quality?season_year=2027&league_level=9
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    season_year = request.args.get("season_year", type=int)
+    league_level = request.args.get("league_level", type=int)
+
+    if not season_year or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="season_year and league_level are required"), 400
+
+    try:
+        from db import get_engine
+        from services.schedule_generator import _get_tables, schedule_quality_metrics
+
+        engine = get_engine()
+        tables = _get_tables(engine)
+        with engine.connect() as conn:
+            result = schedule_quality_metrics(conn, tables, season_year, league_level)
+
+        return jsonify(ok=True, **result)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="quality_error", message=str(e)), 400
+    except Exception as e:
+        logging.exception("admin_schedule_quality failed")
+        return jsonify(ok=False, error="quality_failed", message=str(e)), 500
+
+
+@admin_bp.put("/schedule/game/<int:game_id>")
+def admin_update_game(game_id: int):
+    """
+    Update a single game in the schedule.
+
+    PUT /admin/schedule/game/123
+    Body: { "home_team": 5, "away_team": 10, "season_week": 3, "season_subweek": "b" }
+    Only provided fields are updated.
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_disabled"), 403
+
+    body = request.get_json(force=True, silent=True) or {}
+    allowed_fields = {"home_team", "away_team", "season_week", "season_subweek", "random_seed"}
+    updates = {k: v for k, v in body.items() if k in allowed_fields}
+
+    if not updates:
+        return jsonify(ok=False, error="no_updates",
+                       message="No valid fields to update"), 400
+
+    try:
+        from db import get_engine
+        from sqlalchemy import text as sa_text
+
+        engine = get_engine()
+        set_clause = ", ".join("%s = :%s" % (k, k) for k in updates)
+        updates["game_id"] = game_id
+
+        with engine.begin() as conn:
+            result = conn.execute(
+                sa_text("UPDATE gamelist SET %s WHERE id = :game_id" % set_clause),
+                updates,
+            )
+            if result.rowcount == 0:
+                return jsonify(ok=False, error="not_found",
+                               message="Game %d not found" % game_id), 404
+
+        return jsonify(ok=True, updated=game_id)
+
+    except Exception as e:
+        logging.exception("admin_update_game failed")
+        return jsonify(ok=False, error="update_failed", message=str(e)), 500
 
 
 def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):

@@ -9,12 +9,26 @@ College: 50 games/team, ~14 weeks, conference round-robin + OOC, starts week 1
 
 import logging
 import random
+import time
 from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import MetaData, Table, select, delete, and_, text, func
 
 log = logging.getLogger("app")
+
+
+class ScheduleTimeout(RuntimeError):
+    """Raised when a schedule generation phase exceeds its time budget."""
+    pass
+
+
+def _check_timeout(deadline: float, phase: str):
+    """Raise ScheduleTimeout if we have exceeded the deadline."""
+    if time.monotonic() > deadline:
+        raise ScheduleTimeout(
+            "Schedule generation timed out during '%s'" % phase
+        )
 
 # ── Level IDs ───────────────────────────────────────────────────────────
 LEVEL_MLB = 9
@@ -287,6 +301,187 @@ def schedule_report(conn, tables) -> Dict[str, Any]:
         }
 
     return {"seasons": result}
+
+
+# =====================================================================
+# Schedule viewer (shared by frontend + admin)
+# =====================================================================
+
+def schedule_viewer(
+    conn,
+    tables,
+    season_year: int,
+    league_level: int = None,
+    team_id: int = None,
+    week_start: int = None,
+    week_end: int = None,
+    page: int = 1,
+    page_size: int = 200,
+) -> Dict[str, Any]:
+    """
+    Query schedule data with filtering, JOINing team names.
+
+    Returns paginated game rows plus a per-week summary.
+    """
+    seasons = tables["seasons"]
+    season_row = conn.execute(
+        select(seasons.c.id).where(seasons.c.year == season_year)
+    ).first()
+    if not season_row:
+        raise ValueError("No season found for year %d" % season_year)
+    season_id = season_row[0]
+
+    # Build WHERE clause
+    where_parts = ["g.season = :season_id"]
+    params: Dict[str, Any] = {"season_id": season_id}
+
+    if league_level is not None:
+        where_parts.append("g.league_level = :league_level")
+        params["league_level"] = league_level
+
+    if team_id is not None:
+        where_parts.append("(g.home_team = :team_id OR g.away_team = :team_id)")
+        params["team_id"] = team_id
+
+    if week_start is not None:
+        where_parts.append("g.season_week >= :week_start")
+        params["week_start"] = week_start
+
+    if week_end is not None:
+        where_parts.append("g.season_week <= :week_end")
+        params["week_end"] = week_end
+
+    where_sql = " AND ".join(where_parts)
+
+    # Count total matching games
+    total = conn.execute(
+        text("SELECT COUNT(*) FROM gamelist g WHERE %s" % where_sql), params
+    ).scalar()
+
+    # Fetch paginated games with team name JOINs
+    offset = (page - 1) * page_size
+    data_params = dict(params, limit=page_size, offset=offset)
+
+    games_rows = conn.execute(text("""
+        SELECT g.id, g.season_week, g.season_subweek, g.league_level,
+               g.home_team  AS home_team_id,
+               ht.team_name AS home_team_name,
+               ht.team_abbrev AS home_team_abbrev,
+               g.away_team  AS away_team_id,
+               at.team_name AS away_team_name,
+               at.team_abbrev AS away_team_abbrev,
+               g.random_seed
+        FROM gamelist g
+        JOIN teams ht ON ht.id = g.home_team
+        JOIN teams at ON at.id = g.away_team
+        WHERE %s
+        ORDER BY g.season_week, g.season_subweek, g.id
+        LIMIT :limit OFFSET :offset
+    """ % where_sql), data_params).all()
+
+    games = []
+    for r in games_rows:
+        m = dict(r._mapping)
+        m["level_name"] = LEVEL_NAMES.get(m["league_level"], "Level %d" % m["league_level"])
+        games.append(m)
+
+    # Weeks summary (un-paginated)
+    summary_rows = conn.execute(text("""
+        SELECT g.season_week,
+               COUNT(*) AS games,
+               COUNT(DISTINCT CONCAT(
+                   LEAST(g.home_team, g.away_team), '-',
+                   GREATEST(g.home_team, g.away_team), '-',
+                   g.season_week
+               )) AS series_count
+        FROM gamelist g
+        WHERE %s
+        GROUP BY g.season_week
+        ORDER BY g.season_week
+    """ % where_sql), params).all()
+
+    weeks_summary = {}
+    for r in summary_rows:
+        m = r._mapping
+        weeks_summary[m["season_week"]] = {
+            "games": m["games"],
+            "series_count": m["series_count"],
+        }
+
+    return {
+        "games": games,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "filters": {
+            "season_year": season_year,
+            "league_level": league_level,
+            "team_id": team_id,
+            "week_start": week_start,
+            "week_end": week_end,
+        },
+        "weeks_summary": weeks_summary,
+    }
+
+
+def schedule_quality_metrics(
+    conn,
+    tables,
+    season_year: int,
+    league_level: int,
+) -> Dict[str, Any]:
+    """
+    Compute schedule quality metrics: per-team game distribution
+    and home/away balance.
+    """
+    seasons = tables["seasons"]
+    season_row = conn.execute(
+        select(seasons.c.id).where(seasons.c.year == season_year)
+    ).first()
+    if not season_row:
+        raise ValueError("No season found for year %d" % season_year)
+    season_id = season_row[0]
+
+    rows = conn.execute(text("""
+        SELECT t.id AS team_id, t.team_name, t.team_abbrev,
+               SUM(CASE WHEN g.home_team = t.id THEN 1 ELSE 0 END) AS home_games,
+               SUM(CASE WHEN g.away_team = t.id THEN 1 ELSE 0 END) AS away_games,
+               COUNT(*) AS total_games
+        FROM teams t
+        JOIN gamelist g ON (g.home_team = t.id OR g.away_team = t.id)
+        WHERE g.season = :season_id AND g.league_level = :league_level
+          AND t.team_level = :league_level
+        GROUP BY t.id, t.team_name, t.team_abbrev
+        ORDER BY total_games DESC
+    """), {"season_id": season_id, "league_level": league_level}).all()
+
+    games_per_team = {}
+    totals = []
+    for r in rows:
+        m = dict(r._mapping)
+        tid = str(m["team_id"])
+        total = m["total_games"]
+        home = m["home_games"]
+        games_per_team[tid] = {
+            "team_name": m["team_name"],
+            "team_abbrev": m["team_abbrev"],
+            "total": total,
+            "home": home,
+            "away": m["away_games"],
+            "home_pct": round(home / total * 100, 1) if total else 0,
+        }
+        totals.append(total)
+
+    avg_games = sum(totals) / len(totals) if totals else 0
+    variance = sum((t - avg_games) ** 2 for t in totals) / len(totals) if totals else 0
+    std_games = variance ** 0.5
+
+    return {
+        "games_per_team": games_per_team,
+        "avg_games_per_team": round(avg_games, 1),
+        "std_games_per_team": round(std_games, 2),
+        "team_count": len(games_per_team),
+    }
 
 
 # =====================================================================
@@ -607,6 +802,7 @@ def _assign_series_to_weeks(
     start_week: int = 1,
     rng: random.Random = None,
     max_attempts: int = 100,
+    timeout_seconds: float = 60.0,
 ) -> Dict[int, List[Dict]]:
     """
     Assign each series to a week such that:
@@ -620,8 +816,21 @@ def _assign_series_to_weeks(
 
     end_week = start_week + num_weeks - 1
     weeks = list(range(start_week, end_week + 1))
+    deadline = time.monotonic() + timeout_seconds
+
+    log.info(
+        "schedule: starting week assignment — %d series, %d weeks, max %d/week",
+        len(all_series), num_weeks, max_per_week,
+    )
 
     for attempt in range(max_attempts):
+        if attempt % 10 == 0:
+            log.info(
+                "schedule: week assignment attempt %d/%d",
+                attempt + 1, max_attempts,
+            )
+        _check_timeout(deadline, "week assignment attempt %d/%d" % (attempt + 1, max_attempts))
+
         series_list = list(all_series)
         rng.shuffle(series_list)
 
@@ -1016,6 +1225,7 @@ def _build_college_matchup_pool(
     teams_by_conf: Dict[str, List[Dict]],
     games_per_team: int,
     rng: random.Random,
+    timeout_seconds: float = 30.0,
 ) -> List[Dict]:
     """
     Build college schedule: conference round-robin + OOC to hit total.
@@ -1024,11 +1234,11 @@ def _build_college_matchup_pool(
     team_game_count = {}
 
     # ── Conference round-robin ───────────────────────────────────────
+    conf_series_count = 0
     for conf, teams in teams_by_conf.items():
         if len(teams) < 2:
             continue
         for ta, tb in combinations(teams, 2):
-            # One 3-game series per conference pair
             all_series.append({
                 "team_a": ta["id"],
                 "team_b": tb["id"],
@@ -1037,6 +1247,12 @@ def _build_college_matchup_pool(
             })
             team_game_count[ta["id"]] = team_game_count.get(ta["id"], 0) + 3
             team_game_count[tb["id"]] = team_game_count.get(tb["id"], 0) + 3
+            conf_series_count += 1
+
+    log.info(
+        "college_matchup: %d conference series built across %d conferences",
+        conf_series_count, len(teams_by_conf),
+    )
 
     # ── OOC matchups to fill remaining ───────────────────────────────
     all_teams = []
@@ -1046,56 +1262,88 @@ def _build_college_matchup_pool(
             all_teams.append(t)
             team_conf[t["id"]] = conf
 
-    # Build list of teams needing more games, sorted by need
     remaining = {
         t["id"]: max(0, games_per_team - team_game_count.get(t["id"], 0))
         for t in all_teams
     }
 
-    # Pair up teams from different conferences who need games
-    needy = [tid for tid, r in remaining.items() if r >= 3]
-    rng.shuffle(needy)
-
     used_ooc_pairs = set()
-    i = 0
-    while i < len(needy) - 1:
-        a = needy[i]
-        if remaining[a] < 3:
-            i += 1
-            continue
+    deadline = time.monotonic() + timeout_seconds
+    max_passes = 50
+    ooc_series_count = 0
 
-        # Find a partner from a different conference
-        paired = False
-        for j in range(i + 1, len(needy)):
-            b = needy[j]
-            if remaining[b] < 3:
-                continue
-            if team_conf[a] == team_conf[b]:
-                continue
-            pair = frozenset([a, b])
-            if pair in used_ooc_pairs:
-                continue
+    for pass_num in range(1, max_passes + 1):
+        _check_timeout(deadline, "OOC matchup pass %d" % pass_num)
 
-            length = 4 if remaining[a] >= 4 and remaining[b] >= 4 and rng.random() < 0.3 else 3
-            all_series.append({
-                "team_a": a,
-                "team_b": b,
-                "length": length,
-                "category": "ooc",
-            })
-            remaining[a] -= length
-            remaining[b] -= length
-            used_ooc_pairs.add(pair)
-            paired = True
+        needy = [tid for tid, r in remaining.items() if r >= 3]
+        if len(needy) < 2:
+            log.info(
+                "college_ooc: pass %d — %d needy teams remain, stopping",
+                pass_num, len(needy),
+            )
             break
 
-        if not paired:
-            i += 1
-        # Re-sort needy list
-        needy = [tid for tid in needy if remaining.get(tid, 0) >= 3]
         rng.shuffle(needy)
-        i = 0  # restart scan
+        paired_this_pass = 0
+        i = 0
 
+        while i < len(needy) - 1:
+            a = needy[i]
+            if remaining[a] < 3:
+                i += 1
+                continue
+
+            paired = False
+            for j in range(i + 1, len(needy)):
+                b = needy[j]
+                if remaining[b] < 3:
+                    continue
+                if team_conf[a] == team_conf[b]:
+                    continue
+                pair = frozenset([a, b])
+                if pair in used_ooc_pairs:
+                    continue
+
+                length = 4 if remaining[a] >= 4 and remaining[b] >= 4 and rng.random() < 0.3 else 3
+                all_series.append({
+                    "team_a": a,
+                    "team_b": b,
+                    "length": length,
+                    "category": "ooc",
+                })
+                remaining[a] -= length
+                remaining[b] -= length
+                used_ooc_pairs.add(pair)
+                paired = True
+                paired_this_pass += 1
+                ooc_series_count += 1
+                break
+
+            i += 1  # always advance
+
+        log.info(
+            "college_ooc: pass %d — paired %d series (%d total OOC), %d teams still needy",
+            pass_num, paired_this_pass, ooc_series_count,
+            sum(1 for r in remaining.values() if r >= 3),
+        )
+
+        if paired_this_pass == 0:
+            still_needy = {
+                tid: {"remaining": remaining[tid], "conf": team_conf[tid]}
+                for tid in remaining if remaining[tid] >= 3
+            }
+            if still_needy:
+                sample = dict(list(still_needy.items())[:10])
+                log.warning(
+                    "college_ooc: could not pair %d teams (likely same-conference clusters): %s",
+                    len(still_needy), sample,
+                )
+            break
+
+    log.info(
+        "college_matchup_pool: %d conf + %d OOC = %d total series",
+        conf_series_count, ooc_series_count, len(all_series),
+    )
     return all_series
 
 
@@ -1260,13 +1508,16 @@ def generate_college_schedule(
 
     with engine.begin() as conn:
         season_id = _resolve_season_id(conn, tables, league_year)
+        log.info("college_schedule: resolved season_id=%d for year=%d", season_id, league_year)
 
         validation = validate_schedule_generation(conn, tables, season_id, LEVEL_COLLEGE)
         if not validation["valid"]:
             raise ValueError("Validation failed: %s" % "; ".join(validation["errors"]))
+        log.info("college_schedule: validation passed, %d teams", validation["team_count"])
 
         if clear_existing:
-            _clear_existing_schedule(conn, tables, season_id, LEVEL_COLLEGE)
+            cleared = _clear_existing_schedule(conn, tables, season_id, LEVEL_COLLEGE)
+            log.info("college_schedule: cleared %d existing games", cleared)
         elif validation["existing_games"] > 0:
             raise ValueError(
                 "%d games already exist. Use clear_existing=true to replace."
@@ -1275,8 +1526,16 @@ def generate_college_schedule(
 
         teams_by_conf = _load_college_teams(conn, tables)
         all_teams = [t for teams in teams_by_conf.values() for t in teams]
+        log.info(
+            "college_schedule: loaded %d teams across %d conferences",
+            len(all_teams), len(teams_by_conf),
+        )
 
+        log.info("college_schedule: building matchup pool...")
         pool = _build_college_matchup_pool(teams_by_conf, COLLEGE_GAMES_PER_TEAM, rng)
+        log.info("college_schedule: matchup pool built — %d series", len(pool))
+
+        log.info("college_schedule: balancing home/away...")
         _balance_home_away(pool, rng)
 
         # Calculate weeks needed based on the team with most series
@@ -1287,18 +1546,23 @@ def generate_college_schedule(
         max_series = max(team_series_count.values()) if team_series_count else 0
         num_weeks = max_series + 1  # +1 buffer
 
-        # Max simultaneous series = half the teams
         max_per_week = len(all_teams) // 2
 
+        log.info(
+            "college_schedule: assigning %d series to %d weeks (max %d/week)...",
+            len(pool), num_weeks, max_per_week,
+        )
         week_assignments = _assign_series_to_weeks(
             pool, num_weeks, max_per_week, start_week=start_week, rng=rng,
         )
+
         rows = _expand_to_game_rows(week_assignments, season_id, LEVEL_COLLEGE)
+        log.info("college_schedule: expanded to %d game rows, inserting...", len(rows))
 
         gamelist = tables["gamelist"]
         conn.execute(gamelist.insert(), rows)
 
-        log.info("schedule: inserted %d college games for year %d", len(rows), league_year)
+        log.info("college_schedule: inserted %d games for year %d", len(rows), league_year)
 
         return {
             "league_year": league_year,

@@ -35,6 +35,9 @@
       <a href="#" class="nav-item" data-section="schedule-gen">
         <span class="nav-icon">&#128197;</span> Schedule Generator
       </a>
+      <a href="#" class="nav-item" data-section="schedule-viewer">
+        <span class="nav-icon">&#128065;</span> Schedule Viewer
+      </a>
       <a href="#" class="nav-item" data-section="simulate">
         <span class="nav-icon">&#9654;</span> Simulate Week
       </a>
@@ -1296,6 +1299,163 @@
             <button class="btn btn-primary" id="btn-sched-add-series">Add Series</button>
           </div>
           <pre id="sched-add-result" class="result-box" style="margin-top: 16px; display: none"></pre>
+        </div>
+      </section>
+
+      <!-- Schedule Viewer Section -->
+      <section id="section-schedule-viewer" class="section">
+        <div class="card">
+          <h3>Schedule Viewer</h3>
+          <p class="text-muted" style="margin-bottom: 12px">Browse and filter the game schedule. Edit individual games.</p>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="sv-year">Season Year</label>
+              <input type="number" id="sv-year" value="2027" min="2025" max="2050" />
+            </div>
+            <div class="form-group">
+              <label for="sv-level">League Level</label>
+              <select id="sv-level">
+                <option value="">All levels</option>
+                <option value="9">9 - MLB</option>
+                <option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option>
+                <option value="6">6 - High-A</option>
+                <option value="5">5 - A</option>
+                <option value="4">4 - Scraps</option>
+                <option value="3">3 - College</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="sv-team">Team ID (optional)</label>
+              <input type="number" id="sv-team" placeholder="Filter by team" />
+            </div>
+            <div class="form-group">
+              <label for="sv-week-start">Week Start</label>
+              <input type="number" id="sv-week-start" placeholder="From week" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sv-week-end">Week End</label>
+              <input type="number" id="sv-week-end" placeholder="To week" min="1" />
+            </div>
+            <div class="form-group" style="align-self: flex-end">
+              <button class="btn btn-primary" id="btn-sv-load">Load Schedule</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Weeks Summary -->
+        <div class="card" id="sv-summary-card" style="display: none">
+          <h3>Weeks Summary</h3>
+          <div class="table-container" id="sv-summary-container"></div>
+        </div>
+
+        <!-- Quality Metrics -->
+        <div class="card" id="sv-quality-card" style="display: none">
+          <h3>Schedule Quality</h3>
+          <div class="button-group" style="margin-bottom: 12px">
+            <button class="btn btn-secondary" id="btn-sv-quality">Load Quality Metrics</button>
+          </div>
+          <div class="grid-3" id="sv-quality-stats" style="display: none">
+            <div class="stat-card">
+              <div class="stat-label">Avg Games/Team</div>
+              <div class="stat-value" id="sv-avg-games">--</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Std Dev</div>
+              <div class="stat-value" id="sv-std-games">--</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Teams</div>
+              <div class="stat-value" id="sv-team-count">--</div>
+            </div>
+          </div>
+          <div class="table-container" id="sv-quality-table-container" style="display: none; margin-top: 16px">
+            <table class="data-table" id="sv-quality-table">
+              <thead>
+                <tr>
+                  <th>Team</th>
+                  <th>Abbrev</th>
+                  <th>Total</th>
+                  <th>Home</th>
+                  <th>Away</th>
+                  <th>Home %</th>
+                </tr>
+              </thead>
+              <tbody id="sv-quality-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Games Table -->
+        <div class="card" id="sv-games-card" style="display: none">
+          <h3>Games <span class="text-muted" id="sv-total-label"></span></h3>
+          <div class="button-group" style="margin-bottom: 12px">
+            <button class="btn btn-secondary" id="btn-sv-prev" disabled>&larr; Prev</button>
+            <span class="text-muted" id="sv-page-label" style="align-self: center">Page 1</span>
+            <button class="btn btn-secondary" id="btn-sv-next" disabled>Next &rarr;</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table" id="sv-games-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Week</th>
+                  <th>Sub</th>
+                  <th>Level</th>
+                  <th>Away</th>
+                  <th>@</th>
+                  <th>Home</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sv-games-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Quick Add Series -->
+        <div class="card">
+          <h3>Quick Add Series</h3>
+          <p class="text-muted" style="margin-bottom: 12px">Add a single series directly to the schedule.</p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="sv-add-year">Year</label>
+              <input type="number" id="sv-add-year" value="2027" />
+            </div>
+            <div class="form-group">
+              <label for="sv-add-level">Level</label>
+              <select id="sv-add-level">
+                <option value="9">MLB</option>
+                <option value="8">AAA</option>
+                <option value="7">AA</option>
+                <option value="6">High-A</option>
+                <option value="5">A</option>
+                <option value="4">Scraps</option>
+                <option value="3">College</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="sv-add-home">Home Team ID</label>
+              <input type="number" id="sv-add-home" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sv-add-away">Away Team ID</label>
+              <input type="number" id="sv-add-away" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sv-add-week">Week</label>
+              <input type="number" id="sv-add-week" value="1" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="sv-add-games">Games (1-4)</label>
+              <input type="number" id="sv-add-games" value="3" min="1" max="4" />
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-primary" id="btn-sv-add-series">Add Series</button>
+          </div>
+          <pre id="sv-add-result" class="result-box" style="margin-top: 12px; display: none"></pre>
         </div>
       </section>
 
