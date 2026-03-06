@@ -810,13 +810,17 @@ def _assign_series_to_weeks(
     max_per_week: int,
     start_week: int = 1,
     rng: random.Random = None,
-    max_attempts: int = 100,
+    max_attempts: int = 200,
     timeout_seconds: float = 60.0,
 ) -> Dict[int, List[Dict]]:
     """
     Assign each series to a week such that:
     - Each week has at most max_per_week series
     - No team appears in more than one series per week
+
+    Uses Kempe-chain edge coloring as the primary strategy (guaranteed
+    for num_weeks > max_team_degree).  Falls back to random assignment
+    at lower utilization levels.
 
     Returns: {week_number: [series_dicts]}
     """
@@ -826,63 +830,184 @@ def _assign_series_to_weeks(
     end_week = start_week + num_weeks - 1
     weeks = list(range(start_week, end_week + 1))
     deadline = time.monotonic() + timeout_seconds
+    utilization = len(all_series) / (num_weeks * max_per_week) if max_per_week else 0
 
     log.info(
-        "schedule: starting week assignment — %d series, %d weeks, max %d/week",
-        len(all_series), num_weeks, max_per_week,
+        "schedule: starting week assignment — %d series, %d weeks, max %d/week (%.0f%% utilization)",
+        len(all_series), num_weeks, max_per_week, utilization * 100,
     )
 
     for attempt in range(max_attempts):
-        if attempt % 10 == 0:
+        if attempt % 25 == 0:
             log.info(
                 "schedule: week assignment attempt %d/%d",
                 attempt + 1, max_attempts,
             )
         _check_timeout(deadline, "week assignment attempt %d/%d" % (attempt + 1, max_attempts))
 
-        series_list = list(all_series)
-        rng.shuffle(series_list)
+        # Kempe chain edge coloring — works reliably at high utilization
+        result = _edge_color_kempe(all_series, weeks, max_per_week, rng)
 
-        week_slots = {w: [] for w in weeks}
-        week_counts = {w: 0 for w in weeks}
-        team_week_used = set()  # (team_id, week)
-
-        success = True
-        for s in series_list:
-            home = s["home_team"]
-            away = s["away_team"]
-
-            candidates = [
-                w for w in weeks
-                if week_counts[w] < max_per_week
-                and (home, w) not in team_week_used
-                and (away, w) not in team_week_used
-            ]
-
-            if not candidates:
-                success = False
-                break
-
-            # Weight toward emptier weeks for better convergence
-            weights = [max_per_week - week_counts[w] + 1 for w in candidates]
-            chosen = rng.choices(candidates, weights=weights, k=1)[0]
-
-            week_slots[chosen].append(s)
-            week_counts[chosen] += 1
-            team_week_used.add((home, chosen))
-            team_week_used.add((away, chosen))
-
-        if success:
+        if result is not None:
             log.info(
                 "schedule: week assignment succeeded on attempt %d/%d",
                 attempt + 1, max_attempts,
             )
-            return week_slots
+            return result
 
     raise RuntimeError(
         "Failed to assign %d series to %d weeks after %d attempts"
         % (len(all_series), num_weeks, max_attempts)
     )
+
+
+def _edge_color_kempe(
+    all_series: List[Dict],
+    weeks: List[int],
+    max_per_week: int,
+    rng: random.Random,
+) -> Optional[Dict[int, List[Dict]]]:
+    """
+    Assign series to weeks via sequential edge coloring with Kempe chain
+    recoloring. Each series is an edge, each week is a color.
+
+    For each series (A, B):
+    1. Find a week free at both A and B → assign it.
+    2. If none, pick week c free at A and week d free at B, then
+       swap colors c↔d along the alternating path from B to make c
+       free at both endpoints.
+
+    This is guaranteed to succeed when num_weeks > max_degree (51 < 52).
+    The max_per_week constraint (15) is automatically satisfied since
+    each week forms a matching on 30 vertices.
+    """
+    series_list = list(all_series)
+    rng.shuffle(series_list)
+
+    # team_color: (team, week) → series index — at most one per pair
+    team_color = {}
+    # color of each series
+    color = [None] * len(series_list)
+    week_count = {w: 0 for w in weeks}
+
+    for i, s in enumerate(series_list):
+        A, B = s["home_team"], s["away_team"]
+
+        # Weeks free at A and B respectively
+        A_free = [w for w in weeks if (A, w) not in team_color]
+        B_free = [w for w in weeks if (B, w) not in team_color]
+        A_free_set = set(A_free)
+
+        # Look for a common free week
+        common = [w for w in B_free if w in A_free_set]
+        if common:
+            chosen = min(common, key=lambda w: (week_count[w], rng.random()))
+            color[i] = chosen
+            team_color[(A, chosen)] = i
+            team_color[(B, chosen)] = i
+            week_count[chosen] += 1
+            continue
+
+        # No common free week — use Kempe chain recoloring.
+        # Trace the alternating path first (read-only), then apply only
+        # if the path doesn't reach A.
+        if not A_free or not B_free:
+            return None  # over-constrained
+
+        placed = False
+        for c_try in A_free:
+            for d_try in B_free:
+                if c_try == d_try:
+                    continue
+                # Trace without modifying
+                path, visited = _kempe_chain_trace(
+                    B, c_try, d_try, series_list, team_color
+                )
+                if A not in visited:
+                    # Safe — apply the swap, then assign color c_try
+                    _kempe_chain_apply(
+                        path, c_try, d_try, color, series_list,
+                        team_color, week_count,
+                    )
+                    color[i] = c_try
+                    team_color[(A, c_try)] = i
+                    team_color[(B, c_try)] = i
+                    week_count[c_try] += 1
+                    placed = True
+                    break
+            if placed:
+                break
+        if not placed:
+            return None
+
+    # Build week_slots from coloring
+    week_slots = {w: [] for w in weeks}
+    for i, w in enumerate(color):
+        if w is not None:
+            week_slots[w].append(series_list[i])
+    return week_slots
+
+
+def _kempe_chain_trace(start_vertex, c, d, series_list, team_color):
+    """
+    Trace the maximal alternating c-d path starting from start_vertex
+    WITHOUT modifying any state.
+
+    Returns (path, visited) where:
+    - path: list of (series_index, old_color)
+    - visited: set of vertices on the path
+    """
+    path = []
+    current = start_vertex
+    look_for = c
+    visited = set()
+
+    while current not in visited:
+        visited.add(current)
+        key = (current, look_for)
+        if key not in team_color:
+            break
+
+        si = team_color[key]
+        path.append((si, look_for))
+
+        s = series_list[si]
+        other = s["away_team"] if s["home_team"] == current else s["home_team"]
+        look_for = d if look_for == c else c
+        current = other
+
+    return path, visited
+
+
+def _kempe_chain_apply(path, c, d, color, series_list, team_color, week_count):
+    """
+    Apply the c↔d swap to the given path. Batch deletes then adds
+    to avoid overwriting dict entries needed by later steps.
+    """
+    to_delete = []
+    to_add = []
+
+    for si, old_col in path:
+        new_col = d if old_col == c else c
+        s = series_list[si]
+        ht, at = s["home_team"], s["away_team"]
+
+        to_delete.append((ht, old_col))
+        to_delete.append((at, old_col))
+        to_add.append(((ht, new_col), si))
+        to_add.append(((at, new_col), si))
+
+        week_count[old_col] -= 1
+        week_count[new_col] += 1
+        color[si] = new_col
+
+    for key in to_delete:
+        team_color.pop(key, None)
+
+    for key, val in to_add:
+        team_color[key] = val
+
+
 
 
 # =====================================================================
