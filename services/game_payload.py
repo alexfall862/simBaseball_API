@@ -1720,6 +1720,331 @@ def build_game_payload(conn, game_id: int) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
+# Post-game: store results + update player state
+# -------------------------------------------------------------------
+
+_GAME_RESULT_INSERT = None  # lazy-built on first use
+
+
+def _store_game_results(
+    conn,
+    results: List[Dict[str, Any]],
+    payloads: List[Dict[str, Any]],
+    games: List[Any],
+) -> int:
+    """
+    Persist game scores/outcomes from the engine into the game_results table.
+
+    Args:
+        conn:     Active SQLAlchemy connection (caller manages commit).
+        results:  Engine result dicts (game_id, home_score, away_score, winner).
+        payloads: Payload dicts built by build_game_payload_core (same order as results).
+        games:    Original gamelist rows for this subweek (contain season FK, league_level).
+
+    Returns:
+        Number of game_result rows inserted.
+    """
+    from sqlalchemy import text as sa_text
+
+    if not results:
+        return 0
+
+    # Build lookup: game_id → payload, game_id → game_row
+    payload_by_gid: Dict[int, Dict[str, Any]] = {}
+    for p in payloads:
+        gid = p.get("game_id")
+        if gid is not None:
+            payload_by_gid[int(gid)] = p
+
+    game_row_by_gid: Dict[int, Any] = {}
+    for g in games:
+        gid = g.get("id") if isinstance(g, dict) else g["id"]
+        game_row_by_gid[int(gid)] = g
+
+    # Collect all team IDs so we can bulk-load org IDs
+    all_team_ids: set[int] = set()
+    for p in payloads:
+        hs = p.get("home_side") or {}
+        as_ = p.get("away_side") or {}
+        if hs.get("team_id"):
+            all_team_ids.add(int(hs["team_id"]))
+        if as_.get("team_id"):
+            all_team_ids.add(int(as_["team_id"]))
+
+    # Bulk-load team → org mapping
+    org_by_team: Dict[int, int] = {}
+    if all_team_ids:
+        tables = _get_core_tables()
+        teams_tbl = tables["teams"]
+        rows = (
+            conn.execute(
+                select(teams_tbl.c.id, teams_tbl.c.orgID)
+                .where(teams_tbl.c.id.in_(list(all_team_ids)))
+            )
+            .mappings()
+            .all()
+        )
+        for row in rows:
+            org_by_team[int(row["id"])] = int(row["orgID"])
+
+    insert_sql = sa_text("""
+        INSERT INTO game_results
+            (game_id, season, league_level, season_week, season_subweek,
+             home_team_id, away_team_id, home_score, away_score,
+             winning_team_id, losing_team_id, winning_org_id, losing_org_id,
+             game_outcome, completed_at)
+        VALUES
+            (:game_id, :season, :league_level, :season_week, :season_subweek,
+             :home_team_id, :away_team_id, :home_score, :away_score,
+             :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
+             :game_outcome, NOW())
+        ON DUPLICATE KEY UPDATE
+            home_score      = VALUES(home_score),
+            away_score      = VALUES(away_score),
+            winning_team_id = VALUES(winning_team_id),
+            losing_team_id  = VALUES(losing_team_id),
+            winning_org_id  = VALUES(winning_org_id),
+            losing_org_id   = VALUES(losing_org_id),
+            game_outcome    = VALUES(game_outcome),
+            completed_at    = VALUES(completed_at)
+    """)
+
+    count = 0
+    for result in results:
+        game_id = result.get("game_id")
+        if game_id is None:
+            continue
+        game_id = int(game_id)
+
+        payload = payload_by_gid.get(game_id)
+        game_row = game_row_by_gid.get(game_id)
+        if not payload or game_row is None:
+            logger.warning(
+                "store_game_results: no payload/game_row for game_id=%s, skipping",
+                game_id,
+            )
+            continue
+
+        home_side = payload.get("home_side") or {}
+        away_side = payload.get("away_side") or {}
+        home_team_id = int(home_side.get("team_id", 0))
+        away_team_id = int(away_side.get("team_id", 0))
+        home_score = int(result.get("home_score", 0))
+        away_score = int(result.get("away_score", 0))
+
+        # Determine outcome
+        winner = str(result.get("winner", "")).lower()
+        if winner == "home":
+            game_outcome = "HOME_WIN"
+            winning_team_id = home_team_id
+            losing_team_id = away_team_id
+        elif winner == "away":
+            game_outcome = "AWAY_WIN"
+            winning_team_id = away_team_id
+            losing_team_id = home_team_id
+        else:
+            game_outcome = "TIE"
+            winning_team_id = None
+            losing_team_id = None
+
+        winning_org_id = org_by_team.get(winning_team_id) if winning_team_id else None
+        losing_org_id = org_by_team.get(losing_team_id) if losing_team_id else None
+
+        # Get season FK and league_level from the original gamelist row
+        season_id = int(game_row.get("season") if isinstance(game_row, dict)
+                        else game_row["season"])
+        league_level = int(game_row.get("league_level") if isinstance(game_row, dict)
+                           else game_row["league_level"])
+        season_week = int(game_row.get("season_week") if isinstance(game_row, dict)
+                          else game_row["season_week"])
+        season_subweek = str(
+            (game_row.get("season_subweek") if isinstance(game_row, dict)
+             else game_row["season_subweek"]) or "a"
+        )
+
+        try:
+            conn.execute(insert_sql, {
+                "game_id": game_id,
+                "season": season_id,
+                "league_level": league_level,
+                "season_week": season_week,
+                "season_subweek": season_subweek,
+                "home_team_id": home_team_id,
+                "away_team_id": away_team_id,
+                "home_score": home_score,
+                "away_score": away_score,
+                "winning_team_id": winning_team_id,
+                "losing_team_id": losing_team_id,
+                "winning_org_id": winning_org_id,
+                "losing_org_id": losing_org_id,
+                "game_outcome": game_outcome,
+            })
+            count += 1
+        except Exception:
+            logger.exception(
+                "store_game_results: INSERT failed for game_id=%s", game_id
+            )
+
+    logger.info("store_game_results: inserted/updated %d game result rows", count)
+    return count
+
+
+# Stamina cost constants for pitcher fatigue after a game
+_SP_BASE_STAMINA_COST = 30     # base cost for a starting pitcher appearance
+_SP_PER_OUT_STAMINA_COST = 1   # additional cost per out recorded (SP)
+_RP_BASE_STAMINA_COST = 15     # base cost for a reliever appearance
+_RP_PER_OUT_STAMINA_COST = 1   # additional cost per out recorded (RP)
+_REST_RECOVERY_PER_SUBWEEK = 5 # stamina recovery for pitchers who did NOT pitch
+
+
+def _update_player_state_after_subweek(
+    conn,
+    results: List[Dict[str, Any]],
+    league_year_id: int,
+) -> Dict[str, int]:
+    """
+    Update player fatigue and injury state after a subweek's games.
+
+    1. Pitcher stamina: decrease based on workload (innings pitched).
+    2. Pitcher rest recovery: pitchers who did NOT pitch recover a small amount.
+    3. Injury persistence: if the engine reports injuries, persist them.
+
+    Args:
+        conn:           Active SQLAlchemy connection (caller manages commit).
+        results:        Engine result dicts with stats.pitchers and optional injuries.
+        league_year_id: Current league year.
+
+    Returns:
+        Dict with counts: {"stamina_updates": N, "injuries_persisted": N}
+    """
+    from sqlalchemy import text as sa_text
+
+    stamina_updates = 0
+    injuries_persisted = 0
+
+    # --- 1. Pitcher stamina updates ---
+    # Collect all pitcher workloads from game results
+    pitcher_costs: Dict[int, int] = {}  # player_id → total stamina cost this subweek
+
+    for result in results:
+        stats = result.get("stats") or {}
+        pitchers = stats.get("pitchers") or {}
+
+        for pid_str, p_stats in pitchers.items():
+            pid = int(pid_str)
+            ipo = int(p_stats.get("innings_pitched_outs", 0))
+            gs = int(p_stats.get("games_started", 0))
+
+            if gs > 0:
+                cost = _SP_BASE_STAMINA_COST + (ipo * _SP_PER_OUT_STAMINA_COST)
+            else:
+                cost = _RP_BASE_STAMINA_COST + (ipo * _RP_PER_OUT_STAMINA_COST)
+
+            pitcher_costs[pid] = pitcher_costs.get(pid, 0) + cost
+
+    if pitcher_costs:
+        # Bulk-load current stamina for all pitchers who pitched
+        from services.stamina import get_effective_stamina_bulk
+        current_stamina = get_effective_stamina_bulk(
+            conn, list(pitcher_costs.keys()), league_year_id
+        )
+
+        stamina_upsert = sa_text("""
+            INSERT INTO player_fatigue_state
+                (player_id, league_year_id, stamina, last_updated_at)
+            VALUES
+                (:player_id, :league_year_id, :stamina, NOW())
+            ON DUPLICATE KEY UPDATE
+                stamina          = :stamina,
+                last_updated_at  = NOW()
+        """)
+
+        for pid, cost in pitcher_costs.items():
+            old_stamina = current_stamina.get(pid, 100)
+            new_stamina = max(0, old_stamina - cost)
+
+            try:
+                conn.execute(stamina_upsert, {
+                    "player_id": pid,
+                    "league_year_id": league_year_id,
+                    "stamina": new_stamina,
+                })
+                stamina_updates += 1
+            except Exception:
+                logger.exception(
+                    "update_player_state: stamina update failed for player %d", pid
+                )
+
+    # --- 2. Injury persistence (if engine reports injuries) ---
+    injury_insert = sa_text("""
+        INSERT INTO player_injury_events
+            (player_id, injury_type_id, league_year_id, weeks_assigned,
+             weeks_remaining, malus_json)
+        VALUES
+            (:player_id, :injury_type_id, :league_year_id, :weeks_assigned,
+             :weeks_remaining, :malus_json)
+    """)
+
+    injury_state_upsert = sa_text("""
+        INSERT INTO player_injury_state
+            (player_id, status, current_event_id, weeks_remaining, last_updated_at)
+        VALUES
+            (:player_id, 'injured', :event_id, :weeks_remaining, NOW())
+        ON DUPLICATE KEY UPDATE
+            status           = 'injured',
+            current_event_id = :event_id,
+            weeks_remaining  = :weeks_remaining,
+            last_updated_at  = NOW()
+    """)
+
+    for result in results:
+        injuries = result.get("injuries") or []
+        for inj in injuries:
+            pid = inj.get("player_id")
+            if pid is None:
+                continue
+            pid = int(pid)
+
+            injury_type_id = int(inj.get("injury_type_id", 0))
+            duration_weeks = int(inj.get("duration_weeks", 1))
+            effects = inj.get("effects") or {}
+
+            try:
+                # Insert the injury event
+                ev_result = conn.execute(injury_insert, {
+                    "player_id": pid,
+                    "injury_type_id": injury_type_id,
+                    "league_year_id": league_year_id,
+                    "weeks_assigned": duration_weeks,
+                    "weeks_remaining": duration_weeks,
+                    "malus_json": json.dumps(effects),
+                })
+
+                # Get the auto-increment ID of the new event
+                event_id = ev_result.lastrowid
+
+                # Update the player's injury state
+                conn.execute(injury_state_upsert, {
+                    "player_id": pid,
+                    "event_id": event_id,
+                    "weeks_remaining": duration_weeks,
+                })
+
+                injuries_persisted += 1
+            except Exception:
+                logger.exception(
+                    "update_player_state: injury persistence failed for player %d",
+                    pid,
+                )
+
+    logger.info(
+        "update_player_state: %d stamina updates, %d injuries persisted",
+        stamina_updates, injuries_persisted,
+    )
+    return {"stamina_updates": stamina_updates, "injuries_persisted": injuries_persisted}
+
+
+# -------------------------------------------------------------------
 # Public: weekly batch processing
 # -------------------------------------------------------------------
 
@@ -1908,8 +2233,19 @@ def build_week_payloads(
                 )
 
                 # Store game results in database
-                # TODO: Implement result storage
-                # _store_game_results(conn, results)
+                try:
+                    result_count = _store_game_results(
+                        conn, results, payloads, games
+                    )
+                    conn.commit()
+                    logger.info(
+                        f"Stored {result_count} game results for subweek '{subweek}'"
+                    )
+                except Exception as res_err:
+                    logger.exception(
+                        f"Game result storage failed for subweek '{subweek}': "
+                        f"{res_err}"
+                    )
 
                 # Accumulate player stats from engine box scores
                 try:
@@ -1945,8 +2281,20 @@ def build_week_payloads(
                     )
 
                 # Update player state for next subweek
-                # TODO: Implement state updates
-                # _update_player_state_after_subweek(conn, results, league_year_id)
+                try:
+                    state_counts = _update_player_state_after_subweek(
+                        conn, results, league_year_id
+                    )
+                    conn.commit()
+                    logger.info(
+                        f"Player state updates for subweek '{subweek}': "
+                        f"{state_counts}"
+                    )
+                except Exception as state_err:
+                    logger.exception(
+                        f"Player state update failed for subweek '{subweek}': "
+                        f"{state_err}"
+                    )
 
             except ImportError:
                 # Game engine client not available - skip simulation

@@ -146,15 +146,16 @@ def simulate_week():
 
       {"league_year_id": 2026, "season_week": 1}
     """
-    if not request.json:
+    body = request.get_json(force=True, silent=True) or {}
+    if not body:
         return jsonify(
             error="invalid_request",
             message="Request body must be JSON"
         ), 400
 
-    league_year_id = request.json.get("league_year_id")
-    season_week = request.json.get("season_week")
-    league_level = request.json.get("league_level")
+    league_year_id = body.get("league_year_id")
+    season_week = body.get("season_week")
+    league_level = body.get("league_level")
 
     # Validate required fields
     if league_year_id is None:
@@ -345,6 +346,145 @@ def reset_week_endpoint():
             error="unexpected_error",
             message=str(e)
         ), 500
+
+
+@games_bp.post("/games/wipe-season")
+def wipe_season():
+    """
+    Wipe all simulation results, stats, and player state for a season.
+
+    Deletes game_results, player stats, fatigue, injuries, and position usage
+    for the given league_year_id. Optionally filter by league_level for
+    game_results only. Resets timestamp to week 1.
+
+    Does NOT delete the schedule (gamelist) — only simulation output.
+
+    Request body:
+    {
+        "league_year_id": 1,
+        "league_level": 9   // optional — filters game_results only
+    }
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    if not body:
+        return jsonify(error="invalid_request",
+                       message="Request body must be JSON"), 400
+
+    league_year_id = body.get("league_year_id")
+    league_level = body.get("league_level")
+
+    if league_year_id is None:
+        return jsonify(error="missing_field",
+                       message="league_year_id is required"), 400
+
+    try:
+        league_year_id = int(league_year_id)
+        if league_level is not None:
+            league_level = int(league_level)
+    except (TypeError, ValueError) as e:
+        return jsonify(error="invalid_type", message=str(e)), 400
+
+    engine = get_engine()
+
+    try:
+        from sqlalchemy import text as sa_text, MetaData, Table, select
+
+        with engine.begin() as conn:
+            deleted = {}
+
+            # Resolve season_id from league_year_id
+            md = MetaData()
+            league_years = Table("league_years", md, autoload_with=engine)
+            seasons = Table("seasons", md, autoload_with=engine)
+
+            ly_row = conn.execute(
+                select(league_years.c.league_year)
+                .where(league_years.c.id == league_year_id)
+            ).first()
+            if not ly_row:
+                return jsonify(error="not_found",
+                               message=f"league_year_id {league_year_id} not found"), 404
+
+            year = int(ly_row[0])
+            season_rows = conn.execute(
+                select(seasons.c.id).where(seasons.c.year == year)
+            ).all()
+            season_ids = [int(r[0]) for r in season_rows]
+
+            # 1. game_results (uses season FK, optionally filtered by level)
+            gr_sql = "DELETE FROM game_results WHERE season IN :season_ids"
+            params = {"season_ids": tuple(season_ids) if season_ids else (0,)}
+            if league_level is not None:
+                gr_sql += " AND league_level = :league_level"
+                params["league_level"] = league_level
+            r = conn.execute(sa_text(gr_sql), params)
+            deleted["game_results"] = r.rowcount
+
+            # 2-4. Player stat tables (keyed by league_year_id)
+            for tbl_name in ("player_batting_stats", "player_pitching_stats",
+                             "player_fielding_stats"):
+                r = conn.execute(sa_text(
+                    f"DELETE FROM {tbl_name} WHERE league_year_id = :lyid"
+                ), {"lyid": league_year_id})
+                deleted[tbl_name] = r.rowcount
+
+            # 5. Financial tables (keyed by league_year_id)
+            for tbl_name in ("org_ledger_entries", "org_media_shares"):
+                r = conn.execute(sa_text(
+                    f"DELETE FROM {tbl_name} WHERE league_year_id = :lyid"
+                ), {"lyid": league_year_id})
+                deleted[tbl_name] = r.rowcount
+
+            # 6. Position usage
+            r = conn.execute(sa_text(
+                "DELETE FROM player_position_usage_week WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["player_position_usage_week"] = r.rowcount
+
+            # 6. Injury events (FK SET NULL cascades to player_injury_state)
+            r = conn.execute(sa_text(
+                "DELETE FROM player_injury_events WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["player_injury_events"] = r.rowcount
+
+            # 7. Reset orphaned injury states to healthy
+            r = conn.execute(sa_text(
+                "UPDATE player_injury_state "
+                "SET status = 'healthy', weeks_remaining = 0 "
+                "WHERE current_event_id IS NULL AND status = 'injured'"
+            ))
+            deleted["injury_states_reset"] = r.rowcount
+
+            # 8. Fatigue state
+            r = conn.execute(sa_text(
+                "DELETE FROM player_fatigue_state WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["player_fatigue_state"] = r.rowcount
+
+            # 9. Reset timestamp
+            conn.execute(sa_text(
+                "UPDATE timestamp_state SET "
+                "week = 1, games_a_ran = 0, games_b_ran = 0, "
+                "games_c_ran = 0, games_d_ran = 0, run_games = 0 "
+                "WHERE id = 1"
+            ))
+
+        # Broadcast updated timestamp
+        from services.websocket_manager import ws_manager
+        ws_manager.broadcast_timestamp()
+
+        current_app.logger.info(
+            f"Wiped season data for league_year_id={league_year_id}: {deleted}"
+        )
+
+        return jsonify(ok=True, deleted=deleted, timestamp_reset=True), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("wipe_season: database error")
+        return jsonify(error="database_error", message=str(e)), 500
+    except Exception as e:
+        current_app.logger.exception("wipe_season: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
 
 
 @games_bp.get("/games/timestamp")
@@ -580,6 +720,169 @@ def _run_synthetic_task(task_id: str, count: int, league_level: int,
     except Exception as e:
         logger.exception(f"Task {task_id} failed")
         store.set_failed(task_id, str(e))
+
+
+def _run_season_task(task_id: str, league_year_id: int, league_level: int,
+                     start_week: int, end_week: int):
+    """
+    Background worker: simulate every week of a season in sequence.
+
+    Runs in a separate thread, updates task store progress per week.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    store = get_task_store()
+    store.set_running(task_id)
+
+    engine = get_engine()
+    total_games = 0
+    weeks_completed = 0
+
+    try:
+        for week in range(start_week, end_week + 1):
+            logger.info(
+                f"run_season task {task_id}: simulating week {week} "
+                f"(league_year={league_year_id}, level={league_level})"
+            )
+
+            # Update timestamp to current week and mark running
+            update_timestamp({"week": week, "run_games": True}, broadcast=True)
+
+            # Fresh connection per week to avoid long-held transactions
+            with engine.connect() as conn:
+                result = build_week_payloads(
+                    conn=conn,
+                    league_year_id=league_year_id,
+                    season_week=week,
+                    league_level=league_level,
+                    simulate=True,
+                )
+
+            week_games = result.get("total_games", 0)
+            total_games += week_games
+
+            # Mark subweeks completed
+            subweeks = result.get("subweeks", {})
+            for sw_key in ["a", "b", "c", "d"]:
+                if subweeks.get(sw_key):
+                    set_subweek_completed(sw_key, broadcast=False)
+
+            set_run_games(False, broadcast=False)
+
+            # Advance to next week
+            advance_week(broadcast=True)
+
+            weeks_completed += 1
+            store.set_progress(task_id, weeks_completed)
+
+            logger.info(
+                f"run_season task {task_id}: week {week} done — "
+                f"{week_games} games, {weeks_completed}/{end_week - start_week + 1} weeks"
+            )
+
+        summary = {
+            "league_year_id": league_year_id,
+            "league_level": league_level,
+            "weeks_completed": weeks_completed,
+            "total_games": total_games,
+            "start_week": start_week,
+            "end_week": end_week,
+        }
+        store.set_complete(task_id, summary)
+        logger.info(f"run_season task {task_id} completed: {summary}")
+
+    except Exception as e:
+        # Reset run_games flag on failure
+        try:
+            set_run_games(False, broadcast=True)
+        except Exception:
+            pass
+        logger.exception(
+            f"run_season task {task_id} failed at week "
+            f"{start_week + weeks_completed}"
+        )
+        store.set_failed(task_id, str(e))
+
+
+@games_bp.post("/games/run-season")
+def run_season():
+    """
+    Start a background task to simulate an entire season.
+
+    Processes every week from start_week to end_week sequentially,
+    advancing the timestamp after each week.
+
+    Request body:
+    {
+        "league_year_id": 1,
+        "league_level": 9,
+        "start_week": 1,    // optional, default 1
+        "end_week": 52       // optional, default 52
+    }
+
+    Response (immediate):
+    {
+        "task_id": "abc12345",
+        "status": "pending",
+        "total": 52,
+        "poll_url": "/api/v1/games/tasks/abc12345"
+    }
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    if not body:
+        return jsonify(error="invalid_request",
+                       message="Request body must be JSON"), 400
+
+    league_year_id = body.get("league_year_id")
+    league_level = body.get("league_level")
+    start_week = body.get("start_week", 1)
+    end_week = body.get("end_week", 52)
+
+    if league_year_id is None or league_level is None:
+        return jsonify(error="missing_field",
+                       message="league_year_id and league_level are required"), 400
+
+    try:
+        league_year_id = int(league_year_id)
+        league_level = int(league_level)
+        start_week = int(start_week)
+        end_week = int(end_week)
+    except (TypeError, ValueError) as e:
+        return jsonify(error="invalid_type", message=str(e)), 400
+
+    if start_week < 1 or end_week < start_week:
+        return jsonify(error="invalid_range",
+                       message="start_week must be >= 1 and end_week >= start_week"), 400
+
+    total_weeks = end_week - start_week + 1
+
+    store = get_task_store()
+    task_id = store.create_task("run_season", total=total_weeks, metadata={
+        "league_year_id": league_year_id,
+        "league_level": league_level,
+        "start_week": start_week,
+        "end_week": end_week,
+    })
+
+    t = threading.Thread(
+        target=_run_season_task,
+        args=(task_id, league_year_id, league_level, start_week, end_week),
+        daemon=True,
+    )
+    t.start()
+
+    current_app.logger.info(
+        f"Started run_season task {task_id}: weeks {start_week}-{end_week}, "
+        f"level={league_level}, league_year={league_year_id}"
+    )
+
+    return jsonify(
+        task_id=task_id,
+        status="pending",
+        total=total_weeks,
+        poll_url=f"/api/v1/games/tasks/{task_id}",
+    ), 202
 
 
 @games_bp.route("/games/debug/synthetic-async", methods=["GET", "POST"])

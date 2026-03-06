@@ -106,6 +106,8 @@
     // Simulate Week
     document.getElementById('btn-sim-preview').addEventListener('click', () => runSimulation(false));
     document.getElementById('btn-sim-run').addEventListener('click', () => runSimulation(true));
+    document.getElementById('btn-run-season').addEventListener('click', runSeason);
+    document.getElementById('btn-wipe-season').addEventListener('click', wipeSeason);
 
     // Timestamp
     document.getElementById('btn-refresh-timestamp').addEventListener('click', loadTimestamp);
@@ -657,25 +659,33 @@
     const week = document.getElementById('sim-week').value;
     const level = document.getElementById('sim-level').value;
 
-    let url = `${API_BASE}/games/simulate-week?league_year_id=${year}&season_week=${week}`;
-    if (level) url += `&level=${level}`;
-
     const resultBox = document.getElementById('sim-result');
     resultBox.textContent = 'Loading...';
 
-    const options = execute ? {
-      method: 'POST',
-      credentials: 'include',
-    } : { credentials: 'include' };
+    if (execute) {
+      // POST — send JSON body
+      const body = { league_year_id: parseInt(year), season_week: parseInt(week) };
+      if (level) body.league_level = parseInt(level);
 
-    fetch(url, options)
-      .then(r => r.json())
-      .then(data => {
-        resultBox.textContent = JSON.stringify(data, null, 2);
+      fetch(`${API_BASE}/games/simulate-week`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
       })
-      .catch(err => {
-        resultBox.textContent = 'Error: ' + err.message;
-      });
+        .then(r => r.json())
+        .then(data => { resultBox.textContent = JSON.stringify(data, null, 2); })
+        .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+    } else {
+      // GET — path params
+      let url = `${API_BASE}/games/simulate-week/${year}/${week}`;
+      if (level) url += `?league_level=${level}`;
+
+      fetch(url, { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => { resultBox.textContent = JSON.stringify(data, null, 2); })
+        .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+    }
   }
 
   // Timestamp
@@ -702,7 +712,7 @@
     const resultBox = document.getElementById('timestamp-result');
     resultBox.textContent = 'Advancing week...';
 
-    fetch(`${API_BASE}/games/timestamp/advance`, {
+    fetch(`${API_BASE}/games/advance-week`, {
       method: 'POST',
       credentials: 'include',
     })
@@ -720,13 +730,126 @@
     const resultBox = document.getElementById('timestamp-result');
     resultBox.textContent = 'Resetting week games...';
 
-    fetch(`${API_BASE}/games/timestamp/reset-week`, {
+    fetch(`${API_BASE}/games/reset-week`, {
       method: 'POST',
       credentials: 'include',
     })
       .then(r => r.json())
       .then(data => {
         resultBox.textContent = JSON.stringify(data, null, 2);
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // Run Season (background task with polling)
+  let _seasonPollId = null;
+
+  function runSeason() {
+    const year = document.getElementById('season-run-year').value;
+    const level = document.getElementById('season-run-level').value;
+    const startWeek = document.getElementById('season-run-start').value;
+    const endWeek = document.getElementById('season-run-end').value;
+    const resultBox = document.getElementById('season-run-result');
+    const progressWrap = document.getElementById('season-progress-wrap');
+    const progressBar = document.getElementById('season-progress-bar');
+    const progressText = document.getElementById('season-progress-text');
+
+    if (!confirm(`Run season weeks ${startWeek}–${endWeek} for level ${level}? This may take a while.`)) return;
+
+    resultBox.textContent = 'Starting...';
+    progressWrap.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressText.textContent = '0 / 0';
+
+    fetch(`${API_BASE}/games/run-season`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_year_id: parseInt(year),
+        league_level: parseInt(level),
+        start_week: parseInt(startWeek),
+        end_week: parseInt(endWeek),
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = 'Error: ' + (data.message || data.error);
+          progressWrap.style.display = 'none';
+          return;
+        }
+        const taskId = data.task_id;
+        const total = data.total;
+        resultBox.textContent = `Task started: ${taskId} (${total} weeks)`;
+        progressText.textContent = `0 / ${total}`;
+
+        // Poll for progress
+        if (_seasonPollId) clearInterval(_seasonPollId);
+        _seasonPollId = setInterval(() => {
+          fetch(`${API_BASE}/games/tasks/${taskId}`, { credentials: 'include' })
+            .then(r => r.json())
+            .then(task => {
+              const progress = task.progress || 0;
+              const pct = total > 0 ? Math.round((progress / total) * 100) : 0;
+              progressBar.style.width = pct + '%';
+              progressText.textContent = `${progress} / ${total} weeks`;
+
+              if (task.status === 'complete' || task.status === 'COMPLETE') {
+                clearInterval(_seasonPollId);
+                _seasonPollId = null;
+                progressBar.style.width = '100%';
+                progressText.textContent = `${total} / ${total} weeks`;
+                resultBox.textContent = JSON.stringify(task, null, 2);
+                loadTimestamp();
+              } else if (task.status === 'failed' || task.status === 'FAILED') {
+                clearInterval(_seasonPollId);
+                _seasonPollId = null;
+                resultBox.textContent = 'FAILED: ' + (task.error || 'Unknown error');
+                loadTimestamp();
+              }
+            })
+            .catch(() => {});
+        }, 3000);
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+        progressWrap.style.display = 'none';
+      });
+  }
+
+  // Wipe Season
+  function wipeSeason() {
+    const year = document.getElementById('wipe-year').value;
+    const level = document.getElementById('wipe-level').value;
+    const resultBox = document.getElementById('wipe-result');
+
+    const confirmation = prompt(
+      'This will delete ALL simulation results, stats, fatigue, and injuries ' +
+      'for this season. Type WIPE to confirm.'
+    );
+    if (confirmation !== 'WIPE') {
+      resultBox.textContent = 'Wipe cancelled.';
+      return;
+    }
+
+    resultBox.textContent = 'Wiping...';
+
+    const body = { league_year_id: parseInt(year) };
+    if (level) body.league_level = parseInt(level);
+
+    fetch(`${API_BASE}/games/wipe-season`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        loadTimestamp();
       })
       .catch(err => {
         resultBox.textContent = 'Error: ' + err.message;
