@@ -657,27 +657,38 @@ def _upgrade_intraleague_series(
     Upgrade intraleague 3-game series to 4-game so each team gets exactly
     4 four-game intraleague series (total 64 games from intraleague).
 
-    Modifies series in-place.
+    Modifies series in-place. Retries with different shuffles if the greedy
+    pass doesn't achieve exact counts (can happen when all remaining
+    candidates pair a short team with already-maxed partners).
     """
-    # Collect indices of intraleague series
     intra_indices = [i for i, s in enumerate(all_series) if s["category"] == "intraleague"]
+    target = 4
 
-    # Count how many 4-game intraleague series each team already has
-    team_4game = {}
-    for t in teams_data["all"]:
-        team_4game[t["id"]] = 0
+    for attempt in range(200):
+        # Reset all intraleague to 3-game
+        for idx in intra_indices:
+            all_series[idx]["length"] = 3
 
-    # Shuffle and greedily upgrade
-    rng.shuffle(intra_indices)
-    for idx in intra_indices:
-        s = all_series[idx]
-        if s["length"] == 4:
-            continue
-        a, b = s["team_a"], s["team_b"]
-        if team_4game.get(a, 0) < 4 and team_4game.get(b, 0) < 4:
-            s["length"] = 4
-            team_4game[a] = team_4game.get(a, 0) + 1
-            team_4game[b] = team_4game.get(b, 0) + 1
+        team_4game = {}
+        for t in teams_data["all"]:
+            team_4game[t["id"]] = 0
+
+        rng.shuffle(intra_indices)
+        for idx in intra_indices:
+            s = all_series[idx]
+            a, b = s["team_a"], s["team_b"]
+            if team_4game[a] < target and team_4game[b] < target:
+                s["length"] = 4
+                team_4game[a] += 1
+                team_4game[b] += 1
+
+        if all(v == target for v in team_4game.values()):
+            return
+
+    raise RuntimeError(
+        "Failed to assign exactly %d four-game intraleague series per team"
+        % target
+    )
 
 
 def _upgrade_interleague_series(
@@ -687,24 +698,36 @@ def _upgrade_interleague_series(
     Upgrade interleague 3-game series to 4-game so each team gets exactly
     2 four-game interleague series (total 44 games from interleague).
 
-    Modifies series in-place.
+    Modifies series in-place. Retries with different shuffles if needed.
     """
     inter_indices = [i for i, s in enumerate(all_series) if s["category"] == "interleague"]
+    target = 2
 
-    team_4game = {}
-    for t in teams_data["all"]:
-        team_4game[t["id"]] = 0
+    for attempt in range(200):
+        # Reset all interleague to 3-game
+        for idx in inter_indices:
+            all_series[idx]["length"] = 3
 
-    rng.shuffle(inter_indices)
-    for idx in inter_indices:
-        s = all_series[idx]
-        if s["length"] == 4:
-            continue
-        a, b = s["team_a"], s["team_b"]
-        if team_4game.get(a, 0) < 2 and team_4game.get(b, 0) < 2:
-            s["length"] = 4
-            team_4game[a] = team_4game.get(a, 0) + 1
-            team_4game[b] = team_4game.get(b, 0) + 1
+        team_4game = {}
+        for t in teams_data["all"]:
+            team_4game[t["id"]] = 0
+
+        rng.shuffle(inter_indices)
+        for idx in inter_indices:
+            s = all_series[idx]
+            a, b = s["team_a"], s["team_b"]
+            if team_4game[a] < target and team_4game[b] < target:
+                s["length"] = 4
+                team_4game[a] += 1
+                team_4game[b] += 1
+
+        if all(v == target for v in team_4game.values()):
+            return
+
+    raise RuntimeError(
+        "Failed to assign exactly %d four-game interleague series per team"
+        % target
+    )
 
 
 def _validate_mlb_pool(all_series: List[Dict], teams_data: Dict):
