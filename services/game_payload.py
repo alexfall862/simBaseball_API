@@ -1837,8 +1837,23 @@ def _store_game_results(
         home_score = int(game_result_data.get("home_score", 0))
         away_score = int(game_result_data.get("away_score", 0))
 
+        # Also check top-level score fields as fallback
+        if home_score == 0 and away_score == 0:
+            home_score = int(result.get("home_score", 0))
+            away_score = int(result.get("away_score", 0))
+
+        if home_score == 0 and away_score == 0:
+            logger.warning(
+                "store_game_results: game_id=%s has 0-0 scores. "
+                "result keys=%s, result['result'] keys=%s",
+                game_id, list(result.keys()),
+                list(game_result_data.keys()) if game_result_data else "empty"
+            )
+
         # Determine outcome from scores (most reliable) with engine hint as fallback
         winner = str(game_result_data.get("winning_team", "")).lower()
+        if not winner:
+            winner = str(result.get("winning_team", "")).lower()
         if home_score > away_score or winner == "home":
             game_outcome = "HOME_WIN"
             winning_team_id = home_team_id
@@ -1868,8 +1883,9 @@ def _store_game_results(
         )
 
         # Serialize boxscore and play-by-play from engine result
-        boxscore_raw = result.get("boxscore")
-        pbp_raw = result.get("play_by_play")
+        # Check both top-level and nested result dict
+        boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
+        pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
         boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
         pbp_str = json.dumps(pbp_raw) if pbp_raw else None
 

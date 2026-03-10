@@ -723,10 +723,10 @@ def injury_report():
     params = {}
 
     if org_id:
-        where_parts.append("t.orgID = :oid")
+        where_parts.append("cts.orgID = :oid")
         params["oid"] = org_id
     if team_id:
-        where_parts.append("c.team_id = :tid")
+        where_parts.append("t.id = :tid")
         params["tid"] = team_id
     if league_year_id:
         where_parts.append("pie.league_year_id = :lyid")
@@ -742,14 +742,19 @@ def injury_report():
                        p.firstName, p.lastName,
                        it.name AS injury_name, it.code AS injury_code,
                        pie.weeks_assigned, pie.league_year_id,
-                       c.team_id, t.team_abbrev AS team_abbrev, t.orgID AS org_id
+                       t.id AS team_id, t.team_abbrev AS team_abbrev, t.orgID AS org_id
                 FROM player_injury_state pis
                 JOIN simbbPlayers p ON p.id = pis.player_id
                 JOIN player_injury_events pie ON pie.id = pis.current_event_id
                 JOIN injury_types it ON it.id = pie.injury_type_id
-                LEFT JOIN contracts c ON c.player_id = pis.player_id
-                    AND c.status = 'active'
-                LEFT JOIN teams t ON t.id = c.team_id
+                LEFT JOIN contracts c ON c.playerID = pis.player_id
+                    AND c.isActive = 1
+                LEFT JOIN contractDetails cd ON cd.contractID = c.id
+                    AND cd.year = c.current_year
+                LEFT JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+                    AND cts.isHolder = 1
+                LEFT JOIN teams t ON t.orgID = cts.orgID
+                    AND t.team_level = c.current_level
                 {where_sql}
                 ORDER BY pis.weeks_remaining DESC
             """), params).mappings().all()
@@ -796,7 +801,7 @@ def injury_history():
         where_parts.append("pie.player_id = :pid")
         params["pid"] = player_id
     if org_id:
-        where_parts.append("t.orgID = :oid")
+        where_parts.append("cts.orgID = :oid")
         params["oid"] = org_id
 
     where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
@@ -810,13 +815,18 @@ def injury_history():
                        pie.created_at,
                        p.firstName, p.lastName,
                        it.name AS injury_name, it.code AS injury_code,
-                       c.team_id, t.team_abbrev AS team_abbrev
+                       t.id AS team_id, t.team_abbrev AS team_abbrev
                 FROM player_injury_events pie
                 JOIN simbbPlayers p ON p.id = pie.player_id
                 LEFT JOIN injury_types it ON it.id = pie.injury_type_id
-                LEFT JOIN contracts c ON c.player_id = pie.player_id
-                    AND c.status = 'active'
-                LEFT JOIN teams t ON t.id = c.team_id
+                LEFT JOIN contracts c ON c.playerID = pie.player_id
+                    AND c.isActive = 1
+                LEFT JOIN contractDetails cd ON cd.contractID = c.id
+                    AND cd.year = c.current_year
+                LEFT JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+                    AND cts.isHolder = 1
+                LEFT JOIN teams t ON t.orgID = cts.orgID
+                    AND t.team_level = c.current_level
                 {where_sql}
                 ORDER BY pie.created_at DESC
             """), params).mappings().all()

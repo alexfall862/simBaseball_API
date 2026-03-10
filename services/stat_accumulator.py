@@ -37,10 +37,17 @@ def accumulate_game_stats(
         Dict with counts: {"batters": N, "pitchers": N, "fielders": N}
     """
     stats = game_result.get("stats")
+    # Also check nested result dict for stats
+    if not stats:
+        nested = game_result.get("result") or {}
+        stats = nested.get("stats")
     if not stats:
         return {"batters": 0, "pitchers": 0, "fielders": 0}
 
     game_id = game_result.get("game_id")
+    if game_id is None:
+        logger.warning("accumulate_game_stats: no game_id in result, keys=%s",
+                        list(game_result.keys()))
     batters = stats.get("batters") or {}
     pitchers = stats.get("pitchers") or {}
     fielders = stats.get("fielders") or {}
