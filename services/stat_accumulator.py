@@ -58,8 +58,17 @@ def accumulate_game_stats(
 
     # Per-game lines for box score reconstruction
     if game_id is not None:
-        _insert_game_batting_lines(conn, int(game_id), batters, league_year_id)
-        _insert_game_pitching_lines(conn, int(game_id), pitchers, league_year_id)
+        gbl_count = _insert_game_batting_lines(conn, int(game_id), batters, league_year_id)
+        gpl_count = _insert_game_pitching_lines(conn, int(game_id), pitchers, league_year_id)
+        logger.info(
+            "stat_accumulator: game %s per-game lines — %d batting, %d pitching",
+            game_id, gbl_count, gpl_count,
+        )
+    else:
+        logger.warning(
+            "stat_accumulator: game_id is None, skipping per-game lines. "
+            "Result keys: %s", list(game_result.keys()),
+        )
 
     return {"batters": b_count, "pitchers": p_count, "fielders": f_count}
 
