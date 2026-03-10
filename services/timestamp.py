@@ -272,6 +272,13 @@ def advance_week(broadcast: bool = True) -> bool:
 
             logger.info(f"Advanced from week {current_week} to week {new_week}")
 
+            # Decrement injury weeks and clean up healed players
+            try:
+                healed = _tick_injuries(engine)
+                logger.info(f"Injury tick for week {current_week}: {healed} players healed")
+            except Exception as e:
+                logger.exception(f"Injury tick failed for week {current_week}, continuing")
+
             # Run financial books for the completed week
             try:
                 from financials.books import run_week_books
@@ -311,3 +318,48 @@ def reset_week_games(broadcast: bool = True) -> bool:
         },
         broadcast=broadcast
     )
+
+
+def _tick_injuries(engine) -> int:
+    """
+    Decrement weeks_remaining on all injured players by 1.
+    Players who reach 0 are healed: their player_injury_state row is deleted
+    (historical data lives in player_injury_events).
+
+    Also decrements weeks_remaining on the corresponding player_injury_events row.
+
+    Returns:
+        Number of players healed this tick.
+    """
+    from sqlalchemy import text as sa_text
+
+    with engine.begin() as conn:
+        # Decrement weeks on injury events that are still active
+        conn.execute(sa_text("""
+            UPDATE player_injury_events pie
+            JOIN player_injury_state pis ON pis.current_event_id = pie.id
+            SET pie.weeks_remaining = GREATEST(pie.weeks_remaining - 1, 0)
+            WHERE pis.status = 'injured' AND pie.weeks_remaining > 0
+        """))
+
+        # Decrement weeks on injury state
+        conn.execute(sa_text("""
+            UPDATE player_injury_state
+            SET weeks_remaining = GREATEST(weeks_remaining - 1, 0)
+            WHERE status = 'injured' AND weeks_remaining > 0
+        """))
+
+        # Delete healed players (weeks_remaining hit 0)
+        result = conn.execute(sa_text("""
+            DELETE FROM player_injury_state
+            WHERE status = 'injured' AND weeks_remaining <= 0
+        """))
+        healed = result.rowcount
+
+        # Also clean up any stale healthy rows (shouldn't exist, but belt-and-suspenders)
+        conn.execute(sa_text("""
+            DELETE FROM player_injury_state
+            WHERE status = 'healthy'
+        """))
+
+    return healed

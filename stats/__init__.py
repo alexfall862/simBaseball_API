@@ -82,7 +82,7 @@ def batting_leaderboard():
                        bs.home_runs, bs.rbi, bs.walks, bs.strikeouts,
                        bs.stolen_bases, bs.caught_stealing,
                        p.firstName, p.lastName,
-                       tm.abbreviation AS team_abbrev,
+                       tm.team_abbrev AS team_abbrev,
                        IF(bs.at_bats > 0, ROUND(bs.hits / bs.at_bats, 3), 0) AS avg,
                        IF(bs.at_bats + bs.walks > 0,
                           ROUND((bs.hits + bs.walks) / (bs.at_bats + bs.walks), 3), 0) AS obp,
@@ -193,7 +193,7 @@ def pitching_leaderboard():
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
                        p.firstName, p.lastName,
-                       tm.abbreviation AS team_abbrev,
+                       tm.team_abbrev AS team_abbrev,
                        IF(ps.innings_pitched_outs > 0,
                           ROUND(ps.earned_runs * 27.0 / ps.innings_pitched_outs, 2), 0) AS era,
                        IF(ps.innings_pitched_outs > 0,
@@ -296,7 +296,7 @@ def fielding_leaderboard():
                 SELECT fs.player_id, fs.team_id, fs.position_code,
                        fs.games, fs.innings, fs.putouts, fs.assists, fs.errors,
                        p.firstName, p.lastName,
-                       tm.abbreviation AS team_abbrev,
+                       tm.team_abbrev AS team_abbrev,
                        IF(fs.putouts + fs.assists + fs.errors > 0,
                           ROUND((fs.putouts + fs.assists)
                                 / (fs.putouts + fs.assists + fs.errors), 3), 0) AS fpct
@@ -360,7 +360,7 @@ def team_stats():
 
         with engine.connect() as conn:
             bat_rows = conn.execute(sa_text(f"""
-                SELECT bs.team_id, tm.abbreviation AS team_abbrev,
+                SELECT bs.team_id, tm.team_abbrev AS team_abbrev,
                        SUM(bs.games) AS g, SUM(bs.at_bats) AS ab,
                        SUM(bs.runs) AS r, SUM(bs.hits) AS h,
                        SUM(bs.doubles_hit) AS `2b`, SUM(bs.triples) AS `3b`,
@@ -372,12 +372,12 @@ def team_stats():
                 FROM player_batting_stats bs
                 JOIN teams tm ON tm.id = bs.team_id
                 WHERE bs.league_year_id = :lyid {level_filter}
-                GROUP BY bs.team_id, tm.abbreviation
+                GROUP BY bs.team_id, tm.team_abbrev
                 ORDER BY avg DESC
             """), params).mappings().all()
 
             pit_rows = conn.execute(sa_text(f"""
-                SELECT ps.team_id, tm.abbreviation AS team_abbrev,
+                SELECT ps.team_id, tm.team_abbrev AS team_abbrev,
                        SUM(ps.innings_pitched_outs) AS ipo,
                        SUM(ps.earned_runs) AS er,
                        SUM(ps.walks) AS bb, SUM(ps.strikeouts) AS so,
@@ -391,7 +391,7 @@ def team_stats():
                 FROM player_pitching_stats ps
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE ps.league_year_id = :lyid {level_filter}
-                GROUP BY ps.team_id, tm.abbreviation
+                GROUP BY ps.team_id, tm.team_abbrev
                 ORDER BY era ASC
             """), params).mappings().all()
 
@@ -465,7 +465,7 @@ def player_stats(player_id: int):
                        bs.runs, bs.hits, bs.doubles_hit, bs.triples,
                        bs.home_runs, bs.rbi, bs.walks, bs.strikeouts,
                        bs.stolen_bases, bs.caught_stealing,
-                       tm.abbreviation AS team_abbrev
+                       tm.team_abbrev AS team_abbrev
                 FROM player_batting_stats bs
                 JOIN teams tm ON tm.id = bs.team_id
                 WHERE {bat_where}
@@ -485,7 +485,7 @@ def player_stats(player_id: int):
                        ps.innings_pitched_outs, ps.hits_allowed,
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
-                       tm.abbreviation AS team_abbrev
+                       tm.team_abbrev AS team_abbrev
                 FROM player_pitching_stats ps
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE {pit_where}
@@ -502,12 +502,43 @@ def player_stats(player_id: int):
             fielding = conn.execute(sa_text(f"""
                 SELECT fs.league_year_id, fs.team_id, fs.position_code,
                        fs.games, fs.innings, fs.putouts, fs.assists, fs.errors,
-                       tm.abbreviation AS team_abbrev
+                       tm.team_abbrev AS team_abbrev
                 FROM player_fielding_stats fs
                 JOIN teams tm ON tm.id = fs.team_id
                 WHERE {fld_where}
                 ORDER BY fs.league_year_id
             """), fld_params).mappings().all()
+
+            # Current injury status
+            current_injury = conn.execute(sa_text("""
+                SELECT pis.weeks_remaining,
+                       it.name AS injury_name, it.code AS injury_code,
+                       pie.weeks_assigned
+                FROM player_injury_state pis
+                JOIN player_injury_events pie ON pie.id = pis.current_event_id
+                JOIN injury_types it ON it.id = pie.injury_type_id
+                WHERE pis.player_id = :pid
+                  AND pis.status = 'injured'
+                  AND pis.weeks_remaining > 0
+            """), {"pid": player_id}).mappings().first()
+
+            # Injury history
+            inj_where = "pie.player_id = :pid"
+            inj_params = {"pid": player_id}
+            if league_year_id:
+                inj_where += " AND pie.league_year_id = :lyid"
+                inj_params["lyid"] = league_year_id
+
+            injury_history = conn.execute(sa_text(f"""
+                SELECT pie.id AS event_id, pie.league_year_id,
+                       pie.weeks_assigned, pie.weeks_remaining,
+                       pie.created_at,
+                       it.name AS injury_name, it.code AS injury_code
+                FROM player_injury_events pie
+                JOIN injury_types it ON it.id = pie.injury_type_id
+                WHERE {inj_where}
+                ORDER BY pie.created_at DESC
+            """), inj_params).mappings().all()
 
             # Game log (optional)
             gamelog_bat = []
@@ -526,8 +557,8 @@ def player_stats(player_id: int):
                            gbl.stolen_bases, gbl.caught_stealing,
                            gr.season_week, gr.season_subweek,
                            CASE WHEN gr.home_team_id = gbl.team_id
-                                THEN at2.abbreviation
-                                ELSE CONCAT('@', ht.abbreviation)
+                                THEN at2.team_abbrev
+                                ELSE CONCAT('@', ht.team_abbrev)
                            END AS opponent
                     FROM game_batting_lines gbl
                     JOIN game_results gr ON gr.game_id = gbl.game_id
@@ -551,8 +582,8 @@ def player_stats(player_id: int):
                            gpl.walks, gpl.strikeouts, gpl.home_runs_allowed,
                            gr.season_week, gr.season_subweek,
                            CASE WHEN gr.home_team_id = gpl.team_id
-                                THEN at2.abbreviation
-                                ELSE CONCAT('@', ht.abbreviation)
+                                THEN at2.team_abbrev
+                                ELSE CONCAT('@', ht.team_abbrev)
                            END AS opponent
                     FROM game_pitching_lines gpl
                     JOIN game_results gr ON gr.game_id = gpl.game_id
@@ -600,6 +631,21 @@ def player_stats(player_id: int):
         result = {
             "player_id": player_id,
             "name": f"{player['firstName']} {player['lastName']}",
+            "current_injury": {
+                "injury_name": current_injury["injury_name"],
+                "injury_code": current_injury["injury_code"],
+                "weeks_remaining": int(current_injury["weeks_remaining"]),
+                "weeks_assigned": int(current_injury["weeks_assigned"]),
+            } if current_injury else None,
+            "injury_history": [{
+                "event_id": int(r["event_id"]),
+                "league_year_id": int(r["league_year_id"]),
+                "injury_name": r["injury_name"],
+                "injury_code": r["injury_code"],
+                "weeks_assigned": int(r["weeks_assigned"]) if r["weeks_assigned"] else 0,
+                "weeks_remaining": int(r["weeks_remaining"]) if r["weeks_remaining"] else 0,
+                "created_at": str(r["created_at"]) if r["created_at"] else None,
+            } for r in injury_history],
             "batting": [_bat_season(r) for r in batting],
             "pitching": [_pit_season(r) for r in pitching],
             "fielding": [{
@@ -653,25 +699,20 @@ def player_stats(player_id: int):
 @stats_bp.get("/injuries")
 def injury_report():
     """
-    League-wide injury report.
+    League-wide injury report. Only returns currently injured players.
+    Healed players are automatically removed from player_injury_state
+    on advance_week; historical data lives in player_injury_events.
 
-    Query params: league_year_id, org_id, team_id, status (injured/healthy/all)
+    Query params: league_year_id, org_id, team_id
     """
     from sqlalchemy import text as sa_text
 
     league_year_id = request.args.get("league_year_id", type=int)
     org_id = request.args.get("org_id", type=int)
     team_id = request.args.get("team_id", type=int)
-    status_filter = request.args.get("status", "injured")
 
-    where_parts = []
+    where_parts = ["pis.status = 'injured'", "pis.weeks_remaining > 0"]
     params = {}
-
-    if status_filter == "injured":
-        where_parts.append("pis.status = 'injured'")
-    elif status_filter == "healthy":
-        where_parts.append("pis.status = 'healthy'")
-    # "all" = no filter on status
 
     if org_id:
         where_parts.append("t.orgID = :oid")
@@ -683,21 +724,21 @@ def injury_report():
         where_parts.append("pie.league_year_id = :lyid")
         params["lyid"] = league_year_id
 
-    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    where_sql = " WHERE " + " AND ".join(where_parts)
 
     engine = get_engine()
     try:
         with engine.connect() as conn:
             rows = conn.execute(sa_text(f"""
-                SELECT pis.player_id, pis.status, pis.weeks_remaining,
+                SELECT pis.player_id, pis.weeks_remaining,
                        p.firstName, p.lastName,
                        it.name AS injury_name, it.code AS injury_code,
                        pie.weeks_assigned, pie.league_year_id,
-                       c.team_id, t.abbreviation AS team_abbrev, t.orgID AS org_id
+                       c.team_id, t.team_abbrev AS team_abbrev, t.orgID AS org_id
                 FROM player_injury_state pis
                 JOIN simbbPlayers p ON p.id = pis.player_id
-                LEFT JOIN player_injury_events pie ON pie.id = pis.current_event_id
-                LEFT JOIN injury_types it ON it.id = pie.injury_type_id
+                JOIN player_injury_events pie ON pie.id = pis.current_event_id
+                JOIN injury_types it ON it.id = pie.injury_type_id
                 LEFT JOIN contracts c ON c.player_id = pis.player_id
                     AND c.status = 'active'
                 LEFT JOIN teams t ON t.id = c.team_id
@@ -713,9 +754,8 @@ def injury_report():
             "org_id": int(r["org_id"]) if r["org_id"] else None,
             "injury_name": r["injury_name"],
             "injury_code": r["injury_code"],
-            "weeks_remaining": int(r["weeks_remaining"]) if r["weeks_remaining"] else 0,
+            "weeks_remaining": int(r["weeks_remaining"]),
             "weeks_assigned": int(r["weeks_assigned"]) if r["weeks_assigned"] else 0,
-            "status": r["status"],
         } for r in rows]
 
         return jsonify(injuries=injuries, total=len(injuries)), 200
@@ -761,7 +801,7 @@ def injury_history():
                        pie.created_at,
                        p.firstName, p.lastName,
                        it.name AS injury_name, it.code AS injury_code,
-                       c.team_id, t.abbreviation AS team_abbrev
+                       c.team_id, t.team_abbrev AS team_abbrev
                 FROM player_injury_events pie
                 JOIN simbbPlayers p ON p.id = pie.player_id
                 LEFT JOIN injury_types it ON it.id = pie.injury_type_id
@@ -837,13 +877,13 @@ def position_usage():
                        SUM(CASE WHEN pu.vs_hand = 'L' THEN pu.starts_this_week ELSE 0 END) AS vs_l,
                        SUM(CASE WHEN pu.vs_hand = 'R' THEN pu.starts_this_week ELSE 0 END) AS vs_r,
                        p.firstName, p.lastName,
-                       tm.abbreviation AS team_abbrev
+                       tm.team_abbrev AS team_abbrev
                 FROM player_position_usage_week pu
                 JOIN simbbPlayers p ON p.id = pu.player_id
                 JOIN teams tm ON tm.id = pu.team_id
                 WHERE {where_sql}
                 GROUP BY pu.player_id, pu.team_id, pu.position_code,
-                         p.firstName, p.lastName, tm.abbreviation
+                         p.firstName, p.lastName, tm.team_abbrev
                 ORDER BY total_starts DESC
             """), params).mappings().all()
 

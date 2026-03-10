@@ -1837,13 +1837,13 @@ def _store_game_results(
         home_score = int(game_result_data.get("home_score", 0))
         away_score = int(game_result_data.get("away_score", 0))
 
-        # Determine outcome — engine uses "winning_team" not "winner"
+        # Determine outcome from scores (most reliable) with engine hint as fallback
         winner = str(game_result_data.get("winning_team", "")).lower()
-        if winner == "home":
+        if home_score > away_score or winner == "home":
             game_outcome = "HOME_WIN"
             winning_team_id = home_team_id
             losing_team_id = away_team_id
-        elif winner == "away":
+        elif away_score > home_score or winner == "away":
             game_outcome = "AWAY_WIN"
             winning_team_id = away_team_id
             losing_team_id = home_team_id

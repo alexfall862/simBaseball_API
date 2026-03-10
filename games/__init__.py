@@ -649,7 +649,7 @@ def get_game_boxscore(game_id: int):
                        gr.home_score, gr.away_score, gr.game_outcome,
                        gr.boxscore_json, gr.completed_at, gr.season_week,
                        gr.season_subweek, gr.league_level,
-                       ht.abbreviation AS home_abbrev, at2.abbreviation AS away_abbrev
+                       ht.team_abbrev AS home_abbrev, at2.team_abbrev AS away_abbrev
                 FROM game_results gr
                 JOIN teams ht ON ht.id = gr.home_team_id
                 JOIN teams at2 ON at2.id = gr.away_team_id
@@ -834,8 +834,8 @@ def get_game_results_list():
                        gr.home_score, gr.away_score, gr.game_outcome,
                        gr.season_week, gr.season_subweek, gr.league_level,
                        gr.completed_at,
-                       ht.abbreviation AS home_abbrev,
-                       at2.abbreviation AS away_abbrev
+                       ht.team_abbrev AS home_abbrev,
+                       at2.team_abbrev AS away_abbrev
                 FROM game_results gr
                 JOIN teams ht ON ht.id = gr.home_team_id
                 JOIN teams at2 ON at2.id = gr.away_team_id
