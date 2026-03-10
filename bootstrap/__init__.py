@@ -872,45 +872,80 @@ def _get_standings(conn, tables, ctx):
     if season_id is None:
         return []
 
-    sql = text("""
-        SELECT
-            t.id         AS team_id,
-            t.team_abbrev,
-            t.orgID      AS org_id,
-            t.team_level,
-            t.conference,
-            t.division,
-            COALESCE(w.wins, 0)       AS wins,
-            COALESCE(l.losses, 0)     AS losses,
-            COALESCE(cw.conf_wins, 0)   AS conf_wins,
-            COALESCE(cl.conf_losses, 0) AS conf_losses
-        FROM teams t
-        LEFT JOIN (
-            SELECT winning_team_id, COUNT(*) AS wins
-            FROM game_results WHERE season = :season_id
-            GROUP BY winning_team_id
-        ) w ON w.winning_team_id = t.id
-        LEFT JOIN (
-            SELECT losing_team_id, COUNT(*) AS losses
-            FROM game_results WHERE season = :season_id
-            GROUP BY losing_team_id
-        ) l ON l.losing_team_id = t.id
-        LEFT JOIN (
-            SELECT gr.winning_team_id, COUNT(*) AS conf_wins
-            FROM game_results gr
-            JOIN gamelist gl ON gl.id = gr.game_id
-            WHERE gr.season = :season_id AND gl.is_conference = 1
-            GROUP BY gr.winning_team_id
-        ) cw ON cw.winning_team_id = t.id
-        LEFT JOIN (
-            SELECT gr.losing_team_id, COUNT(*) AS conf_losses
-            FROM game_results gr
-            JOIN gamelist gl ON gl.id = gr.game_id
-            WHERE gr.season = :season_id AND gl.is_conference = 1
-            GROUP BY gr.losing_team_id
-        ) cl ON cl.losing_team_id = t.id
-        WHERE t.team_level >= 3
-    """)
+    # Check if is_conference column exists (migration 018)
+    has_conf_col = False
+    try:
+        conn.execute(text("SELECT is_conference FROM gamelist LIMIT 0"))
+        has_conf_col = True
+    except Exception:
+        pass
+
+    if has_conf_col:
+        sql = text("""
+            SELECT
+                t.id         AS team_id,
+                t.team_abbrev,
+                t.orgID      AS org_id,
+                t.team_level,
+                t.conference,
+                t.division,
+                COALESCE(w.wins, 0)       AS wins,
+                COALESCE(l.losses, 0)     AS losses,
+                COALESCE(cw.conf_wins, 0)   AS conf_wins,
+                COALESCE(cl.conf_losses, 0) AS conf_losses
+            FROM teams t
+            LEFT JOIN (
+                SELECT winning_team_id, COUNT(*) AS wins
+                FROM game_results WHERE season = :season_id
+                GROUP BY winning_team_id
+            ) w ON w.winning_team_id = t.id
+            LEFT JOIN (
+                SELECT losing_team_id, COUNT(*) AS losses
+                FROM game_results WHERE season = :season_id
+                GROUP BY losing_team_id
+            ) l ON l.losing_team_id = t.id
+            LEFT JOIN (
+                SELECT gr.winning_team_id, COUNT(*) AS conf_wins
+                FROM game_results gr
+                JOIN gamelist gl ON gl.id = gr.game_id
+                WHERE gr.season = :season_id AND gl.is_conference = 1
+                GROUP BY gr.winning_team_id
+            ) cw ON cw.winning_team_id = t.id
+            LEFT JOIN (
+                SELECT gr.losing_team_id, COUNT(*) AS conf_losses
+                FROM game_results gr
+                JOIN gamelist gl ON gl.id = gr.game_id
+                WHERE gr.season = :season_id AND gl.is_conference = 1
+                GROUP BY gr.losing_team_id
+            ) cl ON cl.losing_team_id = t.id
+            WHERE t.team_level >= 3
+        """)
+    else:
+        sql = text("""
+            SELECT
+                t.id         AS team_id,
+                t.team_abbrev,
+                t.orgID      AS org_id,
+                t.team_level,
+                t.conference,
+                t.division,
+                COALESCE(w.wins, 0)   AS wins,
+                COALESCE(l.losses, 0) AS losses,
+                0 AS conf_wins,
+                0 AS conf_losses
+            FROM teams t
+            LEFT JOIN (
+                SELECT winning_team_id, COUNT(*) AS wins
+                FROM game_results WHERE season = :season_id
+                GROUP BY winning_team_id
+            ) w ON w.winning_team_id = t.id
+            LEFT JOIN (
+                SELECT losing_team_id, COUNT(*) AS losses
+                FROM game_results WHERE season = :season_id
+                GROUP BY losing_team_id
+            ) l ON l.losing_team_id = t.id
+            WHERE t.team_level >= 3
+        """)
 
     rows = conn.execute(sql, {"season_id": season_id}).all()
     standings = [_row_to_dict(r) for r in rows]

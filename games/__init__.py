@@ -476,6 +476,18 @@ def wipe_season():
                 "WHERE id = 1"
             ))
 
+            # 10. Reclaim disk space from deleted rows
+            optimize_tables = [
+                "game_results", "game_batting_lines", "game_pitching_lines",
+                "player_batting_stats", "player_pitching_stats",
+                "player_fielding_stats", "player_position_usage_week",
+                "player_injury_events", "player_fatigue_state",
+                "org_ledger_entries", "org_media_shares",
+            ]
+            for tbl in optimize_tables:
+                conn.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))
+            deleted["optimized_tables"] = len(optimize_tables)
+
         # Broadcast updated timestamp
         from services.websocket_manager import ws_manager
         ws_manager.broadcast_timestamp()
