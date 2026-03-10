@@ -10,7 +10,7 @@ This state is broadcast to all connected WebSocket clients whenever it changes.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 
 from sqlalchemy import MetaData, Table, select, update
@@ -118,6 +118,522 @@ def _format_timestamp_for_frontend(row: Dict[str, Any]) -> Dict[str, Any]:
         "GMActionsCompleted": bool(row.get("gm_actions_completed", True)),
         "FreeAgencyRound": row.get("free_agency_round", 0),
     }
+
+
+# --- Phase derivation ---
+
+# Total weeks in a regular season
+TOTAL_SEASON_WEEKS = 25
+
+
+def get_current_phase(ts: Dict[str, Any]) -> str:
+    """
+    Derive the current simulation phase from timestamp flags.
+
+    Args:
+        ts: PascalCase timestamp dict (from _format_timestamp_for_frontend or
+            get_current_timestamp).
+
+    Returns:
+        One of: REGULAR_SEASON, OFFSEASON, FREE_AGENCY, DRAFT, RECRUITING
+    """
+    if not ts.get("IsOffSeason"):
+        return "REGULAR_SEASON"
+
+    # Offseason sub-phases (check most specific first)
+    if not ts.get("IsFreeAgencyLocked"):
+        return "FREE_AGENCY"
+    if ts.get("IsDraftTime"):
+        return "DRAFT"
+    if not ts.get("IsRecruitingLocked"):
+        return "RECRUITING"
+
+    return "OFFSEASON"
+
+
+def get_available_actions(ts: Dict[str, Any], phase: str) -> List[str]:
+    """
+    Return the list of actions available in the current phase.
+
+    Args:
+        ts: PascalCase timestamp dict.
+        phase: The current phase string from get_current_phase().
+
+    Returns:
+        List of action name strings the frontend can offer.
+    """
+    actions: List[str] = []
+
+    if phase == "REGULAR_SEASON":
+        all_ran = (
+            ts.get("GamesARan")
+            and ts.get("GamesBRan")
+            and ts.get("GamesCRan")
+            and ts.get("GamesDRan")
+        )
+        any_ran = (
+            ts.get("GamesARan")
+            or ts.get("GamesBRan")
+            or ts.get("GamesCRan")
+            or ts.get("GamesDRan")
+        )
+
+        if not ts.get("RunGames"):
+            actions.append("simulate_week")
+
+        if all_ran:
+            actions.append("advance_week")
+
+        if any_ran:
+            actions.append("reset_week")
+
+        actions.append("set_week")
+
+        if ts.get("Week", 0) >= TOTAL_SEASON_WEEKS and all_ran:
+            actions.append("end_season")
+
+    elif phase == "OFFSEASON":
+        actions.append("start_free_agency")
+        actions.append("start_draft")
+        actions.append("start_recruiting")
+        actions.append("start_new_season")
+        actions.append("set_week")
+
+    elif phase == "FREE_AGENCY":
+        actions.append("advance_fa_round")
+        actions.append("end_free_agency")
+
+    elif phase == "DRAFT":
+        actions.append("end_draft")
+
+    elif phase == "RECRUITING":
+        actions.append("end_recruiting")
+
+    # Always available
+    actions.append("set_phase")
+
+    return actions
+
+
+def get_enhanced_timestamp() -> Optional[Dict[str, Any]]:
+    """
+    Get timestamp with derived Phase and AvailableActions for the frontend.
+
+    Returns:
+        Enhanced timestamp dict with Phase, AvailableActions, TotalWeeks,
+        or None if no timestamp exists.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        return None
+
+    phase = get_current_phase(ts)
+    actions = get_available_actions(ts, phase)
+
+    ts["Phase"] = phase
+    ts["AvailableActions"] = actions
+    ts["TotalWeeks"] = TOTAL_SEASON_WEEKS
+
+    return ts
+
+
+# --- Week / phase management ---
+
+
+def set_week(week: int, broadcast: bool = True) -> bool:
+    """
+    Jump to a specific week number (admin tool).
+    Resets all game completion flags for the new week.
+
+    Args:
+        week: Target week number (1-based).
+        broadcast: If True, broadcast updated state to WebSocket clients.
+
+    Returns:
+        True if update succeeded, False otherwise.
+    """
+    if week < 1:
+        logger.error(f"set_week: invalid week {week}")
+        return False
+
+    return update_timestamp(
+        {
+            "week": week,
+            "games_a_ran": False,
+            "games_b_ran": False,
+            "games_c_ran": False,
+            "games_d_ran": False,
+        },
+        broadcast=broadcast,
+    )
+
+
+def set_phase_flags(
+    is_offseason: bool = None,
+    is_free_agency_locked: bool = None,
+    is_draft_time: bool = None,
+    is_recruiting_locked: bool = None,
+    free_agency_round: int = None,
+    broadcast: bool = True,
+) -> bool:
+    """
+    Directly set phase-related flags (admin tool).
+
+    Only provided (non-None) fields are updated.
+
+    Args:
+        is_offseason: Whether the sim is in offseason.
+        is_free_agency_locked: Whether FA is locked.
+        is_draft_time: Whether draft is active.
+        is_recruiting_locked: Whether recruiting is locked.
+        free_agency_round: Current FA round number.
+        broadcast: If True, broadcast updated state.
+
+    Returns:
+        True if update succeeded, False otherwise.
+    """
+    updates: Dict[str, Any] = {}
+
+    if is_offseason is not None:
+        updates["is_offseason"] = is_offseason
+    if is_free_agency_locked is not None:
+        updates["is_free_agency_locked"] = is_free_agency_locked
+    if is_draft_time is not None:
+        updates["is_draft_time"] = is_draft_time
+    if is_recruiting_locked is not None:
+        updates["is_recruiting_locked"] = is_recruiting_locked
+    if free_agency_round is not None:
+        updates["free_agency_round"] = free_agency_round
+
+    if not updates:
+        logger.warning("set_phase_flags called with no updates")
+        return False
+
+    return update_timestamp(updates, broadcast=broadcast)
+
+
+# --- Lifecycle transitions ---
+
+
+def end_regular_season(league_year_id: int) -> Dict[str, Any]:
+    """
+    Transition from regular season to offseason.
+
+    Steps:
+      1. Run end-of-season contract processing (service time, expirations, FA eligibility)
+      2. Progress all players (age +1, ability changes)
+      3. Set timestamp flags to OFFSEASON
+
+    Args:
+        league_year_id: The league year to process.
+
+    Returns:
+        Summary dict with results from each step.
+
+    Raises:
+        ValueError: If not currently in REGULAR_SEASON phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "REGULAR_SEASON":
+        raise ValueError(f"Cannot end regular season: currently in {phase}")
+
+    engine = get_engine()
+    summary: Dict[str, Any] = {"phase_transition": "REGULAR_SEASON -> OFFSEASON"}
+
+    # 1. End-of-season contract processing
+    try:
+        from services.contract_ops import process_end_of_season
+        with engine.begin() as conn:
+            eos_result = process_end_of_season(conn, league_year_id)
+        summary["end_of_season"] = eos_result
+        logger.info(f"End-of-season contracts processed: {eos_result}")
+    except Exception as e:
+        logger.exception("end_regular_season: contract processing failed")
+        summary["end_of_season_error"] = str(e)
+
+    # 2. Player progression
+    try:
+        from player_engine.player_progression import progress_all_players
+        with engine.begin() as conn:
+            prog_result = progress_all_players(conn)
+        summary["progression"] = prog_result
+        logger.info(f"Player progression complete: {prog_result}")
+    except Exception as e:
+        logger.exception("end_regular_season: player progression failed")
+        summary["progression_error"] = str(e)
+
+    # 3. Flip to offseason
+    update_timestamp(
+        {
+            "is_offseason": True,
+            "is_free_agency_locked": True,
+            "is_draft_time": False,
+            "is_recruiting_locked": True,
+            "free_agency_round": 0,
+            "run_games": False,
+            "games_a_ran": False,
+            "games_b_ran": False,
+            "games_c_ran": False,
+            "games_d_ran": False,
+        },
+        broadcast=True,
+    )
+    summary["timestamp_updated"] = True
+
+    logger.info(f"Regular season ended for league_year {league_year_id}")
+    return summary
+
+
+def start_free_agency() -> bool:
+    """
+    Open the free agency window.
+
+    Sets is_free_agency_locked=False and resets free_agency_round to 1.
+
+    Returns:
+        True if succeeded.
+
+    Raises:
+        ValueError: If not in OFFSEASON or FREE_AGENCY phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase not in ("OFFSEASON", "FREE_AGENCY"):
+        raise ValueError(f"Cannot start free agency: currently in {phase}")
+
+    return update_timestamp(
+        {"is_free_agency_locked": False, "free_agency_round": 1},
+        broadcast=True,
+    )
+
+
+def advance_fa_round() -> Dict[str, Any]:
+    """
+    Advance to the next free agency round.
+
+    Returns:
+        Dict with old_round and new_round.
+
+    Raises:
+        ValueError: If not in FREE_AGENCY phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "FREE_AGENCY":
+        raise ValueError(f"Cannot advance FA round: currently in {phase}")
+
+    old_round = ts.get("FreeAgencyRound", 0)
+    new_round = old_round + 1
+
+    update_timestamp({"free_agency_round": new_round}, broadcast=True)
+
+    logger.info(f"Free agency advanced from round {old_round} to {new_round}")
+    return {"old_round": old_round, "new_round": new_round}
+
+
+def end_free_agency() -> bool:
+    """
+    Close the free agency window.
+
+    Sets is_free_agency_locked=True.
+
+    Returns:
+        True if succeeded.
+
+    Raises:
+        ValueError: If not in FREE_AGENCY phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "FREE_AGENCY":
+        raise ValueError(f"Cannot end free agency: currently in {phase}")
+
+    return update_timestamp(
+        {"is_free_agency_locked": True},
+        broadcast=True,
+    )
+
+
+def start_draft() -> bool:
+    """
+    Open the draft phase.
+
+    Sets is_draft_time=True.
+
+    Returns:
+        True if succeeded.
+
+    Raises:
+        ValueError: If not in OFFSEASON phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "OFFSEASON":
+        raise ValueError(f"Cannot start draft: currently in {phase}")
+
+    return update_timestamp({"is_draft_time": True}, broadcast=True)
+
+
+def end_draft() -> bool:
+    """
+    Close the draft phase.
+
+    Sets is_draft_time=False.
+
+    Returns:
+        True if succeeded.
+
+    Raises:
+        ValueError: If not in DRAFT phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "DRAFT":
+        raise ValueError(f"Cannot end draft: currently in {phase}")
+
+    return update_timestamp({"is_draft_time": False}, broadcast=True)
+
+
+def start_recruiting() -> bool:
+    """
+    Open the recruiting window.
+
+    Sets is_recruiting_locked=False and recruiting_synced=False.
+
+    Returns:
+        True if succeeded.
+
+    Raises:
+        ValueError: If not in OFFSEASON phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "OFFSEASON":
+        raise ValueError(f"Cannot start recruiting: currently in {phase}")
+
+    return update_timestamp(
+        {"is_recruiting_locked": False, "recruiting_synced": False},
+        broadcast=True,
+    )
+
+
+def end_recruiting() -> bool:
+    """
+    Close the recruiting window.
+
+    Sets is_recruiting_locked=True and recruiting_synced=True.
+
+    Returns:
+        True if succeeded.
+
+    Raises:
+        ValueError: If not in RECRUITING phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "RECRUITING":
+        raise ValueError(f"Cannot end recruiting: currently in {phase}")
+
+    return update_timestamp(
+        {"is_recruiting_locked": True, "recruiting_synced": True},
+        broadcast=True,
+    )
+
+
+def start_new_season(league_year_id: int) -> Dict[str, Any]:
+    """
+    Transition from offseason to a new regular season.
+
+    Steps:
+      1. Run year-start financial books
+      2. Reset timestamp to week 1, regular season
+
+    Args:
+        league_year_id: The new league year id.
+
+    Returns:
+        Summary dict.
+
+    Raises:
+        ValueError: If not in OFFSEASON phase.
+    """
+    ts = get_current_timestamp()
+    if ts is None:
+        raise ValueError("No timestamp state found")
+
+    phase = get_current_phase(ts)
+    if phase != "OFFSEASON":
+        raise ValueError(
+            f"Cannot start new season: currently in {phase}. "
+            "All offseason phases (FA, draft, recruiting) must be completed first."
+        )
+
+    engine = get_engine()
+    league_year = ts.get("Season", 2026)
+    summary: Dict[str, Any] = {"phase_transition": "OFFSEASON -> REGULAR_SEASON"}
+
+    # 1. Year-start financial books
+    try:
+        from financials.books import run_year_start_books
+        books_result = run_year_start_books(engine, league_year)
+        summary["year_start_books"] = books_result
+        logger.info(f"Year-start books: {books_result}")
+    except Exception as e:
+        logger.exception("start_new_season: year-start books failed")
+        summary["year_start_books_error"] = str(e)
+
+    # 2. Reset to regular season
+    new_season = league_year + 1
+    update_timestamp(
+        {
+            "season": new_season,
+            "season_id": league_year_id,
+            "week": 1,
+            "is_offseason": False,
+            "is_free_agency_locked": True,
+            "is_draft_time": False,
+            "is_recruiting_locked": True,
+            "free_agency_round": 0,
+            "run_games": False,
+            "games_a_ran": False,
+            "games_b_ran": False,
+            "games_c_ran": False,
+            "games_d_ran": False,
+            "gm_actions_completed": False,
+            "recruiting_synced": True,
+        },
+        broadcast=True,
+    )
+    summary["new_season"] = new_season
+    summary["timestamp_updated"] = True
+
+    logger.info(f"New season {new_season} started (league_year_id={league_year_id})")
+    return summary
 
 
 def update_timestamp(updates: Dict[str, Any], broadcast: bool = True) -> bool:

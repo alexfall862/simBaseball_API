@@ -1540,6 +1540,228 @@ def build_team_game_side(
     }
 
 # -------------------------------------------------------------------
+# Cache-aware assembly (zero DB per game)
+# -------------------------------------------------------------------
+
+def build_team_game_side_from_cache(
+    conn,
+    cache,
+    team_id: int,
+    league_level_id: int,
+    league_year_id: int,
+    season_week: int,
+    starter_id: int,
+    vs_hand: str | None,
+    random_seed: int | None,
+    use_dh: bool,
+) -> Dict[str, Any]:
+    """
+    Same as build_team_game_side but reads from SubweekCache.
+    Only conn is needed for pregame injuries (reference data lookups).
+    """
+    from services.lineups import build_defense_and_lineup_from_cache
+    from services.subweek_cache import resolve_strategies_for_team
+
+    meta = cache.team_meta.get(team_id)
+    if not meta:
+        raise ValueError(f"Team id {team_id} not found in cache")
+
+    org_id = cache.org_by_team.get(team_id, int(meta["orgID"]))
+    team_abbrev = meta["team_abbrev"]
+    team_name = meta["team_name"]
+    team_nickname = meta["team_nickname"]
+
+    player_ids = cache.roster_by_team.get(team_id, [])
+
+    if not player_ids:
+        return {
+            "team_id": team_id,
+            "team_abbrev": team_abbrev,
+            "team_name": team_name,
+            "team_nickname": team_nickname,
+            "org_id": org_id,
+            "players": [],
+            "starting_pitcher_id": None,
+            "available_pitcher_ids": [],
+            "defense": {},
+            "lineup": [],
+            "bench": [],
+            "pregame_injuries": [],
+        }
+
+    # All from cache — no DB queries
+    strategies_by_player = resolve_strategies_for_team(cache, player_ids, org_id)
+    team_strategy = cache.team_strategy_by_team.get(team_id, _DEFAULT_TEAM_STRATEGY.copy())
+    bullpen_order = cache.bullpen_order_by_team.get(team_id, [])
+
+    players_by_id: Dict[int, Dict[str, Any]] = {}
+
+    for pid in player_ids:
+        base_view = cache.engine_views.get(pid)
+        if base_view is None:
+            continue
+
+        ep = dict(base_view)
+        ep["stamina"] = int(cache.stamina.get(pid, 100))
+
+        strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
+        ep.update(strat)
+
+        ep["defensive_xp_mod"] = cache.xp_mods.get(
+            pid, {pos: 0.0 for pos in POSITION_CODES}
+        )
+
+        players_by_id[pid] = ep
+
+    # Pregame injuries (still uses conn for reference data — few queries, cached)
+    pregame_injuries: List[Dict[str, Any]] = []
+    if random_seed is not None:
+        team_seed = (int(random_seed) * 31 + int(team_id)) & 0xFFFFFFFF
+        rng = random.Random(team_seed)
+        pregame_injuries = roll_pregame_injuries_for_team(
+            conn=conn,
+            league_level_id=league_level_id,
+            team_id=team_id,
+            players_by_id=players_by_id,
+            rng=rng,
+        )
+
+    # Available pitchers (all pitchers except starter, respect bullpen order)
+    all_pitcher_ids = {
+        pid for pid, pdata in players_by_id.items()
+        if (pdata.get("ptype") or "").lower() == "pitcher" and pid != starter_id
+    }
+    if bullpen_order:
+        ordered_ids = [bp["player_id"] for bp in bullpen_order
+                       if bp["player_id"] in all_pitcher_ids]
+        remaining = [pid for pid in all_pitcher_ids if pid not in set(ordered_ids)]
+        available_pitcher_ids: List[int] = ordered_ids + remaining
+    else:
+        available_pitcher_ids: List[int] = list(all_pitcher_ids)
+
+    # Defense + lineup from cache
+    defense, lineup_ids, bench_ids = build_defense_and_lineup_from_cache(
+        cache=cache,
+        team_id=team_id,
+        vs_hand=vs_hand,
+        players_by_id=players_by_id,
+        starter_id=starter_id,
+        use_dh=use_dh,
+    )
+
+    return {
+        "team_id": team_id,
+        "team_abbrev": team_abbrev,
+        "team_name": team_name,
+        "team_nickname": team_nickname,
+        "org_id": org_id,
+        "players": list(players_by_id.values()),
+        "starting_pitcher_id": starter_id,
+        "available_pitcher_ids": available_pitcher_ids,
+        "defense": defense,
+        "lineup": lineup_ids,
+        "bench": bench_ids,
+        "pregame_injuries": pregame_injuries,
+        "team_strategy": team_strategy,
+        "bullpen_order": bullpen_order,
+        "vs_hand": vs_hand,
+    }
+
+
+def build_game_payload_core_from_cache(
+    conn,
+    cache,
+    game_row,
+    league_year_id: int,
+    rules_by_level: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Same as build_game_payload_core but uses SubweekCache for team data.
+    Only conn is passed through for pregame injury reference data.
+    """
+    from services.rotation import pick_starting_pitcher_from_cache
+
+    game_id = int(game_row["id"])
+    league_level_id = int(game_row["league_level"])
+    season_week = int(game_row["season_week"])
+    season_subweek = game_row.get("season_subweek")
+
+    rules = rules_by_level.get(str(league_level_id), {})
+    use_dh = bool(rules.get("dh", False))
+
+    away_team_id = int(game_row["away_team"])
+    home_team_id = int(game_row["home_team"])
+
+    # Ballpark from cache
+    home_meta = cache.team_meta.get(home_team_id, {})
+    ballpark = {
+        "ballpark_name": home_meta.get("ballpark_name"),
+        "pitch_break_mod": float(home_meta.get("pitch_break_mod") or 1.0),
+        "power_mod": float(home_meta.get("power_mod") or 1.0),
+    }
+
+    random_seed = None
+    if "random_seed" in game_row and game_row["random_seed"] is not None:
+        random_seed = int(game_row["random_seed"])
+
+    # Pick starters from cache (zero DB)
+    away_rot = pick_starting_pitcher_from_cache(cache, away_team_id)
+    home_rot = pick_starting_pitcher_from_cache(cache, home_team_id)
+
+    away_sp_id = int(away_rot["starter_id"])
+    home_sp_id = int(home_rot["starter_id"])
+
+    # Pitch hands from cache
+    away_sp_hand = cache.pitch_hands.get(away_sp_id)
+    home_sp_hand = cache.pitch_hands.get(home_sp_id)
+
+    away_vs_hand = home_sp_hand
+    home_vs_hand = away_sp_hand
+
+    # Build team sides from cache
+    home_side = build_team_game_side_from_cache(
+        conn=conn,
+        cache=cache,
+        team_id=home_team_id,
+        league_level_id=league_level_id,
+        league_year_id=league_year_id,
+        season_week=season_week,
+        starter_id=home_sp_id,
+        vs_hand=home_vs_hand,
+        random_seed=random_seed,
+        use_dh=use_dh,
+    )
+    away_side = build_team_game_side_from_cache(
+        conn=conn,
+        cache=cache,
+        team_id=away_team_id,
+        league_level_id=league_level_id,
+        league_year_id=league_year_id,
+        season_week=season_week,
+        starter_id=away_sp_id,
+        vs_hand=away_vs_hand,
+        random_seed=random_seed,
+        use_dh=use_dh,
+    )
+
+    payload: Dict[str, Any] = {
+        "game_id": game_id,
+        "league_level_id": league_level_id,
+        "league_year_id": league_year_id,
+        "season_week": season_week,
+        "season_subweek": season_subweek,
+        "ballpark": ballpark,
+        "home_side": home_side,
+        "away_side": away_side,
+    }
+
+    if random_seed is not None:
+        payload["random_seed"] = str(random_seed)
+
+    return payload
+
+
+# -------------------------------------------------------------------
 # Public: full game payload
 # -------------------------------------------------------------------
 
@@ -1918,6 +2140,294 @@ def _store_game_results(
     return count
 
 
+def _store_game_results_bulk(
+    conn,
+    results: List[Dict[str, Any]],
+    payloads: List[Dict[str, Any]],
+    games: List[Any],
+) -> int:
+    """
+    Bulk version of _store_game_results — collects all params, one executemany call.
+    """
+    from sqlalchemy import text as sa_text
+
+    if not results:
+        return 0
+
+    payload_by_gid: Dict[int, Dict[str, Any]] = {}
+    for p in payloads:
+        gid = p.get("game_id")
+        if gid is not None:
+            payload_by_gid[int(gid)] = p
+
+    game_row_by_gid: Dict[int, Any] = {}
+    for g in games:
+        gid = g.get("id") if isinstance(g, dict) else g["id"]
+        game_row_by_gid[int(gid)] = g
+
+    # Build org mapping from payloads (already have org_id in team sides)
+    org_by_team: Dict[int, int] = {}
+    for p in payloads:
+        for side_key in ("home_side", "away_side"):
+            side = p.get(side_key) or {}
+            tid = side.get("team_id")
+            oid = side.get("org_id")
+            if tid and oid:
+                org_by_team[int(tid)] = int(oid)
+
+    # If we still need org mappings, bulk-load from DB
+    all_team_ids = set()
+    for p in payloads:
+        for side_key in ("home_side", "away_side"):
+            side = p.get(side_key) or {}
+            tid = side.get("team_id")
+            if tid and int(tid) not in org_by_team:
+                all_team_ids.add(int(tid))
+
+    if all_team_ids:
+        tables = _get_core_tables()
+        teams_tbl = tables["teams"]
+        rows = conn.execute(
+            select(teams_tbl.c.id, teams_tbl.c.orgID)
+            .where(teams_tbl.c.id.in_(list(all_team_ids)))
+        ).mappings().all()
+        for row in rows:
+            org_by_team[int(row["id"])] = int(row["orgID"])
+
+    insert_sql = sa_text("""
+        INSERT INTO game_results
+            (game_id, season, league_level, season_week, season_subweek,
+             home_team_id, away_team_id, home_score, away_score,
+             winning_team_id, losing_team_id, winning_org_id, losing_org_id,
+             game_outcome, boxscore_json, play_by_play_json, completed_at)
+        VALUES
+            (:game_id, :season, :league_level, :season_week, :season_subweek,
+             :home_team_id, :away_team_id, :home_score, :away_score,
+             :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
+             :game_outcome, :boxscore_json, :play_by_play_json, NOW())
+        ON DUPLICATE KEY UPDATE
+            home_score         = VALUES(home_score),
+            away_score         = VALUES(away_score),
+            winning_team_id    = VALUES(winning_team_id),
+            losing_team_id     = VALUES(losing_team_id),
+            winning_org_id     = VALUES(winning_org_id),
+            losing_org_id      = VALUES(losing_org_id),
+            game_outcome       = VALUES(game_outcome),
+            boxscore_json      = VALUES(boxscore_json),
+            play_by_play_json  = VALUES(play_by_play_json),
+            completed_at       = VALUES(completed_at)
+    """)
+
+    all_params = []
+
+    for result in results:
+        game_id = result.get("game_id")
+        if game_id is None:
+            continue
+        game_id = int(game_id)
+
+        payload = payload_by_gid.get(game_id)
+        game_row = game_row_by_gid.get(game_id)
+        if not payload or game_row is None:
+            continue
+
+        home_side = payload.get("home_side") or {}
+        away_side = payload.get("away_side") or {}
+        home_team_id = int(home_side.get("team_id", 0))
+        away_team_id = int(away_side.get("team_id", 0))
+
+        game_result_data = result.get("result") or {}
+        home_score = int(game_result_data.get("home_score", 0))
+        away_score = int(game_result_data.get("away_score", 0))
+
+        if home_score == 0 and away_score == 0:
+            home_score = int(result.get("home_score", 0))
+            away_score = int(result.get("away_score", 0))
+
+        winner = str(game_result_data.get("winning_team", "")).lower()
+        if not winner:
+            winner = str(result.get("winning_team", "")).lower()
+        if home_score > away_score or winner == "home":
+            game_outcome = "HOME_WIN"
+            winning_team_id = home_team_id
+            losing_team_id = away_team_id
+        elif away_score > home_score or winner == "away":
+            game_outcome = "AWAY_WIN"
+            winning_team_id = away_team_id
+            losing_team_id = home_team_id
+        else:
+            game_outcome = "TIE"
+            winning_team_id = None
+            losing_team_id = None
+
+        winning_org_id = org_by_team.get(winning_team_id) if winning_team_id else None
+        losing_org_id = org_by_team.get(losing_team_id) if losing_team_id else None
+
+        season_id = int(game_row.get("season") if isinstance(game_row, dict) else game_row["season"])
+        league_level = int(game_row.get("league_level") if isinstance(game_row, dict) else game_row["league_level"])
+        season_week = int(game_row.get("season_week") if isinstance(game_row, dict) else game_row["season_week"])
+        season_subweek = str((game_row.get("season_subweek") if isinstance(game_row, dict) else game_row["season_subweek"]) or "a")
+
+        boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
+        pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
+        boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
+        pbp_str = json.dumps(pbp_raw) if pbp_raw else None
+
+        all_params.append({
+            "game_id": game_id,
+            "season": season_id,
+            "league_level": league_level,
+            "season_week": season_week,
+            "season_subweek": season_subweek,
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+            "home_score": home_score,
+            "away_score": away_score,
+            "winning_team_id": winning_team_id,
+            "losing_team_id": losing_team_id,
+            "winning_org_id": winning_org_id,
+            "losing_org_id": losing_org_id,
+            "game_outcome": game_outcome,
+            "boxscore_json": boxscore_str,
+            "play_by_play_json": pbp_str,
+        })
+
+    if not all_params:
+        return 0
+
+    try:
+        conn.execute(insert_sql, all_params)
+        logger.info("store_game_results_bulk: inserted/updated %d game result rows", len(all_params))
+        return len(all_params)
+    except Exception:
+        logger.exception("store_game_results_bulk: bulk INSERT failed (%d rows)", len(all_params))
+        return 0
+
+
+def _update_player_state_bulk(
+    conn,
+    results: List[Dict[str, Any]],
+    league_year_id: int,
+) -> Dict[str, int]:
+    """
+    Bulk version of _update_player_state_after_subweek.
+    Batches stamina updates; injuries stay individual (need lastrowid).
+    """
+    from sqlalchemy import text as sa_text
+    from services.stamina import get_effective_stamina_bulk
+
+    stamina_updates = 0
+    injuries_persisted = 0
+
+    # Collect pitcher workloads
+    pitcher_costs: Dict[int, int] = {}
+    for result in results:
+        stats = result.get("stats") or {}
+        pitchers = stats.get("pitchers") or {}
+        for pid_str, p_stats in pitchers.items():
+            pid = int(pid_str)
+            ipo = int(p_stats.get("innings_pitched_outs", 0))
+            gs = int(p_stats.get("games_started", 0))
+            if gs > 0:
+                cost = _SP_BASE_STAMINA_COST + (ipo * _SP_PER_OUT_STAMINA_COST)
+            else:
+                cost = _RP_BASE_STAMINA_COST + (ipo * _RP_PER_OUT_STAMINA_COST)
+            pitcher_costs[pid] = pitcher_costs.get(pid, 0) + cost
+
+    if pitcher_costs:
+        current_stamina = get_effective_stamina_bulk(
+            conn, list(pitcher_costs.keys()), league_year_id
+        )
+
+        stamina_upsert = sa_text("""
+            INSERT INTO player_fatigue_state
+                (player_id, league_year_id, stamina, last_updated_at)
+            VALUES
+                (:player_id, :league_year_id, :stamina, NOW())
+            ON DUPLICATE KEY UPDATE
+                stamina          = :stamina,
+                last_updated_at  = NOW()
+        """)
+
+        stamina_params = []
+        for pid, cost in pitcher_costs.items():
+            old_stamina = current_stamina.get(pid, 100)
+            new_stamina = max(0, old_stamina - cost)
+            stamina_params.append({
+                "player_id": pid,
+                "league_year_id": league_year_id,
+                "stamina": new_stamina,
+            })
+
+        try:
+            conn.execute(stamina_upsert, stamina_params)
+            stamina_updates = len(stamina_params)
+        except Exception:
+            logger.exception(
+                "update_player_state_bulk: stamina upsert failed (%d rows)", len(stamina_params)
+            )
+
+    # Injuries stay individual (need lastrowid for state update)
+    injury_insert = sa_text("""
+        INSERT INTO player_injury_events
+            (player_id, injury_type_id, league_year_id, weeks_assigned,
+             weeks_remaining, malus_json)
+        VALUES
+            (:player_id, :injury_type_id, :league_year_id, :weeks_assigned,
+             :weeks_remaining, :malus_json)
+    """)
+
+    injury_state_upsert = sa_text("""
+        INSERT INTO player_injury_state
+            (player_id, status, current_event_id, weeks_remaining, last_updated_at)
+        VALUES
+            (:player_id, 'injured', :event_id, :weeks_remaining, NOW())
+        ON DUPLICATE KEY UPDATE
+            status           = 'injured',
+            current_event_id = :event_id,
+            weeks_remaining  = :weeks_remaining,
+            last_updated_at  = NOW()
+    """)
+
+    for result in results:
+        injuries = result.get("injuries") or []
+        for inj in injuries:
+            pid = inj.get("player_id")
+            if pid is None:
+                continue
+            pid = int(pid)
+            injury_type_id = int(inj.get("injury_type_id", 0))
+            duration_weeks = int(inj.get("duration_weeks", 1))
+            effects = inj.get("effects") or {}
+
+            try:
+                ev_result = conn.execute(injury_insert, {
+                    "player_id": pid,
+                    "injury_type_id": injury_type_id,
+                    "league_year_id": league_year_id,
+                    "weeks_assigned": duration_weeks,
+                    "weeks_remaining": duration_weeks,
+                    "malus_json": json.dumps(effects),
+                })
+                event_id = ev_result.lastrowid
+                conn.execute(injury_state_upsert, {
+                    "player_id": pid,
+                    "event_id": event_id,
+                    "weeks_remaining": duration_weeks,
+                })
+                injuries_persisted += 1
+            except Exception:
+                logger.exception(
+                    "update_player_state_bulk: injury persistence failed for player %d", pid
+                )
+
+    logger.info(
+        "update_player_state_bulk: %d stamina updates, %d injuries persisted",
+        stamina_updates, injuries_persisted,
+    )
+    return {"stamina_updates": stamina_updates, "injuries_persisted": injuries_persisted}
+
+
 # Stamina cost constants for pitcher fatigue after a game
 _SP_BASE_STAMINA_COST = 30     # base cost for a starting pitcher appearance
 _SP_PER_OUT_STAMINA_COST = 1   # additional cost per out recorded (SP)
@@ -2223,14 +2733,40 @@ def build_week_payloads(
             f"(week {season_week}, league_year {league_year_id})"
         )
 
+        # --- Bulk-load all data for this subweek's teams ---
+        from services.subweek_cache import load_subweek_cache
+
+        subweek_team_ids = set()
+        for g in games:
+            subweek_team_ids.add(int(g["home_team"]))
+            subweek_team_ids.add(int(g["away_team"]))
+
+        # Determine the primary league level for XP config
+        primary_level = league_level or int(games[0]["league_level"])
+
+        cache = load_subweek_cache(
+            conn,
+            team_ids=list(subweek_team_ids),
+            league_year_id=league_year_id,
+            season_week=season_week,
+            league_level_id=primary_level,
+        )
+
+        logger.info(
+            f"SubweekCache loaded for subweek '{subweek}': "
+            f"{len(subweek_team_ids)} teams, {len(cache.all_player_ids)} players"
+        )
+
+        # --- Assemble payloads from cache (zero DB per game) ---
         payloads = []
 
         for game_row in games:
             game_id = int(game_row["id"])
 
             try:
-                # Use core payload (game-specific data only, no redundant metadata)
-                payload = build_game_payload_core(conn, game_id)
+                payload = build_game_payload_core_from_cache(
+                    conn, cache, game_row, league_year_id, rules_by_level,
+                )
                 payloads.append(payload)
                 total_games += 1
 
@@ -2269,9 +2805,9 @@ def build_week_payloads(
                     f"Received {len(results)} results from engine for subweek '{subweek}'"
                 )
 
-                # Store game results in database
+                # Store game results in database (bulk)
                 try:
-                    result_count = _store_game_results(
+                    result_count = _store_game_results_bulk(
                         conn, results, payloads, games
                     )
                     conn.commit()
@@ -2283,11 +2819,15 @@ def build_week_payloads(
                         f"Game result storage failed for subweek '{subweek}': "
                         f"{res_err}"
                     )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
-                # Accumulate player stats from engine box scores
+                # Accumulate player stats from engine box scores (bulk)
                 try:
-                    from services.stat_accumulator import accumulate_subweek_stats
-                    stat_counts = accumulate_subweek_stats(
+                    from services.stat_accumulator import accumulate_subweek_stats_bulk
+                    stat_counts = accumulate_subweek_stats_bulk(
                         conn, results, league_year_id
                     )
                     conn.commit()
@@ -2303,11 +2843,10 @@ def build_week_payloads(
                     except Exception:
                         pass
 
-                # Record defensive position usage from the payloads
-                # (payloads contain defense dicts + vs_hand built before simulation)
+                # Record defensive position usage (bulk)
                 try:
-                    from services.stat_accumulator import record_subweek_position_usage
-                    usage_count = record_subweek_position_usage(
+                    from services.stat_accumulator import record_subweek_position_usage_bulk
+                    usage_count = record_subweek_position_usage_bulk(
                         conn, payloads, league_year_id
                     )
                     conn.commit()
@@ -2325,9 +2864,9 @@ def build_week_payloads(
                     except Exception:
                         pass
 
-                # Update player state for next subweek
+                # Update player state for next subweek (bulk stamina)
                 try:
-                    state_counts = _update_player_state_after_subweek(
+                    state_counts = _update_player_state_bulk(
                         conn, results, league_year_id
                     )
                     conn.commit()

@@ -4,6 +4,7 @@ from functools import wraps
 from flask import has_request_context
 from flask import Flask, request, jsonify, g, session
 from flask_cors import CORS
+from flask_compress import Compress
 from flask_sock import Sock
 from werkzeug.exceptions import HTTPException, BadRequest
 from seeding.contracts_seed import seed_initial_contracts
@@ -279,6 +280,10 @@ def create_app(config_object=Config):
     # CORS
     CORS(app, resources={r"/*": {"origins": app.config["CORS_ORIGINS"]}})
     log.info("stage: cors_ok")
+
+    # Response compression (gzip/deflate)
+    Compress(app)
+    log.info("stage: compress_ok")
 
     # WebSocket support
     sock = Sock(app)

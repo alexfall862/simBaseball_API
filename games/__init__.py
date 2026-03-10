@@ -516,9 +516,9 @@ def get_timestamp_endpoint():
       GET /api/v1/games/timestamp
     """
     try:
-        from services.timestamp import get_current_timestamp
+        from services.timestamp import get_enhanced_timestamp
 
-        timestamp = get_current_timestamp()
+        timestamp = get_enhanced_timestamp()
 
         if timestamp:
             return jsonify(timestamp), 200
@@ -534,6 +534,308 @@ def get_timestamp_endpoint():
             error="unexpected_error",
             message=str(e)
         ), 500
+
+
+@games_bp.post("/games/set-week")
+def set_week_endpoint():
+    """
+    Set the simulation to a specific week number.
+    Resets all game completion flags.
+
+    Request body:
+    {
+        "week": 10
+    }
+
+    Example:
+      POST /api/v1/games/set-week
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        week = data.get("week")
+
+        if week is None or not isinstance(week, int) or week < 1:
+            return jsonify(
+                error="invalid_request",
+                message="'week' is required and must be a positive integer."
+            ), 400
+
+        from services.timestamp import set_week
+
+        if set_week(week):
+            from services.timestamp import get_enhanced_timestamp
+            return jsonify(get_enhanced_timestamp()), 200
+        else:
+            return jsonify(
+                error="update_failed",
+                message="Failed to set week."
+            ), 500
+
+    except Exception as e:
+        current_app.logger.exception("set_week: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/set-phase")
+def set_phase_endpoint():
+    """
+    Directly set phase-related flags on the timestamp.
+    Only provided fields are updated.
+
+    Request body (all fields optional):
+    {
+        "is_offseason": true,
+        "is_free_agency_locked": false,
+        "is_draft_time": false,
+        "is_recruiting_locked": true,
+        "free_agency_round": 1
+    }
+
+    Example:
+      POST /api/v1/games/set-phase
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+
+        if not data:
+            return jsonify(
+                error="invalid_request",
+                message="Request body must include at least one phase flag."
+            ), 400
+
+        from services.timestamp import set_phase_flags
+
+        success = set_phase_flags(
+            is_offseason=data.get("is_offseason"),
+            is_free_agency_locked=data.get("is_free_agency_locked"),
+            is_draft_time=data.get("is_draft_time"),
+            is_recruiting_locked=data.get("is_recruiting_locked"),
+            free_agency_round=data.get("free_agency_round"),
+        )
+
+        if success:
+            from services.timestamp import get_enhanced_timestamp
+            return jsonify(get_enhanced_timestamp()), 200
+        else:
+            return jsonify(
+                error="update_failed",
+                message="Failed to set phase flags. Check that at least one valid flag was provided."
+            ), 500
+
+    except Exception as e:
+        current_app.logger.exception("set_phase: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/end-season")
+def end_season_endpoint():
+    """
+    Transition from regular season to offseason.
+    Runs end-of-season contract processing and player progression.
+
+    Request body:
+    {
+        "league_year_id": 1
+    }
+
+    Example:
+      POST /api/v1/games/end-season
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        league_year_id = data.get("league_year_id")
+
+        if league_year_id is None:
+            return jsonify(
+                error="invalid_request",
+                message="'league_year_id' is required."
+            ), 400
+
+        from services.timestamp import end_regular_season
+        result = end_regular_season(int(league_year_id))
+        return jsonify(result), 200
+
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("end_season: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/start-free-agency")
+def start_free_agency_endpoint():
+    """
+    Open the free agency window.
+
+    Example:
+      POST /api/v1/games/start-free-agency
+    """
+    try:
+        from services.timestamp import start_free_agency, get_enhanced_timestamp
+        if start_free_agency():
+            return jsonify(get_enhanced_timestamp()), 200
+        return jsonify(error="update_failed", message="Failed to start free agency."), 500
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("start_free_agency: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/advance-fa-round")
+def advance_fa_round_endpoint():
+    """
+    Advance to the next free agency round.
+
+    Example:
+      POST /api/v1/games/advance-fa-round
+    """
+    try:
+        from services.timestamp import advance_fa_round, get_enhanced_timestamp
+        round_info = advance_fa_round()
+        ts = get_enhanced_timestamp()
+        ts["round_info"] = round_info
+        return jsonify(ts), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("advance_fa_round: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/end-free-agency")
+def end_free_agency_endpoint():
+    """
+    Close the free agency window.
+
+    Example:
+      POST /api/v1/games/end-free-agency
+    """
+    try:
+        from services.timestamp import end_free_agency, get_enhanced_timestamp
+        if end_free_agency():
+            return jsonify(get_enhanced_timestamp()), 200
+        return jsonify(error="update_failed", message="Failed to end free agency."), 500
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("end_free_agency: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/start-draft")
+def start_draft_endpoint():
+    """
+    Open the draft phase.
+
+    Example:
+      POST /api/v1/games/start-draft
+    """
+    try:
+        from services.timestamp import start_draft, get_enhanced_timestamp
+        if start_draft():
+            return jsonify(get_enhanced_timestamp()), 200
+        return jsonify(error="update_failed", message="Failed to start draft."), 500
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("start_draft: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/end-draft")
+def end_draft_endpoint():
+    """
+    Close the draft phase.
+
+    Example:
+      POST /api/v1/games/end-draft
+    """
+    try:
+        from services.timestamp import end_draft, get_enhanced_timestamp
+        if end_draft():
+            return jsonify(get_enhanced_timestamp()), 200
+        return jsonify(error="update_failed", message="Failed to end draft."), 500
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("end_draft: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/start-recruiting")
+def start_recruiting_endpoint():
+    """
+    Open the recruiting window.
+
+    Example:
+      POST /api/v1/games/start-recruiting
+    """
+    try:
+        from services.timestamp import start_recruiting, get_enhanced_timestamp
+        if start_recruiting():
+            return jsonify(get_enhanced_timestamp()), 200
+        return jsonify(error="update_failed", message="Failed to start recruiting."), 500
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("start_recruiting: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/end-recruiting")
+def end_recruiting_endpoint():
+    """
+    Close the recruiting window.
+
+    Example:
+      POST /api/v1/games/end-recruiting
+    """
+    try:
+        from services.timestamp import end_recruiting, get_enhanced_timestamp
+        if end_recruiting():
+            return jsonify(get_enhanced_timestamp()), 200
+        return jsonify(error="update_failed", message="Failed to end recruiting."), 500
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("end_recruiting: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/start-new-season")
+def start_new_season_endpoint():
+    """
+    Transition from offseason to a new regular season.
+    Runs year-start financial books and resets timestamp.
+
+    Request body:
+    {
+        "league_year_id": 2
+    }
+
+    Example:
+      POST /api/v1/games/start-new-season
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        league_year_id = data.get("league_year_id")
+
+        if league_year_id is None:
+            return jsonify(
+                error="invalid_request",
+                message="'league_year_id' is required."
+            ), 400
+
+        from services.timestamp import start_new_season
+        result = start_new_season(int(league_year_id))
+        return jsonify(result), 200
+
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except Exception as e:
+        current_app.logger.exception("start_new_season: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
 
 
 @games_bp.get("/schedule/week-levels")

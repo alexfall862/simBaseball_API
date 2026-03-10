@@ -914,3 +914,230 @@ def build_defense_and_lineup(
     bench_ids = sorted(all_ids - set(lineup_ids) - {starter_id})
 
     return defense, lineup_ids, bench_ids
+
+
+# -------------------------------------------------------------------
+# Cache-aware variant (zero DB queries)
+# -------------------------------------------------------------------
+
+def build_defense_and_lineup_from_cache(
+    cache,
+    team_id: int,
+    vs_hand: str | None,
+    players_by_id: Dict[int, Dict[str, Any]],
+    starter_id: int,
+    use_dh: bool = False,
+) -> Tuple[Dict[str, Any], List[int], List[int]]:
+    """
+    Same logic as build_defense_and_lineup but reads from SubweekCache.
+    Zero database queries.
+    """
+    # Get pre-loaded plans and usage from cache
+    plans_by_position = cache.position_plans_by_team.get(team_id, {})
+
+    # Filter plans by vs_hand (mirrors _load_all_position_plans_for_team logic)
+    if vs_hand:
+        filtered_plans: Dict[str, List[Dict]] = {}
+        for pos, plans in plans_by_position.items():
+            matching = [
+                p for p in plans
+                if p.get("vs_hand") in (vs_hand, "both", None)
+            ]
+            if matching:
+                filtered_plans[pos] = matching
+        plans_by_position = filtered_plans
+
+    usage_by_position = cache.weekly_usage_by_team.get(team_id, {})
+
+    # Initialize defense with SP fixed
+    defense: Dict[str, Any] = {
+        "startingpitcher": starter_id,
+        "c": None, "fb": None, "sb": None, "tb": None,
+        "ss": None, "lf": None, "cf": None, "rf": None,
+        "dh": None,
+    }
+
+    remaining_ids = [pid for pid in players_by_id.keys() if pid != starter_id]
+
+    for pos in _POSITION_PRIORITY_ORDER:
+        chosen = _choose_player_for_position(
+            conn=None,
+            team_id=team_id,
+            league_year_id=0,
+            season_week=0,
+            position_code=pos,
+            vs_hand=vs_hand,
+            players_by_id=players_by_id,
+            remaining_ids=remaining_ids,
+            plans_by_position=plans_by_position,
+            usage_by_position=usage_by_position,
+        )
+        if chosen is not None:
+            defense[pos] = chosen
+            if chosen in remaining_ids:
+                remaining_ids.remove(chosen)
+
+    if use_dh:
+        best_pid = None
+        best_score = None
+        for pid in remaining_ids:
+            p = players_by_id[pid]
+            if not _is_player_available_for_lineup(p):
+                continue
+            base_pos_rating = _get_rating(p, "dh_rating")
+            off_score = _compute_offense_score(p)
+            score = base_pos_rating * 0.7 + off_score * 0.3
+            if best_pid is None or score > best_score:
+                best_pid = pid
+                best_score = score
+        if best_pid is not None:
+            defense["dh"] = best_pid
+            if best_pid in remaining_ids:
+                remaining_ids.remove(best_pid)
+
+    # Build batting order — use cached lineup roles for the fallback path
+    lineup_ids = _build_batting_order_from_cache(
+        cache=cache,
+        team_id=team_id,
+        players_by_id=players_by_id,
+        starter_id=starter_id,
+        defense=defense,
+        use_dh=use_dh,
+        plans_by_position=plans_by_position,
+    )
+
+    all_ids = set(players_by_id.keys())
+    bench_ids = sorted(all_ids - set(lineup_ids) - {starter_id})
+
+    return defense, lineup_ids, bench_ids
+
+
+def _build_batting_order_from_cache(
+    cache,
+    team_id: int,
+    players_by_id: Dict[int, Dict[str, Any]],
+    starter_id: int,
+    defense: Dict[str, Any],
+    use_dh: bool,
+    plans_by_position: Dict[str, List[Dict[str, Any]]] | None = None,
+) -> List[int]:
+    """
+    Same logic as _build_batting_order but uses cached lineup roles
+    instead of querying team_lineup_roles.
+    """
+    # Determine starting hitters (same logic)
+    starting_ids: List[int] = []
+
+    if use_dh:
+        dh_id = defense.get("dh")
+        if dh_id is not None:
+            starting_ids.append(dh_id)
+    else:
+        if starter_id in players_by_id:
+            starting_ids.append(starter_id)
+
+    for pos in _POSITION_PRIORITY_ORDER:
+        pid = defense.get(pos)
+        if pid is not None and pid not in starting_ids:
+            starting_ids.append(pid)
+
+    unique_start_ids: List[int] = []
+    seen = set()
+    for pid in starting_ids:
+        if pid not in seen:
+            seen.add(pid)
+            unique_start_ids.append(pid)
+
+    if not unique_start_ids:
+        return []
+
+    # Build player lineup prefs from defense assignments
+    player_lineup_prefs: Dict[int, Dict[str, Any]] = {}
+    has_defense_lineup_data = False
+
+    if plans_by_position:
+        for pos, plans in plans_by_position.items():
+            chosen_pid = defense.get(pos)
+            if chosen_pid is None or chosen_pid not in unique_start_ids:
+                continue
+            for plan in plans:
+                if plan["player_id"] == chosen_pid:
+                    role = plan.get("lineup_role", "balanced")
+                    mn = plan.get("min_order")
+                    mx = plan.get("max_order")
+                    if chosen_pid not in player_lineup_prefs:
+                        player_lineup_prefs[chosen_pid] = {
+                            "lineup_role": role,
+                            "min_order": mn,
+                            "max_order": mx,
+                        }
+                        if role != "balanced" or mn is not None or mx is not None:
+                            has_defense_lineup_data = True
+                    break
+
+    if has_defense_lineup_data:
+        return _build_order_from_defense_prefs(
+            unique_start_ids, players_by_id, player_lineup_prefs
+        )
+
+    # Fallback: use cached lineup roles instead of querying
+    roles_by_slot = cache.lineup_roles_by_team.get(team_id, {})
+
+    if not roles_by_slot:
+        return sorted(
+            unique_start_ids,
+            key=lambda pid: _compute_offense_score(players_by_id[pid]),
+            reverse=True,
+        )
+
+    # Legacy team_lineup_roles algorithm (same as _build_batting_order)
+    lineup: List[int | None] = [None] * min(9, len(unique_start_ids))
+    assigned_players: set[int] = set()
+
+    for slot_idx in range(len(lineup)):
+        slot_num = slot_idx + 1
+        role_row = roles_by_slot.get(slot_num)
+        if not role_row:
+            continue
+        locked_pid = role_row.get("locked_player_id")
+        if locked_pid is None:
+            continue
+        locked_pid = int(locked_pid)
+        if locked_pid in unique_start_ids and locked_pid not in assigned_players:
+            lineup[slot_idx] = locked_pid
+            assigned_players.add(locked_pid)
+
+    for slot_idx in range(len(lineup)):
+        if lineup[slot_idx] is not None:
+            continue
+        slot_num = slot_idx + 1
+        role_row = roles_by_slot.get(slot_num)
+        role_name = role_row["role"] if role_row else "balanced"
+
+        best_pid = None
+        best_score = None
+        for pid in unique_start_ids:
+            if pid in assigned_players:
+                continue
+            p = players_by_id[pid]
+            score = _score_player_for_role(p, role_name)
+            if role_name == "bottom":
+                score = -score
+            if best_pid is None or score > best_score:
+                best_pid = pid
+                best_score = score
+        if best_pid is not None:
+            lineup[slot_idx] = best_pid
+            assigned_players.add(best_pid)
+
+    remaining_ids = [pid for pid in unique_start_ids if pid not in assigned_players]
+    remaining_sorted = sorted(
+        remaining_ids,
+        key=lambda pid: _compute_offense_score(players_by_id[pid]),
+        reverse=True,
+    )
+    final_lineup: List[int] = [pid for pid in lineup if pid is not None]
+    for pid in remaining_sorted:
+        if pid not in final_lineup:
+            final_lineup.append(pid)
+    return final_lineup

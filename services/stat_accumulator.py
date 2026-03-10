@@ -542,3 +542,224 @@ def _insert_game_pitching_lines(
                 "game %d player %s", game_id, player_id_str,
             )
     return count
+
+
+# ---------------------------------------------------------------------------
+# Bulk variants — collect all params across all games, execute once
+# ---------------------------------------------------------------------------
+
+def accumulate_subweek_stats_bulk(
+    conn,
+    results: List[Dict[str, Any]],
+    league_year_id: int,
+) -> Dict[str, int]:
+    """
+    Bulk version of accumulate_subweek_stats.
+    Collects all param dicts across all games, then executes each UPSERT
+    statement once with executemany (list of param dicts).
+    """
+    batting_params = []
+    pitching_params = []
+    fielding_params = []
+    game_batting_params = []
+    game_pitching_params = []
+
+    for game_result in results:
+        nested = game_result.get("result") or {}
+        stats = game_result.get("stats") or nested.get("stats")
+        if not stats:
+            continue
+
+        game_id = game_result.get("game_id") or nested.get("game_id")
+
+        batters = stats.get("batters") or {}
+        pitchers = stats.get("pitchers") or {}
+        fielders = stats.get("fielders") or {}
+
+        # Batting season stats + per-game lines
+        for pid_str, b in batters.items():
+            try:
+                params = {
+                    "player_id":       int(pid_str),
+                    "league_year_id":  league_year_id,
+                    "team_id":         int(b["team_id"]),
+                    "at_bats":         int(b.get("at_bats", 0)),
+                    "runs":            int(b.get("runs", 0)),
+                    "hits":            int(b.get("hits", 0)),
+                    "doubles":         int(b.get("doubles", 0)),
+                    "triples":         int(b.get("triples", 0)),
+                    "home_runs":       int(b.get("home_runs", 0)),
+                    "rbi":             int(b.get("rbi", 0)),
+                    "walks":           int(b.get("walks", 0)),
+                    "strikeouts":      int(b.get("strikeouts", 0)),
+                    "stolen_bases":    int(b.get("stolen_bases", 0)),
+                    "caught_stealing": int(b.get("caught_stealing", 0)),
+                }
+                batting_params.append(params)
+
+                if game_id is not None:
+                    game_batting_params.append({
+                        "game_id": int(game_id),
+                        **params,
+                    })
+            except Exception:
+                logger.exception(
+                    "stat_accumulator bulk: failed to build batting params for %s", pid_str
+                )
+
+        # Pitching season stats + per-game lines
+        for pid_str, p in pitchers.items():
+            try:
+                params = {
+                    "player_id":            int(pid_str),
+                    "league_year_id":       league_year_id,
+                    "team_id":              int(p["team_id"]),
+                    "games_started":        int(p.get("games_started", 0)),
+                    "win":                  int(p.get("win", 0)),
+                    "loss":                 int(p.get("loss", 0)),
+                    "save":                 int(p.get("save", 0)),
+                    "innings_pitched_outs": int(p.get("innings_pitched_outs", 0)),
+                    "hits_allowed":         int(p.get("hits_allowed", 0)),
+                    "runs_allowed":         int(p.get("runs_allowed", 0)),
+                    "earned_runs":          int(p.get("earned_runs", 0)),
+                    "walks":                int(p.get("walks", 0)),
+                    "strikeouts":           int(p.get("strikeouts", 0)),
+                    "home_runs_allowed":    int(p.get("home_runs_allowed", 0)),
+                }
+                pitching_params.append(params)
+
+                if game_id is not None:
+                    game_pitching_params.append({
+                        "game_id": int(game_id),
+                        **params,
+                    })
+            except Exception:
+                logger.exception(
+                    "stat_accumulator bulk: failed to build pitching params for %s", pid_str
+                )
+
+        # Fielding season stats
+        for pid_str, f in fielders.items():
+            try:
+                if "_" in pid_str:
+                    pid_part, pos_part = pid_str.rsplit("_", 1)
+                    player_id = int(pid_part)
+                    position_code = pos_part
+                else:
+                    player_id = int(pid_str)
+                    position_code = str(f.get("position_code", ""))
+
+                fielding_params.append({
+                    "player_id":      player_id,
+                    "league_year_id": league_year_id,
+                    "team_id":        int(f["team_id"]),
+                    "position_code":  str(f.get("position_code", position_code)),
+                    "innings":        int(f.get("innings", 0)),
+                    "putouts":        int(f.get("putouts", 0)),
+                    "assists":        int(f.get("assists", 0)),
+                    "errors":         int(f.get("errors", 0)),
+                })
+            except Exception:
+                logger.exception(
+                    "stat_accumulator bulk: failed to build fielding params for %s", pid_str
+                )
+
+    # Execute each statement once with full param lists
+    totals = {"batters": 0, "pitchers": 0, "fielders": 0}
+
+    if batting_params:
+        try:
+            conn.execute(_BATTING_UPSERT, batting_params)
+            totals["batters"] = len(batting_params)
+        except Exception:
+            logger.exception("stat_accumulator bulk: batting upsert failed (%d rows)", len(batting_params))
+
+    if pitching_params:
+        try:
+            conn.execute(_PITCHING_UPSERT, pitching_params)
+            totals["pitchers"] = len(pitching_params)
+        except Exception:
+            logger.exception("stat_accumulator bulk: pitching upsert failed (%d rows)", len(pitching_params))
+
+    if fielding_params:
+        try:
+            conn.execute(_FIELDING_UPSERT, fielding_params)
+            totals["fielders"] = len(fielding_params)
+        except Exception:
+            logger.exception("stat_accumulator bulk: fielding upsert failed (%d rows)", len(fielding_params))
+
+    if game_batting_params:
+        try:
+            conn.execute(_GAME_BATTING_INSERT, game_batting_params)
+        except Exception:
+            logger.exception("stat_accumulator bulk: game batting insert failed (%d rows)", len(game_batting_params))
+
+    if game_pitching_params:
+        try:
+            conn.execute(_GAME_PITCHING_INSERT, game_pitching_params)
+        except Exception:
+            logger.exception("stat_accumulator bulk: game pitching insert failed (%d rows)", len(game_pitching_params))
+
+    logger.info(
+        "stat_accumulator bulk: %d batters, %d pitchers, %d fielders, "
+        "%d game batting lines, %d game pitching lines",
+        totals["batters"], totals["pitchers"], totals["fielders"],
+        len(game_batting_params), len(game_pitching_params),
+    )
+    return totals
+
+
+def record_subweek_position_usage_bulk(
+    conn,
+    payloads: List[Dict[str, Any]],
+    league_year_id: int,
+) -> int:
+    """
+    Bulk version of record_subweek_position_usage.
+    Collects all usage params, executes one executemany call.
+    """
+    usage_params = []
+
+    for payload in payloads:
+        season_week = payload.get("season_week")
+
+        for side_key in ("home_side", "away_side"):
+            side = payload.get(side_key) or {}
+            defense = side.get("defense") or {}
+            team_id = side.get("team_id")
+            vs_hand = side.get("vs_hand")
+
+            if not team_id or not vs_hand or vs_hand.upper() not in ("L", "R"):
+                continue
+
+            for def_key, usage_pos in _DEFENSE_POS_TO_USAGE.items():
+                player_id = defense.get(def_key)
+                if player_id is None:
+                    continue
+
+                usage_params.append({
+                    "league_year_id": league_year_id,
+                    "season_week":    season_week,
+                    "team_id":        int(team_id),
+                    "player_id":      int(player_id),
+                    "position_code":  usage_pos,
+                    "vs_hand":        vs_hand.upper(),
+                })
+
+    if not usage_params:
+        return 0
+
+    try:
+        conn.execute(_USAGE_UPSERT, usage_params)
+        logger.info("stat_accumulator bulk: %d position usage rows upserted", len(usage_params))
+        return len(usage_params)
+    except Exception:
+        logger.exception(
+            "stat_accumulator bulk: position usage upsert failed (%d rows)",
+            len(usage_params),
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0

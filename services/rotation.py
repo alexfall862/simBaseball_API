@@ -400,3 +400,135 @@ def pick_starting_pitcher(
         "starter_id": starter["player_id"],
         "candidates": candidates,
     }
+
+
+# -------------------------------------------------------------------
+# Cache-aware variant (zero DB queries)
+# -------------------------------------------------------------------
+
+def pick_starting_pitcher_from_cache(cache, team_id: int) -> Dict[str, Any]:
+    """
+    Same logic as pick_starting_pitcher but reads entirely from SubweekCache.
+    No database queries.
+    """
+    rot_row = cache.rotation_by_team.get(team_id)
+
+    if not rot_row:
+        return _fallback_pick_starter_from_cache(cache, team_id)
+
+    rotation_id = int(rot_row["id"])
+    rotation_size = int(rot_row["rotation_size"])
+
+    slot_rows = cache.rotation_slots_by_rotation.get(rotation_id, [])
+
+    if not slot_rows or len(slot_rows) != rotation_size:
+        return _fallback_pick_starter_from_cache(cache, team_id)
+
+    st_row = cache.rotation_state_by_team.get(team_id)
+    current_slot = int(st_row["current_slot"]) if st_row and st_row.get("current_slot") is not None else 0
+
+    slot_order: List[int] = []
+    for i in range(rotation_size):
+        next_slot = ((current_slot + i) % rotation_size) + 1
+        slot_order.append(next_slot)
+
+    pitcher_ids = [int(r["player_id"]) for r in slot_rows]
+
+    usage_prefs = _get_usage_prefs_from_cache(cache, pitcher_ids)
+
+    candidates: List[Dict[str, Any]] = []
+
+    for slot_num in slot_order:
+        s_row = next((r for r in slot_rows if r["slot"] == slot_num), None)
+        if s_row is None:
+            continue
+        pid = int(s_row["player_id"])
+
+        stamina = cache.stamina.get(pid, 100)
+        usage_pref = usage_prefs.get(pid, "normal")
+        threshold = _USAGE_THRESHOLDS.get(usage_pref, 70)
+
+        candidates.append({
+            "player_id": pid,
+            "slot": slot_num,
+            "stamina": stamina,
+            "usage_preference": usage_pref,
+            "threshold": threshold,
+        })
+
+    starter = None
+    for cand in candidates:
+        if cand["stamina"] >= cand["threshold"]:
+            starter = cand
+            break
+
+    if starter is None and candidates:
+        starter = max(candidates, key=lambda c: c["stamina"])
+
+    if starter is None:
+        raise ValueError(f"No rotation candidates found for team_id {team_id}")
+
+    return {
+        "starter_id": starter["player_id"],
+        "candidates": candidates,
+    }
+
+
+def _fallback_pick_starter_from_cache(cache, team_id: int) -> Dict[str, Any]:
+    """
+    Fallback rotation selection using cached data.
+    Same logic as _fallback_pick_starter_without_rotation but zero DB.
+    """
+    pitcher_ids = cache.pitcher_ids_by_team.get(team_id, [])
+    if not pitcher_ids:
+        raise ValueError(f"No pitchers found on roster for team_id {team_id}")
+
+    usage_prefs = _get_usage_prefs_from_cache(cache, pitcher_ids)
+
+    candidates: List[Dict[str, Any]] = []
+
+    for pid in pitcher_ids:
+        stamina = cache.stamina.get(pid, 100)
+        usage_pref = usage_prefs.get(pid, "normal")
+        threshold = _USAGE_THRESHOLDS.get(usage_pref, 70)
+
+        player_ratings = cache.player_rows.get(pid, {})
+        ability_score = _compute_pitcher_ability_score(player_ratings)
+
+        candidates.append({
+            "player_id": pid,
+            "slot": None,
+            "stamina": stamina,
+            "usage_preference": usage_pref,
+            "threshold": threshold,
+            "ability_score": ability_score,
+        })
+
+    rested = [c for c in candidates if c["stamina"] >= c["threshold"]]
+
+    if rested:
+        starter = max(rested, key=lambda c: c["ability_score"])
+    else:
+        starter = max(candidates, key=lambda c: c["ability_score"])
+        logger.warning(
+            "Desperation mode (cached): no pitchers meet stamina threshold for team_id %s",
+            team_id,
+        )
+
+    return {
+        "starter_id": starter["player_id"],
+        "candidates": candidates,
+    }
+
+
+def _get_usage_prefs_from_cache(cache, player_ids: List[int]) -> Dict[int, str]:
+    """Extract usage_preference from cached strategy rows."""
+    result = {}
+    for pid in player_ids:
+        rows = cache.strategy_rows_by_player.get(pid)
+        if rows:
+            pref = rows[0].get("usage_preference")
+            result[pid] = pref if pref else "normal"
+        else:
+            result[pid] = "normal"
+    return result

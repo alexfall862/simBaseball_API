@@ -110,9 +110,17 @@
     document.getElementById('btn-wipe-season').addEventListener('click', wipeSeason);
 
     // Timestamp
-    document.getElementById('btn-refresh-timestamp').addEventListener('click', loadTimestamp);
-    document.getElementById('btn-advance-week').addEventListener('click', advanceWeek);
-    document.getElementById('btn-reset-week').addEventListener('click', resetWeekGames);
+    const _tsListeners = {
+      'btn-refresh-timestamp': loadTimestamp,
+      'btn-set-week': tsSetWeek,
+      'btn-set-phase': tsSetPhase,
+      'btn-end-season': tsEndSeason,
+      'btn-start-new-season': tsStartNewSeason,
+    };
+    for (const [id, fn] of Object.entries(_tsListeners)) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', fn);
+    }
 
     // Organizations
     document.getElementById('btn-refresh-orgs').addEventListener('click', loadOrganizations);
@@ -720,31 +728,131 @@
     }
   }
 
-  // Timestamp
-  function loadTimestamp() {
-    const container = document.getElementById('timestamp-data');
-    container.innerHTML = '<div class="kv-row"><div class="kv-key">Loading...</div><div class="kv-val"></div></div>';
+  // Timestamp — phase-aware UI
+  let _tsData = null;
 
+  const PHASE_BADGE_CLASS = {
+    REGULAR_SEASON: 'badge-success',
+    OFFSEASON: 'badge-warning',
+    FREE_AGENCY: 'badge-info',
+    DRAFT: 'badge-running',
+    RECRUITING: 'badge-pending',
+  };
+
+  const PHASE_LABEL = {
+    REGULAR_SEASON: 'Regular Season',
+    OFFSEASON: 'Offseason',
+    FREE_AGENCY: 'Free Agency',
+    DRAFT: 'Draft',
+    RECRUITING: 'Recruiting',
+  };
+
+  const ACTION_CONFIG = {
+    simulate_week:      { label: 'Simulate Week',       cls: 'btn-warning',   endpoint: null },
+    advance_week:       { label: 'Advance Week',        cls: 'btn-warning',   endpoint: '/games/advance-week' },
+    reset_week:         { label: 'Reset Week Games',    cls: 'btn-secondary', endpoint: '/games/reset-week' },
+    end_season:         { label: 'End Season',          cls: 'btn-danger',    endpoint: null, card: 'ts-end-season-card' },
+    start_free_agency:  { label: 'Start Free Agency',   cls: 'btn-primary',   endpoint: '/games/start-free-agency' },
+    advance_fa_round:   { label: 'Advance FA Round',    cls: 'btn-warning',   endpoint: '/games/advance-fa-round' },
+    end_free_agency:    { label: 'End Free Agency',     cls: 'btn-secondary', endpoint: '/games/end-free-agency' },
+    start_draft:        { label: 'Start Draft',         cls: 'btn-primary',   endpoint: '/games/start-draft' },
+    end_draft:          { label: 'End Draft',           cls: 'btn-secondary', endpoint: '/games/end-draft' },
+    start_recruiting:   { label: 'Start Recruiting',    cls: 'btn-primary',   endpoint: '/games/start-recruiting' },
+    end_recruiting:     { label: 'End Recruiting',      cls: 'btn-secondary', endpoint: '/games/end-recruiting' },
+    start_new_season:   { label: 'Start New Season',    cls: 'btn-primary',   endpoint: null, card: 'ts-new-season-card' },
+    set_phase:          { label: 'Phase Override',      cls: 'btn-secondary', endpoint: null, scroll: 'btn-set-phase' },
+  };
+
+  function loadTimestamp() {
     fetch(`${API_BASE}/games/timestamp`)
       .then(r => r.json())
       .then(data => {
-        container.innerHTML = Object.entries(data).map(([key, val]) => `
-          <div class="kv-row">
-            <div class="kv-key">${key}</div>
-            <div class="kv-val">${JSON.stringify(val)}</div>
-          </div>
-        `).join('');
+        _tsData = data;
+        renderTimestamp(data);
       })
       .catch(err => {
-        container.innerHTML = `<div class="kv-row"><div class="kv-key">Error</div><div class="kv-val">${err.message}</div></div>`;
+        const badge = document.getElementById('ts-phase-badge');
+        if (badge) {
+          badge.textContent = 'Error';
+          badge.className = 'badge badge-danger';
+        }
+        console.error('loadTimestamp failed:', err);
       });
   }
 
-  function advanceWeek() {
-    const resultBox = document.getElementById('timestamp-result');
-    resultBox.textContent = 'Advancing week...';
+  function renderTimestamp(ts) {
+    // Phase badge
+    const badge = document.getElementById('ts-phase-badge');
+    const phase = ts.Phase || 'UNKNOWN';
+    if (!badge) {
+      // Fallback: old HTML without new elements — dump raw JSON
+      const container = document.getElementById('timestamp-data');
+      if (container) {
+        container.innerHTML = Object.entries(ts).map(([k, v]) =>
+          `<div class="kv-row"><div class="kv-key">${k}</div><div class="kv-val">${JSON.stringify(v)}</div></div>`
+        ).join('');
+      }
+      return;
+    }
+    badge.textContent = PHASE_LABEL[phase] || phase;
+    badge.className = 'badge ' + (PHASE_BADGE_CLASS[phase] || 'badge-pending');
 
-    fetch(`${API_BASE}/games/advance-week`, {
+    // Overview cards
+    document.getElementById('ts-season').textContent = ts.Season || '--';
+    document.getElementById('ts-season-sub').textContent = `Season ID: ${ts.SeasonID || '--'}`;
+    document.getElementById('ts-week').textContent = `${ts.Week || '--'} / ${ts.TotalWeeks || '--'}`;
+    document.getElementById('ts-week-sub').textContent = ts.RunGames ? 'Simulating...' : (ts.GamesARan && ts.GamesBRan && ts.GamesCRan && ts.GamesDRan ? 'All games complete' : 'Ready');
+
+    // Game flags
+    const flagsContainer = document.getElementById('ts-game-flags');
+    const flags = [
+      ['Games A', ts.GamesARan], ['Games B', ts.GamesBRan],
+      ['Games C', ts.GamesCRan], ['Games D', ts.GamesDRan],
+    ];
+    flagsContainer.innerHTML = flags.map(([label, val]) => `
+      <div class="kv-row">
+        <div class="kv-key">${label}</div>
+        <div class="kv-val"><span class="badge ${val ? 'badge-success' : 'badge-pending'}">${val ? 'Complete' : 'Pending'}</span></div>
+      </div>
+    `).join('');
+
+    // Dynamic action buttons
+    const actionsContainer = document.getElementById('ts-actions-container');
+    const actions = ts.AvailableActions || [];
+    const buttons = [];
+
+    // Show/hide special cards
+    document.getElementById('ts-end-season-card').style.display = actions.includes('end_season') ? 'block' : 'none';
+    document.getElementById('ts-new-season-card').style.display = actions.includes('start_new_season') && phase === 'OFFSEASON' ? 'block' : 'none';
+
+    for (const action of actions) {
+      const cfg = ACTION_CONFIG[action];
+      if (!cfg) continue;
+
+      // Skip actions that have their own card (end_season, start_new_season)
+      // but keep set_phase as a scroll-to link
+      if (cfg.card) continue;
+
+      if (cfg.endpoint) {
+        buttons.push(`<button class="btn ${cfg.cls}" onclick="tsAction('${cfg.endpoint}', '${cfg.label}')">${cfg.label}</button>`);
+      } else if (cfg.scroll) {
+        buttons.push(`<button class="btn ${cfg.cls}" onclick="document.getElementById('${cfg.scroll}').scrollIntoView({behavior:'smooth'})">${cfg.label}</button>`);
+      } else if (action === 'simulate_week') {
+        buttons.push(`<button class="btn ${cfg.cls}" onclick="document.querySelector('[data-section=simulate]').click()">${cfg.label}</button>`);
+      }
+    }
+
+    actionsContainer.innerHTML = buttons.length
+      ? `<div class="button-group">${buttons.join('')}</div>`
+      : '<p class="text-muted">No actions available in current state.</p>';
+  }
+
+  // Generic action caller for simple POST endpoints
+  function tsAction(endpoint, label) {
+    const resultBox = document.getElementById('timestamp-result');
+    resultBox.textContent = `${label}...`;
+
+    fetch(`${API_BASE}${endpoint}`, {
       method: 'POST',
       credentials: 'include',
     })
@@ -757,22 +865,107 @@
         resultBox.textContent = 'Error: ' + err.message;
       });
   }
+  // Expose to inline onclick
+  window.tsAction = tsAction;
 
-  function resetWeekGames() {
+  function tsSetWeek() {
+    const week = parseInt(document.getElementById('ts-set-week').value, 10);
+    if (!week || week < 1) return;
+
     const resultBox = document.getElementById('timestamp-result');
-    resultBox.textContent = 'Resetting week games...';
+    resultBox.textContent = `Setting week to ${week}...`;
 
-    fetch(`${API_BASE}/games/reset-week`, {
+    fetch(`${API_BASE}/games/set-week`, {
       method: 'POST',
       credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ week }),
     })
       .then(r => r.json())
       .then(data => {
         resultBox.textContent = JSON.stringify(data, null, 2);
+        loadTimestamp();
       })
-      .catch(err => {
-        resultBox.textContent = 'Error: ' + err.message;
-      });
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  function tsSetPhase() {
+    const body = {};
+    const offseason = document.getElementById('ts-offseason').value;
+    const faLocked = document.getElementById('ts-fa-locked').value;
+    const draftTime = document.getElementById('ts-draft-time').value;
+    const recruitLocked = document.getElementById('ts-recruiting-locked').value;
+    const faRound = document.getElementById('ts-fa-round').value;
+
+    if (offseason !== '') body.is_offseason = offseason === 'true';
+    if (faLocked !== '') body.is_free_agency_locked = faLocked === 'true';
+    if (draftTime !== '') body.is_draft_time = draftTime === 'true';
+    if (recruitLocked !== '') body.is_recruiting_locked = recruitLocked === 'true';
+    if (faRound !== '') body.free_agency_round = parseInt(faRound, 10);
+
+    if (Object.keys(body).length === 0) return;
+
+    const resultBox = document.getElementById('timestamp-result');
+    resultBox.textContent = 'Applying phase override...';
+
+    fetch(`${API_BASE}/games/set-phase`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        loadTimestamp();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  function tsEndSeason() {
+    const yearId = parseInt(document.getElementById('ts-eos-year').value, 10);
+    if (!yearId) return;
+
+    if (!confirm('End the regular season? This runs contract processing and player progression.')) return;
+
+    const resultBox = document.getElementById('timestamp-result');
+    resultBox.textContent = 'Ending season...';
+
+    fetch(`${API_BASE}/games/end-season`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: yearId }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        loadTimestamp();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  function tsStartNewSeason() {
+    const yearId = parseInt(document.getElementById('ts-new-year').value, 10);
+    if (!yearId) return;
+
+    if (!confirm('Start a new season? This runs year-start financials and resets to week 1.')) return;
+
+    const resultBox = document.getElementById('timestamp-result');
+    resultBox.textContent = 'Starting new season...';
+
+    fetch(`${API_BASE}/games/start-new-season`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: yearId }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        loadTimestamp();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
   }
 
   // Run Season (background task with polling)

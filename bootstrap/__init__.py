@@ -134,6 +134,113 @@ def get_landing(org_id: int):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/v1/bootstrap/landing/all
+# ---------------------------------------------------------------------------
+@bootstrap_bp.get("/bootstrap/landing/all")
+def get_landing_all():
+    """
+    All-orgs bootstrap. Returns shared data at the top level and per-org
+    data keyed by org_id inside an ``Orgs`` map.
+
+    Shared (queried once):
+        SeasonContext, Standings, AllTeams, AllGames, FaceData
+
+    Per-org:
+        Organization, RosterMap, Notifications, News,
+        TopBatter, TopPitcher, TopFielder, InjuryReport, Financials
+    """
+    engine = get_engine()
+    tables = _get_tables()
+
+    try:
+        with engine.connect() as conn:
+            # ── Shared data ──────────────────────────────────────
+            ctx = _resolve_season_context(conn, tables)
+            if ctx is None:
+                return jsonify(error="no_league_state",
+                               message="League state not initialized"), 404
+
+            standings = _get_standings(conn, tables, ctx)
+            all_teams = _get_all_teams(conn, tables)
+            all_games = _get_all_games_unfiltered(conn, tables, ctx)
+
+            # ── Enumerate orgs ───────────────────────────────────
+            orgs_table = tables["organizations"]
+            org_rows = conn.execute(
+                select(orgs_table.c.id).where(orgs_table.c.id < 31)
+            ).all()
+            org_ids = [r[0] for r in org_rows]
+
+            # Face config loaded once, reused for all orgs
+            face_config = None
+            try:
+                from services.face_generator import load_face_config
+                face_config = load_face_config(conn)
+            except Exception:
+                log.debug("bootstrap/all: face config unavailable")
+
+            # ── Per-org data ─────────────────────────────────────
+            orgs_map = {}
+            all_face_data = {}
+
+            for oid in org_ids:
+                org = _get_organization(conn, tables, oid)
+                if org is None:
+                    continue
+
+                team_ids = _get_org_team_ids(org)
+
+                roster_map    = _get_roster_map(conn, tables, oid)
+                notifications = _get_notifications(conn, tables, team_ids)
+                news          = _get_news(conn, tables, team_ids)
+                top_batter    = _get_top_batter(conn, tables, ctx, team_ids)
+                top_pitcher   = _get_top_pitcher(conn, tables, ctx, team_ids)
+                top_fielder   = _get_top_fielder(conn, tables, ctx, team_ids)
+                injury_report = _get_injury_report(conn, tables, oid)
+
+                financials = None
+                try:
+                    financials = _get_financials(conn, tables, oid, ctx)
+                except Exception:
+                    pass
+
+                # Face data per org's roster
+                if face_config is not None:
+                    try:
+                        from services.face_generator import generate_faces_for_roster
+                        org_faces = generate_faces_for_roster(roster_map, config=face_config)
+                        all_face_data.update(org_faces)
+                    except Exception:
+                        pass
+
+                orgs_map[str(oid)] = {
+                    "Organization":  org,
+                    "RosterMap":     roster_map,
+                    "Notifications": notifications,
+                    "News":          news,
+                    "TopBatter":     top_batter,
+                    "TopPitcher":    top_pitcher,
+                    "TopFielder":    top_fielder,
+                    "InjuryReport":  injury_report,
+                    "Financials":    financials,
+                }
+
+        return jsonify({
+            "SeasonContext": ctx,
+            "Standings":    standings,
+            "AllTeams":     all_teams,
+            "AllGames":     all_games,
+            "FaceData":     all_face_data,
+            "Orgs":         orgs_map,
+        }), 200
+
+    except SQLAlchemyError:
+        log.exception("bootstrap landing/all: db error")
+        return jsonify(error="db_unavailable",
+                       message="Database temporarily unavailable"), 503
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -845,6 +952,33 @@ def _get_all_games(conn, tables, ctx, team_ids):
     """)
 
     rows = conn.execute(sql, params).all()
+    return [_row_to_dict(r) for r in rows]
+
+
+def _get_all_games_unfiltered(conn, tables, ctx):
+    """Full season schedule for ALL teams (used by /all endpoint)."""
+    season_id = ctx.get("current_season_id")
+    if season_id is None:
+        return []
+
+    sql = text("""
+        SELECT
+            gl.id,
+            gl.home_team  AS home_team_id,
+            gl.away_team  AS away_team_id,
+            gl.season_week AS week,
+            gl.season_subweek AS game_day,
+            gr.home_score,
+            gr.away_score,
+            gr.game_outcome,
+            CASE WHEN gr.game_id IS NOT NULL THEN 1 ELSE 0 END AS is_complete
+        FROM gamelist gl
+        LEFT JOIN game_results gr ON gr.game_id = gl.id
+        WHERE gl.season = :season_id
+        ORDER BY gl.season_week, gl.season_subweek
+    """)
+
+    rows = conn.execute(sql, {"season_id": season_id}).all()
     return [_row_to_dict(r) for r in rows]
 
 

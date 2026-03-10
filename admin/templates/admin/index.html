@@ -379,21 +379,132 @@
 
       <!-- Timestamp Section -->
       <section id="section-timestamp" class="section">
+        <!-- Phase + Status Overview -->
         <div class="card">
-          <h3>Current Timestamp State</h3>
-          <button class="btn btn-secondary" id="btn-refresh-timestamp" style="margin-bottom: 16px">Refresh</button>
-          <div class="kv-table" id="timestamp-data">
-            <div class="kv-row"><div class="kv-key">Loading...</div><div class="kv-val"></div></div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px">
+            <h3 style="margin: 0">Simulation State</h3>
+            <div style="display: flex; align-items: center; gap: 10px">
+              <span id="ts-phase-badge" class="badge badge-info">--</span>
+              <button class="btn btn-secondary btn-sm" id="btn-refresh-timestamp">Refresh</button>
+            </div>
+          </div>
+
+          <div class="grid-2" id="ts-overview-cards">
+            <div class="stat-card">
+              <div class="stat-label">Season</div>
+              <div class="stat-value" id="ts-season">--</div>
+              <div class="stat-sub" id="ts-season-sub"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Week</div>
+              <div class="stat-value" id="ts-week">--</div>
+              <div class="stat-sub" id="ts-week-sub"></div>
+            </div>
+          </div>
+
+          <div class="kv-table" id="ts-game-flags" style="margin-top: 16px">
+            <!-- Populated by JS -->
           </div>
         </div>
 
+        <!-- Dynamic Actions -->
         <div class="card">
-          <h3>Timestamp Actions</h3>
-          <div class="button-group">
-            <button class="btn btn-warning" id="btn-advance-week">Advance Week</button>
-            <button class="btn btn-secondary" id="btn-reset-week">Reset Week Games</button>
+          <h3>Actions</h3>
+          <div id="ts-actions-container">
+            <!-- Populated dynamically based on AvailableActions -->
           </div>
           <pre id="timestamp-result" class="result-box" style="margin-top: 16px"></pre>
+        </div>
+
+        <!-- Set Week (always visible) -->
+        <div class="card">
+          <h3>Jump to Week</h3>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="ts-set-week">Week Number</label>
+              <input type="number" id="ts-set-week" value="1" min="1" />
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-primary" id="btn-set-week">Set Week</button>
+          </div>
+        </div>
+
+        <!-- Set Phase (admin override) -->
+        <div class="card">
+          <h3>Phase Override</h3>
+          <p class="text-muted">Directly set phase flags. Use with caution.</p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="ts-offseason">Is Offseason</label>
+              <select id="ts-offseason">
+                <option value="">-- no change --</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ts-fa-locked">FA Locked</label>
+              <select id="ts-fa-locked">
+                <option value="">-- no change --</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ts-draft-time">Draft Time</label>
+              <select id="ts-draft-time">
+                <option value="">-- no change --</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ts-recruiting-locked">Recruiting Locked</label>
+              <select id="ts-recruiting-locked">
+                <option value="">-- no change --</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ts-fa-round">FA Round</label>
+              <input type="number" id="ts-fa-round" placeholder="-- no change --" min="0" />
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-danger" id="btn-set-phase">Apply Phase Override</button>
+          </div>
+        </div>
+
+        <!-- End Season (needs league_year_id) -->
+        <div class="card" id="ts-end-season-card" style="display: none">
+          <h3>End Regular Season</h3>
+          <p class="text-muted">Runs end-of-season contracts, player progression, and transitions to offseason.</p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="ts-eos-year">League Year ID</label>
+              <input type="number" id="ts-eos-year" value="1" min="1" />
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-danger" id="btn-end-season">End Season</button>
+          </div>
+        </div>
+
+        <!-- Start New Season (needs league_year_id) -->
+        <div class="card" id="ts-new-season-card" style="display: none">
+          <h3>Start New Season</h3>
+          <p class="text-muted">Runs year-start financials and resets to week 1.</p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="ts-new-year">New League Year ID</label>
+              <input type="number" id="ts-new-year" value="2" min="1" />
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-primary" id="btn-start-new-season">Start New Season</button>
+          </div>
         </div>
       </section>
 

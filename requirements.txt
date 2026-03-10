@@ -9,3 +9,4 @@ python-dotenv==1.0.1
 cryptography==42.0.8
 requests==2.31.0
 simple-websocket==1.0.0
+flask-compress==1.15
