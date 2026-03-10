@@ -1385,33 +1385,112 @@ def _build_college_matchup_pool(
     timeout_seconds: float = 30.0,
 ) -> List[Dict]:
     """
-    Build college schedule: conference round-robin + OOC to hit total.
+    Build college schedule:
+
+    Conference play (30 games):
+      - 10 three-game series per team against conference opponents.
+      - For large conferences (>= 10 teams): pick 10 unique opponents.
+      - For small conferences (< 10 teams): schedule every opponent once,
+        then add rematch series (home/away flipped) until 10 series reached.
+
+    OOC play (20 games):
+      - 20 single-game matchups against non-conference opponents.
+
+    Total: 30 + 20 = 50 games per team.
     """
+    CONF_SERIES_TARGET = 10   # 10 conference series per team
+    CONF_SERIES_LENGTH = 3    # each conference series is 3 games
+    OOC_GAMES_PER_TEAM = 20   # 20 single OOC games
+
     all_series = []
     team_game_count = {}
 
-    # ── Conference round-robin ───────────────────────────────────────
+    # ── Conference: 10 three-game series per team ─────────────────────
     conf_series_count = 0
     for conf, teams in teams_by_conf.items():
         if len(teams) < 2:
             continue
-        for ta, tb in combinations(teams, 2):
+
+        team_ids = [t["id"] for t in teams]
+        team_by_id = {t["id"]: t for t in teams}
+        conf_count = {tid: 0 for tid in team_ids}  # series count per team
+
+        # Phase 1: unique opponent pairs — shuffle and pick up to 10 per team
+        pairs = list(combinations(teams, 2))
+        rng.shuffle(pairs)
+
+        for ta, tb in pairs:
+            a_id, b_id = ta["id"], tb["id"]
+            if conf_count[a_id] >= CONF_SERIES_TARGET:
+                continue
+            if conf_count[b_id] >= CONF_SERIES_TARGET:
+                continue
+
             all_series.append({
-                "team_a": ta["id"],
-                "team_b": tb["id"],
-                "length": 3,
+                "team_a": a_id,
+                "team_b": b_id,
+                "length": CONF_SERIES_LENGTH,
                 "category": "conference",
             })
-            team_game_count[ta["id"]] = team_game_count.get(ta["id"], 0) + 3
-            team_game_count[tb["id"]] = team_game_count.get(tb["id"], 0) + 3
+            conf_count[a_id] += 1
+            conf_count[b_id] += 1
+            team_game_count[a_id] = team_game_count.get(a_id, 0) + CONF_SERIES_LENGTH
+            team_game_count[b_id] = team_game_count.get(b_id, 0) + CONF_SERIES_LENGTH
             conf_series_count += 1
 
+        # Phase 2: small conferences — add rematches with flipped home/away
+        need_more = [tid for tid in team_ids if conf_count[tid] < CONF_SERIES_TARGET]
+        if need_more:
+            # Collect existing conf pairs for this conference
+            existing_pairs = []
+            for s in all_series:
+                if s["category"] == "conference":
+                    a, b = s["team_a"], s["team_b"]
+                    if a in conf_count and b in conf_count:
+                        existing_pairs.append((a, b))
+
+            safety = 0
+            while need_more and safety < 500:
+                safety += 1
+                rng.shuffle(existing_pairs)
+                made_progress = False
+                for orig_a, orig_b in existing_pairs:
+                    # Flip home/away for rematch
+                    a, b = orig_b, orig_a
+                    if conf_count[a] >= CONF_SERIES_TARGET:
+                        continue
+                    if conf_count[b] >= CONF_SERIES_TARGET:
+                        continue
+
+                    all_series.append({
+                        "team_a": a,
+                        "team_b": b,
+                        "length": CONF_SERIES_LENGTH,
+                        "category": "conference",
+                    })
+                    conf_count[a] += 1
+                    conf_count[b] += 1
+                    team_game_count[a] = team_game_count.get(a, 0) + CONF_SERIES_LENGTH
+                    team_game_count[b] = team_game_count.get(b, 0) + CONF_SERIES_LENGTH
+                    conf_series_count += 1
+                    made_progress = True
+
+                need_more = [tid for tid in team_ids if conf_count[tid] < CONF_SERIES_TARGET]
+                if not made_progress:
+                    break
+
+        log.info(
+            "college_conf: %s — %d teams, series/team: min=%d max=%d",
+            conf, len(teams),
+            min(conf_count.values()), max(conf_count.values()),
+        )
+
     log.info(
-        "college_matchup: %d conference series built across %d conferences",
+        "college_matchup: %d conference series across %d conferences",
         conf_series_count, len(teams_by_conf),
     )
 
-    # ── OOC matchups to fill remaining ───────────────────────────────
+    # ── OOC: 20 single-game matchups per team ────────────────────────
     all_teams = []
     team_conf = {}
     for conf, teams in teams_by_conf.items():
@@ -1419,25 +1498,18 @@ def _build_college_matchup_pool(
             all_teams.append(t)
             team_conf[t["id"]] = conf
 
-    remaining = {
-        t["id"]: max(0, games_per_team - team_game_count.get(t["id"], 0))
-        for t in all_teams
-    }
+    remaining = {t["id"]: OOC_GAMES_PER_TEAM for t in all_teams}
 
     used_ooc_pairs = set()
     deadline = time.monotonic() + timeout_seconds
-    max_passes = 50
-    ooc_series_count = 0
+    max_passes = 200
+    ooc_count = 0
 
     for pass_num in range(1, max_passes + 1):
         _check_timeout(deadline, "OOC matchup pass %d" % pass_num)
 
-        needy = [tid for tid, r in remaining.items() if r >= 3]
+        needy = [tid for tid, r in remaining.items() if r >= 1]
         if len(needy) < 2:
-            log.info(
-                "college_ooc: pass %d — %d needy teams remain, stopping",
-                pass_num, len(needy),
-            )
             break
 
         rng.shuffle(needy)
@@ -1446,60 +1518,47 @@ def _build_college_matchup_pool(
 
         while i < len(needy) - 1:
             a = needy[i]
-            if remaining[a] < 3:
+            if remaining[a] < 1:
                 i += 1
                 continue
 
-            paired = False
             for j in range(i + 1, len(needy)):
                 b = needy[j]
-                if remaining[b] < 3:
+                if remaining[b] < 1:
                     continue
                 if team_conf[a] == team_conf[b]:
                     continue
-                pair = frozenset([a, b])
+                pair = (min(a, b), max(a, b))
                 if pair in used_ooc_pairs:
                     continue
 
-                length = 4 if remaining[a] >= 4 and remaining[b] >= 4 and rng.random() < 0.3 else 3
                 all_series.append({
                     "team_a": a,
                     "team_b": b,
-                    "length": length,
+                    "length": 1,
                     "category": "ooc",
                 })
-                remaining[a] -= length
-                remaining[b] -= length
+                remaining[a] -= 1
+                remaining[b] -= 1
                 used_ooc_pairs.add(pair)
-                paired = True
                 paired_this_pass += 1
-                ooc_series_count += 1
+                ooc_count += 1
                 break
 
-            i += 1  # always advance
-
-        log.info(
-            "college_ooc: pass %d — paired %d series (%d total OOC), %d teams still needy",
-            pass_num, paired_this_pass, ooc_series_count,
-            sum(1 for r in remaining.values() if r >= 3),
-        )
+            i += 1
 
         if paired_this_pass == 0:
-            still_needy = {
-                tid: {"remaining": remaining[tid], "conf": team_conf[tid]}
-                for tid in remaining if remaining[tid] >= 3
-            }
+            still_needy = sum(1 for r in remaining.values() if r >= 1)
             if still_needy:
-                sample = dict(list(still_needy.items())[:10])
                 log.warning(
-                    "college_ooc: could not pair %d teams (likely same-conference clusters): %s",
-                    len(still_needy), sample,
+                    "college_ooc: pass %d — no pairs found, %d teams still need games",
+                    pass_num, still_needy,
                 )
             break
 
     log.info(
-        "college_matchup_pool: %d conf + %d OOC = %d total series",
-        conf_series_count, ooc_series_count, len(all_series),
+        "college_matchup_pool: %d conf series (x3 = %d games) + %d OOC games = %d total entries",
+        conf_series_count, conf_series_count * CONF_SERIES_LENGTH, ooc_count, len(all_series),
     )
     return all_series
 

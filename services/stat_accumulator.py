@@ -360,6 +360,10 @@ def record_game_position_usage(
                 "stat_accumulator: usage upsert failed for player %s "
                 "at %s (team %d)", player_id, usage_pos, team_id,
             )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     return count
 
 

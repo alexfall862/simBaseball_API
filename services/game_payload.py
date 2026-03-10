@@ -2298,6 +2298,10 @@ def build_week_payloads(
                     logger.exception(
                         f"Stat accumulation failed for subweek '{subweek}': {stat_err}"
                     )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
                 # Record defensive position usage from the payloads
                 # (payloads contain defense dicts + vs_hand built before simulation)
@@ -2316,6 +2320,10 @@ def build_week_payloads(
                         f"Position usage tracking failed for subweek "
                         f"'{subweek}': {usage_err}"
                     )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
                 # Update player state for next subweek
                 try:
@@ -2332,6 +2340,10 @@ def build_week_payloads(
                         f"Player state update failed for subweek '{subweek}': "
                         f"{state_err}"
                     )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
             except ImportError:
                 # Game engine client not available - skip simulation
