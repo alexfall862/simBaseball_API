@@ -1602,11 +1602,56 @@ def _assign_college_weeks(
     ooc_weeks = list(range(ooc_start, ooc_start + COLLEGE_OOC_WEEKS))
     week_slots = {w: [] for w in range(ooc_start, conf_start + COLLEGE_CONF_WEEKS)}
 
-    # Split OOC into two halves — each half fills one subweek slot per week
+    # Split OOC into two balanced halves — each team must have exactly
+    # the same number of series in each slot (10 each for 20 total).
+    # A random split can leave a team with >10 in one slot, which is
+    # impossible to fit into 10 weeks (max 1 per team per week).
     rng.shuffle(ooc_series)
-    half = len(ooc_series) // 2
-    ooc_slot_a = ooc_series[:half]
-    ooc_slot_c = ooc_series[half:]
+    ooc_slot_a = []
+    ooc_slot_c = []
+    team_a_ct = {}   # per-team count in slot a
+    team_c_ct = {}   # per-team count in slot c
+    target_per_slot = COLLEGE_OOC_WEEKS  # 10 series per team per slot
+
+    for s in ooc_series:
+        ta, tb = s["team_a"], s["team_b"]
+        a_ok = team_a_ct.get(ta, 0) < target_per_slot and team_a_ct.get(tb, 0) < target_per_slot
+        c_ok = team_c_ct.get(ta, 0) < target_per_slot and team_c_ct.get(tb, 0) < target_per_slot
+
+        if a_ok and c_ok:
+            # Both slots available — pick the less loaded one
+            if (team_a_ct.get(ta, 0) + team_a_ct.get(tb, 0)
+                    <= team_c_ct.get(ta, 0) + team_c_ct.get(tb, 0)):
+                ooc_slot_a.append(s)
+                team_a_ct[ta] = team_a_ct.get(ta, 0) + 1
+                team_a_ct[tb] = team_a_ct.get(tb, 0) + 1
+            else:
+                ooc_slot_c.append(s)
+                team_c_ct[ta] = team_c_ct.get(ta, 0) + 1
+                team_c_ct[tb] = team_c_ct.get(tb, 0) + 1
+        elif a_ok:
+            ooc_slot_a.append(s)
+            team_a_ct[ta] = team_a_ct.get(ta, 0) + 1
+            team_a_ct[tb] = team_a_ct.get(tb, 0) + 1
+        elif c_ok:
+            ooc_slot_c.append(s)
+            team_c_ct[ta] = team_c_ct.get(ta, 0) + 1
+            team_c_ct[tb] = team_c_ct.get(tb, 0) + 1
+        else:
+            # Both full for at least one team — put in less loaded slot
+            if len(ooc_slot_a) <= len(ooc_slot_c):
+                ooc_slot_a.append(s)
+                team_a_ct[ta] = team_a_ct.get(ta, 0) + 1
+                team_a_ct[tb] = team_a_ct.get(tb, 0) + 1
+            else:
+                ooc_slot_c.append(s)
+                team_c_ct[ta] = team_c_ct.get(ta, 0) + 1
+                team_c_ct[tb] = team_c_ct.get(tb, 0) + 1
+
+    log.info(
+        "college_ooc_split: slot_a=%d series, slot_c=%d series",
+        len(ooc_slot_a), len(ooc_slot_c),
+    )
 
     for slot_idx, (slot_series, subweek_off) in enumerate([
         (ooc_slot_a, 0),   # subweek "a" (offset 0)
