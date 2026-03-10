@@ -14,7 +14,21 @@ admin_bp = Blueprint(
     url_prefix="/admin",
     template_folder="templates/admin",
     static_folder="static/admin",
+    static_url_path="/static/admin",
 )
+
+
+@admin_bp.after_request
+def admin_no_cache(response):
+    """Prevent browser from caching admin HTML/JS so deploys take effect immediately."""
+    if response.content_type and (
+        "text/html" in response.content_type
+        or "javascript" in response.content_type
+    ):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 # Allowed statement patterns
 SQL_READ_ALLOWED  = re.compile(r"^\s*(SELECT|SHOW|DESCRIBE|EXPLAIN)\b", re.I)
@@ -61,7 +75,6 @@ def _require_admin():
 
 @admin_bp.get("/")
 def admin_index():
-    # Serves templates/admin/index.html
     return render_template("index.html")
 
 @admin_bp.post("/login")

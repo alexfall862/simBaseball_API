@@ -122,8 +122,28 @@ def _format_timestamp_for_frontend(row: Dict[str, Any]) -> Dict[str, Any]:
 
 # --- Phase derivation ---
 
-# Total weeks in a regular season
-TOTAL_SEASON_WEEKS = 25
+# Fallback if no schedule exists yet
+_DEFAULT_SEASON_WEEKS = 52
+
+
+def _get_total_season_weeks(season: int) -> int:
+    """
+    Query the actual max scheduled week from gamelist for the given season.
+    Falls back to _DEFAULT_SEASON_WEEKS if no games exist.
+    """
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            row = conn.execute(
+                text("SELECT MAX(season_week) FROM gamelist WHERE season = :s"),
+                {"s": season},
+            ).first()
+            if row and row[0]:
+                return int(row[0])
+    except Exception:
+        logger.debug("Could not query max season_week, using default")
+    return _DEFAULT_SEASON_WEEKS
 
 
 def get_current_phase(ts: Dict[str, Any]) -> str:
@@ -189,7 +209,8 @@ def get_available_actions(ts: Dict[str, Any], phase: str) -> List[str]:
 
         actions.append("set_week")
 
-        if ts.get("Week", 0) >= TOTAL_SEASON_WEEKS and all_ran:
+        total_weeks = _get_total_season_weeks(ts.get("Season", 2026))
+        if ts.get("Week", 0) >= total_weeks and all_ran:
             actions.append("end_season")
 
     elif phase == "OFFSEASON":
@@ -232,7 +253,7 @@ def get_enhanced_timestamp() -> Optional[Dict[str, Any]]:
 
     ts["Phase"] = phase
     ts["AvailableActions"] = actions
-    ts["TotalWeeks"] = TOTAL_SEASON_WEEKS
+    ts["TotalWeeks"] = _get_total_season_weeks(ts.get("Season", 2026))
 
     # Resolve LeagueYearID from Season (year number)
     try:
