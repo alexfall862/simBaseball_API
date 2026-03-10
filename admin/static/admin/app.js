@@ -328,6 +328,9 @@
       case 'tasks':
         loadTasks();
         break;
+      case 'simulate':
+        refreshSimState();
+        break;
       case 'timestamp':
         loadTimestamp();
         break;
@@ -714,7 +717,10 @@
         body: JSON.stringify(body),
       })
         .then(r => r.json())
-        .then(data => { resultBox.textContent = JSON.stringify(data, null, 2); })
+        .then(data => {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          refreshSimState(); // refresh state bar after manual sim
+        })
         .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
     } else {
       // GET — path params
@@ -723,13 +729,158 @@
 
       fetch(url, { credentials: 'include' })
         .then(r => r.json())
-        .then(data => { resultBox.textContent = JSON.stringify(data, null, 2); })
+        .then(data => {
+          resultBox.textContent = JSON.stringify(data, null, 2);
+          refreshSimState(); // refresh state bar after sim
+        })
         .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
     }
   }
 
-  // Timestamp — phase-aware UI
+  // ── Shared timestamp data ───────────────────────────────────────────
   let _tsData = null;
+
+  // ── Simulate Section — state-aware control bar ─────────────────────
+  function refreshSimState() {
+    fetch(`${API_BASE}/games/timestamp`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        _tsData = data;
+        renderSimState(data);
+        // Also sync the manual sim inputs
+        if (data.Week) document.getElementById('sim-week').value = data.Week;
+        if (data.LeagueYearID) document.getElementById('sim-year').value = data.LeagueYearID;
+        loadSimLevels();
+      })
+      .catch(err => {
+        console.error('refreshSimState failed:', err);
+      });
+  }
+
+  function renderSimState(ts) {
+    const phase = ts.Phase || 'UNKNOWN';
+    const phaseBadge = document.getElementById('sim-phase-badge');
+    const weekBadge = document.getElementById('sim-week-badge');
+
+    if (phaseBadge) {
+      phaseBadge.textContent = PHASE_LABEL[phase] || phase;
+      phaseBadge.className = 'badge ' + (PHASE_BADGE_CLASS[phase] || 'badge-pending');
+    }
+    if (weekBadge) {
+      weekBadge.textContent = `Week ${ts.Week || '--'} / ${ts.TotalWeeks || '--'}`;
+    }
+
+    // Game flags
+    const flagsEl = document.getElementById('sim-game-flags');
+    if (flagsEl) {
+      const flags = [
+        ['Games A', ts.GamesARan], ['Games B', ts.GamesBRan],
+        ['Games C', ts.GamesCRan], ['Games D', ts.GamesDRan],
+      ];
+      flagsEl.innerHTML = flags.map(([label, val]) => `
+        <div class="kv-row">
+          <div class="kv-key">${label}</div>
+          <div class="kv-val"><span class="badge ${val ? 'badge-success' : 'badge-pending'}">${val ? 'Complete' : 'Pending'}</span></div>
+        </div>
+      `).join('');
+    }
+
+    // Action buttons
+    const btnContainer = document.getElementById('sim-action-buttons');
+    if (!btnContainer) return;
+
+    const allRan = ts.GamesARan && ts.GamesBRan && ts.GamesCRan && ts.GamesDRan;
+    const anyRan = ts.GamesARan || ts.GamesBRan || ts.GamesCRan || ts.GamesDRan;
+    const running = ts.RunGames;
+
+    const buttons = [];
+
+    if (phase === 'REGULAR_SEASON') {
+      if (!running && !allRan) {
+        buttons.push(`<button class="btn btn-warning" onclick="simQuickRun()">Simulate Week ${ts.Week || ''}</button>`);
+      }
+      if (allRan) {
+        buttons.push(`<button class="btn btn-primary" onclick="simAdvanceWeek()">Advance to Week ${(ts.Week || 0) + 1}</button>`);
+      }
+      if (anyRan && !allRan) {
+        buttons.push(`<button class="btn btn-warning" onclick="simQuickRun()">Continue Simulation</button>`);
+      }
+      if (anyRan) {
+        buttons.push(`<button class="btn btn-secondary" onclick="simResetWeek()">Reset Week Games</button>`);
+      }
+      if (ts.Week >= (ts.TotalWeeks || 25) && allRan) {
+        buttons.push(`<button class="btn btn-danger" onclick="document.querySelector('[data-section=timestamp]').click()">End Season &rarr;</button>`);
+      }
+    } else {
+      buttons.push(`<button class="btn btn-secondary" onclick="document.querySelector('[data-section=timestamp]').click()">Go to Timestamp &rarr;</button>`);
+    }
+
+    btnContainer.innerHTML = buttons.length
+      ? `<div class="button-group">${buttons.join('')}</div>`
+      : '<p class="text-muted">No simulation actions available.</p>';
+  }
+
+  function simQuickRun() {
+    const ts = _tsData;
+    if (!ts) return;
+    const resultBox = document.getElementById('sim-action-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = `Simulating week ${ts.Week}...`;
+
+    const body = { league_year_id: ts.LeagueYearID, season_week: ts.Week };
+
+    fetch(`${API_BASE}/games/simulate-week`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        refreshSimState();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+  window.simQuickRun = simQuickRun;
+
+  function simAdvanceWeek() {
+    const resultBox = document.getElementById('sim-action-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Advancing week...';
+
+    fetch(`${API_BASE}/games/advance-week`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        refreshSimState();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+  window.simAdvanceWeek = simAdvanceWeek;
+
+  function simResetWeek() {
+    const resultBox = document.getElementById('sim-action-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Resetting week games...';
+
+    fetch(`${API_BASE}/games/reset-week`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        refreshSimState();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+  window.simResetWeek = simResetWeek;
+
+  // Timestamp — phase-aware UI
 
   const PHASE_BADGE_CLASS = {
     REGULAR_SEASON: 'badge-success',
@@ -1074,7 +1225,7 @@
       .then(r => r.json())
       .then(data => {
         resultBox.textContent = JSON.stringify(data, null, 2);
-        loadTimestamp();
+        refreshSimState();
       })
       .catch(err => {
         resultBox.textContent = 'Error: ' + err.message;

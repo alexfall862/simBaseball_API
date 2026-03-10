@@ -221,7 +221,7 @@ def get_enhanced_timestamp() -> Optional[Dict[str, Any]]:
 
     Returns:
         Enhanced timestamp dict with Phase, AvailableActions, TotalWeeks,
-        or None if no timestamp exists.
+        LeagueYearID, or None if no timestamp exists.
     """
     ts = get_current_timestamp()
     if ts is None:
@@ -233,6 +233,19 @@ def get_enhanced_timestamp() -> Optional[Dict[str, Any]]:
     ts["Phase"] = phase
     ts["AvailableActions"] = actions
     ts["TotalWeeks"] = TOTAL_SEASON_WEEKS
+
+    # Resolve LeagueYearID from Season (year number)
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            row = conn.execute(
+                text("SELECT id FROM league_years WHERE league_year = :yr"),
+                {"yr": ts.get("Season", 2026)},
+            ).first()
+            ts["LeagueYearID"] = row[0] if row else 1
+    except Exception:
+        ts["LeagueYearID"] = 1
 
     return ts
 
