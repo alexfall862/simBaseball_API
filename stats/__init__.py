@@ -38,7 +38,7 @@ def batting_leaderboard():
     league_level = request.args.get("league_level", type=int)
     team_id = request.args.get("team_id", type=int)
     sort = request.args.get("sort", "avg")
-    min_ab = request.args.get("min_ab", 20, type=int)
+    min_ab = request.args.get("min_ab", 0, type=int)
     page = request.args.get("page", 1, type=int)
     page_size = min(request.args.get("page_size", 50, type=int), 200)
 
