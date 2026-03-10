@@ -82,6 +82,10 @@ MILB_TEAMS_PER_LEVEL = 30
 
 # ── College constants ───────────────────────────────────────────────────
 COLLEGE_GAMES_PER_TEAM = 50
+COLLEGE_OOC_WEEKS = 10        # weeks 1-10: out-of-conference
+COLLEGE_CONF_WEEKS = 10       # weeks 11-20: conference play
+COLLEGE_OOC_SUBWEEKS = ["a", "c"]   # 2 single-game slots per OOC week
+COLLEGE_CONF_SERIES_LENGTH = 3
 
 # ── Subweek labels ──────────────────────────────────────────────────────
 SUBWEEK_LABELS = ["a", "b", "c", "d"]
@@ -1046,20 +1050,25 @@ def _expand_to_game_rows(
     Expand series into individual gamelist rows.
 
     Each game in a series fills subweeks a, b, c, d sequentially.
+    Series may carry optional 'subweek_offset' (for college OOC placement)
+    and 'is_conference' flag.
     """
     rows = []
     for week_num in sorted(week_assignments.keys()):
         for s in week_assignments[week_num]:
             length = s["length"]
+            subweek_offset = s.get("subweek_offset", 0)
+            is_conf = 1 if s.get("category") == "conference" else 0
             for game_idx in range(length):
                 rows.append({
                     "away_team": s["away_team"],
                     "home_team": s["home_team"],
                     "season_week": week_num,
-                    "season_subweek": SUBWEEK_LABELS[game_idx],
+                    "season_subweek": SUBWEEK_LABELS[subweek_offset + game_idx],
                     "league_level": league_level,
                     "season": season_id,
                     "random_seed": None,
+                    "is_conference": is_conf,
                 })
     return rows
 
@@ -1563,6 +1572,89 @@ def _build_college_matchup_pool(
     return all_series
 
 
+def _assign_college_weeks(
+    all_series: List[Dict],
+    start_week: int,
+    rng: random.Random,
+    timeout_seconds: float = 60.0,
+) -> Dict[int, List[Dict]]:
+    """
+    Assign college series to weeks with strict phase separation:
+
+    - Weeks start_week .. start_week+9   → OOC (single-game, 2 per week at subweek a & c)
+    - Weeks start_week+10 .. start_week+19 → Conference (3-game series, 1 per week)
+
+    Uses edge coloring within each phase independently.
+    """
+    deadline = time.monotonic() + timeout_seconds
+
+    ooc_series = [s for s in all_series if s["category"] == "ooc"]
+    conf_series = [s for s in all_series if s["category"] == "conference"]
+
+    ooc_start = start_week
+    conf_start = start_week + COLLEGE_OOC_WEEKS
+
+    # ── OOC phase: weeks 1-10, 2 slots per week (subweek a, subweek c) ──
+    # Each slot is an independent matching — a team can appear in slot-a AND
+    # slot-c of the same week (different opponents).
+    # We treat each slot as a separate color and run two independent colorings.
+
+    ooc_weeks = list(range(ooc_start, ooc_start + COLLEGE_OOC_WEEKS))
+    week_slots = {w: [] for w in range(ooc_start, conf_start + COLLEGE_CONF_WEEKS)}
+
+    # Split OOC into two halves — each half fills one subweek slot per week
+    rng.shuffle(ooc_series)
+    half = len(ooc_series) // 2
+    ooc_slot_a = ooc_series[:half]
+    ooc_slot_c = ooc_series[half:]
+
+    for slot_idx, (slot_series, subweek_off) in enumerate([
+        (ooc_slot_a, 0),   # subweek "a" (offset 0)
+        (ooc_slot_c, 2),   # subweek "c" (offset 2)
+    ]):
+        _check_timeout(deadline, "college OOC slot %d" % slot_idx)
+        max_per_week = max(1, len(slot_series) // COLLEGE_OOC_WEEKS + 1)
+
+        assignment = _assign_series_to_weeks(
+            slot_series, COLLEGE_OOC_WEEKS, max_per_week,
+            start_week=ooc_start, rng=rng,
+        )
+
+        for w, series_list in assignment.items():
+            for s in series_list:
+                s["subweek_offset"] = subweek_off
+                week_slots[w].append(s)
+
+    # ── Conference phase: weeks 11-20, one 3-game series per team per week ──
+    _check_timeout(deadline, "college conference assignment")
+    n_teams = set()
+    for s in conf_series:
+        n_teams.add(s["home_team"])
+        n_teams.add(s["away_team"])
+    max_conf_per_week = max(1, len(n_teams) // 2)
+
+    conf_assignment = _assign_series_to_weeks(
+        conf_series, COLLEGE_CONF_WEEKS, max_conf_per_week,
+        start_week=conf_start, rng=rng,
+    )
+    for w, series_list in conf_assignment.items():
+        week_slots[w].extend(series_list)
+
+    # Summary logging
+    ooc_games = sum(1 for w in ooc_weeks for s in week_slots[w])
+    conf_games = sum(
+        1 for w in range(conf_start, conf_start + COLLEGE_CONF_WEEKS)
+        for s in week_slots[w]
+    )
+    log.info(
+        "college_weeks: OOC series=%d (weeks %d-%d), conf series=%d (weeks %d-%d)",
+        ooc_games, ooc_start, ooc_start + COLLEGE_OOC_WEEKS - 1,
+        conf_games, conf_start, conf_start + COLLEGE_CONF_WEEKS - 1,
+    )
+
+    return week_slots
+
+
 # =====================================================================
 # Top-level generators
 # =====================================================================
@@ -1718,7 +1810,16 @@ def generate_college_schedule(
     seed: int = None,
     clear_existing: bool = False,
 ) -> Dict[str, Any]:
-    """Generate a college baseball schedule (level 3)."""
+    """
+    Generate a college baseball schedule (level 3).
+
+    Structure:
+      Weeks 1-10:  OOC play  — 2 single-game series per team per week
+                   (one at subweek a, one at subweek c) = 20 OOC games
+      Weeks 11-20: Conference — 1 three-game series per team per week
+                   (subweeks a/b/c) = 30 conference games
+      Total: 50 games per team across 20 weeks.
+    """
     rng = random.Random(seed)
     tables = _get_tables(engine)
 
@@ -1754,22 +1855,16 @@ def generate_college_schedule(
         log.info("college_schedule: balancing home/away...")
         _balance_home_away(pool, rng)
 
-        # Calculate weeks needed based on the team with most series
-        team_series_count = {}
-        for s in pool:
-            team_series_count[s["team_a"]] = team_series_count.get(s["team_a"], 0) + 1
-            team_series_count[s["team_b"]] = team_series_count.get(s["team_b"], 0) + 1
-        max_series = max(team_series_count.values()) if team_series_count else 0
-        num_weeks = max_series + 1  # +1 buffer
-
-        max_per_week = len(all_teams) // 2
+        total_weeks = COLLEGE_OOC_WEEKS + COLLEGE_CONF_WEEKS
 
         log.info(
-            "college_schedule: assigning %d series to %d weeks (max %d/week)...",
-            len(pool), num_weeks, max_per_week,
+            "college_schedule: assigning to %d weeks (OOC %d-%d, conf %d-%d)...",
+            total_weeks,
+            start_week, start_week + COLLEGE_OOC_WEEKS - 1,
+            start_week + COLLEGE_OOC_WEEKS, start_week + total_weeks - 1,
         )
-        week_assignments = _assign_series_to_weeks(
-            pool, num_weeks, max_per_week, start_week=start_week, rng=rng,
+        week_assignments = _assign_college_weeks(
+            pool, start_week=start_week, rng=rng,
         )
 
         rows = _expand_to_game_rows(week_assignments, season_id, LEVEL_COLLEGE)
@@ -1778,16 +1873,28 @@ def generate_college_schedule(
         gamelist = tables["gamelist"]
         conn.execute(gamelist.insert(), rows)
 
-        log.info("college_schedule: inserted %d games for year %d", len(rows), league_year)
+        ooc_count = sum(1 for r in rows if r["is_conference"] == 0)
+        conf_count = sum(1 for r in rows if r["is_conference"] == 1)
+        log.info(
+            "college_schedule: inserted %d games (%d OOC + %d conference) for year %d",
+            len(rows), ooc_count, conf_count, league_year,
+        )
 
         return {
             "league_year": league_year,
             "league_level": LEVEL_COLLEGE,
             "season_id": season_id,
             "total_games": len(rows),
+            "ooc_games": ooc_count,
+            "conference_games": conf_count,
             "total_series": len(pool),
-            "weeks": num_weeks,
+            "weeks": total_weeks,
             "start_week": start_week,
+            "ooc_weeks": "%d-%d" % (start_week, start_week + COLLEGE_OOC_WEEKS - 1),
+            "conference_weeks": "%d-%d" % (
+                start_week + COLLEGE_OOC_WEEKS,
+                start_week + total_weeks - 1,
+            ),
         }
 
 

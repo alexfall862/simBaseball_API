@@ -864,6 +864,9 @@ def _get_standings(conn, tables, ctx):
 
     Pro teams (level >= 4): grouped by team_level, games_back within level.
     College teams (level 3): grouped by conference, games_back within conference.
+      College standings include conference record (conf_wins/conf_losses)
+      derived from is_conference flag on gamelist. Conference games_back is
+      computed from conference record.
     """
     season_id = ctx.get("current_season_id")
     if season_id is None:
@@ -877,8 +880,10 @@ def _get_standings(conn, tables, ctx):
             t.team_level,
             t.conference,
             t.division,
-            COALESCE(w.wins, 0)   AS wins,
-            COALESCE(l.losses, 0) AS losses
+            COALESCE(w.wins, 0)       AS wins,
+            COALESCE(l.losses, 0)     AS losses,
+            COALESCE(cw.conf_wins, 0)   AS conf_wins,
+            COALESCE(cl.conf_losses, 0) AS conf_losses
         FROM teams t
         LEFT JOIN (
             SELECT winning_team_id, COUNT(*) AS wins
@@ -890,6 +895,20 @@ def _get_standings(conn, tables, ctx):
             FROM game_results WHERE season = :season_id
             GROUP BY losing_team_id
         ) l ON l.losing_team_id = t.id
+        LEFT JOIN (
+            SELECT gr.winning_team_id, COUNT(*) AS conf_wins
+            FROM game_results gr
+            JOIN gamelist gl ON gl.id = gr.game_id
+            WHERE gr.season = :season_id AND gl.is_conference = 1
+            GROUP BY gr.winning_team_id
+        ) cw ON cw.winning_team_id = t.id
+        LEFT JOIN (
+            SELECT gr.losing_team_id, COUNT(*) AS conf_losses
+            FROM game_results gr
+            JOIN gamelist gl ON gl.id = gr.game_id
+            WHERE gr.season = :season_id AND gl.is_conference = 1
+            GROUP BY gr.losing_team_id
+        ) cl ON cl.losing_team_id = t.id
         WHERE t.team_level >= 3
     """)
 
@@ -897,12 +916,15 @@ def _get_standings(conn, tables, ctx):
     standings = [_row_to_dict(r) for r in rows]
 
     # Compute win_pct and games_back
-    # College (level 3): group by conference
+    # College (level 3): group by conference, rank by conf_win_pct
     # Pro (level >= 4): group by team_level
     groups = {}
     for s in standings:
         total = s["wins"] + s["losses"]
         s["win_pct"] = round(s["wins"] / total, 3) if total > 0 else 0.0
+
+        conf_total = s["conf_wins"] + s["conf_losses"]
+        s["conf_win_pct"] = round(s["conf_wins"] / conf_total, 3) if conf_total > 0 else 0.0
 
         if s["team_level"] == 3:
             conf = s.get("conference") or "Unknown"
@@ -913,12 +935,28 @@ def _get_standings(conn, tables, ctx):
         groups.setdefault(group_key, []).append(s)
 
     for group_key, teams in groups.items():
-        teams.sort(key=lambda x: x["win_pct"], reverse=True)
-        if teams:
-            leader_w = teams[0]["wins"]
-            leader_l = teams[0]["losses"]
-            for t in teams:
-                t["games_back"] = ((leader_w - t["wins"]) + (t["losses"] - leader_l)) / 2.0
+        is_college = str(group_key).startswith("college_")
+
+        if is_college:
+            # College: sort and compute GB by conference record
+            teams.sort(key=lambda x: x["conf_win_pct"], reverse=True)
+            if teams:
+                leader_cw = teams[0]["conf_wins"]
+                leader_cl = teams[0]["conf_losses"]
+                for t in teams:
+                    t["games_back"] = (
+                        (leader_cw - t["conf_wins"]) + (t["conf_losses"] - leader_cl)
+                    ) / 2.0
+        else:
+            # Pro: sort and compute GB by overall record
+            teams.sort(key=lambda x: x["win_pct"], reverse=True)
+            if teams:
+                leader_w = teams[0]["wins"]
+                leader_l = teams[0]["losses"]
+                for t in teams:
+                    t["games_back"] = (
+                        (leader_w - t["wins"]) + (t["losses"] - leader_l)
+                    ) / 2.0
 
     return standings
 
