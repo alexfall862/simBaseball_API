@@ -3,10 +3,13 @@
 Stats blueprint: leaderboards, player stats, team stats, splits, injuries, positions.
 """
 
+import logging
 from flask import Blueprint, jsonify, request
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import get_engine
+
+logger = logging.getLogger(__name__)
 
 stats_bp = Blueprint("stats", __name__)
 
@@ -124,6 +127,7 @@ def batting_leaderboard():
         return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -231,6 +235,7 @@ def pitching_leaderboard():
         return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -327,6 +332,7 @@ def fielding_leaderboard():
         return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -423,6 +429,7 @@ def team_stats():
         return jsonify(batting=batting, pitching=pitching), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -689,6 +696,7 @@ def player_stats(player_id: int):
         return jsonify(result), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -761,6 +769,7 @@ def injury_report():
         return jsonify(injuries=injuries, total=len(injuries)), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -828,6 +837,7 @@ def injury_history():
         return jsonify(events=events, total=len(events)), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -901,6 +911,7 @@ def position_usage():
         return jsonify(positions=positions, total=len(positions)), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
 
 
@@ -963,4 +974,5 @@ def player_splits():
         return jsonify(splits=splits, total=len(splits)), 200
 
     except SQLAlchemyError as e:
+        logger.exception("Stats endpoint error: %s", e)
         return jsonify(error="database_error", message=str(e)), 500
