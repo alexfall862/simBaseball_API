@@ -488,6 +488,11 @@ def wipe_season():
                 conn.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))
             deleted["optimized_tables"] = len(optimize_tables)
 
+            # 11. Re-run year-start books (media payouts + bonuses)
+            from financials.books import run_year_start_books
+            books_result = run_year_start_books(engine, year)
+            deleted["year_start_books"] = books_result
+
         # Broadcast updated timestamp
         from services.websocket_manager import ws_manager
         ws_manager.broadcast_timestamp()
