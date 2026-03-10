@@ -420,7 +420,14 @@ def wipe_season():
             r = conn.execute(sa_text(gr_sql), params)
             deleted["game_results"] = r.rowcount
 
-            # 2-4. Player stat tables (keyed by league_year_id)
+            # 2-4. Per-game line tables (keyed by league_year_id)
+            for tbl_name in ("game_batting_lines", "game_pitching_lines"):
+                r = conn.execute(sa_text(
+                    f"DELETE FROM {tbl_name} WHERE league_year_id = :lyid"
+                ), {"lyid": league_year_id})
+                deleted[tbl_name] = r.rowcount
+
+            # 5-7. Player stat tables (keyed by league_year_id)
             for tbl_name in ("player_batting_stats", "player_pitching_stats",
                              "player_fielding_stats"):
                 r = conn.execute(sa_text(
@@ -529,6 +536,47 @@ def get_timestamp_endpoint():
         ), 500
 
 
+@games_bp.get("/schedule/week-levels")
+def get_week_levels():
+    """
+    Return distinct league levels that have scheduled games for a given
+    league_year + season_week.  Used by the admin panel to dynamically
+    populate the level dropdown.
+
+    Query params:
+      - league_year_id (required)
+      - season_week    (required)
+    """
+    league_year_id = request.args.get("league_year_id", type=int)
+    season_week = request.args.get("season_week", type=int)
+
+    if not league_year_id or not season_week:
+        return jsonify(error="missing_field",
+                       message="league_year_id and season_week are required"), 400
+
+    try:
+        from sqlalchemy import text as sa_text
+        from services.schedule_generator import LEVEL_NAMES
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(sa_text(
+                "SELECT DISTINCT league_level FROM gamelist "
+                "WHERE season = :ly AND season_week = :sw "
+                "ORDER BY league_level DESC"
+            ), {"ly": league_year_id, "sw": season_week}).fetchall()
+
+        levels = [
+            {"level": r[0], "name": LEVEL_NAMES.get(r[0], f"Level {r[0]}")}
+            for r in rows
+        ]
+        return jsonify(levels=levels), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_week_levels: database error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+
 @games_bp.get("/schedule")
 def get_schedule():
     """
@@ -581,6 +629,241 @@ def get_schedule():
     except Exception as e:
         current_app.logger.exception("get_schedule: unexpected error")
         return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.get("/games/<int:game_id>/boxscore")
+def get_game_boxscore(game_id: int):
+    """
+    Return the full box score for a single game.
+
+    Includes linescore, per-player batting and pitching lines, and outcome.
+    """
+    from sqlalchemy import text as sa_text
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            # 1. Game result + boxscore JSON
+            gr = conn.execute(sa_text("""
+                SELECT gr.game_id, gr.home_team_id, gr.away_team_id,
+                       gr.home_score, gr.away_score, gr.game_outcome,
+                       gr.boxscore_json, gr.completed_at, gr.season_week,
+                       gr.season_subweek, gr.league_level,
+                       ht.abbreviation AS home_abbrev, at2.abbreviation AS away_abbrev
+                FROM game_results gr
+                JOIN teams ht ON ht.id = gr.home_team_id
+                JOIN teams at2 ON at2.id = gr.away_team_id
+                WHERE gr.game_id = :gid
+            """), {"gid": game_id}).mappings().first()
+
+            if not gr:
+                return jsonify(error="not_found",
+                               message=f"No results for game {game_id}"), 404
+
+            # 2. Batting lines
+            bat_rows = conn.execute(sa_text("""
+                SELECT gbl.player_id, gbl.team_id,
+                       p.firstName, p.lastName,
+                       gbl.at_bats, gbl.runs, gbl.hits, gbl.doubles_hit,
+                       gbl.triples, gbl.home_runs, gbl.rbi, gbl.walks,
+                       gbl.strikeouts, gbl.stolen_bases, gbl.caught_stealing
+                FROM game_batting_lines gbl
+                JOIN simbbPlayers p ON p.id = gbl.player_id
+                WHERE gbl.game_id = :gid
+                ORDER BY gbl.team_id, gbl.id
+            """), {"gid": game_id}).mappings().all()
+
+            # 3. Pitching lines
+            pit_rows = conn.execute(sa_text("""
+                SELECT gpl.player_id, gpl.team_id,
+                       p.firstName, p.lastName,
+                       gpl.games_started, gpl.win, gpl.loss, gpl.save_recorded,
+                       gpl.innings_pitched_outs, gpl.hits_allowed, gpl.runs_allowed,
+                       gpl.earned_runs, gpl.walks, gpl.strikeouts,
+                       gpl.home_runs_allowed
+                FROM game_pitching_lines gpl
+                JOIN simbbPlayers p ON p.id = gpl.player_id
+                WHERE gpl.game_id = :gid
+                ORDER BY gpl.team_id, gpl.id
+            """), {"gid": game_id}).mappings().all()
+
+        home_tid = int(gr["home_team_id"])
+        away_tid = int(gr["away_team_id"])
+
+        def _format_batter(r):
+            return {
+                "player_id": int(r["player_id"]),
+                "name": f"{r['firstName']} {r['lastName']}",
+                "ab": int(r["at_bats"]), "r": int(r["runs"]),
+                "h": int(r["hits"]), "2b": int(r["doubles_hit"]),
+                "3b": int(r["triples"]), "hr": int(r["home_runs"]),
+                "rbi": int(r["rbi"]), "bb": int(r["walks"]),
+                "so": int(r["strikeouts"]), "sb": int(r["stolen_bases"]),
+                "cs": int(r["caught_stealing"]),
+            }
+
+        def _format_pitcher(r):
+            ipo = int(r["innings_pitched_outs"])
+            ip = f"{ipo // 3}.{ipo % 3}"
+            dec = ""
+            if int(r["win"]):
+                dec = "W"
+            elif int(r["loss"]):
+                dec = "L"
+            elif int(r["save_recorded"]):
+                dec = "S"
+            return {
+                "player_id": int(r["player_id"]),
+                "name": f"{r['firstName']} {r['lastName']}",
+                "gs": int(r["games_started"]),
+                "ip": ip, "h": int(r["hits_allowed"]),
+                "r": int(r["runs_allowed"]), "er": int(r["earned_runs"]),
+                "bb": int(r["walks"]), "so": int(r["strikeouts"]),
+                "hr": int(r["home_runs_allowed"]), "dec": dec,
+            }
+
+        import json as _json
+        boxscore_data = None
+        if gr["boxscore_json"]:
+            raw = gr["boxscore_json"]
+            boxscore_data = _json.loads(raw) if isinstance(raw, str) else raw
+
+        result = {
+            "game_id": game_id,
+            "home_team": {"id": home_tid, "abbrev": gr["home_abbrev"],
+                          "score": int(gr["home_score"])},
+            "away_team": {"id": away_tid, "abbrev": gr["away_abbrev"],
+                          "score": int(gr["away_score"])},
+            "linescore": boxscore_data,
+            "batting": {
+                "home": [_format_batter(r) for r in bat_rows if int(r["team_id"]) == home_tid],
+                "away": [_format_batter(r) for r in bat_rows if int(r["team_id"]) == away_tid],
+            },
+            "pitching": {
+                "home": [_format_pitcher(r) for r in pit_rows if int(r["team_id"]) == home_tid],
+                "away": [_format_pitcher(r) for r in pit_rows if int(r["team_id"]) == away_tid],
+            },
+            "game_outcome": gr["game_outcome"],
+            "season_week": int(gr["season_week"]),
+            "season_subweek": gr["season_subweek"],
+            "completed_at": str(gr["completed_at"]) if gr["completed_at"] else None,
+        }
+        return jsonify(result), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_game_boxscore: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@games_bp.get("/games/<int:game_id>/play-by-play")
+def get_game_play_by_play(game_id: int):
+    """Return the play-by-play JSON blob for a single game."""
+    from sqlalchemy import text as sa_text
+    import json as _json
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(sa_text(
+                "SELECT play_by_play_json FROM game_results WHERE game_id = :gid"
+            ), {"gid": game_id}).first()
+
+        if not row:
+            return jsonify(error="not_found",
+                           message=f"No results for game {game_id}"), 404
+
+        pbp = row[0]
+        if pbp is None:
+            return jsonify(game_id=game_id, play_by_play=[]), 200
+
+        data = _json.loads(pbp) if isinstance(pbp, str) else pbp
+        return jsonify(game_id=game_id, play_by_play=data), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_game_play_by_play: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@games_bp.get("/games/results")
+def get_game_results_list():
+    """
+    Paginated list of completed games with scores.
+
+    Query params: league_year_id, season_week, league_level, team_id, page, page_size
+    """
+    from sqlalchemy import text as sa_text
+
+    league_year_id = request.args.get("league_year_id", type=int)
+    season_week = request.args.get("season_week", type=int)
+    league_level = request.args.get("league_level", type=int)
+    team_id = request.args.get("team_id", type=int)
+    page = request.args.get("page", 1, type=int)
+    page_size = min(request.args.get("page_size", 50, type=int), 200)
+
+    where_clauses = []
+    params = {}
+
+    if league_year_id:
+        where_clauses.append("gr.season = :season")
+        params["season"] = league_year_id
+    if season_week:
+        where_clauses.append("gr.season_week = :sw")
+        params["sw"] = season_week
+    if league_level:
+        where_clauses.append("gr.league_level = :ll")
+        params["ll"] = league_level
+    if team_id:
+        where_clauses.append("(gr.home_team_id = :tid OR gr.away_team_id = :tid)")
+        params["tid"] = team_id
+
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            total = conn.execute(sa_text(
+                f"SELECT COUNT(*) FROM game_results gr{where_sql}"
+            ), params).scalar()
+
+            offset = (page - 1) * page_size
+            params["limit"] = page_size
+            params["offset"] = offset
+
+            rows = conn.execute(sa_text(f"""
+                SELECT gr.game_id, gr.home_team_id, gr.away_team_id,
+                       gr.home_score, gr.away_score, gr.game_outcome,
+                       gr.season_week, gr.season_subweek, gr.league_level,
+                       gr.completed_at,
+                       ht.abbreviation AS home_abbrev,
+                       at2.abbreviation AS away_abbrev
+                FROM game_results gr
+                JOIN teams ht ON ht.id = gr.home_team_id
+                JOIN teams at2 ON at2.id = gr.away_team_id
+                {where_sql}
+                ORDER BY gr.completed_at DESC
+                LIMIT :limit OFFSET :offset
+            """), params).mappings().all()
+
+        games = [{
+            "game_id": int(r["game_id"]),
+            "home_team": {"id": int(r["home_team_id"]), "abbrev": r["home_abbrev"],
+                          "score": int(r["home_score"])},
+            "away_team": {"id": int(r["away_team_id"]), "abbrev": r["away_abbrev"],
+                          "score": int(r["away_score"])},
+            "outcome": r["game_outcome"],
+            "week": int(r["season_week"]),
+            "subweek": r["season_subweek"],
+            "league_level": int(r["league_level"]),
+            "completed_at": str(r["completed_at"]) if r["completed_at"] else None,
+        } for r in rows]
+
+        pages = (total + page_size - 1) // page_size if total else 0
+
+        return jsonify(games=games, total=total, page=page, pages=pages), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_game_results_list: db error")
+        return jsonify(error="database_error", message=str(e)), 500
 
 
 @games_bp.get("/games/debug/synthetic")

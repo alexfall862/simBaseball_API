@@ -1792,21 +1792,23 @@ def _store_game_results(
             (game_id, season, league_level, season_week, season_subweek,
              home_team_id, away_team_id, home_score, away_score,
              winning_team_id, losing_team_id, winning_org_id, losing_org_id,
-             game_outcome, completed_at)
+             game_outcome, boxscore_json, play_by_play_json, completed_at)
         VALUES
             (:game_id, :season, :league_level, :season_week, :season_subweek,
              :home_team_id, :away_team_id, :home_score, :away_score,
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
-             :game_outcome, NOW())
+             :game_outcome, :boxscore_json, :play_by_play_json, NOW())
         ON DUPLICATE KEY UPDATE
-            home_score      = VALUES(home_score),
-            away_score      = VALUES(away_score),
-            winning_team_id = VALUES(winning_team_id),
-            losing_team_id  = VALUES(losing_team_id),
-            winning_org_id  = VALUES(winning_org_id),
-            losing_org_id   = VALUES(losing_org_id),
-            game_outcome    = VALUES(game_outcome),
-            completed_at    = VALUES(completed_at)
+            home_score         = VALUES(home_score),
+            away_score         = VALUES(away_score),
+            winning_team_id    = VALUES(winning_team_id),
+            losing_team_id     = VALUES(losing_team_id),
+            winning_org_id     = VALUES(winning_org_id),
+            losing_org_id      = VALUES(losing_org_id),
+            game_outcome       = VALUES(game_outcome),
+            boxscore_json      = VALUES(boxscore_json),
+            play_by_play_json  = VALUES(play_by_play_json),
+            completed_at       = VALUES(completed_at)
     """)
 
     count = 0
@@ -1829,11 +1831,14 @@ def _store_game_results(
         away_side = payload.get("away_side") or {}
         home_team_id = int(home_side.get("team_id", 0))
         away_team_id = int(away_side.get("team_id", 0))
-        home_score = int(result.get("home_score", 0))
-        away_score = int(result.get("away_score", 0))
 
-        # Determine outcome
-        winner = str(result.get("winner", "")).lower()
+        # Engine nests scores inside result["result"]
+        game_result_data = result.get("result") or {}
+        home_score = int(game_result_data.get("home_score", 0))
+        away_score = int(game_result_data.get("away_score", 0))
+
+        # Determine outcome — engine uses "winning_team" not "winner"
+        winner = str(game_result_data.get("winning_team", "")).lower()
         if winner == "home":
             game_outcome = "HOME_WIN"
             winning_team_id = home_team_id
@@ -1862,6 +1867,12 @@ def _store_game_results(
              else game_row["season_subweek"]) or "a"
         )
 
+        # Serialize boxscore and play-by-play from engine result
+        boxscore_raw = result.get("boxscore")
+        pbp_raw = result.get("play_by_play")
+        boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
+        pbp_str = json.dumps(pbp_raw) if pbp_raw else None
+
         try:
             conn.execute(insert_sql, {
                 "game_id": game_id,
@@ -1878,6 +1889,8 @@ def _store_game_results(
                 "winning_org_id": winning_org_id,
                 "losing_org_id": losing_org_id,
                 "game_outcome": game_outcome,
+                "boxscore_json": boxscore_str,
+                "play_by_play_json": pbp_str,
             })
             count += 1
         except Exception:
@@ -2226,7 +2239,15 @@ def build_week_payloads(
                 )
 
                 # Call game engine to simulate this subweek's games
-                results = simulate_games_batch(payloads, subweek)
+                results = simulate_games_batch(
+                    payloads, subweek,
+                    game_constants=game_constants,
+                    level_configs=level_configs,
+                    rules=rules_by_level,
+                    injury_types=injury_types,
+                    league_year_id=league_year_id,
+                    season_week=season_week,
+                )
 
                 logger.info(
                     f"Received {len(results)} results from engine for subweek '{subweek}'"

@@ -653,7 +653,39 @@
       .catch(err => alert('Error: ' + err.message));
   }
 
-  // Simulation
+  // Simulation — dynamic level loader
+  function loadSimLevels() {
+    const year = document.getElementById('sim-year').value;
+    const week = document.getElementById('sim-week').value;
+    const sel = document.getElementById('sim-level');
+
+    if (!year || !week) return;
+
+    sel.innerHTML = '<option value="">Loading...</option>';
+
+    fetch(`${API_BASE}/schedule/week-levels?league_year_id=${year}&season_week=${week}`, {
+      credentials: 'include',
+    })
+      .then(r => r.json())
+      .then(data => {
+        const levels = data.levels || [];
+        sel.innerHTML = '<option value="">All levels</option>';
+        levels.forEach(l => {
+          sel.innerHTML += `<option value="${l.level}">${l.level} - ${l.name}</option>`;
+        });
+        if (levels.length === 0) {
+          sel.innerHTML = '<option value="">No games scheduled</option>';
+        }
+      })
+      .catch(() => {
+        sel.innerHTML = '<option value="">Error loading levels</option>';
+      });
+  }
+
+  document.getElementById('sim-year').addEventListener('change', loadSimLevels);
+  document.getElementById('sim-week').addEventListener('change', loadSimLevels);
+  loadSimLevels();  // initial load
+
   function runSimulation(execute) {
     const year = document.getElementById('sim-year').value;
     const week = document.getElementById('sim-week').value;

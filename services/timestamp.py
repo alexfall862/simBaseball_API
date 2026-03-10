@@ -242,9 +242,9 @@ def advance_week(broadcast: bool = True) -> bool:
 
     try:
         with engine.connect() as conn:
-            # Get current week
+            # Get current week and season (year number for financial books)
             row = conn.execute(
-                select(ts_table.c.week).where(ts_table.c.id == 1)
+                select(ts_table.c.week, ts_table.c.season).where(ts_table.c.id == 1)
             ).first()
 
             if not row:
@@ -252,6 +252,7 @@ def advance_week(broadcast: bool = True) -> bool:
                 return False
 
             current_week = row[0]
+            league_year = row[1]
             new_week = current_week + 1
 
             # Update week and reset game flags
@@ -270,6 +271,14 @@ def advance_week(broadcast: bool = True) -> bool:
             conn.commit()
 
             logger.info(f"Advanced from week {current_week} to week {new_week}")
+
+            # Run financial books for the completed week
+            try:
+                from financials.books import run_week_books
+                books_result = run_week_books(engine, league_year, current_week)
+                logger.info(f"Week books for week {current_week}: {books_result}")
+            except Exception as e:
+                logger.exception(f"Week books failed for week {current_week}, continuing")
 
             # Broadcast to WebSocket clients
             if broadcast:

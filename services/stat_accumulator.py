@@ -26,6 +26,7 @@ def accumulate_game_stats(
 ) -> Dict[str, int]:
     """
     Parse one game result and UPSERT player stats into the accumulation tables.
+    Also inserts per-game batting/pitching lines for box score reconstruction.
 
     Args:
         conn: Active SQLAlchemy connection (caller manages commit).
@@ -39,6 +40,7 @@ def accumulate_game_stats(
     if not stats:
         return {"batters": 0, "pitchers": 0, "fielders": 0}
 
+    game_id = game_result.get("game_id")
     batters = stats.get("batters") or {}
     pitchers = stats.get("pitchers") or {}
     fielders = stats.get("fielders") or {}
@@ -46,6 +48,11 @@ def accumulate_game_stats(
     b_count = _upsert_batting(conn, batters, league_year_id)
     p_count = _upsert_pitching(conn, pitchers, league_year_id)
     f_count = _upsert_fielding(conn, fielders, league_year_id)
+
+    # Per-game lines for box score reconstruction
+    if game_id is not None:
+        _insert_game_batting_lines(conn, int(game_id), batters, league_year_id)
+        _insert_game_pitching_lines(conn, int(game_id), pitchers, league_year_id)
 
     return {"batters": b_count, "pitchers": p_count, "fielders": f_count}
 
@@ -225,11 +232,21 @@ def _upsert_fielding(
     count = 0
     for player_id_str, f in fielders.items():
         try:
+            # Engine returns keys as "playerid_position" (e.g. "42717_lf")
+            # Split to extract player_id and position
+            if "_" in player_id_str:
+                pid_part, pos_part = player_id_str.rsplit("_", 1)
+                player_id = int(pid_part)
+                position_code = pos_part
+            else:
+                player_id = int(player_id_str)
+                position_code = str(f.get("position_code", ""))
+
             conn.execute(_FIELDING_UPSERT, {
-                "player_id":      int(player_id_str),
+                "player_id":      player_id,
                 "league_year_id": league_year_id,
                 "team_id":        int(f["team_id"]),
-                "position_code":  str(f.get("position_code", "")),
+                "position_code":  str(f.get("position_code", position_code)),
                 "innings":        int(f.get("innings", 0)),
                 "putouts":        int(f.get("putouts", 0)),
                 "assists":        int(f.get("assists", 0)),
@@ -384,3 +401,96 @@ def record_subweek_position_usage(
         total,
     )
     return total
+
+
+# ---------------------------------------------------------------------------
+# Per-game line inserts (for box score reconstruction)
+# ---------------------------------------------------------------------------
+
+_GAME_BATTING_INSERT = text("""
+    INSERT IGNORE INTO game_batting_lines
+        (game_id, player_id, team_id, league_year_id,
+         at_bats, runs, hits, doubles_hit, triples,
+         home_runs, rbi, walks, strikeouts, stolen_bases, caught_stealing)
+    VALUES
+        (:game_id, :player_id, :team_id, :league_year_id,
+         :at_bats, :runs, :hits, :doubles, :triples,
+         :home_runs, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing)
+""")
+
+_GAME_PITCHING_INSERT = text("""
+    INSERT IGNORE INTO game_pitching_lines
+        (game_id, player_id, team_id, league_year_id,
+         games_started, win, loss, save_recorded,
+         innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
+         walks, strikeouts, home_runs_allowed)
+    VALUES
+        (:game_id, :player_id, :team_id, :league_year_id,
+         :games_started, :win, :loss, :save,
+         :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
+         :walks, :strikeouts, :home_runs_allowed)
+""")
+
+
+def _insert_game_batting_lines(
+    conn, game_id: int, batters: Dict[str, Any], league_year_id: int
+) -> int:
+    count = 0
+    for player_id_str, b in batters.items():
+        try:
+            conn.execute(_GAME_BATTING_INSERT, {
+                "game_id":         game_id,
+                "player_id":       int(player_id_str),
+                "team_id":         int(b["team_id"]),
+                "league_year_id":  league_year_id,
+                "at_bats":         int(b.get("at_bats", 0)),
+                "runs":            int(b.get("runs", 0)),
+                "hits":            int(b.get("hits", 0)),
+                "doubles":         int(b.get("doubles", 0)),
+                "triples":         int(b.get("triples", 0)),
+                "home_runs":       int(b.get("home_runs", 0)),
+                "rbi":             int(b.get("rbi", 0)),
+                "walks":           int(b.get("walks", 0)),
+                "strikeouts":      int(b.get("strikeouts", 0)),
+                "stolen_bases":    int(b.get("stolen_bases", 0)),
+                "caught_stealing": int(b.get("caught_stealing", 0)),
+            })
+            count += 1
+        except Exception:
+            logger.exception(
+                "stat_accumulator: game batting line insert failed for "
+                "game %d player %s", game_id, player_id_str,
+            )
+    return count
+
+
+def _insert_game_pitching_lines(
+    conn, game_id: int, pitchers: Dict[str, Any], league_year_id: int
+) -> int:
+    count = 0
+    for player_id_str, p in pitchers.items():
+        try:
+            conn.execute(_GAME_PITCHING_INSERT, {
+                "game_id":              game_id,
+                "player_id":            int(player_id_str),
+                "team_id":              int(p["team_id"]),
+                "league_year_id":       league_year_id,
+                "games_started":        int(p.get("games_started", 0)),
+                "win":                  int(p.get("win", 0)),
+                "loss":                 int(p.get("loss", 0)),
+                "save":                 int(p.get("save", 0)),
+                "innings_pitched_outs": int(p.get("innings_pitched_outs", 0)),
+                "hits_allowed":         int(p.get("hits_allowed", 0)),
+                "runs_allowed":         int(p.get("runs_allowed", 0)),
+                "earned_runs":          int(p.get("earned_runs", 0)),
+                "walks":                int(p.get("walks", 0)),
+                "strikeouts":           int(p.get("strikeouts", 0)),
+                "home_runs_allowed":    int(p.get("home_runs_allowed", 0)),
+            })
+            count += 1
+        except Exception:
+            logger.exception(
+                "stat_accumulator: game pitching line insert failed for "
+                "game %d player %s", game_id, player_id_str,
+            )
+    return count
