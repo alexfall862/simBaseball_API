@@ -61,7 +61,7 @@ def batting_leaderboard():
         where_parts.append("bs.team_id = :tid")
         params["tid"] = team_id
     if league_level:
-        where_parts.append("tm.league_level = :ll")
+        where_parts.append("tm.team_level = :ll")
         params["ll"] = league_level
 
     where_sql = " AND ".join(where_parts)
@@ -361,7 +361,7 @@ def team_stats():
         params = {"lyid": league_year_id}
         level_filter = ""
         if league_level:
-            level_filter = "AND tm.league_level = :ll"
+            level_filter = "AND tm.team_level = :ll"
             params["ll"] = league_level
 
         with engine.connect() as conn:
