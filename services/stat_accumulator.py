@@ -83,6 +83,14 @@ def accumulate_subweek_stats(
     """
     totals = {"batters": 0, "pitchers": 0, "fielders": 0}
 
+    print(f"[accumulate_subweek_stats] received {len(results)} results, league_year_id={league_year_id}")
+    if results:
+        first = results[0]
+        print(f"[accumulate_subweek_stats] first result keys={list(first.keys())}")
+        nested = first.get("result") or {}
+        if nested:
+            print(f"[accumulate_subweek_stats] first result['result'] keys={list(nested.keys())}")
+
     for game_result in results:
         game_id = game_result.get("game_id", "?")
         try:
@@ -90,7 +98,8 @@ def accumulate_subweek_stats(
             totals["batters"] += counts["batters"]
             totals["pitchers"] += counts["pitchers"]
             totals["fielders"] += counts["fielders"]
-        except Exception:
+        except Exception as e:
+            print(f"[accumulate_subweek_stats] EXCEPTION for game_id={game_id}: {e}")
             logger.exception(
                 "stat_accumulator: failed for game_id=%s, skipping", game_id
             )
@@ -99,6 +108,7 @@ def accumulate_subweek_stats(
         "stat_accumulator: subweek totals — %d batters, %d pitchers, %d fielders",
         totals["batters"], totals["pitchers"], totals["fielders"],
     )
+    print(f"[accumulate_subweek_stats] DONE — totals={totals}")
     return totals
 
 

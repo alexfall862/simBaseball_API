@@ -752,7 +752,12 @@ def _get_financials(conn, tables, org_id, ctx):
 
 
 def _get_standings(conn, tables, ctx):
-    """Standings for all teams at all levels from game_results."""
+    """
+    Standings for all teams from game_results.
+
+    Pro teams (level >= 4): grouped by team_level, games_back within level.
+    College teams (level 3): grouped by conference, games_back within conference.
+    """
     season_id = ctx.get("current_season_id")
     if season_id is None:
         return []
@@ -778,20 +783,29 @@ def _get_standings(conn, tables, ctx):
             FROM game_results WHERE season = :season_id
             GROUP BY losing_team_id
         ) l ON l.losing_team_id = t.id
-        WHERE t.team_level >= 4
+        WHERE t.team_level >= 3
     """)
 
     rows = conn.execute(sql, {"season_id": season_id}).all()
     standings = [_row_to_dict(r) for r in rows]
 
-    # Compute win_pct and games_back per level group
-    by_level = {}
+    # Compute win_pct and games_back
+    # College (level 3): group by conference
+    # Pro (level >= 4): group by team_level
+    groups = {}
     for s in standings:
         total = s["wins"] + s["losses"]
         s["win_pct"] = round(s["wins"] / total, 3) if total > 0 else 0.0
-        by_level.setdefault(s["team_level"], []).append(s)
 
-    for level, teams in by_level.items():
+        if s["team_level"] == 3:
+            conf = s.get("conference") or "Unknown"
+            group_key = f"college_{conf}"
+        else:
+            group_key = s["team_level"]
+
+        groups.setdefault(group_key, []).append(s)
+
+    for group_key, teams in groups.items():
         teams.sort(key=lambda x: x["win_pct"], reverse=True)
         if teams:
             leader_w = teams[0]["wins"]

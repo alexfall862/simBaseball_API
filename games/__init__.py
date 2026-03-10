@@ -631,23 +631,97 @@ def get_schedule():
         return jsonify(error="unexpected_error", message=str(e)), 500
 
 
+def _build_linescore(pbp_data, home_abbrev, away_abbrev, final_home, final_away):
+    """
+    Build an inning-by-inning linescore from play-by-play data.
+
+    PBP plays have: Inning (int), Inning Half ("Top"/"Bottom"),
+    Home Score (cumulative int), Away Score (cumulative int).
+
+    Returns:
+        {
+            "innings": 9,
+            "away": {"runs": [0, 0, 2, 0, ...], "R": 4},
+            "home": {"runs": [1, 0, 0, 3, ...], "R": 5}
+        }
+    H and E are added by the caller from boxscore_json stats.
+    """
+    from collections import defaultdict
+
+    # Track the cumulative score at the end of each half-inning
+    # Key = (inning, half), value = (home_score, away_score)
+    end_scores = {}
+    for play in pbp_data:
+        inn = play.get("Inning")
+        half = play.get("Inning Half")
+        if inn is None or half is None:
+            continue
+        # Always overwrite — the last play in each half has the final score
+        end_scores[(inn, half)] = (
+            int(play.get("Home Score", 0)),
+            int(play.get("Away Score", 0)),
+        )
+
+    if not end_scores:
+        return None
+
+    max_inning = max(k[0] for k in end_scores)
+
+    away_runs = []
+    home_runs = []
+    prev_away = 0
+    prev_home = 0
+
+    for i in range(1, max_inning + 1):
+        # Top of inning = away team batting
+        if (i, "Top") in end_scores:
+            _, cum_away = end_scores[(i, "Top")][0], end_scores[(i, "Top")][1]
+            away_runs.append(end_scores[(i, "Top")][1] - prev_away)
+            prev_away = end_scores[(i, "Top")][1]
+        else:
+            away_runs.append(0)
+
+        # Bottom of inning = home team batting
+        if (i, "Bottom") in end_scores:
+            home_runs.append(end_scores[(i, "Bottom")][0] - prev_home)
+            prev_home = end_scores[(i, "Bottom")][0]
+        elif i == max_inning:
+            # Home didn't bat (was already winning)
+            home_runs.append("x")
+        else:
+            home_runs.append(0)
+
+    return {
+        "innings": max_inning,
+        "away": {"runs": away_runs, "R": final_away},
+        "home": {"runs": home_runs, "R": final_home},
+    }
+
+
 @games_bp.get("/games/<int:game_id>/boxscore")
 def get_game_boxscore(game_id: int):
     """
     Return the full box score for a single game.
 
-    Includes linescore, per-player batting and pitching lines, and outcome.
+    Includes linescore (inning-by-inning), per-player batting and pitching
+    lines, outcome, and optionally play-by-play.
+
+    Query params:
+      - include_pbp (optional, "1"): include full play-by-play array
     """
     from sqlalchemy import text as sa_text
+
+    include_pbp = request.args.get("include_pbp", "1") == "1"
 
     engine = get_engine()
     try:
         with engine.connect() as conn:
-            # 1. Game result + boxscore JSON
+            # 1. Game result + boxscore JSON + play-by-play
             gr = conn.execute(sa_text("""
                 SELECT gr.game_id, gr.home_team_id, gr.away_team_id,
                        gr.home_score, gr.away_score, gr.game_outcome,
-                       gr.boxscore_json, gr.completed_at, gr.season_week,
+                       gr.boxscore_json, gr.play_by_play_json,
+                       gr.completed_at, gr.season_week,
                        gr.season_subweek, gr.league_level,
                        ht.team_abbrev AS home_abbrev, at2.team_abbrev AS away_abbrev
                 FROM game_results gr
@@ -723,10 +797,52 @@ def get_game_boxscore(game_id: int):
             }
 
         import json as _json
-        boxscore_data = None
-        if gr["boxscore_json"]:
-            raw = gr["boxscore_json"]
-            boxscore_data = _json.loads(raw) if isinstance(raw, str) else raw
+
+        # ---- Build inning-by-inning linescore from play-by-play ----
+        linescore = None
+        pbp_parsed = None
+        pbp_raw = gr["play_by_play_json"]
+        boxscore_raw = gr["boxscore_json"]
+
+        if pbp_raw:
+            pbp_parsed = _json.loads(pbp_raw) if isinstance(pbp_raw, str) else pbp_raw
+            if isinstance(pbp_parsed, list) and pbp_parsed:
+                linescore = _build_linescore(
+                    pbp_parsed,
+                    gr["home_abbrev"], gr["away_abbrev"],
+                    int(gr["home_score"]), int(gr["away_score"]),
+                )
+
+        # Compute team hits / errors from boxscore_json stats
+        home_hits = 0
+        away_hits = 0
+        home_errors = 0
+        away_errors = 0
+        if boxscore_raw:
+            bs = _json.loads(boxscore_raw) if isinstance(boxscore_raw, str) else boxscore_raw
+            stats_block = bs.get("stats") or {}
+            home_abbrev = gr["home_abbrev"]
+            away_abbrev = gr["away_abbrev"]
+            for b in (stats_block.get("batting") or []):
+                tn = b.get("teamname", "")
+                h = int(b.get("hits", 0))
+                if tn == home_abbrev:
+                    home_hits += h
+                elif tn == away_abbrev:
+                    away_hits += h
+            for f in (stats_block.get("fielding") or []):
+                tn = f.get("teamname", "")
+                e = int(f.get("errors", 0))
+                if tn == home_abbrev:
+                    home_errors += e
+                elif tn == away_abbrev:
+                    away_errors += e
+
+        if linescore:
+            linescore["home"]["H"] = home_hits
+            linescore["home"]["E"] = home_errors
+            linescore["away"]["H"] = away_hits
+            linescore["away"]["E"] = away_errors
 
         result = {
             "game_id": game_id,
@@ -734,7 +850,7 @@ def get_game_boxscore(game_id: int):
                           "score": int(gr["home_score"])},
             "away_team": {"id": away_tid, "abbrev": gr["away_abbrev"],
                           "score": int(gr["away_score"])},
-            "linescore": boxscore_data,
+            "linescore": linescore,
             "batting": {
                 "home": [_format_batter(r) for r in bat_rows if int(r["team_id"]) == home_tid],
                 "away": [_format_batter(r) for r in bat_rows if int(r["team_id"]) == away_tid],
@@ -748,6 +864,8 @@ def get_game_boxscore(game_id: int):
             "season_subweek": gr["season_subweek"],
             "completed_at": str(gr["completed_at"]) if gr["completed_at"] else None,
         }
+        if include_pbp and pbp_parsed:
+            result["play_by_play"] = pbp_parsed
         return jsonify(result), 200
 
     except SQLAlchemyError as e:

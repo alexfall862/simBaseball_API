@@ -980,22 +980,65 @@ def get_league_ratings():
     ), 200
 
 # -------------------------------------------------------------------
+# Face generation helper (reuses face_generator service from bootstrap)
+# -------------------------------------------------------------------
+def _generate_faces_for_rows(conn, rows):
+    """
+    Generate face data for a list of player rows.
+    Returns {str(player_id): FaceDataResponse, ...}.
+    """
+    try:
+        from services.face_generator import generate_face, get_team_jersey, load_face_config
+        face_config = load_face_config(conn)
+    except Exception:
+        return {}
+
+    result = {}
+    # Cache jerseys per team
+    jersey_cache = {}
+    for row in rows:
+        m = row._mapping
+        pid = m.get("id")
+        if pid is None:
+            continue
+        # Get team_id from the row; fall back to org_id-based lookup
+        # _build_ratings_base_stmt labels team columns, but team_id
+        # may not be directly available — use team_abbrev + current_level
+        # to derive. However, the face generator just needs a stable int
+        # for jersey determinism. Use org_id as the team grouping key.
+        org_id = m.get("org_id") or 0
+        level = m.get("current_level") or 0
+        team_key = (int(org_id), int(level))
+
+        if team_key not in jersey_cache:
+            # Use org_id * 100 + level as a stable team_id for jersey generation
+            jersey_cache[team_key] = get_team_jersey(int(org_id) * 100 + int(level), face_config)
+
+        result[str(pid)] = generate_face(int(pid), face_config, jersey=jersey_cache[team_key])
+
+    return result
+
+
+# -------------------------------------------------------------------
 # 1 & 2) All active players in an org, optionally at a specific level
 # -------------------------------------------------------------------
 @rosters_bp.get("/orgs/<string:org_abbrev>/roster")
 def get_org_roster(org_abbrev: str):
     """
-    Return all active players for a given organization.
+    Return all active players for a given organization with 20-80 scaled ratings.
 
     Query params:
       - level (optional, int): specific level_id (e.g. 8 for AAA, 9 for MLB)
       - min_level / max_level (optional, int): inclusive range of levels
+      - include_faces (optional, "1"): include face data
 
     Examples:
       /api/v1/orgs/NYY/roster
       /api/v1/orgs/NYY/roster?level=8      # Yankees AAA
       /api/v1/orgs/NYY/roster?min_level=4&max_level=9  # all pro levels
     """
+    include_faces = request.args.get("include_faces", "0") == "1"
+
     # Parse level filters from query string
     level_filter = None
 
@@ -1008,17 +1051,24 @@ def get_org_roster(org_abbrev: str):
         if min_level is not None or max_level is not None:
             level_filter = (min_level, max_level)
 
-    stmt = _build_base_roster_stmt(level_filter=level_filter)
-
-    # Add org filter
-    tables = _get_tables()
-    orgs = tables["organizations"]
-    stmt = stmt.where(orgs.c.org_abbrev == org_abbrev)
-
     try:
         engine = get_engine()
+        col_cats = _get_player_column_categories()
+
         with engine.connect() as conn:
+            dist_by_level, _ = _load_dist_by_level(conn, col_cats)
+            position_weights = _load_position_weights(conn)
+
+            stmt = _build_ratings_base_stmt(
+                level_filter=level_filter,
+                org_abbrev=org_abbrev,
+            )
             rows = conn.execute(stmt).all()
+
+            face_data = {}
+            if include_faces and rows:
+                face_data = _generate_faces_for_rows(conn, rows)
+
     except SQLAlchemyError:
         return (
             jsonify(
@@ -1032,25 +1082,28 @@ def get_org_roster(org_abbrev: str):
             503,
         )
 
-    # Deduplicate by player id (in case of any weird data)
+    # Deduplicate by player id
     players_out = []
     seen_ids = set()
     for row in rows:
-        player = _row_to_player_dict(row)
-        pid = player.get("id")  # assumes simbbPlayers primary key is "id"
+        player = _build_player_with_ratings(
+            row, dist_by_level, col_cats, position_weights
+        )
+        pid = player.get("id")
         if pid is not None and pid in seen_ids:
             continue
         if pid is not None:
             seen_ids.add(pid)
         players_out.append(player)
 
-    return jsonify(
-        {
-            "org": org_abbrev,
-            "count": len(players_out),
-            "players": players_out,
-        }
-    ), 200
+    result = {
+        "org": org_abbrev,
+        "count": len(players_out),
+        "players": players_out,
+    }
+    if include_faces:
+        result["faces"] = face_data
+    return jsonify(result), 200
 
 
 # -------------------------------------------------------------------
@@ -1059,7 +1112,10 @@ def get_org_roster(org_abbrev: str):
 @rosters_bp.get("/rosters")
 def get_all_rosters_grouped():
     """
-    Return active players across the database.
+    Return active players across the database with 20-80 scaled ratings,
+    structured identically to bootstrap (bio / ratings / potentials / contract).
+
+    Optional: ?include_faces=1 to include face data for all returned players.
 
     Behaviors:
       - No query params: group all orgs:
@@ -1074,7 +1130,8 @@ def get_all_rosters_grouped():
           "org": "NYY",
           "org_id": ...,
           "count": ...,
-          "players": [...]
+          "players": [...],
+          "faces": {...}          // if include_faces=1
         }
 
       - ?org=NYY&level=aaa: same as above, restricted to that level.
@@ -1085,14 +1142,12 @@ def get_all_rosters_grouped():
       - min_level / max_level (int) still work as before when you want ranges.
     """
     org_abbrev = request.args.get("org")
+    include_faces = request.args.get("include_faces", "0") == "1"
 
     # Level can be numeric (id) or a league_level string ("aaa", "mlb", ...)
     level_arg = request.args.get("level")
     min_level = request.args.get("min_level", type=int)
     max_level = request.args.get("max_level", type=int)
-
-    tables = _get_tables()
-    orgs = tables["organizations"]
 
     level_filter = None
 
@@ -1102,6 +1157,7 @@ def get_all_rosters_grouped():
             level_id = int(level_arg)
         except ValueError:
             # Not an int; treat as league_level string, look up in levels table
+            tables = _get_tables()
             levels = tables.get("levels")
             if levels is None:
                 return (
@@ -1145,16 +1201,25 @@ def get_all_rosters_grouped():
         if min_level is not None or max_level is not None:
             level_filter = (min_level, max_level)
 
-    stmt = _build_base_roster_stmt(level_filter=level_filter)
-
-    # Restrict to a specific org if requested
-    if org_abbrev:
-        stmt = stmt.where(orgs.c.org_abbrev == org_abbrev)
-
     try:
         engine = get_engine()
+        col_cats = _get_player_column_categories()
+
         with engine.connect() as conn:
+            dist_by_level, _ = _load_dist_by_level(conn, col_cats)
+            position_weights = _load_position_weights(conn)
+
+            stmt = _build_ratings_base_stmt(
+                level_filter=level_filter,
+                org_abbrev=org_abbrev,
+            )
             rows = conn.execute(stmt).all()
+
+            # Build face data if requested
+            face_data = {}
+            if include_faces and rows:
+                face_data = _generate_faces_for_rows(conn, rows)
+
     except SQLAlchemyError:
         return (
             jsonify(
@@ -1169,7 +1234,6 @@ def get_all_rosters_grouped():
         )
 
     by_org = {}
-    # For safety, dedupe player per org by id
     seen_per_org = {}
 
     for row in rows:
@@ -1177,7 +1241,9 @@ def get_all_rosters_grouped():
         this_org_abbrev = m["org_abbrev"]
         org_id = m["org_id"]
 
-        player = _row_to_player_dict(row)
+        player = _build_player_with_ratings(
+            row, dist_by_level, col_cats, position_weights
+        )
         pid = player.get("id")
 
         bucket = by_org.setdefault(
@@ -1204,20 +1270,70 @@ def get_all_rosters_grouped():
             {"org_abbrev": org_abbrev, "org_id": None, "players": []},
         )
         players_out = org_bucket.get("players", [])
-        return (
-            jsonify(
-                {
-                    "org": org_abbrev,
-                    "org_id": org_bucket.get("org_id"),
-                    "count": len(players_out),
-                    "players": players_out,
-                }
-            ),
-            200,
-        )
+        result = {
+            "org": org_abbrev,
+            "org_id": org_bucket.get("org_id"),
+            "count": len(players_out),
+            "players": players_out,
+        }
+        if include_faces:
+            result["faces"] = face_data
+        return jsonify(result), 200
 
     # Otherwise, return the grouped-by-org map
+    if include_faces:
+        return jsonify({"rosters": by_org, "faces": face_data}), 200
     return jsonify(by_org), 200
+
+
+# -------------------------------------------------------------------
+# Global face data endpoint
+# -------------------------------------------------------------------
+@rosters_bp.get("/faces")
+def get_faces():
+    """
+    Return face data for players.
+
+    Query params:
+      - org (optional): org abbreviation to filter by (e.g. NYY)
+      - level (optional, int): level id to filter by
+      - player_ids (optional): comma-separated player ids (e.g. 123,456,789)
+
+    Returns: {"faces": {str(player_id): FaceDataResponse, ...}}
+    """
+    org_abbrev = request.args.get("org")
+    level = request.args.get("level", type=int)
+    player_ids_param = request.args.get("player_ids")
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            if player_ids_param:
+                # Specific player IDs requested
+                try:
+                    pids = [int(x.strip()) for x in player_ids_param.split(",") if x.strip()]
+                except ValueError:
+                    return jsonify(error="invalid_param", message="player_ids must be comma-separated integers"), 400
+
+                from services.face_generator import generate_face, load_face_config
+                face_config = load_face_config(conn)
+                faces = {}
+                for pid in pids:
+                    faces[str(pid)] = generate_face(pid, face_config)
+                return jsonify({"faces": faces}), 200
+
+            # Otherwise query by org/level
+            stmt = _build_ratings_base_stmt(
+                level_filter=level,
+                org_abbrev=org_abbrev,
+            )
+            rows = conn.execute(stmt).all()
+            face_data = _generate_faces_for_rows(conn, rows)
+
+    except SQLAlchemyError:
+        return jsonify(error="db_unavailable", message="Database temporarily unavailable"), 503
+
+    return jsonify({"faces": face_data}), 200
 
 
 # -------------------------------------------------------------------
