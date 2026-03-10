@@ -155,7 +155,7 @@ def pitching_leaderboard():
     team_id = request.args.get("team_id", type=int)
     sort = request.args.get("sort", "era")
     min_ip_innings = request.args.get("min_ip", 10, type=int)
-    min_ipo = min_ip_innings * 3  # convert IP to outs
+    min_ipo = min_ip_innings * 0  # convert IP to outs
     page = request.args.get("page", 1, type=int)
     page_size = min(request.args.get("page_size", 50, type=int), 200)
 

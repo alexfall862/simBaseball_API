@@ -36,18 +36,16 @@ def accumulate_game_stats(
     Returns:
         Dict with counts: {"batters": N, "pitchers": N, "fielders": N}
     """
-    stats = game_result.get("stats")
-    # Also check nested result dict for stats
+    nested = game_result.get("result") or {}
+    stats = game_result.get("stats") or nested.get("stats")
     if not stats:
-        nested = game_result.get("result") or {}
-        stats = nested.get("stats")
-    if not stats:
+        print(f"[stat_accumulator] NO stats found. Top keys={list(game_result.keys())}, nested keys={list(nested.keys())}")
         return {"batters": 0, "pitchers": 0, "fielders": 0}
 
-    game_id = game_result.get("game_id")
-    if game_id is None:
-        logger.warning("accumulate_game_stats: no game_id in result, keys=%s",
-                        list(game_result.keys()))
+    # game_id may be at top level OR nested inside "result"
+    game_id = game_result.get("game_id") or nested.get("game_id")
+    print(f"[stat_accumulator] game_id={game_id}, batters={len(stats.get('batters') or {})}, pitchers={len(stats.get('pitchers') or {})}")
+
     batters = stats.get("batters") or {}
     pitchers = stats.get("pitchers") or {}
     fielders = stats.get("fielders") or {}
@@ -60,15 +58,9 @@ def accumulate_game_stats(
     if game_id is not None:
         gbl_count = _insert_game_batting_lines(conn, int(game_id), batters, league_year_id)
         gpl_count = _insert_game_pitching_lines(conn, int(game_id), pitchers, league_year_id)
-        logger.info(
-            "stat_accumulator: game %s per-game lines — %d batting, %d pitching",
-            game_id, gbl_count, gpl_count,
-        )
+        print(f"[stat_accumulator] game {game_id} per-game lines: {gbl_count} batting, {gpl_count} pitching")
     else:
-        logger.warning(
-            "stat_accumulator: game_id is None, skipping per-game lines. "
-            "Result keys: %s", list(game_result.keys()),
-        )
+        print(f"[stat_accumulator] game_id is NONE — skipping per-game lines. Top keys={list(game_result.keys())}, nested keys={list(nested.keys())}")
 
     return {"batters": b_count, "pitchers": p_count, "fielders": f_count}
 
@@ -424,7 +416,7 @@ def record_subweek_position_usage(
 # ---------------------------------------------------------------------------
 
 _GAME_BATTING_INSERT = text("""
-    INSERT IGNORE INTO game_batting_lines
+    INSERT INTO game_batting_lines
         (game_id, player_id, team_id, league_year_id,
          at_bats, runs, hits, doubles_hit, triples,
          home_runs, rbi, walks, strikeouts, stolen_bases, caught_stealing)
@@ -432,10 +424,22 @@ _GAME_BATTING_INSERT = text("""
         (:game_id, :player_id, :team_id, :league_year_id,
          :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing)
+    ON DUPLICATE KEY UPDATE
+        at_bats         = VALUES(at_bats),
+        runs            = VALUES(runs),
+        hits            = VALUES(hits),
+        doubles_hit     = VALUES(doubles_hit),
+        triples         = VALUES(triples),
+        home_runs       = VALUES(home_runs),
+        rbi             = VALUES(rbi),
+        walks           = VALUES(walks),
+        strikeouts      = VALUES(strikeouts),
+        stolen_bases    = VALUES(stolen_bases),
+        caught_stealing = VALUES(caught_stealing)
 """)
 
 _GAME_PITCHING_INSERT = text("""
-    INSERT IGNORE INTO game_pitching_lines
+    INSERT INTO game_pitching_lines
         (game_id, player_id, team_id, league_year_id,
          games_started, win, loss, save_recorded,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
@@ -445,6 +449,18 @@ _GAME_PITCHING_INSERT = text("""
          :games_started, :win, :loss, :save,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed)
+    ON DUPLICATE KEY UPDATE
+        games_started        = VALUES(games_started),
+        win                  = VALUES(win),
+        loss                 = VALUES(loss),
+        save_recorded        = VALUES(save_recorded),
+        innings_pitched_outs = VALUES(innings_pitched_outs),
+        hits_allowed         = VALUES(hits_allowed),
+        runs_allowed         = VALUES(runs_allowed),
+        earned_runs          = VALUES(earned_runs),
+        walks                = VALUES(walks),
+        strikeouts           = VALUES(strikeouts),
+        home_runs_allowed    = VALUES(home_runs_allowed)
 """)
 
 
@@ -472,7 +488,8 @@ def _insert_game_batting_lines(
                 "caught_stealing": int(b.get("caught_stealing", 0)),
             })
             count += 1
-        except Exception:
+        except Exception as e:
+            print(f"[stat_accumulator] BATTING INSERT FAILED game={game_id} player={player_id_str}: {e}")
             logger.exception(
                 "stat_accumulator: game batting line insert failed for "
                 "game %d player %s", game_id, player_id_str,
@@ -504,7 +521,8 @@ def _insert_game_pitching_lines(
                 "home_runs_allowed":    int(p.get("home_runs_allowed", 0)),
             })
             count += 1
-        except Exception:
+        except Exception as e:
+            print(f"[stat_accumulator] PITCHING INSERT FAILED game={game_id} player={player_id_str}: {e}")
             logger.exception(
                 "stat_accumulator: game pitching line insert failed for "
                 "game %d player %s", game_id, player_id_str,
