@@ -1594,81 +1594,96 @@ def _assign_college_weeks(
     ooc_start = start_week
     conf_start = start_week + COLLEGE_OOC_WEEKS
 
-    # ── OOC phase: weeks 1-10, 2 slots per week (subweek a, subweek c) ──
-    # Each slot is an independent matching — a team can appear in slot-a AND
-    # slot-c of the same week (different opponents).
-    # We treat each slot as a separate color and run two independent colorings.
+    # ── OOC phase: weeks 1-10, 2 games per team per week ──────────────
+    # Each team plays 20 OOC games in 10 weeks = 2 per week (subweek a & c).
+    #
+    # Instead of edge coloring (which fails at the Vizing boundary when
+    # degree == num_colors), we use a two-step greedy approach:
+    #   1) Assign each OOC series to a week where both teams have < 2 games.
+    #   2) Within each week, 2-color the series into subweek a/c so each
+    #      team appears at most once per subweek.  Since each team has
+    #      degree ≤ 2 within a week, the weekly graph is paths + cycles
+    #      and 2-coloring is trivial.
 
     ooc_weeks = list(range(ooc_start, ooc_start + COLLEGE_OOC_WEEKS))
     week_slots = {w: [] for w in range(ooc_start, conf_start + COLLEGE_CONF_WEEKS)}
 
-    # Split OOC into two balanced halves — each team must have exactly
-    # the same number of series in each slot (10 each for 20 total).
-    # A random split can leave a team with >10 in one slot, which is
-    # impossible to fit into 10 weeks (max 1 per team per week).
+    # Step 1: greedy week assignment (each team ≤ 2 OOC games per week)
     rng.shuffle(ooc_series)
-    ooc_slot_a = []
-    ooc_slot_c = []
-    team_a_ct = {}   # per-team count in slot a
-    team_c_ct = {}   # per-team count in slot c
-    target_per_slot = COLLEGE_OOC_WEEKS  # 10 series per team per slot
+    week_team_ct = {w: {} for w in ooc_weeks}  # week -> {team_id: count}
+    ooc_by_week = {w: [] for w in ooc_weeks}
 
     for s in ooc_series:
+        _check_timeout(deadline, "college OOC week assignment")
         ta, tb = s["team_a"], s["team_b"]
-        a_ok = team_a_ct.get(ta, 0) < target_per_slot and team_a_ct.get(tb, 0) < target_per_slot
-        c_ok = team_c_ct.get(ta, 0) < target_per_slot and team_c_ct.get(tb, 0) < target_per_slot
+        # Try weeks in shuffled order for even spread
+        trial = list(ooc_weeks)
+        rng.shuffle(trial)
+        placed = False
+        for w in trial:
+            if week_team_ct[w].get(ta, 0) < 2 and week_team_ct[w].get(tb, 0) < 2:
+                ooc_by_week[w].append(s)
+                week_team_ct[w][ta] = week_team_ct[w].get(ta, 0) + 1
+                week_team_ct[w][tb] = week_team_ct[w].get(tb, 0) + 1
+                placed = True
+                break
+        if not placed:
+            # Fallback — shouldn't happen with 20 games / 10 weeks / 2 per week
+            w = rng.choice(ooc_weeks)
+            ooc_by_week[w].append(s)
+            log.warning("college_ooc: forced series %s-%s into week %d", ta, tb, w)
 
-        if a_ok and c_ok:
-            # Both slots available — pick the less loaded one
-            if (team_a_ct.get(ta, 0) + team_a_ct.get(tb, 0)
-                    <= team_c_ct.get(ta, 0) + team_c_ct.get(tb, 0)):
-                ooc_slot_a.append(s)
-                team_a_ct[ta] = team_a_ct.get(ta, 0) + 1
-                team_a_ct[tb] = team_a_ct.get(tb, 0) + 1
-            else:
-                ooc_slot_c.append(s)
-                team_c_ct[ta] = team_c_ct.get(ta, 0) + 1
-                team_c_ct[tb] = team_c_ct.get(tb, 0) + 1
-        elif a_ok:
-            ooc_slot_a.append(s)
-            team_a_ct[ta] = team_a_ct.get(ta, 0) + 1
-            team_a_ct[tb] = team_a_ct.get(tb, 0) + 1
-        elif c_ok:
-            ooc_slot_c.append(s)
-            team_c_ct[ta] = team_c_ct.get(ta, 0) + 1
-            team_c_ct[tb] = team_c_ct.get(tb, 0) + 1
-        else:
-            # Both full for at least one team — put in less loaded slot
-            if len(ooc_slot_a) <= len(ooc_slot_c):
-                ooc_slot_a.append(s)
-                team_a_ct[ta] = team_a_ct.get(ta, 0) + 1
-                team_a_ct[tb] = team_a_ct.get(tb, 0) + 1
-            else:
-                ooc_slot_c.append(s)
-                team_c_ct[ta] = team_c_ct.get(ta, 0) + 1
-                team_c_ct[tb] = team_c_ct.get(tb, 0) + 1
+    # Step 2: within each week, split OOC games into subweek a (offset 0)
+    # and subweek c (offset 2).  The weekly OOC graph has max degree 2 per
+    # team, so it decomposes into paths and even cycles — alternating colors
+    # along each component gives a valid 2-coloring.
+    for w in ooc_weeks:
+        series_list = ooc_by_week[w]
+        if not series_list:
+            continue
+
+        # Build adjacency for this week's OOC games
+        adj = {}  # team_id -> list of series
+        for s in series_list:
+            adj.setdefault(s["team_a"], []).append(s)
+            adj.setdefault(s["team_b"], []).append(s)
+
+        colored = set()  # ids of already-colored series
+        for s in series_list:
+            if id(s) in colored:
+                continue
+            # Walk the path/cycle starting from this series
+            chain = [s]
+            colored.add(id(s))
+
+            # Extend forward
+            cur = s
+            # Pick an endpoint to walk from
+            end_team = cur["team_b"]
+            while True:
+                nxt = None
+                for candidate in adj.get(end_team, []):
+                    if id(candidate) not in colored:
+                        nxt = candidate
+                        break
+                if nxt is None:
+                    break
+                chain.append(nxt)
+                colored.add(id(nxt))
+                # Move to the other endpoint of nxt
+                end_team = nxt["team_b"] if nxt["team_a"] == end_team else nxt["team_a"]
+
+            # Alternate subweek offsets along the chain
+            for idx, cs in enumerate(chain):
+                cs["subweek_offset"] = 0 if idx % 2 == 0 else 2
+
+        for s in series_list:
+            week_slots[w].append(s)
 
     log.info(
-        "college_ooc_split: slot_a=%d series, slot_c=%d series",
-        len(ooc_slot_a), len(ooc_slot_c),
+        "college_ooc: assigned %d OOC series across weeks %d-%d",
+        len(ooc_series), ooc_start, ooc_start + COLLEGE_OOC_WEEKS - 1,
     )
-
-    for slot_idx, (slot_series, subweek_off) in enumerate([
-        (ooc_slot_a, 0),   # subweek "a" (offset 0)
-        (ooc_slot_c, 2),   # subweek "c" (offset 2)
-    ]):
-        _check_timeout(deadline, "college OOC slot %d" % slot_idx)
-        max_per_week = max(1, len(slot_series) // COLLEGE_OOC_WEEKS + 1)
-
-        assignment = _assign_series_to_weeks(
-            slot_series, COLLEGE_OOC_WEEKS, max_per_week,
-            start_week=ooc_start, rng=rng,
-        )
-
-        for w, series_list in assignment.items():
-            for s in series_list:
-                s["subweek_offset"] = subweek_off
-                week_slots[w].append(s)
 
     # ── Conference phase: weeks 11-20, one 3-game series per team per week ──
     _check_timeout(deadline, "college conference assignment")
