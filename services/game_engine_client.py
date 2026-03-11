@@ -58,23 +58,27 @@ def simulate_games_batch(
 
     url = f"{GAME_ENGINE_URL}/simulate/batch"
 
-    # Build the full payload structure the engine expects:
-    # metadata + constants at the top level, games nested inside subweeks
+    # Build the payload the engine expects:
+    # Shared config at top level, each games[i] has only game-specific data.
+    # Engine falls back to top-level config when per-game fields are absent.
+    lvl = league_level or (games[0].get("league_level_id") if games else None)
+
+    wrapped_games = []
+    for game_core in games:
+        wrapped_games.append({
+            "league_level": lvl,
+            "subweeks": {
+                subweek: [game_core],
+            },
+        })
+
     payload = {
-        "league_year_id": league_year_id or (games[0].get("league_year_id") if games else None),
-        "season_week": season_week or (games[0].get("season_week") if games else None),
-        "league_level": league_level or (games[0].get("league_level_id") if games else None),
-        "total_games": len(games),
+        "subweek": subweek,
         "game_constants": game_constants or {},
         "level_configs": level_configs or {},
         "rules": rules or {},
         "injury_types": injury_types or [],
-        "subweeks": {
-            "a": games if subweek == "a" else [],
-            "b": games if subweek == "b" else [],
-            "c": games if subweek == "c" else [],
-            "d": games if subweek == "d" else [],
-        },
+        "games": wrapped_games,
     }
 
     logger.info(
@@ -95,8 +99,12 @@ def simulate_games_batch(
             }
         )
 
-        # Raise exception for 4xx/5xx status codes
-        response.raise_for_status()
+        # Log and raise on 4xx/5xx status codes
+        if not response.ok:
+            logger.error(
+                f"Engine returned {response.status_code}: {response.text[:2000]}"
+            )
+            response.raise_for_status()
 
         data = response.json()
 

@@ -766,6 +766,166 @@ def admin_schedule_add_series():
         return jsonify(ok=False, error="add_series_failed", message=str(e)), 500
 
 
+@admin_bp.post("/schedule/swap-ooc")
+def admin_schedule_swap_ooc():
+    """
+    Swap OOC opponents so two specified teams play each other instead.
+
+    POST /admin/schedule/swap-ooc
+    Body: {
+        "team_a_id": 101,
+        "team_b_id": 202,
+        "season_week": 3,
+        "season_subweek": "a"
+    }
+
+    If team A plays X and team B plays Y in that slot, after the swap:
+    - team A plays team B
+    - team X plays team Y
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_disabled"), 403
+
+    body = request.get_json(force=True, silent=True) or {}
+    team_a_id = body.get("team_a_id")
+    team_b_id = body.get("team_b_id")
+    season_week = body.get("season_week")
+    season_subweek = body.get("season_subweek")
+
+    missing = []
+    if not team_a_id:
+        missing.append("team_a_id")
+    if not team_b_id:
+        missing.append("team_b_id")
+    if season_week is None:
+        missing.append("season_week")
+    if not season_subweek:
+        missing.append("season_subweek")
+    if missing:
+        return jsonify(ok=False, error="missing_params",
+                       message="Missing: %s" % ", ".join(missing)), 400
+
+    team_a_id = int(team_a_id)
+    team_b_id = int(team_b_id)
+    season_week = int(season_week)
+
+    if team_a_id == team_b_id:
+        return jsonify(ok=False, error="same_team",
+                       message="team_a_id and team_b_id must be different"), 400
+
+    try:
+        from db import get_engine
+        from sqlalchemy import text as sa_text
+
+        engine = get_engine()
+
+        with engine.begin() as conn:
+            # Find both teams' games in this (week, subweek)
+            rows = conn.execute(
+                sa_text("""
+                    SELECT id, home_team, away_team, is_conference
+                    FROM gamelist
+                    WHERE season_week = :week
+                      AND season_subweek = :subweek
+                      AND (home_team IN (:ta, :tb) OR away_team IN (:ta, :tb))
+                """),
+                {"week": season_week, "subweek": season_subweek,
+                 "ta": team_a_id, "tb": team_b_id},
+            ).fetchall()
+
+            # Find game for team A and game for team B
+            game_a = None
+            game_b = None
+            for r in rows:
+                row = dict(r._mapping)
+                if row["home_team"] == team_a_id or row["away_team"] == team_a_id:
+                    game_a = row
+                if row["home_team"] == team_b_id or row["away_team"] == team_b_id:
+                    game_b = row
+
+            if not game_a:
+                return jsonify(ok=False, error="no_game",
+                               message="Team %d has no game in week %d subweek %s"
+                               % (team_a_id, season_week, season_subweek)), 404
+            if not game_b:
+                return jsonify(ok=False, error="no_game",
+                               message="Team %d has no game in week %d subweek %s"
+                               % (team_b_id, season_week, season_subweek)), 404
+
+            # If they already play each other, nothing to do
+            if game_a["id"] == game_b["id"]:
+                return jsonify(ok=True, message="Teams already play each other in this slot",
+                               swapped=False)
+
+            # Both must be OOC
+            if game_a.get("is_conference"):
+                return jsonify(ok=False, error="conference_game",
+                               message="Team %d's game is a conference game — cannot swap"
+                               % team_a_id), 400
+            if game_b.get("is_conference"):
+                return jsonify(ok=False, error="conference_game",
+                               message="Team %d's game is a conference game — cannot swap"
+                               % team_b_id), 400
+
+            # Check neither game has results
+            played = conn.execute(
+                sa_text("""
+                    SELECT game_id FROM game_results
+                    WHERE game_id IN (:ga, :gb)
+                """),
+                {"ga": game_a["id"], "gb": game_b["id"]},
+            ).fetchall()
+            if played:
+                return jsonify(ok=False, error="already_played",
+                               message="Cannot swap — one or both games already have results"), 400
+
+            # Determine opponents
+            opp_a = (game_a["away_team"] if game_a["home_team"] == team_a_id
+                     else game_a["home_team"])
+            opp_b = (game_b["away_team"] if game_b["home_team"] == team_b_id
+                     else game_b["home_team"])
+
+            # Swap: game_a becomes team_a vs team_b, game_b becomes opp_a vs opp_b
+            # Preserve home/away: team_a keeps home/away status from game_a,
+            # opp_a keeps home/away status from game_a's opponent slot
+            if game_a["home_team"] == team_a_id:
+                new_a_home, new_a_away = team_a_id, team_b_id
+            else:
+                new_a_home, new_a_away = team_b_id, team_a_id
+
+            if game_b["home_team"] == team_b_id:
+                # opp_b was away in game_b, so opp_a takes the away slot
+                new_b_home, new_b_away = opp_b, opp_a
+            else:
+                new_b_home, new_b_away = opp_a, opp_b
+
+            conn.execute(
+                sa_text("UPDATE gamelist SET home_team = :h, away_team = :a WHERE id = :id"),
+                {"h": new_a_home, "a": new_a_away, "id": game_a["id"]},
+            )
+            conn.execute(
+                sa_text("UPDATE gamelist SET home_team = :h, away_team = :a WHERE id = :id"),
+                {"h": new_b_home, "a": new_b_away, "id": game_b["id"]},
+            )
+
+        return jsonify(
+            ok=True,
+            swapped=True,
+            game_1={"game_id": game_a["id"], "home": new_a_home, "away": new_a_away},
+            game_2={"game_id": game_b["id"], "home": new_b_home, "away": new_b_away},
+            week=season_week,
+            subweek=season_subweek,
+        )
+
+    except Exception as e:
+        logging.exception("admin_schedule_swap_ooc failed")
+        return jsonify(ok=False, error="swap_failed", message=str(e)), 500
+
+
 # ── Schedule Viewer endpoints ────────────────────────────────────────
 
 @admin_bp.get("/schedule/viewer")
@@ -951,3 +1111,401 @@ def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
     except Exception as e:
         logging.exception("admin_sql_failed")
         return jsonify(ok=False, error="admin_sql_failed", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Analytics endpoints
+# ---------------------------------------------------------------------------
+
+
+@admin_bp.get("/analytics/league-years")
+def admin_analytics_league_years():
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        from db import get_engine
+        from services.analytics import get_league_years
+        engine = get_engine()
+        with engine.connect() as conn:
+            data = get_league_years(conn)
+        return jsonify(ok=True, league_years=data)
+    except Exception as e:
+        logging.exception("analytics_league_years_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/batting-correlations")
+def admin_batting_correlations():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    min_ab = request.args.get("min_ab", 50, type=int)
+    drill_attr = request.args.get("drill_attr")
+    drill_stat = request.args.get("drill_stat")
+    try:
+        from db import get_engine
+        from services.analytics import batting_correlations
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = batting_correlations(
+                conn, league_year_id, league_level, min_ab,
+                drill_attr, drill_stat,
+            )
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("batting_correlations_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/pitching-correlations")
+def admin_pitching_correlations():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    min_ipo = request.args.get("min_ipo", 60, type=int)
+    drill_attr = request.args.get("drill_attr")
+    drill_stat = request.args.get("drill_stat")
+    try:
+        from db import get_engine
+        from services.analytics import pitching_correlations
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = pitching_correlations(
+                conn, league_year_id, league_level, min_ipo,
+                drill_attr, drill_stat,
+            )
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("pitching_correlations_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/defensive-analysis")
+def admin_defensive_analysis():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    position_code = request.args.get("position_code")
+    min_innings = request.args.get("min_innings", 50, type=int)
+    drill_attr = request.args.get("drill_attr")
+    drill_stat = request.args.get("drill_stat")
+    try:
+        from db import get_engine
+        from services.analytics import defensive_correlations
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = defensive_correlations(
+                conn, league_year_id, league_level,
+                position_code, min_innings,
+                drill_attr, drill_stat,
+            )
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("defensive_analysis_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/war-leaderboard")
+def admin_war_leaderboard():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    replacement_pct = request.args.get("replacement_pct", 0.80, type=float)
+    min_ab = request.args.get("min_ab", 50, type=int)
+    min_ipo = request.args.get("min_ipo", 60, type=int)
+    page = request.args.get("page", 1, type=int)
+    page_size = min(request.args.get("page_size", 50, type=int), 200)
+    weights = {
+        "batting": request.args.get("w_batting", 1.0, type=float),
+        "baserunning": request.args.get("w_baserunning", 1.0, type=float),
+        "fielding": request.args.get("w_fielding", 1.0, type=float),
+        "pitching": request.args.get("w_pitching", 1.0, type=float),
+    }
+    try:
+        from db import get_engine
+        from services.analytics import war_leaderboard
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = war_leaderboard(
+                conn, league_year_id, league_level,
+                replacement_pct, min_ab, min_ipo, weights,
+                page, page_size,
+            )
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("war_leaderboard_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/multi-regression")
+def admin_multi_regression():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    category = request.args.get("category", "batting")
+    target_stat = request.args.get("target_stat")
+    min_threshold = request.args.get("min_threshold", 50, type=int)
+    if not league_year_id or not league_level or not target_stat:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import multi_regression
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = multi_regression(conn, category, league_year_id, league_level, target_stat, min_threshold)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("multi_regression_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/sensitivity")
+def admin_sensitivity():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    category = request.args.get("category", "batting")
+    target_stat = request.args.get("target_stat")
+    attribute = request.args.get("attribute")
+    min_threshold = request.args.get("min_threshold", 50, type=int)
+    num_buckets = request.args.get("num_buckets", 10, type=int)
+    if not league_year_id or not league_level or not target_stat or not attribute:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import sensitivity_curves
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = sensitivity_curves(conn, category, league_year_id, league_level, target_stat, attribute, min_threshold, num_buckets)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("sensitivity_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/isolation")
+def admin_isolation():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    category = request.args.get("category", "batting")
+    target_stat = request.args.get("target_stat")
+    test_attr = request.args.get("test_attr")
+    control_attrs = request.args.getlist("control_attr")
+    min_threshold = request.args.get("min_threshold", 50, type=int)
+    if not league_year_id or not league_level or not target_stat or not test_attr:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import attribute_isolation
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = attribute_isolation(conn, category, league_year_id, league_level, target_stat, test_attr, control_attrs, min_threshold)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("isolation_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/xstats")
+def admin_xstats():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    category = request.args.get("category", "batting")
+    min_threshold = request.args.get("min_threshold", 50, type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import xstats_analysis
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = xstats_analysis(conn, category, league_year_id, league_level, min_threshold)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("xstats_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/interactions")
+def admin_interactions():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    category = request.args.get("category", "batting")
+    target_stat = request.args.get("target_stat")
+    attr_a = request.args.get("attr_a")
+    attr_b = request.args.get("attr_b")
+    min_threshold = request.args.get("min_threshold", 50, type=int)
+    if not all([league_year_id, league_level, target_stat, attr_a, attr_b]):
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import interaction_analysis
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = interaction_analysis(conn, category, league_year_id, league_level, target_stat, attr_a, attr_b, min_threshold)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("interactions_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/stat-dashboard")
+def admin_stat_dashboard():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    category = request.args.get("category", "batting")
+    target_stat = request.args.get("target_stat")
+    min_threshold = request.args.get("min_threshold", 50, type=int)
+    if not league_year_id or not league_level or not target_stat:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import stat_tuning_dashboard
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = stat_tuning_dashboard(conn, category, league_year_id, league_level, target_stat, min_threshold)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("stat_dashboard_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/archetypes")
+def admin_archetypes():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    min_ab = request.args.get("min_ab", 50, type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import archetype_validation
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = archetype_validation(conn, league_year_id, league_level, min_ab)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("archetypes_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/pitch-types")
+def admin_pitch_types():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    min_ipo = request.args.get("min_ipo", 60, type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import pitch_type_analysis
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = pitch_type_analysis(conn, league_year_id, league_level, min_ipo)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("pitch_types_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/defensive-positions")
+def admin_defensive_positions():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    min_innings = request.args.get("min_innings", 50, type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params"), 400
+    try:
+        from db import get_engine
+        from services.analytics import defensive_position_importance
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = defensive_position_importance(conn, league_year_id, league_level, min_innings)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("defensive_positions_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/db-storage")
+def admin_db_storage():
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        from db import get_engine
+        engine = get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(sa_text("""
+                SELECT
+                    table_name,
+                    table_rows,
+                    ROUND(data_length / 1024 / 1024, 2) AS data_mb,
+                    ROUND(index_length / 1024 / 1024, 2) AS index_mb,
+                    ROUND((data_length + index_length) / 1024 / 1024, 2) AS total_mb,
+                    ROUND(data_free / 1024 / 1024, 2) AS free_mb
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                ORDER BY (data_length + index_length) DESC
+            """)).mappings().all()
+            tables = [dict(r) for r in rows]
+            total_data = sum(float(t["data_mb"] or 0) for t in tables)
+            total_index = sum(float(t["index_mb"] or 0) for t in tables)
+            total_size = sum(float(t["total_mb"] or 0) for t in tables)
+            total_rows = sum(int(t["table_rows"] or 0) for t in tables)
+        return jsonify(ok=True, tables=tables, summary={
+            "table_count": len(tables),
+            "total_rows": total_rows,
+            "total_data_mb": round(total_data, 2),
+            "total_index_mb": round(total_index, 2),
+            "total_mb": round(total_size, 2),
+        })
+    except Exception as e:
+        logging.exception("db_storage_failed")
+        return jsonify(ok=False, error="db_storage_error", message=str(e)), 500

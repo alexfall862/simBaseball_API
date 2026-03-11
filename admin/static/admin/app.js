@@ -107,6 +107,7 @@
     document.getElementById('btn-sim-preview').addEventListener('click', () => runSimulation(false));
     document.getElementById('btn-sim-run').addEventListener('click', () => runSimulation(true));
     document.getElementById('btn-run-season').addEventListener('click', runSeason);
+    document.getElementById('btn-run-all-levels').addEventListener('click', runAllLevels);
     document.getElementById('btn-wipe-season').addEventListener('click', wipeSeason);
 
     // Timestamp
@@ -229,6 +230,42 @@
     });
     document.getElementById('sandbox-highlight-player').addEventListener('change', renderSandboxChart);
 
+    // Analytics
+    document.getElementById('btn-an-bat-load').addEventListener('click', loadBattingCorrelations);
+    document.getElementById('btn-an-bat-back').addEventListener('click', () => showAnalyticsView('bat', 'heatmap'));
+    document.getElementById('btn-an-pit-load').addEventListener('click', loadPitchingCorrelations);
+    document.getElementById('btn-an-pit-back').addEventListener('click', () => showAnalyticsView('pit', 'heatmap'));
+    document.getElementById('btn-an-def-load').addEventListener('click', loadDefensiveAnalysis);
+    document.getElementById('btn-an-def-back').addEventListener('click', () => showAnalyticsView('def', 'heatmap'));
+    document.getElementById('btn-an-war-load').addEventListener('click', loadWarLeaderboard);
+    document.getElementById('btn-war-prev').addEventListener('click', () => { warPage--; loadWarLeaderboard(); });
+    document.getElementById('btn-war-next').addEventListener('click', () => { warPage++; loadWarLeaderboard(); });
+    // WAR slider labels
+    ['repl', 'wb', 'wbr', 'wf', 'wp'].forEach(key => {
+      const el = document.getElementById(`an-war-${key}`);
+      if (el) el.addEventListener('input', () => {
+        const suffix = key === 'repl' ? '%' : '';
+        document.getElementById(`an-war-${key}-val`).textContent = el.value + suffix;
+      });
+    });
+
+    // Analytics (advanced)
+    document.getElementById('btn-an-reg-load').addEventListener('click', loadMultiRegression);
+    document.getElementById('an-reg-cat').addEventListener('change', () => populateStatDropdown('an-reg'));
+    document.getElementById('btn-an-sens-load').addEventListener('click', loadSensitivity);
+    document.getElementById('an-sens-cat').addEventListener('change', () => { populateAttrDropdown('an-sens'); populateStatDropdown('an-sens'); });
+    document.getElementById('btn-an-xs-load').addEventListener('click', loadXStats);
+    document.getElementById('btn-an-int-load').addEventListener('click', loadInteractions);
+    document.getElementById('an-int-cat').addEventListener('change', () => { populateAttrDropdown('an-int'); populateStatDropdown('an-int'); });
+    document.getElementById('btn-an-dash-load').addEventListener('click', loadStatDashboard);
+    document.getElementById('an-dash-cat').addEventListener('change', () => populateStatDropdown('an-dash'));
+    document.getElementById('btn-an-arch-load').addEventListener('click', loadArchetypes);
+    document.getElementById('btn-an-pt-load').addEventListener('click', loadPitchTypes);
+    document.getElementById('btn-an-dp-load').addEventListener('click', loadDefensivePositions);
+
+    // DB Storage
+    document.getElementById('btn-db-storage-load').addEventListener('click', loadDbStorage);
+
     // Schedule Generator
     document.getElementById('btn-sched-report').addEventListener('click', loadScheduleReport);
     document.getElementById('btn-sched-validate').addEventListener('click', validateSchedule);
@@ -243,6 +280,7 @@
     document.getElementById('btn-sv-next').addEventListener('click', () => { svCurrentPage++; loadScheduleViewer(); });
     document.getElementById('btn-sv-quality').addEventListener('click', loadScheduleQuality);
     document.getElementById('btn-sv-add-series').addEventListener('click', addViewerSeries);
+    document.getElementById('btn-sv-swap-ooc').addEventListener('click', swapOocOpponents);
 
     // Arrow key navigation for sandbox chart
     document.addEventListener('keydown', (e) => {
@@ -317,6 +355,19 @@
       'schedule-gen': 'Schedule Generator',
       'schedule-viewer': 'Schedule Viewer',
       migrations: 'Migrations',
+      'analytics-batting': 'Batting Correlations',
+      'analytics-pitching': 'Pitching Correlations',
+      'analytics-defense': 'Defensive Analysis',
+      'analytics-war': 'WAR Leaderboard',
+      'analytics-regression': 'Multi-Regression',
+      'analytics-sensitivity': 'Sensitivity Curves',
+      'analytics-xstats': 'xStats / Residuals',
+      'analytics-interactions': 'Interaction Effects',
+      'analytics-dashboard': 'Stat Tuning Dashboard',
+      'analytics-archetypes': 'Archetype Validation',
+      'analytics-pitchtypes': 'Pitch Type Analysis',
+      'analytics-defpos': 'Defensive Positions',
+      'db-storage': 'DB Storage',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -374,6 +425,20 @@
         loadScheduleReport();
         break;
       case 'schedule-viewer':
+        break;
+      case 'analytics-batting':
+      case 'analytics-pitching':
+      case 'analytics-defense':
+      case 'analytics-war':
+      case 'analytics-regression':
+      case 'analytics-sensitivity':
+      case 'analytics-xstats':
+      case 'analytics-interactions':
+      case 'analytics-dashboard':
+      case 'analytics-archetypes':
+      case 'analytics-pitchtypes':
+      case 'analytics-defpos':
+        loadAnalyticsLeagueYears(section);
         break;
     }
 
@@ -1166,8 +1231,12 @@
         if (_seasonPollId) clearInterval(_seasonPollId);
         _seasonPollId = setInterval(() => {
           fetch(`${API_BASE}/games/tasks/${taskId}`, { credentials: 'include' })
-            .then(r => r.json())
+            .then(r => {
+              if (!r.ok) { clearInterval(_seasonPollId); _seasonPollId = null; return null; }
+              return r.json();
+            })
             .then(task => {
+              if (!task) return;
               const progress = task.progress || 0;
               const pct = total > 0 ? Math.round((progress / total) * 100) : 0;
               progressBar.style.width = pct + '%';
@@ -1187,7 +1256,90 @@
                 loadTimestamp();
               }
             })
-            .catch(() => {});
+            .catch(() => { clearInterval(_seasonPollId); _seasonPollId = null; });
+        }, 3000);
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+        progressWrap.style.display = 'none';
+      });
+  }
+
+  // Run All Levels (background task with polling)
+  function runAllLevels() {
+    const year = document.getElementById('season-run-year').value;
+    const startWeek = document.getElementById('season-run-start').value;
+    const endWeek = document.getElementById('season-run-end').value;
+    const resultBox = document.getElementById('season-run-result');
+    const progressWrap = document.getElementById('season-progress-wrap');
+    const progressBar = document.getElementById('season-progress-bar');
+    const progressText = document.getElementById('season-progress-text');
+
+    const totalWeeks = parseInt(endWeek) - parseInt(startWeek) + 1;
+    const totalSteps = totalWeeks * 7; // 7 levels
+
+    if (!confirm(`Run ALL levels (9-3) for weeks ${startWeek}–${endWeek}? That's ${totalSteps} level-weeks. This will take a while.`)) return;
+
+    resultBox.textContent = 'Starting all levels...';
+    progressWrap.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressText.textContent = '0 / 0';
+
+    fetch(`${API_BASE}/games/run-season-all`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_year_id: parseInt(year),
+        start_week: parseInt(startWeek),
+        end_week: parseInt(endWeek),
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = 'Error: ' + (data.message || data.error);
+          progressWrap.style.display = 'none';
+          return;
+        }
+        const taskId = data.task_id;
+        const total = data.total;
+        resultBox.textContent = `Task started: ${taskId} (${total} level-weeks across 7 levels)`;
+        progressText.textContent = `0 / ${total}`;
+
+        if (_seasonPollId) clearInterval(_seasonPollId);
+        _seasonPollId = setInterval(() => {
+          fetch(`${API_BASE}/games/tasks/${taskId}`, { credentials: 'include' })
+            .then(r => {
+              if (!r.ok) { clearInterval(_seasonPollId); _seasonPollId = null; return null; }
+              return r.json();
+            })
+            .then(task => {
+              if (!task) return;
+              const progress = task.progress || 0;
+              const pct = total > 0 ? Math.round((progress / total) * 100) : 0;
+              progressBar.style.width = pct + '%';
+
+              const currentLevel = Math.floor(progress / totalWeeks);
+              const levelNames = ['MLB', 'AAA', 'AA', 'High-A', 'A', 'Scraps', 'College'];
+              const levelLabel = currentLevel < levelNames.length ? levelNames[currentLevel] : 'Done';
+              progressText.textContent = `${progress} / ${total} (${levelLabel})`;
+
+              if (task.status === 'complete' || task.status === 'COMPLETE') {
+                clearInterval(_seasonPollId);
+                _seasonPollId = null;
+                progressBar.style.width = '100%';
+                progressText.textContent = `${total} / ${total} (Complete)`;
+                resultBox.textContent = JSON.stringify(task, null, 2);
+                loadTimestamp();
+              } else if (task.status === 'failed' || task.status === 'FAILED') {
+                clearInterval(_seasonPollId);
+                _seasonPollId = null;
+                resultBox.textContent = 'FAILED: ' + (task.error || 'Unknown error');
+                loadTimestamp();
+              }
+            })
+            .catch(() => { clearInterval(_seasonPollId); _seasonPollId = null; });
         }, 3000);
       })
       .catch(err => {
@@ -3995,6 +4147,1053 @@
       });
   }
 
+  function swapOocOpponents() {
+    const teamA = document.getElementById('sv-swap-team-a').value;
+    const teamB = document.getElementById('sv-swap-team-b').value;
+    const week = document.getElementById('sv-swap-week').value;
+    const subweek = document.getElementById('sv-swap-subweek').value;
+
+    if (!teamA || !teamB) { alert('Both Team A and Team B IDs are required.'); return; }
+    if (!week) { alert('Week is required.'); return; }
+
+    const resultBox = document.getElementById('sv-swap-result');
+
+    fetch(`${ADMIN_BASE}/schedule/swap-ooc`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        team_a_id: parseInt(teamA),
+        team_b_id: parseInt(teamB),
+        season_week: parseInt(week),
+        season_subweek: subweek,
+      }),
+    })
+      .then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(r.status + ': ' + t.slice(0, 300)); });
+        return r.json();
+      })
+      .then(data => {
+        resultBox.style.display = 'block';
+        if (!data.ok) {
+          resultBox.textContent = 'Failed: ' + (data.message || data.error);
+          resultBox.style.color = '#f44336';
+          return;
+        }
+        if (!data.swapped) {
+          resultBox.textContent = data.message || 'No swap needed.';
+          resultBox.style.color = '#ff9800';
+          return;
+        }
+        const g1 = data.game_1;
+        const g2 = data.game_2;
+        resultBox.textContent =
+          `Swapped! Game ${g1.game_id}: ${g1.away} @ ${g1.home} | Game ${g2.game_id}: ${g2.away} @ ${g2.home}`;
+        resultBox.style.color = '#4caf50';
+        loadScheduleViewer();
+      })
+      .catch(err => {
+        resultBox.style.display = 'block';
+        resultBox.textContent = 'Error: ' + err.message;
+        resultBox.style.color = '#f44336';
+      });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analytics
+  // ---------------------------------------------------------------------------
+
+  let analyticsScatterChart = null;
+  let warPage = 1;
+
+  function loadAnalyticsLeagueYears(section) {
+    // Map section to its dropdown id prefix
+    const prefixMap = {
+      'analytics-batting': 'an-bat',
+      'analytics-pitching': 'an-pit',
+      'analytics-defense': 'an-def',
+      'analytics-war': 'an-war',
+      'analytics-regression': 'an-reg',
+      'analytics-sensitivity': 'an-sens',
+      'analytics-xstats': 'an-xs',
+      'analytics-interactions': 'an-int',
+      'analytics-dashboard': 'an-dash',
+      'analytics-archetypes': 'an-arch',
+      'analytics-pitchtypes': 'an-pt',
+      'analytics-defpos': 'an-dp',
+    };
+    const prefix = prefixMap[section];
+    if (!prefix) return;
+    const sel = document.getElementById(`${prefix}-lyid`);
+    if (!sel || sel.options.length > 1) return; // already loaded
+    fetch(`${ADMIN_BASE}/analytics/league-years`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) return;
+        sel.innerHTML = '';
+        data.league_years.forEach(ly => {
+          const opt = document.createElement('option');
+          opt.value = ly.id;
+          opt.textContent = ly.league_year;
+          sel.appendChild(opt);
+        });
+        // Populate stat/attr dropdowns for sections that have them
+        const needsStatDropdown = ['an-reg', 'an-sens', 'an-dash', 'an-int'];
+        const needsAttrDropdown = ['an-sens', 'an-int'];
+        if (needsStatDropdown.includes(prefix)) populateStatDropdown(prefix);
+        if (needsAttrDropdown.includes(prefix)) populateAttrDropdown(prefix);
+      })
+      .catch(() => {});
+  }
+
+  function correlationColor(r) {
+    const abs = Math.min(Math.abs(r), 1);
+    const intensity = Math.round(abs * 200);
+    if (r > 0) return `rgb(${255 - intensity}, 255, ${255 - intensity})`;
+    if (r < 0) return `rgb(255, ${255 - intensity}, ${255 - intensity})`;
+    return '#ffffff';
+  }
+
+  function showAnalyticsView(prefix, view) {
+    document.getElementById(`an-${prefix}-heatmap-card`).style.display = view === 'heatmap' ? '' : 'none';
+    document.getElementById(`an-${prefix}-scatter-card`).style.display = view === 'scatter' ? '' : 'none';
+  }
+
+  function renderCorrelationHeatmap(prefix, data, type) {
+    const container = document.getElementById(`an-${prefix}-heatmap`);
+    const nSpan = document.getElementById(`an-${prefix}-n`);
+    nSpan.textContent = `(n=${data.n})`;
+
+    const attrs = data.attribute_labels || data.attributes;
+    const stats = data.stat_labels || data.stats;
+    const matrix = data.r_matrix;
+
+    let html = '<table class="data-table" style="font-size: 12px;">';
+    html += '<thead><tr><th></th>';
+    stats.forEach(s => { html += `<th style="text-align: center; min-width: 55px;">${s}</th>`; });
+    html += '</tr></thead><tbody>';
+
+    matrix.forEach((row, ai) => {
+      html += `<tr><td style="font-weight: 600; white-space: nowrap;">${attrs[ai]}</td>`;
+      row.forEach((r, si) => {
+        const bg = correlationColor(r);
+        const textColor = Math.abs(r) > 0.6 ? '#000' : '#333';
+        html += `<td style="text-align: center; background: ${bg}; color: ${textColor}; cursor: pointer; padding: 6px 4px;"
+                     onclick="App.drillCorrelation('${type}', '${data.attributes[ai]}', '${data.stats[si]}')"
+                     title="${data.attributes[ai]} vs ${data.stats[si]}">${r.toFixed(2)}</td>`;
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+
+    document.getElementById(`an-${prefix}-heatmap-card`).style.display = '';
+    document.getElementById(`an-${prefix}-scatter-card`).style.display = 'none';
+  }
+
+  function renderCorrelationScatter(prefix, data) {
+    const canvas = document.getElementById(`an-${prefix}-scatter-canvas`);
+    const titleEl = document.getElementById(`an-${prefix}-scatter-title`);
+    const infoEl = document.getElementById(`an-${prefix}-scatter-info`);
+    const detailEl = document.getElementById(`an-${prefix}-scatter-detail`);
+
+    titleEl.textContent = `${data.attr_label} vs ${data.stat_label}`;
+    infoEl.textContent = `R = ${data.r.toFixed(4)} | y = ${data.slope.toFixed(4)}x + ${data.intercept.toFixed(4)} | n = ${data.n}`;
+    if (detailEl) { detailEl.style.display = 'none'; detailEl.innerHTML = ''; }
+
+    if (analyticsScatterChart) {
+      analyticsScatterChart.destroy();
+      analyticsScatterChart = null;
+    }
+
+    // Build regression line endpoints
+    const xs = data.points.map(p => p.x);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const regLine = [
+      { x: minX, y: data.slope * minX + data.intercept },
+      { x: maxX, y: data.slope * maxX + data.intercept },
+    ];
+
+    analyticsScatterChart = new Chart(canvas, {
+      type: 'scatter',
+      data: {
+        datasets: [
+          {
+            label: 'Players',
+            data: data.points.map(p => ({ x: p.x, y: p.y })),
+            backgroundColor: 'rgba(54, 162, 235, 0.5)',
+            pointRadius: 4,
+            pointHoverRadius: 7,
+          },
+          {
+            label: 'Regression',
+            data: regLine,
+            type: 'line',
+            borderColor: 'rgba(255, 99, 132, 0.8)',
+            borderWidth: 2,
+            pointRadius: 0,
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        onClick: function(evt, elements) {
+          if (!detailEl) return;
+          if (!elements.length || elements[0].datasetIndex !== 0) {
+            detailEl.style.display = 'none';
+            return;
+          }
+          const idx = elements[0].index;
+          const pt = data.points[idx];
+          renderPlayerDetail(detailEl, pt, data.attr_label, data.stat_label);
+        },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(ctx) {
+                if (ctx.datasetIndex === 0) {
+                  const pt = data.points[ctx.dataIndex];
+                  return `${pt.name}: (${pt.x.toFixed(1)}, ${pt.y.toFixed(4)})`;
+                }
+                return '';
+              }
+            }
+          },
+          legend: { display: false },
+        },
+        scales: {
+          x: { title: { display: true, text: data.attr_label } },
+          y: { title: { display: true, text: data.stat_label } },
+        },
+      },
+    });
+
+    showAnalyticsView(prefix, 'scatter');
+  }
+
+  function renderPlayerDetail(container, pt, attrLabel, statLabel) {
+    const statLabels = Object.assign({},
+      ...BATTING_STATS.map(s => ({ [s.value]: s.label })),
+      ...PITCHING_STATS.map(s => ({ [s.value]: s.label })),
+    );
+    const attrLabelsMap = Object.assign({},
+      ...BATTING_ATTRS.map(a => ({ [a.value]: a.label })),
+      ...PITCHING_ATTRS.map(a => ({ [a.value]: a.label })),
+    );
+
+    let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+      <h4 style="margin:0;">${pt.name}</h4>
+      <span class="text-muted" style="font-size:13px;">Player ID: ${pt.player_id}</span>
+    </div>`;
+
+    // Stats table
+    if (pt.all_stats && Object.keys(pt.all_stats).length) {
+      html += '<div style="margin-bottom:10px;"><strong>Stats</strong></div>';
+      html += '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
+      for (const [key, val] of Object.entries(pt.all_stats)) {
+        const label = statLabels[key] || key;
+        const fmt = (key === 'AB_per_HR') ? val.toFixed(1) : val.toFixed(3);
+        html += `<div class="stat-card" style="min-width:70px;"><div class="stat-label">${label}</div><div class="stat-value">${fmt}</div></div>`;
+      }
+      html += '</div>';
+    }
+
+    // Attributes table
+    if (pt.all_attrs && Object.keys(pt.all_attrs).length) {
+      html += '<div style="margin-top:10px;margin-bottom:10px;"><strong>Attributes</strong></div>';
+      html += '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
+      for (const [key, val] of Object.entries(pt.all_attrs)) {
+        const label = attrLabelsMap[key] || key;
+        html += `<div class="stat-card" style="min-width:70px;"><div class="stat-label">${label}</div><div class="stat-value">${val.toFixed(0)}</div></div>`;
+      }
+      html += '</div>';
+    }
+
+    container.innerHTML = html;
+    container.style.display = '';
+  }
+
+  function drillCorrelation(type, attr, stat) {
+    const prefixMap = { batting: 'bat', pitching: 'pit', defense: 'def' };
+    const prefix = prefixMap[type];
+    const endpointMap = {
+      batting: 'batting-correlations',
+      pitching: 'pitching-correlations',
+      defense: 'defensive-analysis',
+    };
+
+    const lyid = document.getElementById(`an-${prefix}-lyid`).value;
+    const level = document.getElementById(`an-${prefix}-level`).value;
+
+    let minParam = '';
+    if (type === 'batting') minParam = `&min_ab=${document.getElementById('an-bat-min-ab').value}`;
+    else if (type === 'pitching') minParam = `&min_ipo=${document.getElementById('an-pit-min-ipo').value}`;
+    else if (type === 'defense') {
+      minParam = `&min_innings=${document.getElementById('an-def-min-inn').value}`;
+      const pos = document.getElementById('an-def-pos').value;
+      if (pos) minParam += `&position_code=${pos}`;
+    }
+
+    const url = `${ADMIN_BASE}/analytics/${endpointMap[type]}?league_year_id=${lyid}&league_level=${level}${minParam}&drill_attr=${attr}&drill_stat=${stat}`;
+    document.getElementById(`an-${prefix}-status`).textContent = 'Loading scatter data...';
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        document.getElementById(`an-${prefix}-status`).textContent = '';
+        if (!data.ok) {
+          document.getElementById(`an-${prefix}-status`).textContent = 'Error: ' + (data.message || data.error);
+          return;
+        }
+        renderCorrelationScatter(prefix, data);
+      })
+      .catch(err => {
+        document.getElementById(`an-${prefix}-status`).textContent = 'Error: ' + err.message;
+      });
+  }
+
+  function loadBattingCorrelations() {
+    const lyid = document.getElementById('an-bat-lyid').value;
+    const level = document.getElementById('an-bat-level').value;
+    const minAb = document.getElementById('an-bat-min-ab').value;
+    const status = document.getElementById('an-bat-status');
+    status.textContent = 'Loading...';
+
+    fetch(`${ADMIN_BASE}/analytics/batting-correlations?league_year_id=${lyid}&league_level=${level}&min_ab=${minAb}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        status.textContent = '';
+        if (!data.ok) { status.textContent = 'Error: ' + (data.message || data.error); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n}). Lower min AB.`; return; }
+        renderCorrelationHeatmap('bat', data, 'batting');
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function loadPitchingCorrelations() {
+    const lyid = document.getElementById('an-pit-lyid').value;
+    const level = document.getElementById('an-pit-level').value;
+    const minIpo = document.getElementById('an-pit-min-ipo').value;
+    const status = document.getElementById('an-pit-status');
+    status.textContent = 'Loading...';
+
+    fetch(`${ADMIN_BASE}/analytics/pitching-correlations?league_year_id=${lyid}&league_level=${level}&min_ipo=${minIpo}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        status.textContent = '';
+        if (!data.ok) { status.textContent = 'Error: ' + (data.message || data.error); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n}). Lower min IPO.`; return; }
+        renderCorrelationHeatmap('pit', data, 'pitching');
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function loadDefensiveAnalysis() {
+    const lyid = document.getElementById('an-def-lyid').value;
+    const level = document.getElementById('an-def-level').value;
+    const pos = document.getElementById('an-def-pos').value;
+    const minInn = document.getElementById('an-def-min-inn').value;
+    const status = document.getElementById('an-def-status');
+    status.textContent = 'Loading...';
+
+    let url = `${ADMIN_BASE}/analytics/defensive-analysis?league_year_id=${lyid}&league_level=${level}&min_innings=${minInn}`;
+    if (pos) url += `&position_code=${pos}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        status.textContent = '';
+        if (!data.ok) { status.textContent = 'Error: ' + (data.message || data.error); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n}). Lower min innings.`; return; }
+        // Populate position dropdown if available
+        if (data.positions) {
+          const posSel = document.getElementById('an-def-pos');
+          const current = posSel.value;
+          posSel.innerHTML = '<option value="">All</option>';
+          data.positions.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p;
+            opt.textContent = p.toUpperCase();
+            posSel.appendChild(opt);
+          });
+          posSel.value = current;
+        }
+        renderCorrelationHeatmap('def', data, 'defense');
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function loadWarLeaderboard() {
+    const lyid = document.getElementById('an-war-lyid').value;
+    const level = document.getElementById('an-war-level').value;
+    const minAb = document.getElementById('an-war-min-ab').value;
+    const minIpo = document.getElementById('an-war-min-ipo').value;
+    const repl = document.getElementById('an-war-repl').value;
+    const wb = document.getElementById('an-war-wb').value;
+    const wbr = document.getElementById('an-war-wbr').value;
+    const wf = document.getElementById('an-war-wf').value;
+    const wp = document.getElementById('an-war-wp').value;
+    const status = document.getElementById('an-war-status');
+    status.textContent = 'Loading...';
+
+    const url = `${ADMIN_BASE}/analytics/war-leaderboard?league_year_id=${lyid}&league_level=${level}`
+      + `&min_ab=${minAb}&min_ipo=${minIpo}&replacement_pct=${repl / 100}`
+      + `&w_batting=${wb}&w_baserunning=${wbr}&w_fielding=${wf}&w_pitching=${wp}`
+      + `&page=${warPage}&page_size=50`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        status.textContent = '';
+        if (!data.ok) { status.textContent = 'Error: ' + (data.message || data.error); return; }
+        renderWarTable(data);
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function renderWarTable(data) {
+    // League averages
+    const avgsDiv = document.getElementById('an-war-avgs');
+    const la = data.league_averages;
+    avgsDiv.innerHTML = `
+      <div class="stat-card"><div class="stat-label">Lg OPS</div><div class="stat-value">${la.ops.toFixed(3)}</div></div>
+      <div class="stat-card"><div class="stat-label">Lg ERA</div><div class="stat-value">${la.era.toFixed(2)}</div></div>
+      <div class="stat-card"><div class="stat-label">Repl OPS</div><div class="stat-value">${data.repl_ops.toFixed(3)}</div></div>
+      <div class="stat-card"><div class="stat-label">Repl ERA</div><div class="stat-value">${data.repl_era.toFixed(2)}</div></div>
+      <div class="stat-card"><div class="stat-label">PA/Run</div><div class="stat-value">${la.pa_per_run.toFixed(1)}</div></div>
+    `;
+    document.getElementById('an-war-avgs-card').style.display = '';
+
+    // Table
+    const tbody = document.getElementById('an-war-tbody');
+    tbody.innerHTML = '';
+    data.leaders.forEach(p => {
+      const warColor = p.war > 0 ? '#4caf50' : (p.war < 0 ? '#f44336' : '#999');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${p.rank}</td>
+        <td>${p.name}</td>
+        <td>${p.team}</td>
+        <td>${p.position}</td>
+        <td>${p.type}</td>
+        <td style="font-weight: 700; color: ${warColor}">${p.war.toFixed(1)}</td>
+        <td>${p.batting_runs.toFixed(1)}</td>
+        <td>${p.br_runs.toFixed(1)}</td>
+        <td>${p.fld_runs.toFixed(1)}</td>
+        <td>${p.pit_runs.toFixed(1)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+    document.getElementById('an-war-table-card').style.display = '';
+
+    // Pagination
+    document.getElementById('an-war-page-info').textContent = `Page ${data.page} of ${data.pages} (${data.total} players)`;
+    document.getElementById('btn-war-prev').disabled = data.page <= 1;
+    document.getElementById('btn-war-next').disabled = data.page >= data.pages;
+    warPage = data.page;
+  }
+
+  // --- Dropdown population helpers ---
+
+  const BATTING_STATS = [
+    { value: 'AVG', label: 'AVG' }, { value: 'ISO', label: 'ISO' },
+    { value: 'BB_pct', label: 'BB%' }, { value: 'K_pct', label: 'K%' },
+    { value: 'OBP', label: 'OBP' }, { value: 'SLG', label: 'SLG' },
+    { value: 'OPS', label: 'OPS' }, { value: 'SB_pct', label: 'SB%' },
+    { value: 'AB_per_HR', label: 'AB/HR' }, { value: 'BABIP', label: 'BABIP' },
+    { value: 'XBH_pct', label: 'XBH%' }, { value: 'BB_K', label: 'BB/K' },
+  ];
+  const PITCHING_STATS = [
+    { value: 'ERA', label: 'ERA' }, { value: 'WHIP', label: 'WHIP' },
+    { value: 'K_per_9', label: 'K/9' }, { value: 'BB_per_9', label: 'BB/9' },
+    { value: 'HR_per_9', label: 'HR/9' }, { value: 'K_per_BB', label: 'K/BB' },
+    { value: 'H_per_9', label: 'H/9' }, { value: 'IP_per_GS', label: 'IP/GS' },
+    { value: 'W_pct', label: 'W%' }, { value: 'BABIP_against', label: 'BABIP Ag' },
+    { value: 'K_pct_p', label: 'K%' }, { value: 'BB_pct_p', label: 'BB%' },
+  ];
+  const BATTING_ATTRS = [
+    { value: 'contact_base', label: 'Contact' }, { value: 'power_base', label: 'Power' },
+    { value: 'eye_base', label: 'Eye' }, { value: 'discipline_base', label: 'Discipline' },
+    { value: 'speed_base', label: 'Speed' }, { value: 'baserunning_base', label: 'Baserunning' },
+    { value: 'basereaction_base', label: 'Base Reaction' },
+  ];
+  const PITCHING_ATTRS = [
+    { value: 'pendurance_base', label: 'Endurance' }, { value: 'pgencontrol_base', label: 'Gen Control' },
+    { value: 'psequencing_base', label: 'Sequencing' }, { value: 'pthrowpower_base', label: 'Throw Power' },
+    { value: 'pickoff_base', label: 'Pickoff' },
+    { value: 'avg_consist', label: 'Avg Consistency' }, { value: 'avg_pacc', label: 'Avg Accuracy' },
+    { value: 'avg_pbrk', label: 'Avg Break' }, { value: 'avg_pcntrl', label: 'Avg Control' },
+  ];
+
+  function populateStatDropdown(prefix) {
+    const catEl = document.getElementById(`${prefix}-cat`);
+    const statEl = document.getElementById(`${prefix}-stat`);
+    if (!catEl || !statEl) return;
+    const cat = catEl.value;
+    const items = cat === 'pitching' ? PITCHING_STATS : BATTING_STATS;
+    statEl.innerHTML = '';
+    items.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.value;
+      opt.textContent = s.label;
+      statEl.appendChild(opt);
+    });
+  }
+
+  function populateAttrDropdown(prefix) {
+    const catEl = document.getElementById(`${prefix}-cat`);
+    if (!catEl) return;
+    const cat = catEl.value;
+    const items = cat === 'pitching' ? PITCHING_ATTRS : BATTING_ATTRS;
+    // Some pages have single attr dropdown, some have attr-a / attr-b
+    const ids = [`${prefix}-attr`, `${prefix}-attr-a`, `${prefix}-attr-b`];
+    ids.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.innerHTML = '';
+      items.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.value;
+        opt.textContent = a.label;
+        el.appendChild(opt);
+      });
+    });
+  }
+
+  // --- Multi-Regression ---
+
+  function loadMultiRegression() {
+    const lyid = document.getElementById('an-reg-lyid').value;
+    const level = document.getElementById('an-reg-level').value;
+    const cat = document.getElementById('an-reg-cat').value;
+    const stat = document.getElementById('an-reg-stat').value;
+    const min = document.getElementById('an-reg-min').value;
+    const status = document.getElementById('an-reg-status');
+    if (!stat) { populateStatDropdown('an-reg'); status.textContent = 'Select a target stat'; return; }
+    status.textContent = 'Loading...';
+    document.getElementById('an-reg-results').style.display = 'none';
+    document.getElementById('an-reg-performers').style.display = 'none';
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, category: cat, target_stat: stat, min_threshold: min });
+    fetch(`${ADMIN_BASE}/analytics/multi-regression?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n})`; return; }
+        status.textContent = `n=${data.n}`;
+        document.getElementById('an-reg-r2').textContent = `(R² = ${data.r_squared.toFixed(4)})`;
+
+        // Coefficient table
+        let html = '<table class="data-table"><thead><tr><th>Attribute</th><th>Beta</th><th>Std Beta</th><th>Importance %</th></tr></thead><tbody>';
+        data.coefficients.forEach(c => {
+          const color = c.std_beta > 0 ? '#4caf50' : (c.std_beta < 0 ? '#f44336' : '#999');
+          html += `<tr><td>${c.label}</td><td>${c.beta.toFixed(4)}</td><td style="color:${color};font-weight:600">${c.std_beta.toFixed(4)}</td><td>${c.pct_importance}%</td></tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('an-reg-coeff-table').innerHTML = html;
+        document.getElementById('an-reg-results').style.display = '';
+
+        // Over/underperformers
+        const renderPerf = (arr) => {
+          let t = '<table class="data-table"><thead><tr><th>Player</th><th>Actual</th><th>Predicted</th><th>Residual</th></tr></thead><tbody>';
+          arr.forEach(p => {
+            const rc = p.residual > 0 ? '#4caf50' : '#f44336';
+            t += `<tr><td>${p.name}</td><td>${p.actual.toFixed(4)}</td><td>${p.predicted.toFixed(4)}</td><td style="color:${rc};font-weight:600">${p.residual > 0 ? '+' : ''}${p.residual.toFixed(4)}</td></tr>`;
+          });
+          return t + '</tbody></table>';
+        };
+        document.getElementById('an-reg-over').innerHTML = renderPerf(data.top_overperformers);
+        document.getElementById('an-reg-under').innerHTML = renderPerf(data.top_underperformers);
+        document.getElementById('an-reg-performers').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- Sensitivity Curves ---
+
+  let sensitivityChart = null;
+
+  function loadSensitivity() {
+    const lyid = document.getElementById('an-sens-lyid').value;
+    const level = document.getElementById('an-sens-level').value;
+    const cat = document.getElementById('an-sens-cat').value;
+    const attr = document.getElementById('an-sens-attr').value;
+    const stat = document.getElementById('an-sens-stat').value;
+    const min = document.getElementById('an-sens-min').value;
+    const status = document.getElementById('an-sens-status');
+    if (!attr || !stat) { populateAttrDropdown('an-sens'); populateStatDropdown('an-sens'); status.textContent = 'Select attribute and stat'; return; }
+    status.textContent = 'Loading...';
+    document.getElementById('an-sens-chart-card').style.display = 'none';
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, category: cat, target_stat: stat, attribute: attr, min_threshold: min });
+    fetch(`${ADMIN_BASE}/analytics/sensitivity?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n})`; return; }
+        status.textContent = `n=${data.n}`;
+        document.getElementById('an-sens-title').textContent = `${data.attr_label} → ${data.stat_label}`;
+
+        // Flags
+        const flagsDiv = document.getElementById('an-sens-flags');
+        flagsDiv.innerHTML = data.diminishing_returns
+          ? '<span style="background:#ff9800;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">Diminishing Returns Detected</span>'
+          : '';
+
+        // Chart
+        const canvas = document.getElementById('an-sens-chart');
+        if (sensitivityChart) { sensitivityChart.destroy(); sensitivityChart = null; }
+        const labels = data.buckets.map(b => b.label);
+        const means = data.buckets.map(b => b.mean);
+        const counts = data.buckets.map(b => b.count);
+
+        sensitivityChart = new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: data.stat_label + ' (mean)',
+                data: means,
+                backgroundColor: 'rgba(54, 162, 235, 0.7)',
+                yAxisID: 'y',
+              },
+              {
+                label: 'Player Count',
+                data: counts,
+                type: 'line',
+                borderColor: '#ff9800',
+                backgroundColor: 'rgba(255, 152, 0, 0.1)',
+                yAxisID: 'y1',
+                pointRadius: 3,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            scales: {
+              y: { position: 'left', title: { display: true, text: data.stat_label } },
+              y1: { position: 'right', title: { display: true, text: 'Count' }, grid: { drawOnChartArea: false } },
+            },
+          },
+        });
+        document.getElementById('an-sens-chart-card').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- xStats / Residuals ---
+
+  function loadXStats() {
+    const lyid = document.getElementById('an-xs-lyid').value;
+    const level = document.getElementById('an-xs-level').value;
+    const cat = document.getElementById('an-xs-cat').value;
+    const min = document.getElementById('an-xs-min').value;
+    const status = document.getElementById('an-xs-status');
+    status.textContent = 'Loading...';
+    document.getElementById('an-xs-models').style.display = 'none';
+    document.getElementById('an-xs-players').style.display = 'none';
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, category: cat, min_threshold: min });
+    fetch(`${ADMIN_BASE}/analytics/xstats?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n})`; return; }
+        status.textContent = `n=${data.n}`;
+
+        // Model fit table
+        let mhtml = '<table class="data-table"><thead><tr><th>Stat</th><th>R²</th><th>Residual Std</th><th>Fit Quality</th></tr></thead><tbody>';
+        for (const [stat, model] of Object.entries(data.stat_models)) {
+          const label = data.stat_labels[stat] || stat;
+          const r2 = model.r_squared;
+          const quality = r2 >= 0.5 ? 'Good' : (r2 >= 0.2 ? 'Moderate' : 'Weak');
+          const qColor = r2 >= 0.5 ? '#4caf50' : (r2 >= 0.2 ? '#ff9800' : '#f44336');
+          mhtml += `<tr><td>${label}</td><td>${r2.toFixed(4)}</td><td>${model.resid_std.toFixed(4)}</td><td style="color:${qColor};font-weight:600">${quality}</td></tr>`;
+        }
+        mhtml += '</tbody></table>';
+        document.getElementById('an-xs-models-table').innerHTML = mhtml;
+        document.getElementById('an-xs-models').style.display = '';
+
+        // Top unusual players
+        const stats = Object.keys(data.stat_models);
+        let phtml = '<table class="data-table" style="font-size:12px;"><thead><tr><th>Player</th><th>Total |Resid|</th>';
+        stats.forEach(s => { phtml += `<th>${data.stat_labels[s] || s}</th>`; });
+        phtml += '</tr></thead><tbody>';
+        data.players.slice(0, 30).forEach(p => {
+          phtml += `<tr><td>${p.name}</td><td style="font-weight:600">${p.total_abs_residual.toFixed(3)}</td>`;
+          stats.forEach(s => {
+            const st = p.stats[s];
+            if (!st) { phtml += '<td>-</td>'; return; }
+            const rc = st.residual > 0 ? '#4caf50' : '#f44336';
+            phtml += `<td title="Actual: ${st.actual.toFixed(3)}, xStat: ${st.expected.toFixed(3)}"><span style="color:${rc}">${st.residual > 0 ? '+' : ''}${st.residual.toFixed(3)}</span></td>`;
+          });
+          phtml += '</tr>';
+        });
+        phtml += '</tbody></table>';
+        document.getElementById('an-xs-players-table').innerHTML = phtml;
+        document.getElementById('an-xs-players').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- Interaction Effects ---
+
+  function loadInteractions() {
+    const lyid = document.getElementById('an-int-lyid').value;
+    const level = document.getElementById('an-int-level').value;
+    const cat = document.getElementById('an-int-cat').value;
+    const attrA = document.getElementById('an-int-attr-a').value;
+    const attrB = document.getElementById('an-int-attr-b').value;
+    const stat = document.getElementById('an-int-stat').value;
+    const min = document.getElementById('an-int-min').value;
+    const status = document.getElementById('an-int-status');
+    if (!attrA || !attrB || !stat) { populateAttrDropdown('an-int'); populateStatDropdown('an-int'); status.textContent = 'Select attributes and stat'; return; }
+    status.textContent = 'Loading...';
+    document.getElementById('an-int-results').style.display = 'none';
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, category: cat, target_stat: stat, attr_a: attrA, attr_b: attrB, min_threshold: min });
+    fetch(`${ADMIN_BASE}/analytics/interactions?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n})`; return; }
+        status.textContent = `n=${data.n}`;
+        document.getElementById('an-int-title').textContent = `${data.attr_a_label} × ${data.attr_b_label} → ${data.stat_label}`;
+
+        // R² comparison
+        const gainColor = data.r2_gain > 0.01 ? '#4caf50' : (data.r2_gain > 0 ? '#ff9800' : '#999');
+        const significant = data.r2_gain > 0.01;
+        document.getElementById('an-int-r2-info').innerHTML =
+          `<div style="display:flex;gap:24px;flex-wrap:wrap;">` +
+          `<div><strong>R² without interaction:</strong> ${data.r2_without_interaction.toFixed(4)}</div>` +
+          `<div><strong>R² with interaction:</strong> ${data.r2_with_interaction.toFixed(4)}</div>` +
+          `<div><strong>R² gain:</strong> <span style="color:${gainColor};font-weight:700">${data.r2_gain > 0 ? '+' : ''}${data.r2_gain.toFixed(4)}</span></div>` +
+          `<div>${significant ? '<span style="background:#4caf50;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">Significant Interaction</span>' : '<span style="background:#999;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">No Significant Interaction</span>'}</div>` +
+          `</div>`;
+
+        // 2D Grid
+        let ghtml = `<table class="data-table" style="font-size:12px;"><thead><tr><th>${data.attr_a_label} \\ ${data.attr_b_label}</th>`;
+        data.b_labels.forEach(bl => { ghtml += `<th>${bl}</th>`; });
+        ghtml += '</tr></thead><tbody>';
+        data.grid.forEach((row, ri) => {
+          ghtml += `<tr><td style="font-weight:600">${data.a_labels[ri]}</td>`;
+          row.forEach(cell => {
+            if (cell.mean === null) {
+              ghtml += '<td style="background:#eee;color:#999">-</td>';
+            } else {
+              const bg = correlationColor(cell.mean * 2 - 0.5); // rough color scale
+              ghtml += `<td style="background:${bg}" title="n=${cell.n}">${cell.mean.toFixed(3)}</td>`;
+            }
+          });
+          ghtml += '</tr>';
+        });
+        ghtml += '</tbody></table>';
+        document.getElementById('an-int-grid').innerHTML = ghtml;
+        document.getElementById('an-int-results').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- Stat Tuning Dashboard ---
+
+  let dashHistChart = null;
+
+  function loadStatDashboard() {
+    const lyid = document.getElementById('an-dash-lyid').value;
+    const level = document.getElementById('an-dash-level').value;
+    const cat = document.getElementById('an-dash-cat').value;
+    const stat = document.getElementById('an-dash-stat').value;
+    const min = document.getElementById('an-dash-min').value;
+    const status = document.getElementById('an-dash-status');
+    if (!stat) { populateStatDropdown('an-dash'); status.textContent = 'Select a stat'; return; }
+    status.textContent = 'Loading...';
+    ['an-dash-benchmark', 'an-dash-dist', 'an-dash-attrs', 'an-dash-statcorr'].forEach(id => {
+      document.getElementById(id).style.display = 'none';
+    });
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, category: cat, target_stat: stat, min_threshold: min });
+    fetch(`${ADMIN_BASE}/analytics/stat-dashboard?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n})`; return; }
+        status.textContent = `${data.stat_label} — n=${data.n}`;
+
+        // Benchmark
+        const bench = data.benchmark;
+        const benchDiv = document.getElementById('an-dash-bench-content');
+        if (bench) {
+          const statusColor = bench.status === 'ok' ? '#4caf50' : (bench.status === 'warning' ? '#ff9800' : '#f44336');
+          benchDiv.innerHTML = `
+            <div style="display:flex;gap:16px;flex-wrap:wrap;">
+              <div class="stat-card"><div class="stat-label">MLB Mean</div><div class="stat-value">${bench.mlb_mean.toFixed(3)}</div></div>
+              <div class="stat-card"><div class="stat-label">Sim Mean</div><div class="stat-value">${bench.sim_mean.toFixed(3)}</div></div>
+              <div class="stat-card"><div class="stat-label">MLB Std</div><div class="stat-value">${bench.mlb_std.toFixed(3)}</div></div>
+              <div class="stat-card"><div class="stat-label">Sim Std</div><div class="stat-value">${data.distribution.std.toFixed(3)}</div></div>
+              <div class="stat-card"><div class="stat-label">Z-Deviation</div><div class="stat-value" style="color:${statusColor}">${bench.z_deviation.toFixed(2)}</div></div>
+              <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" style="color:${statusColor};text-transform:uppercase">${bench.status}</div></div>
+            </div>`;
+          document.getElementById('an-dash-benchmark').style.display = '';
+        } else {
+          benchDiv.innerHTML = '<p class="text-muted">No MLB benchmark available for this stat.</p>';
+          document.getElementById('an-dash-benchmark').style.display = '';
+        }
+
+        // Distribution stats
+        const d = data.distribution;
+        document.getElementById('an-dash-dist-stats').innerHTML = `
+          <div style="display:flex;gap:16px;flex-wrap:wrap;">
+            <div class="stat-card"><div class="stat-label">Mean</div><div class="stat-value">${d.mean.toFixed(4)}</div></div>
+            <div class="stat-card"><div class="stat-label">Std</div><div class="stat-value">${d.std.toFixed(4)}</div></div>
+            <div class="stat-card"><div class="stat-label">Min</div><div class="stat-value">${d.min.toFixed(4)}</div></div>
+            <div class="stat-card"><div class="stat-label">P25</div><div class="stat-value">${d.p25.toFixed(4)}</div></div>
+            <div class="stat-card"><div class="stat-label">P50</div><div class="stat-value">${d.p50.toFixed(4)}</div></div>
+            <div class="stat-card"><div class="stat-label">P75</div><div class="stat-value">${d.p75.toFixed(4)}</div></div>
+            <div class="stat-card"><div class="stat-label">Max</div><div class="stat-value">${d.max.toFixed(4)}</div></div>
+          </div>`;
+
+        // Histogram
+        const canvas = document.getElementById('an-dash-hist-canvas');
+        if (dashHistChart) { dashHistChart.destroy(); dashHistChart = null; }
+        const histLabels = data.histogram.map(h => h.lo.toFixed(3));
+        const histCounts = data.histogram.map(h => h.count);
+        dashHistChart = new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels: histLabels,
+            datasets: [{
+              label: data.stat_label + ' Distribution',
+              data: histCounts,
+              backgroundColor: 'rgba(54, 162, 235, 0.7)',
+            }],
+          },
+          options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { title: { display: true, text: data.stat_label } },
+              y: { title: { display: true, text: 'Count' } },
+            },
+          },
+        });
+        document.getElementById('an-dash-dist').style.display = '';
+
+        // Attribute rankings
+        document.getElementById('an-dash-r2').textContent = `(Model R² = ${data.r_squared.toFixed(4)})`;
+        let ahtml = '<table class="data-table"><thead><tr><th>Attribute</th><th>R</th><th>p-value</th><th>95% CI</th><th>Std Beta</th><th>Sig?</th></tr></thead><tbody>';
+        data.attr_rankings.forEach(a => {
+          const rColor = a.r > 0 ? '#4caf50' : (a.r < 0 ? '#f44336' : '#999');
+          const sigIcon = a.significant ? '&#10004;' : '';
+          ahtml += `<tr><td>${a.label}</td><td style="color:${rColor};font-weight:600">${a.r.toFixed(4)}</td>` +
+            `<td>${a.p_value.toFixed(4)}</td><td>[${a.ci_lo.toFixed(3)}, ${a.ci_hi.toFixed(3)}]</td>` +
+            `<td>${a.std_beta.toFixed(4)}</td><td style="color:#4caf50">${sigIcon}</td></tr>`;
+        });
+        ahtml += '</tbody></table>';
+        document.getElementById('an-dash-attr-table').innerHTML = ahtml;
+        document.getElementById('an-dash-attrs').style.display = '';
+
+        // Stat-vs-stat correlations
+        let shtml = '<table class="data-table"><thead><tr><th>Stat</th><th>R</th></tr></thead><tbody>';
+        data.stat_correlations.forEach(s => {
+          const rc = s.r > 0 ? '#4caf50' : (s.r < 0 ? '#f44336' : '#999');
+          shtml += `<tr><td>${s.label}</td><td style="color:${rc};font-weight:600">${s.r.toFixed(4)}</td></tr>`;
+        });
+        shtml += '</tbody></table>';
+        document.getElementById('an-dash-statcorr-table').innerHTML = shtml;
+        document.getElementById('an-dash-statcorr').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- Archetype Validation ---
+
+  function loadArchetypes() {
+    const lyid = document.getElementById('an-arch-lyid').value;
+    const level = document.getElementById('an-arch-level').value;
+    const min = document.getElementById('an-arch-min').value;
+    const status = document.getElementById('an-arch-status');
+    status.textContent = 'Loading...';
+    document.getElementById('an-arch-results').style.display = 'none';
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, min_ab: min });
+    fetch(`${ADMIN_BASE}/analytics/archetypes?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        if (data.error === 'not_enough_data') { status.textContent = `Not enough data (n=${data.n})`; return; }
+        status.textContent = `n=${data.n}`;
+
+        const statKeys = Object.keys(data.stat_labels);
+        let html = '<table class="data-table" style="font-size:12px;"><thead><tr><th>Archetype</th><th>Count</th>';
+        statKeys.forEach(s => { html += `<th>${data.stat_labels[s]}</th>`; });
+        html += '</tr></thead><tbody>';
+
+        // League average row
+        html += '<tr style="background:#f0f0f0;font-weight:600"><td>League Average</td><td>-</td>';
+        statKeys.forEach(s => { html += `<td>${(data.league_average[s] || 0).toFixed(3)}</td>`; });
+        html += '</tr>';
+
+        for (const [name, arch] of Object.entries(data.archetypes)) {
+          html += `<tr><td style="font-weight:600">${name}</td><td>${arch.count}</td>`;
+          statKeys.forEach(s => {
+            const val = arch.avg_stats[s];
+            if (val === undefined) { html += '<td>-</td>'; return; }
+            const lgVal = data.league_average[s] || 0;
+            const diff = val - lgVal;
+            const color = diff > 0 ? '#4caf50' : (diff < 0 ? '#f44336' : '#999');
+            html += `<td style="color:${color}">${val.toFixed(3)}</td>`;
+          });
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        document.getElementById('an-arch-table').innerHTML = html;
+        document.getElementById('an-arch-results').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- Pitch Type Analysis ---
+
+  function loadPitchTypes() {
+    const lyid = document.getElementById('an-pt-lyid').value;
+    const level = document.getElementById('an-pt-level').value;
+    const min = document.getElementById('an-pt-min').value;
+    const status = document.getElementById('an-pt-status');
+    status.textContent = 'Loading...';
+    document.getElementById('an-pt-types').style.display = 'none';
+    document.getElementById('an-pt-rep').style.display = 'none';
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, min_ipo: min });
+    fetch(`${ADMIN_BASE}/analytics/pitch-types?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        status.textContent = `n=${data.n}`;
+
+        const statKeys = Object.keys(data.stat_labels);
+
+        // Pitch type table
+        let html = '<table class="data-table" style="font-size:12px;"><thead><tr><th>Primary Pitch</th><th>Count</th><th>Avg Repertoire</th>';
+        statKeys.forEach(s => { html += `<th>${data.stat_labels[s]}</th>`; });
+        html += '</tr></thead><tbody>';
+        for (const [ptype, info] of Object.entries(data.pitch_types).sort((a, b) => b[1].count - a[1].count)) {
+          html += `<tr><td style="font-weight:600">${ptype}</td><td>${info.count}</td><td>${info.avg_repertoire_size}</td>`;
+          statKeys.forEach(s => {
+            html += `<td>${(info.avg_stats[s] || 0).toFixed(3)}</td>`;
+          });
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        document.getElementById('an-pt-types-table').innerHTML = html;
+        document.getElementById('an-pt-types').style.display = '';
+
+        // Repertoire analysis
+        let rhtml = '<table class="data-table" style="font-size:12px;"><thead><tr><th>Pitches</th><th>Count</th>';
+        statKeys.forEach(s => { rhtml += `<th>${data.stat_labels[s]}</th>`; });
+        rhtml += '</tr></thead><tbody>';
+        for (const [size, info] of Object.entries(data.repertoire_analysis)) {
+          rhtml += `<tr><td style="font-weight:600">${size}</td><td>${info.count}</td>`;
+          statKeys.forEach(s => {
+            rhtml += `<td>${(info.avg_stats[s] || 0).toFixed(3)}</td>`;
+          });
+          rhtml += '</tr>';
+        }
+        rhtml += '</tbody></table>';
+        document.getElementById('an-pt-rep-table').innerHTML = rhtml;
+        document.getElementById('an-pt-rep').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- Defensive Position Importance ---
+
+  function loadDefensivePositions() {
+    const lyid = document.getElementById('an-dp-lyid').value;
+    const level = document.getElementById('an-dp-level').value;
+    const min = document.getElementById('an-dp-min').value;
+    const status = document.getElementById('an-dp-status');
+    status.textContent = 'Loading...';
+    document.getElementById('an-dp-results').style.display = 'none';
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, min_innings: min });
+    fetch(`${ADMIN_BASE}/analytics/defensive-positions?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        status.textContent = `n=${data.n}`;
+
+        const tablesDiv = document.getElementById('an-dp-tables');
+        let html = '';
+        for (const [pos, info] of Object.entries(data.positions).sort((a, b) => a[0].localeCompare(b[0]))) {
+          html += `<h4 style="margin-top:16px;">${pos} <span class="text-muted" style="font-size:13px">(n=${info.count}, Avg Fld%=${info.avg_fld_pct.toFixed(3)}, Avg E/Inn=${info.avg_e_per_inn.toFixed(4)})</span></h4>`;
+          html += '<table class="data-table" style="font-size:12px;"><thead><tr><th>Attribute</th><th>R vs Fld%</th><th>R vs E/Inn</th><th>p-value</th><th>Sig?</th></tr></thead><tbody>';
+          info.attr_importance.forEach(a => {
+            const fldColor = a.r_vs_fielding_pct > 0 ? '#4caf50' : (a.r_vs_fielding_pct < 0 ? '#f44336' : '#999');
+            const errColor = a.r_vs_error_rate < 0 ? '#4caf50' : (a.r_vs_error_rate > 0 ? '#f44336' : '#999');
+            const sigIcon = a.significant ? '&#10004;' : '';
+            html += `<tr><td>${a.label}</td><td style="color:${fldColor};font-weight:600">${a.r_vs_fielding_pct.toFixed(4)}</td>` +
+              `<td style="color:${errColor};font-weight:600">${a.r_vs_error_rate.toFixed(4)}</td>` +
+              `<td>${a.p_value.toFixed(4)}</td><td style="color:#4caf50">${sigIcon}</td></tr>`;
+          });
+          html += '</tbody></table>';
+        }
+        tablesDiv.innerHTML = html;
+        document.getElementById('an-dp-results').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // --- DB Storage ---
+
+  function loadDbStorage() {
+    const status = document.getElementById('db-storage-status');
+    status.textContent = 'Loading...';
+    document.getElementById('db-storage-summary').style.display = 'none';
+    document.getElementById('db-storage-table-card').style.display = 'none';
+
+    fetch(`${ADMIN_BASE}/db-storage`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        status.textContent = '';
+        const s = data.summary;
+
+        // Summary cards
+        document.getElementById('db-storage-summary-content').innerHTML = `
+          <div class="stat-card"><div class="stat-label">Tables</div><div class="stat-value">${s.table_count}</div></div>
+          <div class="stat-card"><div class="stat-label">Total Rows</div><div class="stat-value">${s.total_rows.toLocaleString()}</div></div>
+          <div class="stat-card"><div class="stat-label">Data</div><div class="stat-value">${s.total_data_mb} MB</div></div>
+          <div class="stat-card"><div class="stat-label">Indexes</div><div class="stat-value">${s.total_index_mb} MB</div></div>
+          <div class="stat-card"><div class="stat-label">Total</div><div class="stat-value">${s.total_mb} MB</div></div>
+        `;
+        document.getElementById('db-storage-summary').style.display = '';
+
+        // Table
+        let html = '<table class="data-table"><thead><tr><th>Table</th><th>Rows</th><th>Data (MB)</th><th>Index (MB)</th><th>Total (MB)</th><th>Free (MB)</th><th></th></tr></thead><tbody>';
+        const maxMb = Math.max(...data.tables.map(t => parseFloat(t.total_mb) || 0), 0.01);
+        data.tables.forEach(t => {
+          const pct = ((parseFloat(t.total_mb) || 0) / maxMb * 100).toFixed(0);
+          html += `<tr>
+            <td style="font-weight:600">${t.table_name}</td>
+            <td style="text-align:right">${(t.table_rows || 0).toLocaleString()}</td>
+            <td style="text-align:right">${t.data_mb}</td>
+            <td style="text-align:right">${t.index_mb}</td>
+            <td style="text-align:right;font-weight:600">${t.total_mb}</td>
+            <td style="text-align:right">${t.free_mb}</td>
+            <td style="width:120px"><div style="background:#e0e0e0;border-radius:3px;height:14px;"><div style="background:#4caf50;border-radius:3px;height:14px;width:${pct}%"></div></div></td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('db-storage-table').innerHTML = html;
+        document.getElementById('db-storage-table-card').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
   // Export public API
   window.App = {
     goTo,
@@ -4007,6 +5206,7 @@
     viewTxDetail,
     rollbackTx,
     editGame,
+    drillCorrelation,
   };
 
   // Initialize on DOM ready

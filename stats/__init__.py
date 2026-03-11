@@ -24,9 +24,9 @@ def batting_leaderboard():
     Batting leaderboard from player_batting_stats.
 
     Query params:
-      league_year_id (required), league_level, team_id,
-      sort (avg|hr|rbi|hits|sb|ops, default avg),
-      min_ab (default 20), page, page_size (default 50)
+      league_year_id (required), league_level, team_id, position,
+      sort (any stat key, default avg), order (asc|desc),
+      min_pa (default 0), page, page_size (default 50)
     """
     from sqlalchemy import text as sa_text
 
@@ -37,25 +37,58 @@ def batting_leaderboard():
 
     league_level = request.args.get("league_level", type=int)
     team_id = request.args.get("team_id", type=int)
+    position = request.args.get("position")
     sort = request.args.get("sort", "avg")
-    min_ab = request.args.get("min_ab", 0, type=int)
+    order = request.args.get("order", "").lower()
+    min_pa = request.args.get("min_pa", 0, type=int)
     page = request.args.get("page", 1, type=int)
     page_size = min(request.args.get("page_size", 50, type=int), 200)
 
-    # Map sort param to SQL expression
-    sort_map = {
-        "avg": "IF(at_bats > 0, hits / at_bats, 0) DESC",
-        "hr": "home_runs DESC",
-        "rbi": "rbi DESC",
-        "hits": "hits DESC",
-        "sb": "stolen_bases DESC",
-        "ops": "(IF(at_bats + walks > 0, (hits + walks) / (at_bats + walks), 0) + "
-               "IF(at_bats > 0, (hits + doubles_hit + 2*triples + 3*home_runs) / at_bats, 0)) DESC",
-    }
-    order_by = sort_map.get(sort, sort_map["avg"])
+    # SQL expressions for every sortable stat
+    _pa = "(bs.at_bats + bs.walks)"
+    _avg = "IF(bs.at_bats > 0, bs.hits / bs.at_bats, 0)"
+    _obp = f"IF({_pa} > 0, (bs.hits + bs.walks) / {_pa}, 0)"
+    _slg = ("IF(bs.at_bats > 0, (bs.hits + bs.doubles_hit "
+            "+ 2*bs.triples + 3*bs.home_runs) / bs.at_bats, 0)")
+    _iso = f"IF(bs.at_bats > 0, (bs.doubles_hit + 2*bs.triples + 3*bs.home_runs) / bs.at_bats, 0)"
+    _ops = f"({_obp} + {_slg})"
+    _babip = ("IF(bs.at_bats - bs.strikeouts - bs.home_runs > 0, "
+              "(bs.hits - bs.home_runs) / (bs.at_bats - bs.strikeouts - bs.home_runs), 0)")
+    _bb_pct = f"IF({_pa} > 0, bs.walks / {_pa}, 0)"
+    _k_pct = f"IF({_pa} > 0, bs.strikeouts / {_pa}, 0)"
+    _bb_k = "IF(bs.strikeouts > 0, bs.walks / bs.strikeouts, 0)"
+    _ab_hr = "IF(bs.home_runs > 0, bs.at_bats / bs.home_runs, 0)"
+    _xbh_pct = ("IF(bs.at_bats > 0, (bs.doubles_hit + bs.triples "
+                "+ bs.home_runs) / bs.at_bats, 0)")
+    _sb_pct = ("IF(bs.stolen_bases + bs.caught_stealing > 0, "
+               "bs.stolen_bases / (bs.stolen_bases + bs.caught_stealing), 0)")
+    _tb = "(bs.hits + bs.doubles_hit + 2*bs.triples + 3*bs.home_runs)"
 
-    where_parts = ["bs.league_year_id = :lyid", "bs.at_bats >= :min_ab"]
-    params = {"lyid": league_year_id, "min_ab": min_ab}
+    # Default sort direction: DESC for counting/rate stats, ASC for ab_hr/k_pct
+    asc_defaults = {"ab_hr", "k_pct"}
+    if not order:
+        order = "ASC" if sort in asc_defaults else "DESC"
+    else:
+        order = "ASC" if order == "asc" else "DESC"
+
+    sort_expr_map = {
+        "avg": _avg, "obp": _obp, "slg": _slg, "ops": _ops,
+        "iso": _iso, "babip": _babip,
+        "bb_pct": _bb_pct, "k_pct": _k_pct, "bb_k": _bb_k,
+        "ab_hr": _ab_hr, "xbh_pct": _xbh_pct, "sb_pct": _sb_pct,
+        "g": "bs.games", "ab": "bs.at_bats", "pa": _pa,
+        "r": "bs.runs", "h": "bs.hits", "2b": "bs.doubles_hit",
+        "3b": "bs.triples", "hr": "bs.home_runs", "rbi": "bs.rbi",
+        "bb": "bs.walks", "so": "bs.strikeouts",
+        "sb": "bs.stolen_bases", "cs": "bs.caught_stealing",
+        "tb": _tb,
+    }
+    sort_expr = sort_expr_map.get(sort, _avg)
+    order_by = f"{sort_expr} {order}"
+
+    where_parts = ["bs.league_year_id = :lyid",
+                    f"{_pa} >= :min_pa"]
+    params = {"lyid": league_year_id, "min_pa": min_pa}
 
     if team_id:
         where_parts.append("bs.team_id = :tid")
@@ -63,6 +96,15 @@ def batting_leaderboard():
     if league_level:
         where_parts.append("tm.team_level = :ll")
         params["ll"] = league_level
+
+    join_pos = ""
+    if position:
+        join_pos = ("JOIN player_fielding_stats fs_pos "
+                    "ON fs_pos.player_id = bs.player_id "
+                    "AND fs_pos.league_year_id = bs.league_year_id "
+                    "AND fs_pos.team_id = bs.team_id "
+                    "AND fs_pos.position_code = :pos")
+        params["pos"] = position
 
     where_sql = " AND ".join(where_parts)
 
@@ -72,6 +114,7 @@ def batting_leaderboard():
             total = conn.execute(sa_text(f"""
                 SELECT COUNT(*) FROM player_batting_stats bs
                 JOIN teams tm ON tm.id = bs.team_id
+                {join_pos}
                 WHERE {where_sql}
             """), params).scalar()
 
@@ -86,15 +129,11 @@ def batting_leaderboard():
                        bs.stolen_bases, bs.caught_stealing,
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
-                       IF(bs.at_bats > 0, ROUND(bs.hits / bs.at_bats, 3), 0) AS avg,
-                       IF(bs.at_bats + bs.walks > 0,
-                          ROUND((bs.hits + bs.walks) / (bs.at_bats + bs.walks), 3), 0) AS obp,
-                       IF(bs.at_bats > 0,
-                          ROUND((bs.hits + bs.doubles_hit + 2*bs.triples + 3*bs.home_runs)
-                                / bs.at_bats, 3), 0) AS slg
+                       tm.team_level AS team_level
                 FROM player_batting_stats bs
                 JOIN simbbPlayers p ON p.id = bs.player_id
                 JOIN teams tm ON tm.id = bs.team_id
+                {join_pos}
                 WHERE {where_sql}
                 ORDER BY {order_by}
                 LIMIT :limit OFFSET :offset
@@ -102,25 +141,57 @@ def batting_leaderboard():
 
         leaders = []
         for i, r in enumerate(rows):
-            avg_val = float(r["avg"])
-            obp_val = float(r["obp"])
-            slg_val = float(r["slg"])
+            ab = int(r["at_bats"])
+            h = int(r["hits"])
+            bb = int(r["walks"])
+            so = int(r["strikeouts"])
+            hr = int(r["home_runs"])
+            d = int(r["doubles_hit"])
+            t = int(r["triples"])
+            sb = int(r["stolen_bases"])
+            cs = int(r["caught_stealing"])
+            pa = ab + bb
+            tb = h + d + 2 * t + 3 * hr
+
+            avg_val = h / ab if ab else 0
+            obp_val = (h + bb) / pa if pa else 0
+            slg_val = tb / ab if ab else 0
+            iso_val = slg_val - avg_val
+            ops_val = obp_val + slg_val
+            babip_denom = ab - so - hr
+            babip_val = (h - hr) / babip_denom if babip_denom > 0 else 0
+            bb_pct = bb / pa if pa else 0
+            k_pct = so / pa if pa else 0
+            bb_k = bb / so if so else 0
+            ab_hr = ab / hr if hr else 0
+            xbh_pct = (d + t + hr) / ab if ab else 0
+            sb_pct = sb / (sb + cs) if (sb + cs) else 0
+
             leaders.append({
                 "rank": offset + i + 1,
                 "player_id": int(r["player_id"]),
                 "name": f"{r['firstName']} {r['lastName']}",
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
-                "g": int(r["games"]), "ab": int(r["at_bats"]),
-                "r": int(r["runs"]), "h": int(r["hits"]),
-                "2b": int(r["doubles_hit"]), "3b": int(r["triples"]),
-                "hr": int(r["home_runs"]), "rbi": int(r["rbi"]),
-                "bb": int(r["walks"]), "so": int(r["strikeouts"]),
-                "sb": int(r["stolen_bases"]), "cs": int(r["caught_stealing"]),
+                "team_level": int(r["team_level"]),
+                "g": int(r["games"]), "ab": ab, "pa": pa,
+                "r": int(r["runs"]), "h": h,
+                "2b": d, "3b": t,
+                "hr": hr, "rbi": int(r["rbi"]),
+                "bb": bb, "so": so,
+                "sb": sb, "cs": cs, "tb": tb,
                 "avg": f"{avg_val:.3f}",
                 "obp": f"{obp_val:.3f}",
                 "slg": f"{slg_val:.3f}",
-                "ops": f"{obp_val + slg_val:.3f}",
+                "ops": f"{ops_val:.3f}",
+                "iso": f"{iso_val:.3f}",
+                "babip": f"{babip_val:.3f}",
+                "bb_pct": f"{bb_pct:.3f}",
+                "k_pct": f"{k_pct:.3f}",
+                "bb_k": f"{bb_k:.2f}",
+                "ab_hr": f"{ab_hr:.1f}",
+                "xbh_pct": f"{xbh_pct:.3f}",
+                "sb_pct": f"{sb_pct:.3f}",
             })
 
         pages = (total + page_size - 1) // page_size if total else 0
@@ -142,8 +213,9 @@ def pitching_leaderboard():
 
     Query params:
       league_year_id (required), league_level, team_id,
-      sort (era|wins|so|saves|whip, default era),
-      min_ip (default 10 = 30 outs), page, page_size
+      role (starter|reliever — filters by GS),
+      sort (any stat key, default era), order (asc|desc),
+      min_ip (default 0, in innings), page, page_size
     """
     from sqlalchemy import text as sa_text
 
@@ -152,29 +224,70 @@ def pitching_leaderboard():
         return jsonify(error="missing_field",
                        message="league_year_id is required"), 400
 
+    league_level = request.args.get("league_level", type=int)
     team_id = request.args.get("team_id", type=int)
+    role = request.args.get("role", "").lower()
     sort = request.args.get("sort", "era")
-    min_ip_innings = request.args.get("min_ip", 10, type=int)
-    min_ipo = min_ip_innings * 0  # convert IP to outs
+    order = request.args.get("order", "").lower()
+    min_ip_innings = request.args.get("min_ip", 0, type=int)
+    min_ipo = min_ip_innings * 3
     page = request.args.get("page", 1, type=int)
     page_size = min(request.args.get("page_size", 50, type=int), 200)
 
-    sort_map = {
-        "era": "IF(ps.innings_pitched_outs > 0, ps.earned_runs * 27.0 / ps.innings_pitched_outs, 99) ASC",
-        "wins": "ps.wins DESC",
-        "so": "ps.strikeouts DESC",
-        "saves": "ps.saves DESC",
-        "whip": "IF(ps.innings_pitched_outs > 0, (ps.walks + ps.hits_allowed) * 3.0 / ps.innings_pitched_outs, 99) ASC",
+    # SQL expressions for derived stats
+    _ipo = "ps.innings_pitched_outs"
+    _bf = f"({_ipo} / 3 * 3 + ps.hits_allowed + ps.walks)"  # approx batters faced
+    _era = f"IF({_ipo} > 0, ps.earned_runs * 27.0 / {_ipo}, 99)"
+    _whip = f"IF({_ipo} > 0, (ps.walks + ps.hits_allowed) * 3.0 / {_ipo}, 99)"
+    _k9 = f"IF({_ipo} > 0, ps.strikeouts * 27.0 / {_ipo}, 0)"
+    _bb9 = f"IF({_ipo} > 0, ps.walks * 27.0 / {_ipo}, 0)"
+    _hr9 = f"IF({_ipo} > 0, ps.home_runs_allowed * 27.0 / {_ipo}, 0)"
+    _h9 = f"IF({_ipo} > 0, ps.hits_allowed * 27.0 / {_ipo}, 0)"
+    _k_bb = "IF(ps.walks > 0, ps.strikeouts / ps.walks, 0)"
+    _w_pct = "IF(ps.wins + ps.losses > 0, ps.wins / (ps.wins + ps.losses), 0)"
+    _k_pct = f"IF({_bf} > 0, ps.strikeouts / {_bf}, 0)"
+    _bb_pct = f"IF({_bf} > 0, ps.walks / {_bf}, 0)"
+    _babip = (f"IF({_bf} - ps.strikeouts - ps.home_runs_allowed > 0, "
+              f"(ps.hits_allowed - ps.home_runs_allowed) / "
+              f"({_bf} - ps.strikeouts - ps.home_runs_allowed), 0)")
+    _ip_gs = f"IF(ps.games_started > 0, ({_ipo} / 3.0) / ps.games_started, 0)"
+
+    # Default direction: ASC for rate stats where lower is better
+    asc_defaults = {"era", "whip", "bb9", "hr9", "h9", "bb_pct"}
+    if not order:
+        order = "ASC" if sort in asc_defaults else "DESC"
+    else:
+        order = "ASC" if order == "asc" else "DESC"
+
+    sort_expr_map = {
+        "era": _era, "whip": _whip,
+        "k9": _k9, "bb9": _bb9, "hr9": _hr9, "h9": _h9,
+        "k_bb": _k_bb, "w_pct": _w_pct,
+        "k_pct": _k_pct, "bb_pct": _bb_pct,
+        "babip": _babip, "ip_gs": _ip_gs,
+        "g": "ps.games", "gs": "ps.games_started",
+        "w": "ps.wins", "l": "ps.losses", "sv": "ps.saves",
+        "ip": _ipo, "h": "ps.hits_allowed", "r": "ps.runs_allowed",
+        "er": "ps.earned_runs", "bb": "ps.walks",
+        "so": "ps.strikeouts", "hr": "ps.home_runs_allowed",
     }
-    order_by = sort_map.get(sort, sort_map["era"])
+    sort_expr = sort_expr_map.get(sort, _era)
+    order_by = f"{sort_expr} {order}"
 
     where_parts = ["ps.league_year_id = :lyid",
-                    "ps.innings_pitched_outs >= :min_ipo"]
+                    f"{_ipo} >= :min_ipo"]
     params = {"lyid": league_year_id, "min_ipo": min_ipo}
 
     if team_id:
         where_parts.append("ps.team_id = :tid")
         params["tid"] = team_id
+    if league_level:
+        where_parts.append("tm.team_level = :ll")
+        params["ll"] = league_level
+    if role == "starter":
+        where_parts.append("ps.games_started > 0")
+    elif role == "reliever":
+        where_parts.append("ps.games_started = 0")
 
     where_sql = " AND ".join(where_parts)
 
@@ -183,6 +296,7 @@ def pitching_leaderboard():
         with engine.connect() as conn:
             total = conn.execute(sa_text(f"""
                 SELECT COUNT(*) FROM player_pitching_stats ps
+                JOIN teams tm ON tm.id = ps.team_id
                 WHERE {where_sql}
             """), params).scalar()
 
@@ -198,11 +312,7 @@ def pitching_leaderboard():
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
-                       IF(ps.innings_pitched_outs > 0,
-                          ROUND(ps.earned_runs * 27.0 / ps.innings_pitched_outs, 2), 0) AS era,
-                       IF(ps.innings_pitched_outs > 0,
-                          ROUND((ps.walks + ps.hits_allowed) * 3.0
-                                / ps.innings_pitched_outs, 2), 0) AS whip
+                       tm.team_level AS team_level
                 FROM player_pitching_stats ps
                 JOIN simbbPlayers p ON p.id = ps.player_id
                 JOIN teams tm ON tm.id = ps.team_id
@@ -214,21 +324,59 @@ def pitching_leaderboard():
         leaders = []
         for i, r in enumerate(rows):
             ipo = int(r["innings_pitched_outs"])
-            ip = f"{ipo // 3}.{ipo % 3}"
+            g = int(r["games"])
+            gs = int(r["games_started"])
+            w = int(r["wins"])
+            l = int(r["losses"])
+            sv = int(r["saves"])
+            h = int(r["hits_allowed"])
+            ra = int(r["runs_allowed"])
+            er = int(r["earned_runs"])
+            bb = int(r["walks"])
+            so = int(r["strikeouts"])
+            hra = int(r["home_runs_allowed"])
+
+            ip_f = ipo / 3.0
+            bf = int(ip_f) * 3 + h + bb  # approx batters faced
+            bip = bf - so - hra
+
+            era_val = er * 27.0 / ipo if ipo else 0
+            whip_val = (bb + h) * 3.0 / ipo if ipo else 0
+            k9_val = so * 27.0 / ipo if ipo else 0
+            bb9_val = bb * 27.0 / ipo if ipo else 0
+            hr9_val = hra * 27.0 / ipo if ipo else 0
+            h9_val = h * 27.0 / ipo if ipo else 0
+            k_bb_val = so / bb if bb else 0
+            w_pct_val = w / (w + l) if (w + l) else 0
+            k_pct_val = so / bf if bf else 0
+            bb_pct_val = bb / bf if bf else 0
+            babip_val = (h - hra) / bip if bip > 0 else 0
+            ip_gs_val = ip_f / gs if gs else 0
+
             leaders.append({
                 "rank": offset + i + 1,
                 "player_id": int(r["player_id"]),
                 "name": f"{r['firstName']} {r['lastName']}",
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
-                "g": int(r["games"]), "gs": int(r["games_started"]),
-                "w": int(r["wins"]), "l": int(r["losses"]),
-                "sv": int(r["saves"]), "ip": ip,
-                "h": int(r["hits_allowed"]), "r": int(r["runs_allowed"]),
-                "er": int(r["earned_runs"]), "bb": int(r["walks"]),
-                "so": int(r["strikeouts"]), "hr": int(r["home_runs_allowed"]),
-                "era": f"{float(r['era']):.2f}",
-                "whip": f"{float(r['whip']):.2f}",
+                "team_level": int(r["team_level"]),
+                "g": g, "gs": gs,
+                "w": w, "l": l, "sv": sv,
+                "ip": f"{ipo // 3}.{ipo % 3}",
+                "h": h, "r": ra, "er": er,
+                "bb": bb, "so": so, "hr": hra,
+                "era": f"{era_val:.2f}",
+                "whip": f"{whip_val:.2f}",
+                "k9": f"{k9_val:.1f}",
+                "bb9": f"{bb9_val:.1f}",
+                "hr9": f"{hr9_val:.1f}",
+                "h9": f"{h9_val:.1f}",
+                "k_bb": f"{k_bb_val:.2f}",
+                "w_pct": f"{w_pct_val:.3f}",
+                "k_pct": f"{k_pct_val:.3f}",
+                "bb_pct": f"{bb_pct_val:.3f}",
+                "babip": f"{babip_val:.3f}",
+                "ip_gs": f"{ip_gs_val:.1f}",
             })
 
         pages = (total + page_size - 1) // page_size if total else 0
@@ -249,9 +397,9 @@ def fielding_leaderboard():
     Fielding leaderboard from player_fielding_stats.
 
     Query params:
-      league_year_id (required), position_code, team_id,
-      sort (fpct|putouts|assists, default fpct),
-      page, page_size
+      league_year_id (required), league_level, position_code, team_id,
+      sort (any stat key, default fpct), order (asc|desc),
+      min_inn (default 0), page, page_size
     """
     from sqlalchemy import text as sa_text
 
@@ -260,22 +408,41 @@ def fielding_leaderboard():
         return jsonify(error="missing_field",
                        message="league_year_id is required"), 400
 
+    league_level = request.args.get("league_level", type=int)
     position_code = request.args.get("position_code")
     team_id = request.args.get("team_id", type=int)
     sort = request.args.get("sort", "fpct")
+    order = request.args.get("order", "").lower()
+    min_inn = request.args.get("min_inn", 0, type=int)
     page = request.args.get("page", 1, type=int)
     page_size = min(request.args.get("page_size", 50, type=int), 200)
 
-    sort_map = {
-        "fpct": "IF(fs.putouts + fs.assists + fs.errors > 0, "
-                "(fs.putouts + fs.assists) / (fs.putouts + fs.assists + fs.errors), 0) DESC",
-        "putouts": "fs.putouts DESC",
-        "assists": "fs.assists DESC",
-    }
-    order_by = sort_map.get(sort, sort_map["fpct"])
+    _tc = "(fs.putouts + fs.assists + fs.errors)"
+    _fpct = f"IF({_tc} > 0, (fs.putouts + fs.assists) / {_tc}, 0)"
+    _tc_g = "IF(fs.games > 0, (fs.putouts + fs.assists + fs.errors) / fs.games, 0)"
+    _rf_g = "IF(fs.games > 0, (fs.putouts + fs.assists) / fs.games, 0)"
+    _po_inn = "IF(fs.innings > 0, fs.putouts / fs.innings, 0)"
+    _a_inn = "IF(fs.innings > 0, fs.assists / fs.innings, 0)"
+    _e_inn = "IF(fs.innings > 0, fs.errors / fs.innings, 0)"
 
-    where_parts = ["fs.league_year_id = :lyid"]
-    params = {"lyid": league_year_id}
+    asc_defaults = {"e", "e_inn"}
+    if not order:
+        order = "ASC" if sort in asc_defaults else "DESC"
+    else:
+        order = "ASC" if order == "asc" else "DESC"
+
+    sort_expr_map = {
+        "fpct": _fpct, "tc": _tc, "tc_g": _tc_g, "rf_g": _rf_g,
+        "po_inn": _po_inn, "a_inn": _a_inn, "e_inn": _e_inn,
+        "g": "fs.games", "inn": "fs.innings",
+        "po": "fs.putouts", "a": "fs.assists", "e": "fs.errors",
+    }
+    sort_expr = sort_expr_map.get(sort, _fpct)
+    order_by = f"{sort_expr} {order}"
+
+    where_parts = ["fs.league_year_id = :lyid",
+                    "fs.innings >= :min_inn"]
+    params = {"lyid": league_year_id, "min_inn": min_inn}
 
     if position_code:
         where_parts.append("fs.position_code = :pos")
@@ -283,6 +450,9 @@ def fielding_leaderboard():
     if team_id:
         where_parts.append("fs.team_id = :tid")
         params["tid"] = team_id
+    if league_level:
+        where_parts.append("tm.team_level = :ll")
+        params["ll"] = league_level
 
     where_sql = " AND ".join(where_parts)
 
@@ -290,7 +460,9 @@ def fielding_leaderboard():
     try:
         with engine.connect() as conn:
             total = conn.execute(sa_text(f"""
-                SELECT COUNT(*) FROM player_fielding_stats fs WHERE {where_sql}
+                SELECT COUNT(*) FROM player_fielding_stats fs
+                JOIN teams tm ON tm.id = fs.team_id
+                WHERE {where_sql}
             """), params).scalar()
 
             offset = (page - 1) * page_size
@@ -302,9 +474,7 @@ def fielding_leaderboard():
                        fs.games, fs.innings, fs.putouts, fs.assists, fs.errors,
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
-                       IF(fs.putouts + fs.assists + fs.errors > 0,
-                          ROUND((fs.putouts + fs.assists)
-                                / (fs.putouts + fs.assists + fs.errors), 3), 0) AS fpct
+                       tm.team_level AS team_level
                 FROM player_fielding_stats fs
                 JOIN simbbPlayers p ON p.id = fs.player_id
                 JOIN teams tm ON tm.id = fs.team_id
@@ -315,17 +485,37 @@ def fielding_leaderboard():
 
         leaders = []
         for i, r in enumerate(rows):
+            g = int(r["games"])
+            inn = int(r["innings"])
+            po = int(r["putouts"])
+            a = int(r["assists"])
+            e = int(r["errors"])
+            tc = po + a + e
+
+            fpct_val = (po + a) / tc if tc else 0
+            tc_g_val = tc / g if g else 0
+            rf_g_val = (po + a) / g if g else 0
+            po_inn_val = po / inn if inn else 0
+            a_inn_val = a / inn if inn else 0
+            e_inn_val = e / inn if inn else 0
+
             leaders.append({
                 "rank": offset + i + 1,
                 "player_id": int(r["player_id"]),
                 "name": f"{r['firstName']} {r['lastName']}",
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
+                "team_level": int(r["team_level"]),
                 "pos": r["position_code"],
-                "g": int(r["games"]), "inn": int(r["innings"]),
-                "po": int(r["putouts"]), "a": int(r["assists"]),
-                "e": int(r["errors"]),
-                "fpct": f"{float(r['fpct']):.3f}",
+                "g": g, "inn": inn,
+                "po": po, "a": a, "e": e,
+                "tc": tc,
+                "fpct": f"{fpct_val:.3f}",
+                "tc_g": f"{tc_g_val:.1f}",
+                "rf_g": f"{rf_g_val:.1f}",
+                "po_inn": f"{po_inn_val:.2f}",
+                "a_inn": f"{a_inn_val:.2f}",
+                "e_inn": f"{e_inn_val:.2f}",
             })
 
         pages = (total + page_size - 1) // page_size if total else 0
@@ -367,63 +557,106 @@ def team_stats():
         with engine.connect() as conn:
             bat_rows = conn.execute(sa_text(f"""
                 SELECT bs.team_id, tm.team_abbrev AS team_abbrev,
+                       tm.team_level AS team_level,
                        SUM(bs.games) AS g, SUM(bs.at_bats) AS ab,
                        SUM(bs.runs) AS r, SUM(bs.hits) AS h,
                        SUM(bs.doubles_hit) AS `2b`, SUM(bs.triples) AS `3b`,
                        SUM(bs.home_runs) AS hr, SUM(bs.rbi) AS rbi,
                        SUM(bs.walks) AS bb, SUM(bs.strikeouts) AS so,
                        SUM(bs.stolen_bases) AS sb,
-                       IF(SUM(bs.at_bats) > 0,
-                          ROUND(SUM(bs.hits) / SUM(bs.at_bats), 3), 0) AS avg
+                       SUM(bs.caught_stealing) AS cs
                 FROM player_batting_stats bs
                 JOIN teams tm ON tm.id = bs.team_id
                 WHERE bs.league_year_id = :lyid {level_filter}
-                GROUP BY bs.team_id, tm.team_abbrev
-                ORDER BY avg DESC
+                GROUP BY bs.team_id, tm.team_abbrev, tm.team_level
+                ORDER BY SUM(bs.runs) DESC
             """), params).mappings().all()
 
             pit_rows = conn.execute(sa_text(f"""
                 SELECT ps.team_id, tm.team_abbrev AS team_abbrev,
+                       tm.team_level AS team_level,
+                       SUM(ps.games) AS g,
                        SUM(ps.innings_pitched_outs) AS ipo,
+                       SUM(ps.wins) AS w, SUM(ps.losses) AS l,
+                       SUM(ps.saves) AS sv,
+                       SUM(ps.hits_allowed) AS ha,
+                       SUM(ps.runs_allowed) AS ra,
                        SUM(ps.earned_runs) AS er,
                        SUM(ps.walks) AS bb, SUM(ps.strikeouts) AS so,
-                       SUM(ps.hits_allowed) AS ha,
-                       IF(SUM(ps.innings_pitched_outs) > 0,
-                          ROUND(SUM(ps.earned_runs) * 27.0
-                                / SUM(ps.innings_pitched_outs), 2), 0) AS era,
-                       IF(SUM(ps.innings_pitched_outs) > 0,
-                          ROUND((SUM(ps.walks) + SUM(ps.hits_allowed)) * 3.0
-                                / SUM(ps.innings_pitched_outs), 2), 0) AS whip
+                       SUM(ps.home_runs_allowed) AS hra
                 FROM player_pitching_stats ps
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE ps.league_year_id = :lyid {level_filter}
-                GROUP BY ps.team_id, tm.team_abbrev
-                ORDER BY era ASC
+                GROUP BY ps.team_id, tm.team_abbrev, tm.team_level
+                ORDER BY SUM(ps.earned_runs) * 27.0 / GREATEST(SUM(ps.innings_pitched_outs), 1) ASC
             """), params).mappings().all()
 
-        batting = [{
-            "team_id": int(r["team_id"]),
-            "team_abbrev": r["team_abbrev"],
-            "g": int(r["g"]), "ab": int(r["ab"]),
-            "r": int(r["r"]), "h": int(r["h"]),
-            "2b": int(r["2b"]), "3b": int(r["3b"]),
-            "hr": int(r["hr"]), "rbi": int(r["rbi"]),
-            "bb": int(r["bb"]), "so": int(r["so"]),
-            "sb": int(r["sb"]),
-            "avg": f"{float(r['avg']):.3f}",
-        } for r in bat_rows]
+        batting = []
+        for r in bat_rows:
+            ab = int(r["ab"])
+            h = int(r["h"])
+            bb = int(r["bb"])
+            so = int(r["so"])
+            hr = int(r["hr"])
+            d = int(r["2b"])
+            t = int(r["3b"])
+            sb = int(r["sb"])
+            cs = int(r["cs"])
+            pa = ab + bb
+            tb = h + d + 2 * t + 3 * hr
+            avg_val = h / ab if ab else 0
+            obp_val = (h + bb) / pa if pa else 0
+            slg_val = tb / ab if ab else 0
+            ops_val = obp_val + slg_val
+            babip_denom = ab - so - hr
+            babip_val = (h - hr) / babip_denom if babip_denom > 0 else 0
+            batting.append({
+                "team_id": int(r["team_id"]),
+                "team_abbrev": r["team_abbrev"],
+                "team_level": int(r["team_level"]),
+                "g": int(r["g"]), "ab": ab, "pa": pa,
+                "r": int(r["r"]), "h": h,
+                "2b": d, "3b": t,
+                "hr": hr, "rbi": int(r["rbi"]),
+                "bb": bb, "so": so,
+                "sb": sb, "cs": cs, "tb": tb,
+                "avg": f"{avg_val:.3f}",
+                "obp": f"{obp_val:.3f}",
+                "slg": f"{slg_val:.3f}",
+                "ops": f"{ops_val:.3f}",
+                "babip": f"{babip_val:.3f}",
+            })
 
         pitching = []
         for r in pit_rows:
             ipo = int(r["ipo"])
+            w = int(r["w"])
+            l = int(r["l"])
+            h = int(r["ha"])
+            er = int(r["er"])
+            bb = int(r["bb"])
+            so = int(r["so"])
+            hra = int(r["hra"])
+            ip_f = ipo / 3.0
+            era_val = er * 27.0 / ipo if ipo else 0
+            whip_val = (bb + h) * 3.0 / ipo if ipo else 0
+            k9_val = so * 27.0 / ipo if ipo else 0
+            bb9_val = bb * 27.0 / ipo if ipo else 0
+            hr9_val = hra * 27.0 / ipo if ipo else 0
             pitching.append({
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
+                "team_level": int(r["team_level"]),
+                "g": int(r["g"]),
+                "w": w, "l": l, "sv": int(r["sv"]),
                 "ip": f"{ipo // 3}.{ipo % 3}",
-                "er": int(r["er"]), "bb": int(r["bb"]),
-                "so": int(r["so"]), "ha": int(r["ha"]),
-                "era": f"{float(r['era']):.2f}",
-                "whip": f"{float(r['whip']):.2f}",
+                "h": h, "r": int(r["ra"]),
+                "er": er, "bb": bb, "so": so, "hr": hra,
+                "era": f"{era_val:.2f}",
+                "whip": f"{whip_val:.2f}",
+                "k9": f"{k9_val:.1f}",
+                "bb9": f"{bb9_val:.1f}",
+                "hr9": f"{hr9_val:.1f}",
             })
 
         return jsonify(batting=batting, pitching=pitching), 200

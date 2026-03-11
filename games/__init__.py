@@ -435,12 +435,13 @@ def wipe_season():
                 ), {"lyid": league_year_id})
                 deleted[tbl_name] = r.rowcount
 
-            # 5. Financial tables (keyed by league_year_id)
-            for tbl_name in ("org_ledger_entries", "org_media_shares"):
-                r = conn.execute(sa_text(
-                    f"DELETE FROM {tbl_name} WHERE league_year_id = :lyid"
-                ), {"lyid": league_year_id})
-                deleted[tbl_name] = r.rowcount
+            # 5. Financial ledger (keyed by league_year_id)
+            # NOTE: org_media_shares is NOT wiped — it's configuration data
+            # (each org's share percentage), not simulation output.
+            r = conn.execute(sa_text(
+                "DELETE FROM org_ledger_entries WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["org_ledger_entries"] = r.rowcount
 
             # 6. Position usage
             r = conn.execute(sa_text(
@@ -482,7 +483,7 @@ def wipe_season():
                 "player_batting_stats", "player_pitching_stats",
                 "player_fielding_stats", "player_position_usage_week",
                 "player_injury_events", "player_fatigue_state",
-                "org_ledger_entries", "org_media_shares",
+                "org_ledger_entries",
             ]
             for tbl in optimize_tables:
                 conn.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))
@@ -1578,12 +1579,13 @@ def run_season():
     total_weeks = end_week - start_week + 1
 
     store = get_task_store()
-    task_id = store.create_task("run_season", total=total_weeks, metadata={
+    task_data = store.create_task("run_season", total=total_weeks, metadata={
         "league_year_id": league_year_id,
         "league_level": league_level,
         "start_week": start_week,
         "end_week": end_week,
     })
+    task_id = task_data["task_id"]
 
     t = threading.Thread(
         target=_run_season_task,
@@ -1601,6 +1603,173 @@ def run_season():
         task_id=task_id,
         status="pending",
         total=total_weeks,
+        poll_url=f"/api/v1/games/tasks/{task_id}",
+    ), 202
+
+
+def _run_all_levels_task(task_id: str, league_year_id: int,
+                         start_week: int, end_week: int):
+    """
+    Background worker: simulate every week for ALL league levels in sequence.
+
+    Iterates level-by-level (9,8,7,6,5,4,3), running each level's full
+    week range. Does NOT advance the timestamp/season state — purely runs
+    simulations for testing statistical and financial models.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    ALL_LEVELS = [9, 8, 7, 6, 5, 4, 3]
+    LEVEL_NAMES = {9: "MLB", 8: "AAA", 7: "AA", 6: "High-A",
+                   5: "A", 4: "Scraps", 3: "College"}
+
+    store = get_task_store()
+    store.set_running(task_id)
+
+    engine = get_engine()
+    total_games = 0
+    steps_completed = 0
+    total_weeks = end_week - start_week + 1
+
+    level_summaries = {}
+
+    try:
+        for level in ALL_LEVELS:
+            level_games = 0
+            level_name = LEVEL_NAMES.get(level, str(level))
+            logger.info(
+                f"run_all_levels task {task_id}: starting level {level_name}"
+            )
+
+            for week in range(start_week, end_week + 1):
+                # Update timestamp to current week
+                update_timestamp({"week": week, "run_games": True}, broadcast=True)
+
+                try:
+                    with engine.connect() as conn:
+                        result = build_week_payloads(
+                            conn=conn,
+                            league_year_id=league_year_id,
+                            season_week=week,
+                            league_level=level,
+                            simulate=True,
+                        )
+
+                    week_games = result.get("total_games", 0)
+                    level_games += week_games
+                    total_games += week_games
+
+                    subweeks = result.get("subweeks", {})
+                    for sw_key in ["a", "b", "c", "d"]:
+                        if subweeks.get(sw_key):
+                            set_subweek_completed(sw_key, broadcast=False)
+                except ValueError:
+                    # No games for this level/week — skip silently
+                    pass
+
+                set_run_games(False, broadcast=False)
+                advance_week(broadcast=True)
+
+                steps_completed += 1
+                store.set_progress(task_id, steps_completed)
+
+            level_summaries[level_name] = level_games
+            logger.info(
+                f"run_all_levels task {task_id}: level {level_name} done — "
+                f"{level_games} games"
+            )
+
+        summary = {
+            "league_year_id": league_year_id,
+            "levels_completed": len(ALL_LEVELS),
+            "weeks_per_level": total_weeks,
+            "total_games": total_games,
+            "by_level": level_summaries,
+            "start_week": start_week,
+            "end_week": end_week,
+        }
+        store.set_complete(task_id, summary)
+        logger.info(f"run_all_levels task {task_id} completed: {summary}")
+
+    except Exception as e:
+        try:
+            set_run_games(False, broadcast=True)
+        except Exception:
+            pass
+        logger.exception(
+            f"run_all_levels task {task_id} failed at step {steps_completed}"
+        )
+        store.set_failed(task_id, str(e))
+
+
+@games_bp.post("/games/run-season-all")
+def run_season_all():
+    """
+    Start a background task to simulate ALL league levels for a season.
+
+    Runs levels 9,8,7,6,5,4,3 sequentially, each through the full
+    week range. Does not change season state — for testing only.
+
+    Request body:
+    {
+        "league_year_id": 1,
+        "start_week": 1,
+        "end_week": 52
+    }
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    if not body:
+        return jsonify(error="invalid_request",
+                       message="Request body must be JSON"), 400
+
+    league_year_id = body.get("league_year_id")
+    start_week = body.get("start_week", 1)
+    end_week = body.get("end_week", 52)
+
+    if league_year_id is None:
+        return jsonify(error="missing_field",
+                       message="league_year_id is required"), 400
+
+    try:
+        league_year_id = int(league_year_id)
+        start_week = int(start_week)
+        end_week = int(end_week)
+    except (TypeError, ValueError) as e:
+        return jsonify(error="invalid_type", message=str(e)), 400
+
+    if start_week < 1 or end_week < start_week:
+        return jsonify(error="invalid_range",
+                       message="start_week must be >= 1 and end_week >= start_week"), 400
+
+    total_weeks = end_week - start_week + 1
+    num_levels = 7  # levels 9 through 3
+    total_steps = total_weeks * num_levels
+
+    store = get_task_store()
+    task_data = store.create_task("run_all_levels", total=total_steps, metadata={
+        "league_year_id": league_year_id,
+        "start_week": start_week,
+        "end_week": end_week,
+        "levels": "9,8,7,6,5,4,3",
+    })
+    task_id = task_data["task_id"]
+
+    t = threading.Thread(
+        target=_run_all_levels_task,
+        args=(task_id, league_year_id, start_week, end_week),
+        daemon=True,
+    )
+    t.start()
+
+    current_app.logger.info(
+        f"Started run_all_levels task {task_id}: weeks {start_week}-{end_week}, "
+        f"all levels, league_year={league_year_id}"
+    )
+
+    return jsonify(
+        task_id=task_id,
+        status="pending",
+        total=total_steps,
         poll_url=f"/api/v1/games/tasks/{task_id}",
     ), 202
 

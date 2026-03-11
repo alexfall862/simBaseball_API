@@ -82,8 +82,8 @@ MILB_TEAMS_PER_LEVEL = 30
 
 # ── College constants ───────────────────────────────────────────────────
 COLLEGE_GAMES_PER_TEAM = 50
-COLLEGE_OOC_WEEKS = 10        # weeks 1-10: out-of-conference
-COLLEGE_CONF_WEEKS = 10       # weeks 11-20: conference play
+COLLEGE_OOC_WEEKS_TARGET = 10   # target weeks for OOC (2 games/week)
+COLLEGE_CONF_WEEKS_TARGET = 10  # target weeks for conference (1 series/week)
 COLLEGE_OOC_SUBWEEKS = ["a", "c"]   # 2 single-game slots per OOC week
 COLLEGE_CONF_SERIES_LENGTH = 3
 
@@ -1579,137 +1579,122 @@ def _assign_college_weeks(
     timeout_seconds: float = 60.0,
 ) -> Dict[int, List[Dict]]:
     """
-    Assign college series to weeks with strict phase separation:
+    Assign college series to weeks using greedy edge-coloring.
 
-    - Weeks start_week .. start_week+9   → OOC (single-game, 2 per week at subweek a & c)
-    - Weeks start_week+10 .. start_week+19 → Conference (3-game series, 1 per week)
+    OOC series (single-game) get assigned to (week, subweek) slots where
+    each slot is a matching (every team appears at most once).
+    Conference series get assigned to weeks (one series per team per week).
 
-    Uses edge coloring within each phase independently.
+    Greedy edge-coloring guarantees at most Δ+1 colors, which means:
+    - OOC: 20 games/team → at most 21 slots → 11 weeks (usually 10)
+    - Conference: 10 series/team → at most 11 weeks (usually 10)
     """
-    deadline = time.monotonic() + timeout_seconds
-
     ooc_series = [s for s in all_series if s["category"] == "ooc"]
     conf_series = [s for s in all_series if s["category"] == "conference"]
 
-    ooc_start = start_week
-    conf_start = start_week + COLLEGE_OOC_WEEKS
-
-    # ── OOC phase: weeks 1-10, 2 games per team per week ──────────────
-    # Each team plays 20 OOC games in 10 weeks = 2 per week (subweek a & c).
-    #
-    # Instead of edge coloring (which fails at the Vizing boundary when
-    # degree == num_colors), we use a two-step greedy approach:
-    #   1) Assign each OOC series to a week where both teams have < 2 games.
-    #   2) Within each week, 2-color the series into subweek a/c so each
-    #      team appears at most once per subweek.  Since each team has
-    #      degree ≤ 2 within a week, the weekly graph is paths + cycles
-    #      and 2-coloring is trivial.
-
-    ooc_weeks = list(range(ooc_start, ooc_start + COLLEGE_OOC_WEEKS))
-    week_slots = {w: [] for w in range(ooc_start, conf_start + COLLEGE_CONF_WEEKS)}
-
-    # Step 1: greedy week assignment (each team ≤ 2 OOC games per week)
     rng.shuffle(ooc_series)
-    week_team_ct = {w: {} for w in ooc_weeks}  # week -> {team_id: count}
-    ooc_by_week = {w: [] for w in ooc_weeks}
+    rng.shuffle(conf_series)
+
+    # ── Greedy edge-coloring ─────────────────────────────────────────
+    def _edge_color(series_list):
+        """
+        Assign each series a color (int) such that no team has two series
+        with the same color.  Returns {id(series): color} and max_color.
+
+        Greedy: for each edge, pick the smallest color not used by either
+        endpoint.  Always uses at most Δ+1 colors (Vizing's theorem).
+        """
+        team_colors = {}   # team_id -> set of colors already used
+        assignment = {}    # id(series) -> color
+        max_color = -1
+
+        for s in series_list:
+            ht, at = s["home_team"], s["away_team"]
+            blocked = (team_colors.get(ht, set())
+                       | team_colors.get(at, set()))
+            color = 0
+            while color in blocked:
+                color += 1
+            assignment[id(s)] = color
+            team_colors.setdefault(ht, set()).add(color)
+            team_colors.setdefault(at, set()).add(color)
+            if color > max_color:
+                max_color = color
+
+        return assignment, max_color
+
+    # ── OOC: each color = one (week, subweek) slot ───────────────────
+    log.info("college_ooc: edge-coloring %d OOC series...", len(ooc_series))
+    ooc_colors, ooc_max = _edge_color(ooc_series)
+    num_ooc_slots = ooc_max + 1
+    num_ooc_weeks = (num_ooc_slots + 1) // 2   # 2 slots per week
+    log.info("college_ooc: used %d colors → %d weeks", num_ooc_slots, num_ooc_weeks)
+
+    ooc_start = start_week
+    conf_start = start_week + num_ooc_weeks
+
+    week_slots = {}  # week_num -> [series]
 
     for s in ooc_series:
-        _check_timeout(deadline, "college OOC week assignment")
-        ta, tb = s["team_a"], s["team_b"]
-        # Try weeks in shuffled order for even spread
-        trial = list(ooc_weeks)
-        rng.shuffle(trial)
-        placed = False
-        for w in trial:
-            if week_team_ct[w].get(ta, 0) < 2 and week_team_ct[w].get(tb, 0) < 2:
-                ooc_by_week[w].append(s)
-                week_team_ct[w][ta] = week_team_ct[w].get(ta, 0) + 1
-                week_team_ct[w][tb] = week_team_ct[w].get(tb, 0) + 1
-                placed = True
-                break
-        if not placed:
-            # Fallback — shouldn't happen with 20 games / 10 weeks / 2 per week
-            w = rng.choice(ooc_weeks)
-            ooc_by_week[w].append(s)
-            log.warning("college_ooc: forced series %s-%s into week %d", ta, tb, w)
+        color = ooc_colors[id(s)]
+        w = ooc_start + color // 2
+        suboff = 0 if color % 2 == 0 else 2
+        s["subweek_offset"] = suboff
+        week_slots.setdefault(w, []).append(s)
 
-    # Step 2: within each week, split OOC games into subweek a (offset 0)
-    # and subweek c (offset 2).  The weekly OOC graph has max degree 2 per
-    # team, so it decomposes into paths and even cycles — alternating colors
-    # along each component gives a valid 2-coloring.
-    for w in ooc_weeks:
-        series_list = ooc_by_week[w]
-        if not series_list:
-            continue
-
-        # Build adjacency for this week's OOC games
-        adj = {}  # team_id -> list of series
-        for s in series_list:
-            adj.setdefault(s["team_a"], []).append(s)
-            adj.setdefault(s["team_b"], []).append(s)
-
-        colored = set()  # ids of already-colored series
-        for s in series_list:
-            if id(s) in colored:
-                continue
-            # Walk the path/cycle starting from this series
-            chain = [s]
-            colored.add(id(s))
-
-            # Extend forward
-            cur = s
-            # Pick an endpoint to walk from
-            end_team = cur["team_b"]
-            while True:
-                nxt = None
-                for candidate in adj.get(end_team, []):
-                    if id(candidate) not in colored:
-                        nxt = candidate
-                        break
-                if nxt is None:
-                    break
-                chain.append(nxt)
-                colored.add(id(nxt))
-                # Move to the other endpoint of nxt
-                end_team = nxt["team_b"] if nxt["team_a"] == end_team else nxt["team_a"]
-
-            # Alternate subweek offsets along the chain
-            for idx, cs in enumerate(chain):
-                cs["subweek_offset"] = 0 if idx % 2 == 0 else 2
-
-        for s in series_list:
-            week_slots[w].append(s)
+    # Validate OOC: no team appears twice in the same (week, subweek)
+    for w in range(ooc_start, ooc_start + num_ooc_weeks):
+        for suboff in (0, 2):
+            seen = set()
+            for s in week_slots.get(w, []):
+                if s.get("subweek_offset") != suboff:
+                    continue
+                for tid in (s["home_team"], s["away_team"]):
+                    assert tid not in seen, (
+                        "OOC double-book: team %s week %d subweek_offset %d"
+                        % (tid, w, suboff)
+                    )
+                    seen.add(tid)
 
     log.info(
-        "college_ooc: assigned %d OOC series across weeks %d-%d",
-        len(ooc_series), ooc_start, ooc_start + COLLEGE_OOC_WEEKS - 1,
+        "college_ooc: validated %d OOC series across weeks %d-%d",
+        len(ooc_series), ooc_start, ooc_start + num_ooc_weeks - 1,
     )
 
-    # ── Conference phase: weeks 11-20, one 3-game series per team per week ──
-    _check_timeout(deadline, "college conference assignment")
-    n_teams = set()
+    # ── Conference: each color = one week ────────────────────────────
+    log.info("college_conf: edge-coloring %d conf series...", len(conf_series))
+    conf_colors, conf_max = _edge_color(conf_series)
+    num_conf_weeks = conf_max + 1
+    log.info("college_conf: used %d colors → %d weeks", num_conf_weeks, num_conf_weeks)
+
     for s in conf_series:
-        n_teams.add(s["home_team"])
-        n_teams.add(s["away_team"])
-    max_conf_per_week = max(1, len(n_teams) // 2)
+        color = conf_colors[id(s)]
+        w = conf_start + color
+        week_slots.setdefault(w, []).append(s)
 
-    conf_assignment = _assign_series_to_weeks(
-        conf_series, COLLEGE_CONF_WEEKS, max_conf_per_week,
-        start_week=conf_start, rng=rng,
-    )
-    for w, series_list in conf_assignment.items():
-        week_slots[w].extend(series_list)
+    # Validate conference: no team appears twice in same week
+    for w in range(conf_start, conf_start + num_conf_weeks):
+        seen = set()
+        for s in week_slots.get(w, []):
+            if s.get("category") != "conference":
+                continue
+            for tid in (s["home_team"], s["away_team"]):
+                assert tid not in seen, (
+                    "Conf double-book: team %s week %d" % (tid, w)
+                )
+                seen.add(tid)
 
-    # Summary logging
-    ooc_games = sum(1 for w in ooc_weeks for s in week_slots[w])
-    conf_games = sum(
-        1 for w in range(conf_start, conf_start + COLLEGE_CONF_WEEKS)
-        for s in week_slots[w]
-    )
     log.info(
-        "college_weeks: OOC series=%d (weeks %d-%d), conf series=%d (weeks %d-%d)",
-        ooc_games, ooc_start, ooc_start + COLLEGE_OOC_WEEKS - 1,
-        conf_games, conf_start, conf_start + COLLEGE_CONF_WEEKS - 1,
+        "college_conf: validated %d conf series across weeks %d-%d",
+        len(conf_series), conf_start, conf_start + num_conf_weeks - 1,
+    )
+
+    total_weeks = num_ooc_weeks + num_conf_weeks
+    log.info(
+        "college_weeks: OOC=%d series (%d weeks), conf=%d series (%d weeks), total=%d weeks",
+        len(ooc_series), num_ooc_weeks,
+        len(conf_series), num_conf_weeks,
+        total_weeks,
     )
 
     return week_slots
@@ -1874,11 +1859,13 @@ def generate_college_schedule(
     Generate a college baseball schedule (level 3).
 
     Structure:
-      Weeks 1-10:  OOC play  — 2 single-game series per team per week
+      Weeks 1-12:  OOC play  — 2 single-game series per team per week
                    (one at subweek a, one at subweek c) = 20 OOC games
-      Weeks 11-20: Conference — 1 three-game series per team per week
+                   (2 bye weeks for scheduling flexibility)
+      Weeks 13-24: Conference — 1 three-game series per team per week
                    (subweeks a/b/c) = 30 conference games
-      Total: 50 games per team across 20 weeks.
+                   (2 bye weeks for scheduling flexibility)
+      Total: 50 games per team across 24 weeks.
     """
     rng = random.Random(seed)
     tables = _get_tables(engine)
@@ -1915,14 +1902,7 @@ def generate_college_schedule(
         log.info("college_schedule: balancing home/away...")
         _balance_home_away(pool, rng)
 
-        total_weeks = COLLEGE_OOC_WEEKS + COLLEGE_CONF_WEEKS
-
-        log.info(
-            "college_schedule: assigning to %d weeks (OOC %d-%d, conf %d-%d)...",
-            total_weeks,
-            start_week, start_week + COLLEGE_OOC_WEEKS - 1,
-            start_week + COLLEGE_OOC_WEEKS, start_week + total_weeks - 1,
-        )
+        log.info("college_schedule: assigning series to weeks...")
         week_assignments = _assign_college_weeks(
             pool, start_week=start_week, rng=rng,
         )
@@ -1935,6 +1915,16 @@ def generate_college_schedule(
 
         ooc_count = sum(1 for r in rows if r["is_conference"] == 0)
         conf_count = sum(1 for r in rows if r["is_conference"] == 1)
+
+        # Determine actual week ranges from assignments
+        all_weeks = sorted(week_assignments.keys())
+        ooc_weeks_used = sorted(w for w in all_weeks
+                                if any(s.get("category") == "ooc"
+                                       for s in week_assignments[w]))
+        conf_weeks_used = sorted(w for w in all_weeks
+                                 if any(s.get("category") == "conference"
+                                        for s in week_assignments[w]))
+
         log.info(
             "college_schedule: inserted %d games (%d OOC + %d conference) for year %d",
             len(rows), ooc_count, conf_count, league_year,
@@ -1948,13 +1938,10 @@ def generate_college_schedule(
             "ooc_games": ooc_count,
             "conference_games": conf_count,
             "total_series": len(pool),
-            "weeks": total_weeks,
+            "weeks": len(all_weeks),
             "start_week": start_week,
-            "ooc_weeks": "%d-%d" % (start_week, start_week + COLLEGE_OOC_WEEKS - 1),
-            "conference_weeks": "%d-%d" % (
-                start_week + COLLEGE_OOC_WEEKS,
-                start_week + total_weeks - 1,
-            ),
+            "ooc_weeks": "%d-%d" % (ooc_weeks_used[0], ooc_weeks_used[-1]) if ooc_weeks_used else "none",
+            "conference_weeks": "%d-%d" % (conf_weeks_used[0], conf_weeks_used[-1]) if conf_weeks_used else "none",
         }
 
 

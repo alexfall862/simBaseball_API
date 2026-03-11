@@ -17,6 +17,7 @@
       <span class="version">API Admin</span>
     </div>
 
+    <div class="sidebar-nav">
     <div class="nav-section">
       <div class="nav-section-title">Overview</div>
       <a href="#" class="nav-item active" data-section="dashboard">
@@ -95,6 +96,46 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Analytics</div>
+      <a href="#" class="nav-item" data-section="analytics-batting">
+        <span class="nav-icon">&#9918;</span> Batting Correlations
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-pitching">
+        <span class="nav-icon">&#9918;</span> Pitching Correlations
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-defense">
+        <span class="nav-icon">&#129502;</span> Defensive Analysis
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-war">
+        <span class="nav-icon">&#127942;</span> WAR Leaderboard
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-regression">
+        <span class="nav-icon">&#128200;</span> Multi-Regression
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-sensitivity">
+        <span class="nav-icon">&#128202;</span> Sensitivity Curves
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-xstats">
+        <span class="nav-icon">&#128270;</span> xStats / Residuals
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-interactions">
+        <span class="nav-icon">&#128279;</span> Interaction Effects
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-dashboard">
+        <span class="nav-icon">&#127919;</span> Stat Tuning
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-archetypes">
+        <span class="nav-icon">&#129333;</span> Archetypes
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-pitchtypes">
+        <span class="nav-icon">&#9918;</span> Pitch Types
+      </a>
+      <a href="#" class="nav-item" data-section="analytics-defpos">
+        <span class="nav-icon">&#129502;</span> Defensive Positions
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Administration</div>
       <a href="#" class="nav-item" data-section="cache">
         <span class="nav-icon">&#128451;</span> Cache Manager
@@ -108,6 +149,10 @@
       <a href="#" class="nav-item" data-section="migrations">
         <span class="nav-icon">&#128295;</span> Migrations
       </a>
+      <a href="#" class="nav-item" data-section="db-storage">
+        <span class="nav-icon">&#128230;</span> DB Storage
+      </a>
+    </div>
     </div>
 
     <div class="sidebar-footer">
@@ -353,7 +398,8 @@
           </div>
 
           <div class="button-group">
-            <button class="btn btn-warning" id="btn-run-season">Run Season</button>
+            <button class="btn btn-warning" id="btn-run-season">Run Single Level</button>
+            <button class="btn btn-danger" id="btn-run-all-levels">Run All Levels (9-3)</button>
           </div>
 
           <div id="season-progress-wrap" style="display:none; margin-top: 16px">
@@ -866,6 +912,26 @@
           </ul>
           <button class="btn btn-primary" id="btn-migrate-amateur">Run Migration</button>
           <pre id="migrate-amateur-result" class="result-box" style="margin-top: 16px; display: none"></pre>
+        </div>
+      </section>
+
+      <!-- DB Storage Section -->
+      <section id="section-db-storage" class="section">
+        <div class="card">
+          <h3>Database Storage Report</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            View the size and row count of every table in the database.
+          </p>
+          <button class="btn btn-primary" id="btn-db-storage-load">Load Report</button>
+          <div id="db-storage-status" class="text-muted" style="margin-top: 8px;"></div>
+        </div>
+        <div class="card" id="db-storage-summary" style="display: none;">
+          <h3>Summary</h3>
+          <div id="db-storage-summary-content" style="display:flex;gap:16px;flex-wrap:wrap;"></div>
+        </div>
+        <div class="card" id="db-storage-table-card" style="display: none;">
+          <h3>Tables</h3>
+          <div class="table-container" id="db-storage-table" style="max-height: 600px; overflow-y: auto;"></div>
         </div>
       </section>
 
@@ -1411,6 +1477,467 @@
         </div>
       </section>
 
+      <!-- Analytics: Batting Correlations -->
+      <section id="section-analytics-batting" class="section">
+        <div class="card">
+          <h3>Batting Attribute vs Stat Correlations</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Analyze how player batting attributes correlate with offensive outcomes.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year:
+              <select id="an-bat-lyid" style="width: 100px"></select>
+            </label>
+            <label>Level:
+              <select id="an-bat-level" style="width: 80px">
+                <option value="9">9 - MLB</option><option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option><option value="6">6 - High-A</option>
+                <option value="5">5 - A</option><option value="4">4 - Scraps</option>
+                <option value="3">3 - College</option>
+              </select>
+            </label>
+            <label>Min AB:
+              <input type="number" id="an-bat-min-ab" value="50" min="1" style="width: 70px" />
+            </label>
+            <button class="btn btn-primary" id="btn-an-bat-load">Load</button>
+          </div>
+          <div id="an-bat-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-bat-heatmap-card" style="display: none;">
+          <h3>Correlation Heatmap <span class="text-muted" style="font-size: 13px" id="an-bat-n"></span></h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">Click a cell to drill down into a scatter plot.</p>
+          <div class="table-container" id="an-bat-heatmap"></div>
+        </div>
+        <div class="card" id="an-bat-scatter-card" style="display: none;">
+          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+            <button class="btn btn-secondary" id="btn-an-bat-back">Back to Heatmap</button>
+            <h3 id="an-bat-scatter-title" style="margin: 0;"></h3>
+          </div>
+          <div id="an-bat-scatter-info" class="text-muted" style="margin-bottom: 8px; font-size: 13px"></div>
+          <div style="position: relative; height: 420px;">
+            <canvas id="an-bat-scatter-canvas"></canvas>
+          </div>
+          <div id="an-bat-scatter-detail" style="display:none; margin-top: 12px; padding: 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #dee2e6;"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: Pitching Correlations -->
+      <section id="section-analytics-pitching" class="section">
+        <div class="card">
+          <h3>Pitching Attribute vs Stat Correlations</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Analyze how pitcher attributes correlate with pitching outcomes.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year:
+              <select id="an-pit-lyid" style="width: 100px"></select>
+            </label>
+            <label>Level:
+              <select id="an-pit-level" style="width: 80px">
+                <option value="9">9 - MLB</option><option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option><option value="6">6 - High-A</option>
+                <option value="5">5 - A</option><option value="4">4 - Scraps</option>
+                <option value="3">3 - College</option>
+              </select>
+            </label>
+            <label>Min IPO:
+              <input type="number" id="an-pit-min-ipo" value="60" min="1" style="width: 70px" />
+            </label>
+            <button class="btn btn-primary" id="btn-an-pit-load">Load</button>
+          </div>
+          <div id="an-pit-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-pit-heatmap-card" style="display: none;">
+          <h3>Correlation Heatmap <span class="text-muted" style="font-size: 13px" id="an-pit-n"></span></h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">Click a cell to drill down into a scatter plot.</p>
+          <div class="table-container" id="an-pit-heatmap"></div>
+        </div>
+        <div class="card" id="an-pit-scatter-card" style="display: none;">
+          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+            <button class="btn btn-secondary" id="btn-an-pit-back">Back to Heatmap</button>
+            <h3 id="an-pit-scatter-title" style="margin: 0;"></h3>
+          </div>
+          <div id="an-pit-scatter-info" class="text-muted" style="margin-bottom: 8px; font-size: 13px"></div>
+          <div style="position: relative; height: 420px;">
+            <canvas id="an-pit-scatter-canvas"></canvas>
+          </div>
+          <div id="an-pit-scatter-detail" style="display:none; margin-top: 12px; padding: 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #dee2e6;"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: Defensive Analysis -->
+      <section id="section-analytics-defense" class="section">
+        <div class="card">
+          <h3>Defensive Attribute vs Stat Correlations</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Analyze how fielding attributes correlate with defensive performance.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year:
+              <select id="an-def-lyid" style="width: 100px"></select>
+            </label>
+            <label>Level:
+              <select id="an-def-level" style="width: 80px">
+                <option value="9">9 - MLB</option><option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option><option value="6">6 - High-A</option>
+                <option value="5">5 - A</option><option value="4">4 - Scraps</option>
+                <option value="3">3 - College</option>
+              </select>
+            </label>
+            <label>Position:
+              <select id="an-def-pos" style="width: 80px">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label>Min Inn:
+              <input type="number" id="an-def-min-inn" value="50" min="1" style="width: 70px" />
+            </label>
+            <button class="btn btn-primary" id="btn-an-def-load">Load</button>
+          </div>
+          <div id="an-def-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-def-heatmap-card" style="display: none;">
+          <h3>Correlation Heatmap <span class="text-muted" style="font-size: 13px" id="an-def-n"></span></h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">Click a cell to drill down into a scatter plot.</p>
+          <div class="table-container" id="an-def-heatmap"></div>
+        </div>
+        <div class="card" id="an-def-scatter-card" style="display: none;">
+          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+            <button class="btn btn-secondary" id="btn-an-def-back">Back to Heatmap</button>
+            <h3 id="an-def-scatter-title" style="margin: 0;"></h3>
+          </div>
+          <div id="an-def-scatter-info" class="text-muted" style="margin-bottom: 8px; font-size: 13px"></div>
+          <div style="position: relative; height: 420px;">
+            <canvas id="an-def-scatter-canvas"></canvas>
+          </div>
+          <div id="an-def-scatter-detail" style="display:none; margin-top: 12px; padding: 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #dee2e6;"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: WAR Leaderboard -->
+      <section id="section-analytics-war" class="section">
+        <div class="card">
+          <h3>WAR Leaderboard</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Custom WAR calculation with adjustable component weights and replacement baseline.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year:
+              <select id="an-war-lyid" style="width: 100px"></select>
+            </label>
+            <label>Level:
+              <select id="an-war-level" style="width: 80px">
+                <option value="9">9 - MLB</option><option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option><option value="6">6 - High-A</option>
+                <option value="5">5 - A</option><option value="4">4 - Scraps</option>
+                <option value="3">3 - College</option>
+              </select>
+            </label>
+            <label>Min AB:
+              <input type="number" id="an-war-min-ab" value="50" min="1" style="width: 70px" />
+            </label>
+            <label>Min IPO:
+              <input type="number" id="an-war-min-ipo" value="60" min="1" style="width: 70px" />
+            </label>
+            <button class="btn btn-primary" id="btn-an-war-load">Load</button>
+          </div>
+
+          <div class="form-row" style="margin-bottom: 12px; gap: 16px; flex-wrap: wrap; align-items: center;">
+            <label style="min-width: 200px;">Replacement %: <span id="an-war-repl-val">80%</span>
+              <input type="range" id="an-war-repl" min="50" max="95" value="80" step="1" style="width: 160px" />
+            </label>
+            <label style="min-width: 160px;">Batting: <span id="an-war-wb-val">1.0</span>
+              <input type="range" id="an-war-wb" min="0" max="2" value="1.0" step="0.1" style="width: 100px" />
+            </label>
+            <label style="min-width: 160px;">Baserunning: <span id="an-war-wbr-val">1.0</span>
+              <input type="range" id="an-war-wbr" min="0" max="2" value="1.0" step="0.1" style="width: 100px" />
+            </label>
+            <label style="min-width: 160px;">Fielding: <span id="an-war-wf-val">1.0</span>
+              <input type="range" id="an-war-wf" min="0" max="2" value="1.0" step="0.1" style="width: 100px" />
+            </label>
+            <label style="min-width: 160px;">Pitching: <span id="an-war-wp-val">1.0</span>
+              <input type="range" id="an-war-wp" min="0" max="2" value="1.0" step="0.1" style="width: 100px" />
+            </label>
+          </div>
+          <div id="an-war-status" class="text-muted"></div>
+        </div>
+
+        <div class="card" id="an-war-avgs-card" style="display: none;">
+          <h3>League Context</h3>
+          <div id="an-war-avgs" style="display: flex; gap: 24px; flex-wrap: wrap;"></div>
+        </div>
+
+        <div class="card" id="an-war-table-card" style="display: none;">
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Name</th><th>Team</th><th>Pos</th><th>Type</th>
+                  <th>WAR</th><th>Bat</th><th>BR</th><th>Fld</th><th>Pit</th>
+                </tr>
+              </thead>
+              <tbody id="an-war-tbody"></tbody>
+            </table>
+          </div>
+          <div style="display: flex; gap: 12px; margin-top: 12px; align-items: center;">
+            <button class="btn btn-secondary" id="btn-war-prev" disabled>Prev</button>
+            <span id="an-war-page-info"></span>
+            <button class="btn btn-secondary" id="btn-war-next" disabled>Next</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Analytics: Multi-Regression -->
+      <section id="section-analytics-regression" class="section">
+        <div class="card">
+          <h3>Multi-Attribute Regression</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Fit all attributes simultaneously to a target stat. Shows independent contribution of each attribute, R&sup2;, and over/underperformers.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-reg-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-reg-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Category: <select id="an-reg-cat" style="width: 100px">
+              <option value="batting">Batting</option><option value="pitching">Pitching</option>
+            </select></label>
+            <label>Target Stat: <select id="an-reg-stat" style="width: 100px"></select></label>
+            <label>Min Threshold: <input type="number" id="an-reg-min" value="50" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-reg-load">Load</button>
+          </div>
+          <div id="an-reg-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-reg-results" style="display: none;">
+          <h3>Results <span class="text-muted" style="font-size: 13px" id="an-reg-r2"></span></h3>
+          <div class="table-container" id="an-reg-coeff-table"></div>
+        </div>
+        <div class="card" id="an-reg-performers" style="display: none;">
+          <div style="display: flex; gap: 24px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 300px;">
+              <h3>Top Overperformers</h3>
+              <div class="table-container" id="an-reg-over"></div>
+            </div>
+            <div style="flex: 1; min-width: 300px;">
+              <h3>Top Underperformers</h3>
+              <div class="table-container" id="an-reg-under"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Analytics: Sensitivity Curves -->
+      <section id="section-analytics-sensitivity" class="section">
+        <div class="card">
+          <h3>Attribute Sensitivity Curves</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Bucket players by attribute deciles and plot mean stat per bucket. Shows linearity, diminishing returns, and ceiling effects.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-sens-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-sens-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Category: <select id="an-sens-cat" style="width: 100px">
+              <option value="batting">Batting</option><option value="pitching">Pitching</option>
+            </select></label>
+            <label>Attribute: <select id="an-sens-attr" style="width: 120px"></select></label>
+            <label>Target Stat: <select id="an-sens-stat" style="width: 100px"></select></label>
+            <label>Min Threshold: <input type="number" id="an-sens-min" value="50" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-sens-load">Load</button>
+          </div>
+          <div id="an-sens-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-sens-chart-card" style="display: none;">
+          <h3 id="an-sens-title"></h3>
+          <div id="an-sens-flags" style="margin-bottom: 8px;"></div>
+          <div style="position: relative; height: 350px;">
+            <canvas id="an-sens-chart"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- Analytics: xStats / Residuals -->
+      <section id="section-analytics-xstats" class="section">
+        <div class="card">
+          <h3>Expected Stats (xStats) &amp; Residual Analysis</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Predict each player's expected stats from attributes via multi-regression. Shows over/underperformers and model fit per stat.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-xs-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-xs-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Category: <select id="an-xs-cat" style="width: 100px">
+              <option value="batting">Batting</option><option value="pitching">Pitching</option>
+            </select></label>
+            <label>Min Threshold: <input type="number" id="an-xs-min" value="50" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-xs-load">Load</button>
+          </div>
+          <div id="an-xs-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-xs-models" style="display: none;">
+          <h3>Model Fit by Stat</h3>
+          <div class="table-container" id="an-xs-models-table"></div>
+        </div>
+        <div class="card" id="an-xs-players" style="display: none;">
+          <h3>Most Unusual Players (Highest Total Residual)</h3>
+          <div class="table-container" id="an-xs-players-table" style="max-height: 500px; overflow-y: auto;"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: Interaction Effects -->
+      <section id="section-analytics-interactions" class="section">
+        <div class="card">
+          <h3>Attribute Interaction Effects</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Test if two attributes together predict a stat better than separately. Shows R&sup2; gain from the interaction term and a 2D performance grid.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-int-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-int-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Category: <select id="an-int-cat" style="width: 100px">
+              <option value="batting">Batting</option><option value="pitching">Pitching</option>
+            </select></label>
+            <label>Attr A: <select id="an-int-attr-a" style="width: 120px"></select></label>
+            <label>Attr B: <select id="an-int-attr-b" style="width: 120px"></select></label>
+            <label>Target Stat: <select id="an-int-stat" style="width: 100px"></select></label>
+            <label>Min Threshold: <input type="number" id="an-int-min" value="50" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-int-load">Load</button>
+          </div>
+          <div id="an-int-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-int-results" style="display: none;">
+          <h3 id="an-int-title"></h3>
+          <div id="an-int-r2-info" style="margin-bottom: 12px;"></div>
+          <div class="table-container" id="an-int-grid"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: Stat Tuning Dashboard -->
+      <section id="section-analytics-dashboard" class="section">
+        <div class="card">
+          <h3>Per-Stat Tuning Dashboard</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Deep dive into a single stat: attribute rankings, distribution vs MLB benchmarks, stat correlations, and histogram.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-dash-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-dash-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Category: <select id="an-dash-cat" style="width: 100px">
+              <option value="batting">Batting</option><option value="pitching">Pitching</option>
+            </select></label>
+            <label>Target Stat: <select id="an-dash-stat" style="width: 100px"></select></label>
+            <label>Min Threshold: <input type="number" id="an-dash-min" value="50" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-dash-load">Load</button>
+          </div>
+          <div id="an-dash-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-dash-benchmark" style="display: none;">
+          <h3>Benchmark Comparison</h3>
+          <div id="an-dash-bench-content"></div>
+        </div>
+        <div class="card" id="an-dash-dist" style="display: none;">
+          <h3>Distribution</h3>
+          <div id="an-dash-dist-stats" style="margin-bottom: 12px;"></div>
+          <div style="position: relative; height: 300px;">
+            <canvas id="an-dash-hist-canvas"></canvas>
+          </div>
+        </div>
+        <div class="card" id="an-dash-attrs" style="display: none;">
+          <h3>Attribute Rankings <span class="text-muted" style="font-size: 13px" id="an-dash-r2"></span></h3>
+          <div class="table-container" id="an-dash-attr-table"></div>
+        </div>
+        <div class="card" id="an-dash-statcorr" style="display: none;">
+          <h3>Stat-vs-Stat Correlations</h3>
+          <div class="table-container" id="an-dash-statcorr-table"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: Archetypes -->
+      <section id="section-analytics-archetypes" class="section">
+        <div class="card">
+          <h3>Player Archetype Validation</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Classify players into archetypes (Power Hitter, Contact Hitter, Speedster, etc.) and compare their average stat profiles.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-arch-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-arch-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Min AB: <input type="number" id="an-arch-min" value="50" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-arch-load">Load</button>
+          </div>
+          <div id="an-arch-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-arch-results" style="display: none;">
+          <div class="table-container" id="an-arch-table"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: Pitch Types -->
+      <section id="section-analytics-pitchtypes" class="section">
+        <div class="card">
+          <h3>Pitch Type &amp; Repertoire Analysis</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Group pitchers by primary pitch type and repertoire size. Compare average outcomes across pitch profiles.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-pt-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-pt-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Min IPO: <input type="number" id="an-pt-min" value="60" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-pt-load">Load</button>
+          </div>
+          <div id="an-pt-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-pt-types" style="display: none;">
+          <h3>By Primary Pitch</h3>
+          <div class="table-container" id="an-pt-types-table"></div>
+        </div>
+        <div class="card" id="an-pt-rep" style="display: none;">
+          <h3>By Repertoire Size</h3>
+          <div class="table-container" id="an-pt-rep-table"></div>
+        </div>
+      </section>
+
+      <!-- Analytics: Defensive Positions -->
+      <section id="section-analytics-defpos" class="section">
+        <div class="card">
+          <h3>Position-Specific Defensive Analysis</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            For each position, shows which defensive attributes matter most (correlation with fielding % and error rate).
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-dp-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-dp-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Min Inn: <input type="number" id="an-dp-min" value="50" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-dp-load">Load</button>
+          </div>
+          <div id="an-dp-status" class="text-muted"></div>
+        </div>
+        <div class="card" id="an-dp-results" style="display: none;">
+          <div id="an-dp-tables"></div>
+        </div>
+      </section>
+
       <!-- Schedule Generator Section -->
       <section id="section-schedule-gen" class="section">
         <div class="card">
@@ -1668,6 +2195,39 @@
             <button class="btn btn-primary" id="btn-sv-add-series">Add Series</button>
           </div>
           <pre id="sv-add-result" class="result-box" style="margin-top: 12px; display: none"></pre>
+        </div>
+
+        <!-- Swap OOC Opponents -->
+        <div class="card">
+          <h3>Swap OOC Opponents</h3>
+          <p class="text-muted" style="margin-bottom: 12px">Swap two teams' OOC opponents in a given week/subweek so they play each other instead. The displaced opponents are paired together.</p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="sv-swap-team-a">Team A ID</label>
+              <input type="number" id="sv-swap-team-a" min="1" placeholder="User team A" />
+            </div>
+            <div class="form-group">
+              <label for="sv-swap-team-b">Team B ID</label>
+              <input type="number" id="sv-swap-team-b" min="1" placeholder="User team B" />
+            </div>
+            <div class="form-group">
+              <label for="sv-swap-week">Week</label>
+              <input type="number" id="sv-swap-week" min="1" placeholder="Season week" />
+            </div>
+            <div class="form-group">
+              <label for="sv-swap-subweek">Subweek</label>
+              <select id="sv-swap-subweek">
+                <option value="a">a</option>
+                <option value="b">b</option>
+                <option value="c">c</option>
+                <option value="d">d</option>
+              </select>
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-primary" id="btn-sv-swap-ooc">Swap Opponents</button>
+          </div>
+          <pre id="sv-swap-result" class="result-box" style="margin-top: 12px; display: none"></pre>
         </div>
       </section>
 

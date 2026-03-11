@@ -62,9 +62,16 @@ body {
   transition: transform 0.3s ease;
 }
 
+.sidebar-nav {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
 .sidebar-header {
   padding: 20px;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .sidebar-header h1 {
@@ -126,7 +133,7 @@ body {
 }
 
 .sidebar-footer {
-  margin-top: auto;
+  flex-shrink: 0;
   padding: 16px;
   border-top: 1px solid var(--border);
 }
