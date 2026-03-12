@@ -229,8 +229,15 @@ def _apply_pool_fuzz(players_list, viewing_org_id, pool):
         if not pid:
             continue
 
-        # Fuzz _base columns to letter grades for college/intam/hs pool views
-        if pool in ("college", "intam", "hs"):
+        if pool == "hs":
+            # College recruiting context: attributes hidden, potentials unknown
+            for key in list(player.keys()):
+                if key.endswith("_base"):
+                    player[key] = None
+                elif key.endswith("_pot"):
+                    player[key] = "?"
+        elif pool in ("college", "intam"):
+            # Fuzz _base columns to letter grades for college/intam pool views
             for key in list(player.keys()):
                 if key.endswith("_base"):
                     raw_val = player[key]
@@ -239,16 +246,30 @@ def _apply_pool_fuzz(players_list, viewing_org_id, pool):
                         true_grade, viewing_org_id, pid, key
                     )
                 elif key.endswith("_pot"):
-                    if pool == "hs":
-                        player[key] = "?"
+                    true_pot = player[key]
+                    if true_pot:
+                        player[key] = fuzz_letter_grade(
+                            true_pot, viewing_org_id, pid, key
+                        )
                     else:
-                        true_pot = player[key]
-                        if true_pot:
-                            player[key] = fuzz_letter_grade(
-                                true_pot, viewing_org_id, pid, key
-                            )
-                        else:
-                            player[key] = "?"
+                        player[key] = "?"
+        elif pool == "pro":
+            # Pro roster context: fuzzed letter grades for pool listing
+            for key in list(player.keys()):
+                if key.endswith("_base"):
+                    raw_val = player[key]
+                    true_grade = base_to_letter_grade(raw_val)
+                    player[key] = fuzz_letter_grade(
+                        true_grade, viewing_org_id, pid, key
+                    )
+                elif key.endswith("_pot"):
+                    true_pot = player[key]
+                    if true_pot:
+                        player[key] = fuzz_letter_grade(
+                            true_pot, viewing_org_id, pid, key
+                        )
+                    else:
+                        player[key] = "?"
 
     return players_list
 
@@ -503,6 +524,216 @@ def api_college_pool():
 
     except SQLAlchemyError:
         return jsonify(error="db_error", message="Database error loading college recruiting pool"), 500
+
+
+# -------------------------------------------------------------------
+# Endpoint 2b: INTAM Scouting Pool
+# -------------------------------------------------------------------
+
+@scouting_bp.get("/scouting/intam-pool")
+def api_intam_pool():
+    """
+    Paginated list of international amateur players (org 339, age 18+).
+
+    Filters: ptype, area, search, min_age, max_age.
+    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
+    """
+    try:
+        page, per_page = _parse_pagination()
+        viewing_org_id = request.args.get("viewing_org_id", type=int)
+        join, tables = _build_join_chain()
+
+        contracts = tables["contracts"]
+        shares = tables["contract_team_share"]
+        orgs = tables["organizations"]
+        players = tables["players"]
+
+        conditions = [
+            contracts.c.isActive == 1,
+            shares.c.isHolder == 1,
+            shares.c.orgID == INTAM_ORG_ID,
+            players.c.age >= 18,
+        ]
+
+        _apply_common_filters(conditions, tables)
+
+        min_age = request.args.get("min_age", type=int)
+        max_age = request.args.get("max_age", type=int)
+        if min_age is not None:
+            conditions.append(players.c.age >= min_age)
+        if max_age is not None:
+            conditions.append(players.c.age <= max_age)
+
+        where = and_(*conditions)
+        order = _parse_sort(tables)
+
+        scouting_cols = _get_scouting_columns()
+        select_cols = [
+            *scouting_cols,
+            orgs.c.id.label("org_id"),
+            orgs.c.org_abbrev.label("org_abbrev"),
+            contracts.c.current_level.label("current_level"),
+        ]
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            count_stmt = (
+                select(func.count())
+                .select_from(join)
+                .where(where)
+            )
+            total = conn.execute(count_stmt).scalar()
+
+            data_stmt = (
+                select(*select_cols)
+                .select_from(join)
+                .where(where)
+                .order_by(order)
+                .limit(per_page)
+                .offset((page - 1) * per_page)
+            )
+            rows = conn.execute(data_stmt).all()
+
+        players_list = _build_player_list(rows, tables)
+
+        if viewing_org_id:
+            _apply_pool_fuzz(players_list, viewing_org_id, "intam")
+
+        pages = math.ceil(total / per_page) if per_page else 1
+
+        return jsonify(
+            total=total,
+            page=page,
+            per_page=per_page,
+            pages=pages,
+            players=players_list,
+        ), 200
+
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error loading INTAM scouting pool"), 500
+
+
+# -------------------------------------------------------------------
+# Endpoint 2c: MLB / Pro Roster Scouting Pool
+# -------------------------------------------------------------------
+
+@scouting_bp.get("/scouting/mlb-pool")
+def api_mlb_pool():
+    """
+    Paginated list of professional players on active rosters (levels 4-9).
+
+    Filters: ptype, area, search, min_age, max_age, org_id, level.
+    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
+
+    Returns level_counts for level tab badges.
+    """
+    try:
+        page, per_page = _parse_pagination()
+        viewing_org_id = request.args.get("viewing_org_id", type=int)
+        join, tables = _build_join_chain()
+
+        contracts = tables["contracts"]
+        shares = tables["contract_team_share"]
+        orgs = tables["organizations"]
+        players = tables["players"]
+
+        # Pro rosters: orgs 1-30, levels 4-9
+        conditions = [
+            contracts.c.isActive == 1,
+            shares.c.isHolder == 1,
+            shares.c.orgID >= MLB_ORG_MIN,
+            shares.c.orgID <= MLB_ORG_MAX,
+            contracts.c.current_level.in_(["4", "5", "6", "7", "8", "9"]),
+        ]
+
+        _apply_common_filters(conditions, tables)
+
+        min_age = request.args.get("min_age", type=int)
+        max_age = request.args.get("max_age", type=int)
+        if min_age is not None:
+            conditions.append(players.c.age >= min_age)
+        if max_age is not None:
+            conditions.append(players.c.age <= max_age)
+
+        org_id = request.args.get("org_id", type=int)
+        if org_id is not None:
+            conditions.append(shares.c.orgID == org_id)
+
+        level = request.args.get("level", type=str)
+        if level is not None:
+            conditions.append(contracts.c.current_level == level)
+
+        where = and_(*conditions)
+        order = _parse_sort(tables)
+
+        scouting_cols = _get_scouting_columns()
+        select_cols = [
+            *scouting_cols,
+            orgs.c.id.label("org_id"),
+            orgs.c.org_abbrev.label("org_abbrev"),
+            contracts.c.current_level.label("current_level"),
+        ]
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            # Total count
+            count_stmt = (
+                select(func.count())
+                .select_from(join)
+                .where(where)
+            )
+            total = conn.execute(count_stmt).scalar()
+
+            # Level breakdown counts (full pro pool, ignoring level/org filter)
+            pro_base_conditions = [
+                contracts.c.isActive == 1,
+                shares.c.isHolder == 1,
+                shares.c.orgID >= MLB_ORG_MIN,
+                shares.c.orgID <= MLB_ORG_MAX,
+                contracts.c.current_level.in_(["4", "5", "6", "7", "8", "9"]),
+            ]
+            level_counts_stmt = (
+                select(
+                    contracts.c.current_level,
+                    func.count().label("cnt"),
+                )
+                .select_from(join)
+                .where(and_(*pro_base_conditions))
+                .group_by(contracts.c.current_level)
+                .order_by(contracts.c.current_level)
+            )
+            level_rows = conn.execute(level_counts_stmt).all()
+            level_counts = {str(row[0]): row[1] for row in level_rows}
+
+            # Paginated data
+            data_stmt = (
+                select(*select_cols)
+                .select_from(join)
+                .where(where)
+                .order_by(order)
+                .limit(per_page)
+                .offset((page - 1) * per_page)
+            )
+            rows = conn.execute(data_stmt).all()
+
+        players_list = _build_player_list(rows, tables)
+
+        if viewing_org_id:
+            _apply_pool_fuzz(players_list, viewing_org_id, "pro")
+
+        pages = math.ceil(total / per_page) if per_page else 1
+
+        return jsonify(
+            total=total,
+            page=page,
+            per_page=per_page,
+            pages=pages,
+            level_counts=level_counts,
+            players=players_list,
+        ), 200
+
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error loading MLB scouting pool"), 500
 
 
 # -------------------------------------------------------------------
