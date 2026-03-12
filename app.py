@@ -255,6 +255,24 @@ def create_app(config_object=Config):
     except Exception as e:
         app.logger.exception("Failed to register stats blueprint: %s", e)
 
+    try:
+        from playoffs import playoffs_bp
+        app.register_blueprint(playoffs_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register playoffs blueprint: %s", e)
+
+    try:
+        from allstar import allstar_bp
+        app.register_blueprint(allstar_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register allstar blueprint: %s", e)
+
+    try:
+        from wbc import wbc_bp
+        app.register_blueprint(wbc_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register wbc blueprint: %s", e)
+
     from admin import admin_bp
     # Secure session cookie
     app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))

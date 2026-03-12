@@ -15,7 +15,43 @@ COLLEGE_ORG_MAX = 338
 MLB_ORG_MIN = 1
 MLB_ORG_MAX = 30
 
-# 20-80 score -> letter grade mapping
+# All valid scouting action types
+ALL_ACTION_TYPES = frozenset({
+    "hs_report",
+    "recruit_potential_fuzzed",
+    "recruit_potential_precise",
+    "college_potential_precise",
+    "draft_attrs_fuzzed",
+    "draft_attrs_precise",
+    "draft_potential_precise",
+    "pro_attrs_precise",
+    "pro_potential_precise",
+})
+
+# Prerequisite chains: action_type -> required prior action
+_PREREQUISITES = {
+    "recruit_potential_fuzzed": "hs_report",
+    "recruit_potential_precise": "recruit_potential_fuzzed",
+    "draft_attrs_precise": "draft_attrs_fuzzed",
+}
+
+# Permission rules: action_type -> (allowed_org_range, target_pool_check)
+# Encoded as functions in _validate_scouting_permission
+
+# Cost config keys (map action_type -> scouting_config key with fallback)
+_COST_CONFIG_KEYS = {
+    "hs_report":                 ("hs_report_cost",                 10),
+    "recruit_potential_fuzzed":   ("recruit_potential_fuzzed_cost",   15),
+    "recruit_potential_precise":  ("recruit_potential_precise_cost",  25),
+    "college_potential_precise":  ("college_potential_precise_cost",  15),
+    "draft_attrs_fuzzed":        ("draft_attrs_fuzzed_cost",         10),
+    "draft_attrs_precise":       ("draft_attrs_precise_cost",        20),
+    "draft_potential_precise":   ("draft_potential_precise_cost",     15),
+    "pro_attrs_precise":         ("pro_attrs_precise_cost",          15),
+    "pro_potential_precise":     ("pro_potential_precise_cost",       15),
+}
+
+# 20-80 score -> letter grade mapping (kept for backward compat imports)
 _GRADE_THRESHOLDS = [
     (80, "A+"), (75, "A"), (70, "A-"),
     (65, "B+"), (60, "B"), (55, "B-"),
@@ -94,16 +130,14 @@ def perform_scouting_action(conn, org_id, league_year_id, player_id, action_type
     Returns result dict with status and remaining budget.
     Raises ValueError on validation failures.
     """
+    if action_type not in ALL_ACTION_TYPES:
+        raise ValueError(f"Unknown action_type: {action_type}")
+
     config = get_scouting_config(conn)
 
-    cost_map = {
-        "hs_report": int(config.get("hs_report_cost", 10)),
-        "hs_potential": int(config.get("hs_potential_cost", 25)),
-        "pro_numeric": int(config.get("pro_numeric_cost", 15)),
-    }
-    cost = cost_map.get(action_type)
-    if cost is None:
-        raise ValueError(f"Unknown action_type: {action_type}")
+    # Resolve cost from config (with hardcoded fallback)
+    config_key, fallback = _COST_CONFIG_KEYS[action_type]
+    cost = int(config.get(config_key, fallback))
 
     # Idempotent: already unlocked -> return without charging
     existing = conn.execute(
@@ -124,17 +158,20 @@ def perform_scouting_action(conn, org_id, league_year_id, player_id, action_type
             "points_remaining": budget["total_points"] - budget["spent_points"],
         }
 
-    # Prerequisite: hs_potential requires hs_report first
-    if action_type == "hs_potential":
-        has_report = conn.execute(
+    # Check prerequisites
+    prereq = _PREREQUISITES.get(action_type)
+    if prereq:
+        has_prereq = conn.execute(
             text("""
                 SELECT id FROM scouting_actions
-                WHERE org_id = :org_id AND player_id = :pid AND action_type = 'hs_report'
+                WHERE org_id = :org_id AND player_id = :pid AND action_type = :atype
             """),
-            {"org_id": org_id, "pid": player_id},
+            {"org_id": org_id, "pid": player_id, "atype": prereq},
         ).first()
-        if not has_report:
-            raise ValueError("Must unlock scouting report before viewing potentials")
+        if not has_prereq:
+            raise ValueError(
+                f"Must unlock '{prereq}' before '{action_type}'"
+            )
 
     # Permission check
     _validate_scouting_permission(conn, org_id, player_id, action_type)
@@ -187,13 +224,15 @@ def _validate_scouting_permission(conn, org_id, player_id, action_type):
     Validate that the org is allowed to perform this action on this player.
 
     Rules:
-    - hs_report / hs_potential: college orgs (31-338) on USHS players (org 340)
-    - pro_numeric: MLB orgs (1-30) on college (31-338) or INTAM (339) players
+    - hs_report / recruit_potential_*: college orgs (31-338) on HS players (org 340)
+    - college_potential_precise: any org on college players (orgs 31-338)
+    - draft_attrs_* / draft_potential_precise: MLB orgs (1-30) on college (31-338) or INTAM (339)
+    - pro_attrs_precise / pro_potential_precise: any org on pro players (levels 4-9)
     """
-    # Find the player's current holding org
-    player_org = conn.execute(
+    # Find the player's current holding org and level
+    player_info = conn.execute(
         text("""
-            SELECT cts.orgID
+            SELECT cts.orgID, c.current_level
             FROM contracts c
             JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
             JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
@@ -203,22 +242,35 @@ def _validate_scouting_permission(conn, org_id, player_id, action_type):
         {"pid": player_id},
     ).first()
 
-    if not player_org:
+    if not player_info:
         raise ValueError(f"Player {player_id} not found or has no active contract")
 
-    target_org_id = player_org[0]
+    target_org_id = player_info[0]
+    target_level = player_info[1]
 
-    if action_type in ("hs_report", "hs_potential"):
-        if org_id < COLLEGE_ORG_MIN or org_id > COLLEGE_ORG_MAX:
+    # HS recruiting actions: college orgs only, on HS players
+    if action_type in ("hs_report", "recruit_potential_fuzzed", "recruit_potential_precise"):
+        if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
             raise ValueError("Only college organizations can scout HS players")
         if target_org_id != USHS_ORG_ID:
             raise ValueError("HS scouting actions only apply to USHS players")
 
-    elif action_type == "pro_numeric":
-        if org_id < MLB_ORG_MIN or org_id > MLB_ORG_MAX:
-            raise ValueError("Only MLB organizations can scout college/INTAM players")
-        if target_org_id < COLLEGE_ORG_MIN or target_org_id > INTAM_ORG_ID:
-            raise ValueError("Pro scouting only applies to college or INTAM players")
+    # College potential: any org, on college players
+    elif action_type == "college_potential_precise":
+        if not (COLLEGE_ORG_MIN <= target_org_id <= COLLEGE_ORG_MAX):
+            raise ValueError("College potential scouting only applies to college players")
+
+    # Draft scouting: MLB orgs, on college/INTAM players
+    elif action_type in ("draft_attrs_fuzzed", "draft_attrs_precise", "draft_potential_precise"):
+        if not (MLB_ORG_MIN <= org_id <= MLB_ORG_MAX):
+            raise ValueError("Only MLB organizations can draft-scout college/INTAM players")
+        if not (COLLEGE_ORG_MIN <= target_org_id <= INTAM_ORG_ID):
+            raise ValueError("Draft scouting only applies to college or INTAM players")
+
+    # Pro roster scouting: any org, on pro-level players
+    elif action_type in ("pro_attrs_precise", "pro_potential_precise"):
+        if not (4 <= (target_level or 0) <= 9):
+            raise ValueError("Pro scouting only applies to players at pro levels (4-9)")
 
 
 # ---------------------------------------------------------------------------
@@ -231,15 +283,15 @@ def get_player_scouting_visibility(conn, org_id, player_id):
 
     Returns:
         {
-            pool: 'hs' | 'college' | 'intam' | 'mlb_fa' | 'none',
+            pool: 'hs' | 'college' | 'intam' | 'pro' | 'none',
             unlocked: [action_type, ...],
             available_actions: [action_type, ...],
         }
     """
-    # Find player's current holding org
+    # Find player's current holding org and level
     player_info = conn.execute(
         text("""
-            SELECT p.id, p.ptype, p.age, cts.orgID AS holding_org
+            SELECT p.id, p.ptype, p.age, cts.orgID AS holding_org, c.current_level
             FROM simbbPlayers p
             JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
             JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
@@ -251,17 +303,17 @@ def get_player_scouting_visibility(conn, org_id, player_id):
     ).first()
 
     if not player_info:
-        # No active contract — could be MLB free agent or unknown
         exists = conn.execute(
             text("SELECT id FROM simbbPlayers WHERE id = :pid"),
             {"pid": player_id},
         ).first()
         if not exists:
             return {"pool": "none", "unlocked": [], "available_actions": []}
-        return {"pool": "mlb_fa", "unlocked": [], "available_actions": []}
+        return {"pool": "pro", "unlocked": [], "available_actions": []}
 
     m = player_info._mapping
     holding_org = m["holding_org"]
+    current_level = m["current_level"]
 
     # Determine pool
     if holding_org == USHS_ORG_ID:
@@ -271,7 +323,7 @@ def get_player_scouting_visibility(conn, org_id, player_id):
     elif holding_org == INTAM_ORG_ID:
         pool = "intam"
     else:
-        pool = "mlb_fa"
+        pool = "pro"
 
     # Get unlocked actions for this org + player
     actions = conn.execute(
@@ -282,17 +334,40 @@ def get_player_scouting_visibility(conn, org_id, player_id):
         {"org_id": org_id, "pid": player_id},
     ).all()
     unlocked = [r[0] for r in actions]
+    unlocked_set = set(unlocked)
 
-    # Build available actions
+    # Build available actions based on pool and org type
     available = []
+
     if pool == "hs" and COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX:
-        if "hs_report" not in unlocked:
+        # College recruiting pipeline
+        if "hs_report" not in unlocked_set:
             available.append("hs_report")
-        if "hs_report" in unlocked and "hs_potential" not in unlocked:
-            available.append("hs_potential")
-    elif pool in ("college", "intam") and MLB_ORG_MIN <= org_id <= MLB_ORG_MAX:
-        if "pro_numeric" not in unlocked:
-            available.append("pro_numeric")
+        if "hs_report" in unlocked_set and "recruit_potential_fuzzed" not in unlocked_set:
+            available.append("recruit_potential_fuzzed")
+        if "recruit_potential_fuzzed" in unlocked_set and "recruit_potential_precise" not in unlocked_set:
+            available.append("recruit_potential_precise")
+
+    elif pool in ("college", "intam"):
+        # College potential (any org)
+        if "college_potential_precise" not in unlocked_set:
+            available.append("college_potential_precise")
+
+        # Draft scouting (MLB orgs only)
+        if MLB_ORG_MIN <= org_id <= MLB_ORG_MAX:
+            if "draft_attrs_fuzzed" not in unlocked_set:
+                available.append("draft_attrs_fuzzed")
+            if "draft_attrs_fuzzed" in unlocked_set and "draft_attrs_precise" not in unlocked_set:
+                available.append("draft_attrs_precise")
+            if "draft_potential_precise" not in unlocked_set:
+                available.append("draft_potential_precise")
+
+    elif pool == "pro":
+        # Pro roster scouting (any org)
+        if "pro_attrs_precise" not in unlocked_set:
+            available.append("pro_attrs_precise")
+        if "pro_potential_precise" not in unlocked_set:
+            available.append("pro_potential_precise")
 
     return {
         "pool": pool,
@@ -331,14 +406,15 @@ def get_org_scouting_actions(conn, org_id, league_year_id):
 
 
 # ---------------------------------------------------------------------------
-# Letter grade conversion (for college/INTAM free tier)
+# Letter grade conversion (kept for backward compat, canonical version
+# now lives in services/attribute_visibility.py)
 # ---------------------------------------------------------------------------
 
 def base_to_letter_grade(value, mean=30.0, std=12.0):
     """
     Convert a numeric _base value to a letter grade.
 
-    Uses the 20-80 scouting scale (z-score → scale) then maps to grade.
+    Uses the 20-80 scouting scale (z-score -> scale) then maps to grade.
     Default mean/std are approximate values for amateur-level attributes.
     """
     try:

@@ -1826,3 +1826,961 @@ def defensive_position_importance(
         "attr_labels": {a: ATTR_LABELS.get(a, a) for a in DEFENSIVE_ATTRS},
         "n": len(rows),
     }
+
+
+# ---------------------------------------------------------------------------
+# Stamina Reports
+# ---------------------------------------------------------------------------
+
+_DURABILITY_RECOVERY_MULT = {
+    "Iron Man":      1.5,
+    "Dependable":    1.25,
+    "Normal":        1.0,
+    "Undependable":  0.75,
+    "Tires Easily":  0.5,
+}
+
+_REST_RECOVERY_BASE = 5  # per subweek
+
+
+def stamina_league_overview(conn, league_year_id, league_level=None):
+    """League-wide stamina distribution across all players (pitchers + position)."""
+    level_filter = "AND tm.team_level = :level" if league_level else ""
+    params = {"lyid": league_year_id}
+    if league_level:
+        params["level"] = league_level
+
+    # Pitchers
+    pitcher_sql = sa_text(f"""
+        SELECT p.id AS player_id, p.firstName, p.lastName,
+               p.durability, p.pendurance_base,
+               pfs.stamina AS raw_stamina,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               CASE WHEN pfs.player_id IS NOT NULL THEN 1 ELSE 0 END AS has_fatigue_data,
+               tm.team_abbrev, tm.team_level, tm.id AS team_id,
+               COALESCE(ps.games, 0) AS games,
+               COALESCE(ps.games_started, 0) AS games_started,
+               'pitcher' AS player_type
+        FROM player_pitching_stats ps
+        JOIN simbbPlayers p ON p.id = ps.player_id
+        JOIN teams tm ON tm.id = ps.team_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = ps.league_year_id
+        WHERE ps.league_year_id = :lyid
+          AND ps.games > 0
+          {level_filter}
+    """)
+    pitcher_rows = conn.execute(pitcher_sql, params).mappings().all()
+
+    # Position players (batters who are not also pitchers)
+    batter_sql = sa_text(f"""
+        SELECT p.id AS player_id, p.firstName, p.lastName,
+               p.durability, p.pendurance_base,
+               pfs.stamina AS raw_stamina,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               CASE WHEN pfs.player_id IS NOT NULL THEN 1 ELSE 0 END AS has_fatigue_data,
+               tm.team_abbrev, tm.team_level, tm.id AS team_id,
+               COALESCE(bs.games, 0) AS games,
+               0 AS games_started,
+               'position' AS player_type
+        FROM player_batting_stats bs
+        JOIN simbbPlayers p ON p.id = bs.player_id
+        JOIN teams tm ON tm.id = bs.team_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = bs.league_year_id
+        LEFT JOIN player_pitching_stats ps2
+            ON ps2.player_id = p.id AND ps2.league_year_id = bs.league_year_id AND ps2.games > 0
+        WHERE bs.league_year_id = :lyid
+          AND bs.games > 0
+          AND ps2.player_id IS NULL
+          {level_filter}
+    """)
+    batter_rows = conn.execute(batter_sql, params).mappings().all()
+
+    rows = list(pitcher_rows) + list(batter_rows)
+
+    if not rows:
+        empty_dist = [0] * 11
+        empty_thresh = {"below_95": 0, "below_70": 0, "below_40": 0, "at_zero": 0}
+        return {
+            "pitcher_distribution": empty_dist, "position_distribution": list(empty_dist),
+            "team_averages": [],
+            "pitcher_thresholds": dict(empty_thresh),
+            "position_thresholds": dict(empty_thresh),
+            "total_players": 0, "total_pitchers": 0, "total_position": 0,
+            "pitcher_avg_stamina": 0, "position_avg_stamina": 0,
+            "pitchers_with_data": 0, "pitchers_no_data": 0,
+            "position_with_data": 0, "position_no_data": 0,
+        }
+
+    # Separate distribution histograms (0-9, 10-19, ..., 90-100)
+    # All players included; those without fatigue rows use COALESCE(stamina, 100)
+    p_dist = [0] * 11
+    b_dist = [0] * 11
+    p_below_95 = p_below_70 = p_below_40 = p_at_zero = 0
+    b_below_95 = b_below_70 = b_below_40 = b_at_zero = 0
+    p_total_stam = b_total_stam = 0
+    total_pitchers = total_position = 0
+    p_with_data = p_no_data = 0
+    b_with_data = b_no_data = 0
+    team_data = {}
+
+    for r in rows:
+        s = int(r["stamina"])
+        has_data = int(r["has_fatigue_data"]) == 1
+        bucket = min(s // 10, 10)
+        is_pitcher = r["player_type"] == "pitcher"
+
+        if is_pitcher:
+            total_pitchers += 1
+            p_total_stam += s
+            p_dist[bucket] += 1
+            if s < 95: p_below_95 += 1
+            if s < 70: p_below_70 += 1
+            if s < 40: p_below_40 += 1
+            if s == 0: p_at_zero += 1
+            if has_data:
+                p_with_data += 1
+            else:
+                p_no_data += 1
+        else:
+            total_position += 1
+            b_total_stam += s
+            b_dist[bucket] += 1
+            if s < 95: b_below_95 += 1
+            if s < 70: b_below_70 += 1
+            if s < 40: b_below_40 += 1
+            if s == 0: b_at_zero += 1
+            if has_data:
+                b_with_data += 1
+            else:
+                b_no_data += 1
+
+        tid = int(r["team_id"])
+        if tid not in team_data:
+            team_data[tid] = {"team_abbrev": r["team_abbrev"],
+                              "team_level": int(r["team_level"]),
+                              "pitcher_staminas": [],
+                              "position_staminas": [],
+                              "pitcher_no_data": 0,
+                              "position_no_data": 0}
+        if is_pitcher:
+            team_data[tid]["pitcher_staminas"].append(s)
+            if not has_data:
+                team_data[tid]["pitcher_no_data"] += 1
+        else:
+            team_data[tid]["position_staminas"].append(s)
+            if not has_data:
+                team_data[tid]["position_no_data"] += 1
+
+    team_averages = []
+    for tid, td in team_data.items():
+        p_stams = td["pitcher_staminas"]
+        b_stams = td["position_staminas"]
+        team_averages.append({
+            "team_id": tid,
+            "team_abbrev": td["team_abbrev"],
+            "team_level": td["team_level"],
+            "pitcher_count": len(p_stams),
+            "pitcher_tracked": len(p_stams) - td["pitcher_no_data"],
+            "position_count": len(b_stams),
+            "position_tracked": len(b_stams) - td["position_no_data"],
+            "avg_pitcher_stamina": round(sum(p_stams) / len(p_stams), 1) if p_stams else None,
+            "avg_position_stamina": round(sum(b_stams) / len(b_stams), 1) if b_stams else None,
+            "pitcher_below_70": sum(1 for s in p_stams if s < 70),
+            "pitcher_below_40": sum(1 for s in p_stams if s < 40),
+            "position_below_70": sum(1 for s in b_stams if s < 70),
+            "position_below_40": sum(1 for s in b_stams if s < 40),
+        })
+    team_averages.sort(key=lambda t: (t["avg_pitcher_stamina"] or 100))
+
+    return {
+        "pitcher_distribution": p_dist,
+        "position_distribution": b_dist,
+        "team_averages": team_averages,
+        "pitcher_thresholds": {
+            "below_95": p_below_95, "below_70": p_below_70,
+            "below_40": p_below_40, "at_zero": p_at_zero,
+        },
+        "position_thresholds": {
+            "below_95": b_below_95, "below_70": b_below_70,
+            "below_40": b_below_40, "at_zero": b_at_zero,
+        },
+        "total_players": len(rows),
+        "total_pitchers": total_pitchers,
+        "total_position": total_position,
+        "pitchers_with_data": p_with_data,
+        "pitchers_no_data": p_no_data,
+        "position_with_data": b_with_data,
+        "position_no_data": b_no_data,
+        "pitcher_avg_stamina": round(p_total_stam / total_pitchers, 1) if total_pitchers else 0,
+        "position_avg_stamina": round(b_total_stam / total_position, 1) if total_position else 0,
+    }
+
+
+def stamina_team_detail(conn, league_year_id, team_id):
+    """Per-player stamina detail for a single team (pitchers + position)."""
+    # Pitchers
+    pitcher_sql = sa_text("""
+        SELECT p.id AS player_id, p.firstName, p.lastName,
+               p.durability, p.pendurance_base,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               CASE WHEN pfs.player_id IS NOT NULL THEN 1 ELSE 0 END AS has_fatigue_data,
+               pfs.last_updated_at,
+               COALESCE(ps.games, 0) AS games,
+               COALESCE(ps.games_started, 0) AS games_started,
+               COALESCE(ps.innings_pitched_outs, 0) AS ipo,
+               'pitcher' AS player_type
+        FROM player_pitching_stats ps
+        JOIN simbbPlayers p ON p.id = ps.player_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = ps.league_year_id
+        WHERE ps.league_year_id = :lyid
+          AND ps.team_id = :tid
+        ORDER BY ps.games_started DESC, ps.games DESC
+    """)
+    pitcher_rows = conn.execute(pitcher_sql, {"lyid": league_year_id, "tid": team_id}).mappings().all()
+
+    # Position players
+    batter_sql = sa_text("""
+        SELECT p.id AS player_id, p.firstName, p.lastName,
+               p.durability, p.pendurance_base,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               CASE WHEN pfs.player_id IS NOT NULL THEN 1 ELSE 0 END AS has_fatigue_data,
+               pfs.last_updated_at,
+               COALESCE(bs.games, 0) AS games,
+               0 AS games_started,
+               0 AS ipo,
+               'position' AS player_type
+        FROM player_batting_stats bs
+        JOIN simbbPlayers p ON p.id = bs.player_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = bs.league_year_id
+        LEFT JOIN player_pitching_stats ps2
+            ON ps2.player_id = p.id AND ps2.league_year_id = bs.league_year_id AND ps2.games > 0
+        WHERE bs.league_year_id = :lyid
+          AND bs.team_id = :tid
+          AND bs.games > 0
+          AND ps2.player_id IS NULL
+        ORDER BY bs.games DESC
+    """)
+    batter_rows = conn.execute(batter_sql, {"lyid": league_year_id, "tid": team_id}).mappings().all()
+
+    pitchers = []
+    for r in pitcher_rows:
+        stamina = int(r["stamina"])
+        has_data = int(r["has_fatigue_data"]) == 1
+        dur = r["durability"] or "Normal"
+        recovery_per_sw = round(_REST_RECOVERY_BASE * _DURABILITY_RECOVERY_MULT.get(dur, 1.0))
+        if recovery_per_sw < 1:
+            recovery_per_sw = 1
+
+        def _subweeks_to(target, stam=stamina, rec=recovery_per_sw):
+            if stam >= target:
+                return 0
+            gap = target - stam
+            return (gap + rec - 1) // rec
+
+        ipo = int(r["ipo"])
+        pitchers.append({
+            "player_id": int(r["player_id"]),
+            "name": f"{r['firstName']} {r['lastName']}",
+            "stamina": stamina,
+            "has_fatigue_data": has_data,
+            "durability": dur,
+            "pendurance_base": round(float(r["pendurance_base"] or 50), 1),
+            "games": int(r["games"]),
+            "games_started": int(r["games_started"]),
+            "ip": f"{ipo // 3}.{ipo % 3}",
+            "recovery_per_subweek": recovery_per_sw,
+            "subweeks_to_70": _subweeks_to(70) if has_data else None,
+            "subweeks_to_100": _subweeks_to(100) if has_data else None,
+            "last_updated": str(r["last_updated_at"]) if r["last_updated_at"] else None,
+            "player_type": "pitcher",
+        })
+
+    position_players = []
+    for r in batter_rows:
+        stamina = int(r["stamina"])
+        has_data = int(r["has_fatigue_data"]) == 1
+        dur = r["durability"] or "Normal"
+        recovery_per_sw = round(_REST_RECOVERY_BASE * _DURABILITY_RECOVERY_MULT.get(dur, 1.0))
+        if recovery_per_sw < 1:
+            recovery_per_sw = 1
+        games = int(r["games"])
+
+        if has_data:
+            # Estimate drain per game from observed stamina loss + estimated recovery received
+            stamina_deficit = 100 - stamina
+            est_recovery_received = games * recovery_per_sw
+            est_drain_per_game = round((stamina_deficit + est_recovery_received) / games, 1) if games else 0
+        else:
+            est_drain_per_game = None
+
+        def _subweeks_to(target, stam=stamina, rec=recovery_per_sw):
+            if stam >= target:
+                return 0
+            gap = target - stam
+            return (gap + rec - 1) // rec
+
+        position_players.append({
+            "player_id": int(r["player_id"]),
+            "name": f"{r['firstName']} {r['lastName']}",
+            "stamina": stamina,
+            "has_fatigue_data": has_data,
+            "durability": dur,
+            "games": games,
+            "est_drain_per_game": est_drain_per_game,
+            "recovery_per_subweek": recovery_per_sw,
+            "subweeks_to_70": _subweeks_to(70) if has_data else None,
+            "subweeks_to_100": _subweeks_to(100) if has_data else None,
+            "last_updated": str(r["last_updated_at"]) if r["last_updated_at"] else None,
+            "player_type": "position",
+        })
+
+    return {"pitchers": pitchers, "position_players": position_players, "team_id": team_id}
+
+
+def stamina_availability_report(conn, league_year_id, league_level=None):
+    """Per-team player availability at each usage threshold (pitchers + position)."""
+    level_filter = "AND tm.team_level = :level" if league_level else ""
+    params = {"lyid": league_year_id}
+    if league_level:
+        params["level"] = league_level
+
+    # Pitchers
+    pitcher_sql = sa_text(f"""
+        SELECT p.id AS player_id,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               COALESCE(strat.usage_preference, 'normal') AS usage_pref,
+               tm.id AS team_id, tm.team_abbrev, tm.team_level,
+               'pitcher' AS player_type
+        FROM player_pitching_stats ps
+        JOIN simbbPlayers p ON p.id = ps.player_id
+        JOIN teams tm ON tm.id = ps.team_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = ps.league_year_id
+        LEFT JOIN playerStrategies strat
+            ON strat.playerID = p.id
+        WHERE ps.league_year_id = :lyid
+          AND ps.games > 0
+          {level_filter}
+    """)
+    pitcher_rows = conn.execute(pitcher_sql, params).mappings().all()
+
+    # Position players
+    batter_sql = sa_text(f"""
+        SELECT p.id AS player_id,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               COALESCE(strat.usage_preference, 'normal') AS usage_pref,
+               tm.id AS team_id, tm.team_abbrev, tm.team_level,
+               'position' AS player_type
+        FROM player_batting_stats bs
+        JOIN simbbPlayers p ON p.id = bs.player_id
+        JOIN teams tm ON tm.id = bs.team_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = bs.league_year_id
+        LEFT JOIN playerStrategies strat
+            ON strat.playerID = p.id
+        LEFT JOIN player_pitching_stats ps2
+            ON ps2.player_id = p.id AND ps2.league_year_id = bs.league_year_id AND ps2.games > 0
+        WHERE bs.league_year_id = :lyid
+          AND bs.games > 0
+          AND ps2.player_id IS NULL
+          {level_filter}
+    """)
+    batter_rows = conn.execute(batter_sql, params).mappings().all()
+
+    rows = list(pitcher_rows) + list(batter_rows)
+
+    team_data = {}
+
+    for r in rows:
+        tid = int(r["team_id"])
+        is_pitcher = r["player_type"] == "pitcher"
+        if tid not in team_data:
+            team_data[tid] = {
+                "team_id": tid, "team_abbrev": r["team_abbrev"],
+                "team_level": int(r["team_level"]),
+                "total_pitchers": 0, "total_position": 0,
+                "pitcher_avail_95": 0, "pitcher_avail_70": 0, "pitcher_avail_40": 0,
+                "position_avail_95": 0, "position_avail_70": 0, "position_avail_40": 0,
+            }
+        td = team_data[tid]
+        s = int(r["stamina"])
+        prefix = "pitcher" if is_pitcher else "position"
+        if is_pitcher:
+            td["total_pitchers"] += 1
+        else:
+            td["total_position"] += 1
+        if s >= 95:
+            td[f"{prefix}_avail_95"] += 1
+        if s >= 70:
+            td[f"{prefix}_avail_70"] += 1
+        if s >= 40:
+            td[f"{prefix}_avail_40"] += 1
+
+    teams = []
+    for td in team_data.values():
+        if td["pitcher_avail_70"] < 3:
+            danger = "critical"
+        elif td["pitcher_avail_70"] < 5:
+            danger = "warning"
+        else:
+            danger = "ok"
+        # Position player danger
+        if td["position_avail_70"] < 6:
+            pos_danger = "critical"
+        elif td["position_avail_70"] < 9:
+            pos_danger = "warning"
+        else:
+            pos_danger = "ok"
+        td["pitcher_danger"] = danger
+        td["position_danger"] = pos_danger
+        # Overall danger = worst of the two
+        danger_order = {"critical": 0, "warning": 1, "ok": 2}
+        td["danger_level"] = danger if danger_order[danger] < danger_order[pos_danger] else pos_danger
+        teams.append(td)
+
+    teams.sort(key=lambda t: (t["pitcher_avail_70"] + t["position_avail_70"]))
+    return {"teams": teams}
+
+
+def stamina_consumption_analysis(conn, league_year_id, league_level=None):
+    """Per-player workload and stamina consumption analysis (pitchers + position)."""
+    level_filter = "AND tm.team_level = :level" if league_level else ""
+    params = {"lyid": league_year_id}
+    if league_level:
+        params["level"] = league_level
+
+    # Pitchers
+    p_sql = sa_text(f"""
+        SELECT p.id AS player_id, p.firstName, p.lastName,
+               p.durability, p.pendurance_base,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               ps.games, ps.games_started, ps.innings_pitched_outs AS ipo,
+               tm.team_abbrev, tm.team_level
+        FROM player_pitching_stats ps
+        JOIN simbbPlayers p ON p.id = ps.player_id
+        JOIN teams tm ON tm.id = ps.team_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = ps.league_year_id
+        WHERE ps.league_year_id = :lyid
+          AND ps.games > 0
+          {level_filter}
+        ORDER BY ps.games DESC
+    """)
+    p_rows = conn.execute(p_sql, params).mappings().all()
+
+    pitchers = []
+    p_total_games = sum(int(r["games"]) for r in p_rows) if p_rows else 0
+    p_avg_games = p_total_games / len(p_rows) if p_rows else 0
+
+    for r in p_rows:
+        games = int(r["games"])
+        gs = int(r["games_started"])
+        ipo = int(r["ipo"])
+        stamina = int(r["stamina"])
+        pend = float(r["pendurance_base"] or 50)
+        pend_mult = 1.3 - (pend / 100.0) * 0.6
+
+        if gs > 0 and games > gs:
+            avg_ipo_gs = ipo * 0.8 / gs if gs else 0
+            avg_ipo_rp = ipo * 0.2 / (games - gs) if (games - gs) else 0
+            est_drain = int((gs * (30 + avg_ipo_gs) + (games - gs) * (15 + avg_ipo_rp)) * pend_mult)
+        elif gs > 0:
+            avg_ipo = ipo / gs if gs else 0
+            est_drain = int(gs * (30 + avg_ipo) * pend_mult)
+        else:
+            avg_ipo = ipo / games if games else 0
+            est_drain = int(games * (15 + avg_ipo) * pend_mult)
+
+        avg_cost = round(est_drain / games, 1) if games else 0
+        overworked = stamina < 40 and games > p_avg_games
+
+        pitchers.append({
+            "player_id": int(r["player_id"]),
+            "name": f"{r['firstName']} {r['lastName']}",
+            "team_abbrev": r["team_abbrev"],
+            "team_level": int(r["team_level"]),
+            "games": games, "gs": gs,
+            "ip": f"{ipo // 3}.{ipo % 3}",
+            "current_stamina": stamina,
+            "durability": r["durability"] or "Normal",
+            "pendurance_base": round(pend, 1),
+            "est_total_consumed": est_drain,
+            "avg_cost_per_game": avg_cost,
+            "overworked": overworked,
+        })
+
+    pitchers.sort(key=lambda p: p["est_total_consumed"], reverse=True)
+
+    # Position players
+    b_sql = sa_text(f"""
+        SELECT p.id AS player_id, p.firstName, p.lastName,
+               p.durability,
+               pfs.stamina AS raw_stamina,
+               COALESCE(pfs.stamina, 100) AS stamina,
+               CASE WHEN pfs.player_id IS NOT NULL THEN 1 ELSE 0 END AS has_fatigue_data,
+               bs.games,
+               tm.team_abbrev, tm.team_level
+        FROM player_batting_stats bs
+        JOIN simbbPlayers p ON p.id = bs.player_id
+        JOIN teams tm ON tm.id = bs.team_id
+        LEFT JOIN player_fatigue_state pfs
+            ON pfs.player_id = p.id AND pfs.league_year_id = bs.league_year_id
+        LEFT JOIN player_pitching_stats ps2
+            ON ps2.player_id = p.id AND ps2.league_year_id = bs.league_year_id AND ps2.games > 0
+        WHERE bs.league_year_id = :lyid
+          AND bs.games > 0
+          AND ps2.player_id IS NULL
+          {level_filter}
+        ORDER BY bs.games DESC
+    """)
+    b_rows = conn.execute(b_sql, params).mappings().all()
+
+    position_players = []
+    b_total_games = sum(int(r["games"]) for r in b_rows) if b_rows else 0
+    b_avg_games = b_total_games / len(b_rows) if b_rows else 0
+
+    for r in b_rows:
+        games = int(r["games"])
+        stamina = int(r["stamina"])
+        has_data = int(r["has_fatigue_data"]) == 1
+        dur = r["durability"] or "Normal"
+        recovery_per_sw = round(_REST_RECOVERY_BASE * _DURABILITY_RECOVERY_MULT.get(dur, 1.0))
+        if has_data:
+            # Estimate net drain from observed deficit + recovery already received
+            # Each subweek they get recovery, so total recovery received ≈ games * recovery_per_sw
+            # (rough: ~1 game per subweek means they've had ~games subweeks of recovery)
+            stamina_deficit = 100 - stamina
+            est_recovery_received = games * recovery_per_sw
+            est_drain = stamina_deficit + est_recovery_received
+            avg_cost = round(est_drain / games, 1) if games else 0
+        else:
+            est_drain = None
+            avg_cost = None
+        fatigued = has_data and stamina < 70 and games > b_avg_games
+
+        position_players.append({
+            "player_id": int(r["player_id"]),
+            "name": f"{r['firstName']} {r['lastName']}",
+            "team_abbrev": r["team_abbrev"],
+            "team_level": int(r["team_level"]),
+            "games": games,
+            "current_stamina": stamina,
+            "has_fatigue_data": has_data,
+            "durability": dur,
+            "recovery_per_subweek": recovery_per_sw,
+            "est_total_consumed": est_drain,
+            "avg_cost_per_game": avg_cost,
+            "fatigued": fatigued,
+        })
+
+    position_players.sort(key=lambda p: (0 if p["has_fatigue_data"] else 1, p["current_stamina"]))
+
+    return {
+        "pitchers": pitchers,
+        "pitcher_avg_games": round(p_avg_games, 1),
+        "position_players": position_players,
+        "position_avg_games": round(b_avg_games, 1),
+    }
+
+
+def stamina_flow_history(conn, league_year_id, team_id=None):
+    """Reconstruct stamina flow per week from game pitching lines."""
+    team_filter = "AND gpl.team_id = :tid" if team_id else ""
+    params = {"lyid": league_year_id}
+    if team_id:
+        params["tid"] = team_id
+
+    sql = sa_text(f"""
+        SELECT gr.season_week, gr.season_subweek,
+               gpl.player_id, gpl.innings_pitched_outs AS ipo,
+               gpl.games_started AS gs
+        FROM game_pitching_lines gpl
+        JOIN game_results gr ON gr.game_id = gpl.game_id
+        WHERE gpl.league_year_id = :lyid
+          {team_filter}
+        ORDER BY gr.season_week, gr.season_subweek
+    """)
+    rows = conn.execute(sql, params).mappings().all()
+
+    # Get average durability multiplier for recovery estimates
+    dur_sql_filter = "AND gpl.team_id = :tid" if team_id else ""
+    dur_sql = sa_text(f"""
+        SELECT AVG(
+            CASE p.durability
+                WHEN 'Iron Man' THEN 1.5
+                WHEN 'Dependable' THEN 1.25
+                WHEN 'Normal' THEN 1.0
+                WHEN 'Undependable' THEN 0.75
+                WHEN 'Tires Easily' THEN 0.5
+                ELSE 1.0
+            END
+        ) AS avg_dur_mult
+        FROM (
+            SELECT DISTINCT gpl.player_id
+            FROM game_pitching_lines gpl
+            WHERE gpl.league_year_id = :lyid {dur_sql_filter}
+        ) ids
+        JOIN simbbPlayers p ON p.id = ids.player_id
+    """)
+    dur_row = conn.execute(dur_sql, params).mappings().first()
+    avg_dur_mult = float(dur_row["avg_dur_mult"]) if dur_row and dur_row["avg_dur_mult"] else 1.0
+
+    # Group by week; track per-subweek appearances per pitcher
+    week_data = {}
+    for r in rows:
+        wk = int(r["season_week"])
+        if wk not in week_data:
+            week_data[wk] = {"drain": 0, "appearances": 0,
+                             "unique_pitchers": set()}
+        ipo = int(r["ipo"])
+        gs = int(r["gs"])
+        cost = (30 + ipo) if gs > 0 else (15 + ipo)
+        week_data[wk]["drain"] += cost
+        week_data[wk]["appearances"] += 1
+        week_data[wk]["unique_pitchers"].add(int(r["player_id"]))
+
+    if not week_data:
+        return {"weeks": []}
+
+    # Count total unique pitchers across all weeks for recovery estimate
+    all_pitchers = set()
+    for wd in week_data.values():
+        all_pitchers |= wd["unique_pitchers"]
+    total_pitchers = len(all_pitchers) if all_pitchers else 1
+
+    # Recovery per subweek per pitcher (adjusted for avg durability)
+    recovery_per_sw = _REST_RECOVERY_BASE * avg_dur_mult
+
+    weeks = []
+    running_avg = 100.0
+    for wk in sorted(week_data.keys()):
+        wd = week_data[wk]
+        pitched_count = len(wd["unique_pitchers"])
+        resting_count = max(0, total_pitchers - pitched_count)
+        # 4 subweeks per week; each appearance uses 1 subweek (no recovery
+        # that subweek). Resting pitchers get all 4 subweeks of recovery.
+        # Pitched pitchers get (4 - appearances_that_week) subweeks.
+        # Total recovery subweeks = total_pitchers * 4 - appearances
+        total_recovery_subweeks = max(0, total_pitchers * 4 - wd["appearances"])
+        est_recovery = round(total_recovery_subweeks * recovery_per_sw)
+        net = est_recovery - wd["drain"]
+        # Approximate avg stamina change per pitcher
+        avg_change = net / total_pitchers
+        running_avg = max(0, min(100, running_avg + avg_change))
+
+        weeks.append({
+            "week": wk,
+            "total_drain": wd["drain"],
+            "appearances": wd["appearances"],
+            "pitchers_used": pitched_count,
+            "pitchers_resting": resting_count,
+            "est_recovery": est_recovery,
+            "net_change": net,
+            "projected_avg_stamina": round(running_avg, 1),
+        })
+
+    return {"weeks": weeks, "total_pitchers": total_pitchers,
+            "avg_durability_mult": round(avg_dur_mult, 2)}
+
+
+# ---------------------------------------------------------------------------
+# Contact Type Batting Breakdown
+# ---------------------------------------------------------------------------
+
+
+def contact_type_breakdown(
+    conn,
+    league_year_id: int,
+    league_level: int,
+    min_ab: int = 30,
+) -> Dict[str, Any]:
+    """
+    Analyse batting outcomes alongside configured contact odds and distance
+    weights for a given level.  Returns:
+
+    * **config** — the contact_odds and distance_weights currently stored in
+      the DB for this league_level (what the engine uses).
+    * **outcome_summary** — aggregate batting outcome rates (HR%, 2B%, 3B%,
+      1B%, BABIP, K%, BB%, ISO, SLG) for the level.
+    * **tiers** — players bucketed into power tiers (quintiles) with per-tier
+      outcome rates so you can see how attribute distribution interacts with
+      the contact config.
+    * **player_leaders** — top-N players by ISO, barrel-proxy (HR/AB), BABIP
+      for quick spot-checks.
+    """
+
+    # ── 1. Load configured contact odds & distance weights ──────────────
+    odds_sql = sa_text("""
+        SELECT ct.name AS contact_type, co.odds
+        FROM level_contact_odds co
+        JOIN contact_types ct ON ct.id = co.contact_type_id
+        WHERE co.league_level = :level
+        ORDER BY ct.sort_order
+    """)
+    odds_rows = conn.execute(odds_sql, {"level": league_level}).mappings().all()
+    contact_odds = {r["contact_type"]: float(r["odds"]) for r in odds_rows}
+
+    dist_sql = sa_text("""
+        SELECT ct.name AS contact_type, dz.name AS distance_zone, dw.weight
+        FROM level_distance_weights dw
+        JOIN contact_types ct ON ct.id = dw.contact_type_id
+        JOIN distance_zones dz ON dz.id = dw.distance_zone_id
+        WHERE dw.league_level = :level
+        ORDER BY ct.sort_order, dz.sort_order
+    """)
+    dist_rows = conn.execute(dist_sql, {"level": league_level}).mappings().all()
+    distance_weights: Dict[str, Dict[str, float]] = {}
+    for r in dist_rows:
+        ct = r["contact_type"]
+        distance_weights.setdefault(ct, {})[r["distance_zone"]] = float(r["weight"])
+
+    # Normalise contact_odds to percentages
+    total_odds = sum(contact_odds.values()) or 1.0
+    contact_odds_pct = {k: round(v / total_odds * 100, 2) for k, v in contact_odds.items()}
+
+    # ── 1b. Load fielding weights (contact type → outcome distribution) ─
+    fw_sql = sa_text("""
+        SELECT ct.name AS contact_type, fo.name AS outcome, fw.weight
+        FROM level_fielding_weights fw
+        JOIN contact_types ct ON ct.id = fw.contact_type_id
+        JOIN fielding_outcomes fo ON fo.id = fw.fielding_outcome_id
+        WHERE fw.league_level = :level
+        ORDER BY ct.sort_order, fo.sort_order
+    """)
+    fw_rows = conn.execute(fw_sql, {"level": league_level}).mappings().all()
+    fielding_weights: Dict[str, Dict[str, float]] = {}
+    for r in fw_rows:
+        ct = r["contact_type"]
+        fielding_weights.setdefault(ct, {})[r["outcome"]] = float(r["weight"])
+
+    # Compute expected outcome distribution from config:
+    # For each outcome, sum(contact_odds_pct[ct] * fielding_weight_pct[ct][outcome])
+    expected_outcomes: Dict[str, float] = {}
+    if contact_odds_pct and fielding_weights:
+        # Normalise fielding weights per contact type to percentages
+        fw_pct: Dict[str, Dict[str, float]] = {}
+        for ct, outcomes in fielding_weights.items():
+            total_w = sum(outcomes.values()) or 1.0
+            fw_pct[ct] = {o: v / total_w * 100 for o, v in outcomes.items()}
+
+        all_outcomes = set()
+        for fw in fw_pct.values():
+            all_outcomes.update(fw.keys())
+
+        for outcome in sorted(all_outcomes):
+            expected = 0.0
+            for ct, ct_pct in contact_odds_pct.items():
+                expected += (ct_pct / 100.0) * fw_pct.get(ct, {}).get(outcome, 0.0)
+            expected_outcomes[outcome] = round(expected, 2)
+
+    # ── 2. Aggregate batting outcome rates for this level ───────────────
+    agg_sql = sa_text("""
+        SELECT
+            COUNT(DISTINCT bs.player_id) AS n_batters,
+            SUM(bs.at_bats) AS total_ab,
+            SUM(bs.hits) AS total_h,
+            SUM(bs.doubles_hit) AS total_2b,
+            SUM(bs.triples) AS total_3b,
+            SUM(bs.home_runs) AS total_hr,
+            SUM(bs.walks) AS total_bb,
+            SUM(bs.strikeouts) AS total_k,
+            SUM(bs.runs) AS total_r,
+            SUM(bs.stolen_bases) AS total_sb,
+            SUM(bs.caught_stealing) AS total_cs
+        FROM player_batting_stats bs
+        JOIN teams tm ON tm.id = bs.team_id
+        WHERE bs.league_year_id = :lyid
+          AND tm.team_level = :level
+          AND bs.at_bats >= :min_ab
+    """)
+    agg = conn.execute(agg_sql, {
+        "lyid": league_year_id, "level": league_level, "min_ab": min_ab,
+    }).mappings().first()
+
+    ab = float(agg["total_ab"] or 0)
+    h = float(agg["total_h"] or 0)
+    d = float(agg["total_2b"] or 0)
+    t = float(agg["total_3b"] or 0)
+    hr = float(agg["total_hr"] or 0)
+    bb = float(agg["total_bb"] or 0)
+    k = float(agg["total_k"] or 0)
+    singles = h - d - t - hr
+
+    pa = ab + bb
+    outcome_summary = {}
+    if ab > 0 and pa > 0:
+        avg = h / ab
+        slg = (singles + 2 * d + 3 * t + 4 * hr) / ab
+        obp = (h + bb) / pa
+        iso = slg - avg
+        babip = (h - hr) / (ab - k - hr) if (ab - k - hr) > 0 else 0.0
+        outcome_summary = {
+            "n_batters": int(agg["n_batters"] or 0),
+            "total_pa": int(pa),
+            "total_ab": int(ab),
+            "AVG": round(avg, 4),
+            "OBP": round(obp, 4),
+            "SLG": round(slg, 4),
+            "OPS": round(obp + slg, 4),
+            "ISO": round(iso, 4),
+            "BABIP": round(babip, 4),
+            "HR_pct": round(hr / ab * 100, 2),
+            "2B_pct": round(d / ab * 100, 2),
+            "3B_pct": round(t / ab * 100, 2),
+            "1B_pct": round(singles / ab * 100, 2),
+            "K_pct": round(k / pa * 100, 2),
+            "BB_pct": round(bb / pa * 100, 2),
+            "XBH_pct": round((d + t + hr) / ab * 100, 2),
+            "HR_per_AB": round(ab / hr, 1) if hr > 0 else None,
+            "SB_pct": round(
+                float(agg["total_sb"]) / (float(agg["total_sb"]) + float(agg["total_cs"])) * 100, 1
+            ) if (int(agg["total_sb"] or 0) + int(agg["total_cs"] or 0)) > 0 else None,
+        }
+
+    # ── 3. Power-tier breakdown ─────────────────────────────────────────
+    player_sql = sa_text("""
+        SELECT bs.player_id, p.firstName, p.lastName,
+               p.power_base, p.contact_base,
+               bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
+               bs.home_runs, bs.walks, bs.strikeouts
+        FROM player_batting_stats bs
+        JOIN simbbPlayers p ON p.id = bs.player_id
+        JOIN teams tm ON tm.id = bs.team_id
+        WHERE bs.league_year_id = :lyid
+          AND tm.team_level = :level
+          AND bs.at_bats >= :min_ab
+        ORDER BY p.power_base DESC
+    """)
+    players = conn.execute(player_sql, {
+        "lyid": league_year_id, "level": league_level, "min_ab": min_ab,
+    }).mappings().all()
+
+    # Build per-player derived stats
+    player_data = []
+    for row in players:
+        p_ab = float(row["at_bats"])
+        p_h = float(row["hits"])
+        p_2b = float(row["doubles_hit"])
+        p_3b = float(row["triples"])
+        p_hr = float(row["home_runs"])
+        p_bb = float(row["walks"])
+        p_k = float(row["strikeouts"])
+        p_pa = p_ab + p_bb
+        if p_ab == 0 or p_pa == 0:
+            continue
+        p_singles = p_h - p_2b - p_3b - p_hr
+        p_avg = p_h / p_ab
+        p_slg = (p_singles + 2 * p_2b + 3 * p_3b + 4 * p_hr) / p_ab
+        p_iso = p_slg - p_avg
+        p_babip = (p_h - p_hr) / (p_ab - p_k - p_hr) if (p_ab - p_k - p_hr) > 0 else 0.0
+
+        player_data.append({
+            "player_id": int(row["player_id"]),
+            "name": f"{row['firstName']} {row['lastName']}".strip(),
+            "power": float(row["power_base"] or 0),
+            "contact": float(row["contact_base"] or 0),
+            "ab": int(p_ab),
+            "AVG": round(p_avg, 4),
+            "SLG": round(p_slg, 4),
+            "ISO": round(p_iso, 4),
+            "BABIP": round(p_babip, 4),
+            "HR_pct": round(p_hr / p_ab * 100, 2),
+            "2B_pct": round(p_2b / p_ab * 100, 2),
+            "3B_pct": round(p_3b / p_ab * 100, 2),
+            "K_pct": round(p_k / p_pa * 100, 2),
+            "BB_pct": round(p_bb / p_pa * 100, 2),
+            "XBH_pct": round((p_2b + p_3b + p_hr) / p_ab * 100, 2),
+        })
+
+    # Bucket into power quintiles
+    n = len(player_data)
+    tiers = []
+    if n >= 5:
+        tier_size = n // 5
+        tier_labels = ["Bottom 20%", "20-40%", "40-60%", "60-80%", "Top 20%"]
+        # Sort by power ascending for quintile bucketing
+        sorted_players = sorted(player_data, key=lambda p: p["power"])
+        for i, label in enumerate(tier_labels):
+            start = i * tier_size
+            end = start + tier_size if i < 4 else n
+            bucket = sorted_players[start:end]
+            if not bucket:
+                continue
+
+            stats_to_avg = ["AVG", "SLG", "ISO", "BABIP", "HR_pct", "2B_pct",
+                            "3B_pct", "K_pct", "BB_pct", "XBH_pct"]
+            avg_stats = {}
+            for stat in stats_to_avg:
+                vals = [p[stat] for p in bucket]
+                avg_stats[stat] = round(sum(vals) / len(vals), 4)
+
+            power_vals = [p["power"] for p in bucket]
+            contact_vals = [p["contact"] for p in bucket]
+            tiers.append({
+                "label": label,
+                "count": len(bucket),
+                "power_range": [round(min(power_vals), 1), round(max(power_vals), 1)],
+                "avg_power": round(sum(power_vals) / len(power_vals), 1),
+                "avg_contact": round(sum(contact_vals) / len(contact_vals), 1),
+                "stats": avg_stats,
+            })
+
+    # ── 3b. Contact-tier breakdown ────────────────────────────────────
+    contact_tiers = []
+    if n >= 5:
+        tier_size = n // 5
+        tier_labels = ["Bottom 20%", "20-40%", "40-60%", "60-80%", "Top 20%"]
+        sorted_by_contact = sorted(player_data, key=lambda p: p["contact"])
+        for i, label in enumerate(tier_labels):
+            start = i * tier_size
+            end = start + tier_size if i < 4 else n
+            bucket = sorted_by_contact[start:end]
+            if not bucket:
+                continue
+
+            stats_to_avg = ["AVG", "SLG", "ISO", "BABIP", "HR_pct", "2B_pct",
+                            "3B_pct", "K_pct", "BB_pct", "XBH_pct"]
+            avg_stats = {}
+            for stat in stats_to_avg:
+                vals = [p[stat] for p in bucket]
+                avg_stats[stat] = round(sum(vals) / len(vals), 4)
+
+            power_vals = [p["power"] for p in bucket]
+            contact_vals = [p["contact"] for p in bucket]
+            contact_tiers.append({
+                "label": label,
+                "count": len(bucket),
+                "contact_range": [round(min(contact_vals), 1), round(max(contact_vals), 1)],
+                "avg_power": round(sum(power_vals) / len(power_vals), 1),
+                "avg_contact": round(sum(contact_vals) / len(contact_vals), 1),
+                "stats": avg_stats,
+            })
+
+    # ── 4. Player leaders ───────────────────────────────────────────────
+    top_n = 10
+    leaders = {
+        "iso": sorted(player_data, key=lambda p: p["ISO"], reverse=True)[:top_n],
+        "hr_pct": sorted(player_data, key=lambda p: p["HR_pct"], reverse=True)[:top_n],
+        "babip": sorted(player_data, key=lambda p: p["BABIP"], reverse=True)[:top_n],
+        "xbh_pct": sorted(player_data, key=lambda p: p["XBH_pct"], reverse=True)[:top_n],
+        "k_pct_low": sorted(player_data, key=lambda p: p["K_pct"])[:top_n],
+    }
+
+    return {
+        "config": {
+            "contact_odds": contact_odds,
+            "contact_odds_pct": contact_odds_pct,
+            "distance_weights": distance_weights,
+            "fielding_weights": fielding_weights,
+            "expected_outcomes": expected_outcomes,
+        },
+        "outcome_summary": outcome_summary,
+        "tiers": tiers,
+        "contact_tiers": contact_tiers,
+        "leaders": leaders,
+        "n": len(player_data),
+    }

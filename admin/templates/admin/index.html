@@ -133,6 +133,41 @@
       <a href="#" class="nav-item" data-section="analytics-defpos">
         <span class="nav-icon">&#129502;</span> Defensive Positions
       </a>
+      <a href="#" class="nav-item" data-section="analytics-contact">
+        <span class="nav-icon">&#128165;</span> Contact Breakdown
+      </a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Stamina</div>
+      <a href="#" class="nav-item" data-section="stamina-overview">
+        <span class="nav-icon">&#9889;</span> League Overview
+      </a>
+      <a href="#" class="nav-item" data-section="stamina-team">
+        <span class="nav-icon">&#9917;</span> Team Detail
+      </a>
+      <a href="#" class="nav-item" data-section="stamina-availability">
+        <span class="nav-icon">&#128680;</span> Availability
+      </a>
+      <a href="#" class="nav-item" data-section="stamina-consumption">
+        <span class="nav-icon">&#128293;</span> Consumption
+      </a>
+      <a href="#" class="nav-item" data-section="stamina-flow">
+        <span class="nav-icon">&#128200;</span> Stamina Flow
+      </a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Special Events</div>
+      <a href="#" class="nav-item" data-section="playoffs">
+        <span class="nav-icon">&#127942;</span> Playoffs
+      </a>
+      <a href="#" class="nav-item" data-section="allstar">
+        <span class="nav-icon">&#11088;</span> All-Star Game
+      </a>
+      <a href="#" class="nav-item" data-section="wbc">
+        <span class="nav-icon">&#127758;</span> World Baseball Classic
+      </a>
     </div>
 
     <div class="nav-section">
@@ -331,6 +366,20 @@
             <!-- Dynamic: Simulate / Advance / Reset based on state -->
           </div>
           <pre id="sim-action-result" class="result-box" style="margin-top: 12px; display: none"></pre>
+        </div>
+
+        <!-- Quick cache clear for simulation -->
+        <div class="card">
+          <div style="display: flex; align-items: center; justify-content: space-between">
+            <div>
+              <h3 style="margin: 0 0 4px 0">Engine Config Cache</h3>
+              <p class="text-muted" style="margin: 0">Changed contact odds, distance weights, or other config tables? Clear caches so the next sim picks up your changes.</p>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px">
+              <span id="sim-cache-status" class="badge badge-secondary">--</span>
+              <button class="btn btn-warning" id="btn-sim-clear-cache">Clear Caches</button>
+            </div>
+          </div>
         </div>
 
         <!-- Manual Simulate (advanced) -->
@@ -815,10 +864,23 @@
       <section id="section-cache" class="section">
         <div class="card">
           <h3>Cache Manager</h3>
-          <p class="text-muted">Clear in-memory caches after making database changes. This ensures the API returns fresh data.</p>
+          <p class="text-muted">The API caches configuration tables in memory for performance. After editing values in the database (level configs, contact odds, distance weights, catch rates, etc.), you must clear caches for changes to take effect in simulations.</p>
 
-          <div class="alert alert-info">
-            <strong>Cached data includes:</strong> Level configs, catch rates, game constants, injury types, player column categories, and reflected database tables.
+          <div class="alert alert-warning">
+            <strong>Changed config and not seeing results?</strong> If you've modified <code>level_distance_weights</code>, <code>level_contact_odds</code>, <code>level_catch_rates</code>, <code>level_batting_config</code>, <code>level_game_config</code>, or other engine config tables, clear caches below before running your next simulation.
+          </div>
+
+          <div class="grid-2" id="cache-status-grid" style="margin-bottom: 16px">
+            <div class="stat-card">
+              <div class="stat-label">Cache Status</div>
+              <div class="stat-value" id="cache-status-value">Unknown</div>
+              <div class="stat-sub" id="cache-status-sub">Click "Check Status" to inspect</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Last Cleared</div>
+              <div class="stat-value" id="cache-last-cleared">--</div>
+              <div class="stat-sub" id="cache-last-cleared-sub"></div>
+            </div>
           </div>
 
           <div class="button-group">
@@ -826,6 +888,46 @@
           </div>
 
           <pre id="cache-result" class="result-box" style="margin-top: 16px"></pre>
+        </div>
+
+        <div class="card">
+          <h3>What Gets Cached</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Cache</th>
+                <th>DB Tables Affected</th>
+                <th>Impact</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Level Config</td>
+                <td><code>level_contact_odds</code>, <code>level_distance_weights</code>, <code>level_catch_rates</code>, <code>level_batting_config</code>, <code>level_game_config</code></td>
+                <td>Hit outcomes, ball distance, fielding, batting mechanics</td>
+              </tr>
+              <tr>
+                <td>Game Constants</td>
+                <td><code>contact_types</code>, <code>distance_zones</code>, <code>hit_outcome_types</code>, <code>pitch_types</code></td>
+                <td>Reference lookups used by the engine</td>
+              </tr>
+              <tr>
+                <td>Level Rules</td>
+                <td><code>level_rules</code></td>
+                <td>DH rules, roster limits, innings per game</td>
+              </tr>
+              <tr>
+                <td>Core Tables</td>
+                <td>SQLAlchemy table reflection metadata</td>
+                <td>Schema-level cache; clear if columns were added/removed</td>
+              </tr>
+              <tr>
+                <td>Injury Types</td>
+                <td><code>injury_types</code></td>
+                <td>Injury classification and duration ranges</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -1938,6 +2040,153 @@
         </div>
       </section>
 
+      <!-- Analytics: Contact Type Breakdown -->
+      <section id="section-analytics-contact" class="section">
+        <div class="card">
+          <h3>Contact Type Breakdown</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            View configured contact odds and distance weights alongside actual batting outcomes. Use this to tune <code>level_contact_odds</code> and <code>level_distance_weights</code> and verify the engine reflects your changes.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-ct-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-ct-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Min AB: <input type="number" id="an-ct-min-ab" value="30" min="1" style="width: 70px" /></label>
+            <button class="btn btn-primary" id="btn-an-ct-load">Load</button>
+          </div>
+          <div id="an-ct-status" class="text-muted"></div>
+        </div>
+
+        <!-- Config: Contact Odds -->
+        <div class="card" id="an-ct-odds-card" style="display: none;">
+          <h3>Contact Odds Configuration</h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">
+            Raw odds and percentage share for each contact type at this level.
+          </p>
+          <div class="table-container">
+            <table class="data-table" id="an-ct-odds-table">
+              <thead><tr id="an-ct-odds-header"></tr></thead>
+              <tbody id="an-ct-odds-tbody"></tbody>
+            </table>
+          </div>
+          <div style="position: relative; height: 260px; margin-top: 16px;">
+            <canvas id="an-ct-odds-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Config: Distance Weights -->
+        <div class="card" id="an-ct-dist-card" style="display: none;">
+          <h3>Distance Weight Configuration</h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">
+            How each contact type distributes across distance zones.
+          </p>
+          <div class="table-container">
+            <table class="data-table" id="an-ct-dist-table">
+              <thead><tr id="an-ct-dist-header"></tr></thead>
+              <tbody id="an-ct-dist-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Expected vs Actual Outcomes -->
+        <div class="card" id="an-ct-expected-card" style="display: none;">
+          <h3>Expected vs Actual Outcomes</h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">
+            Expected rates computed from <code>contact_odds × fielding_weights</code> config, compared against actual batting outcomes.
+          </p>
+          <div style="position: relative; height: 320px;">
+            <canvas id="an-ct-expected-chart"></canvas>
+          </div>
+          <div class="table-container" style="margin-top: 16px;">
+            <table class="data-table" id="an-ct-expected-table">
+              <thead><tr id="an-ct-expected-header"></tr></thead>
+              <tbody id="an-ct-expected-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Outcome Summary -->
+        <div class="card" id="an-ct-outcome-card" style="display: none;">
+          <h3>Actual Batting Outcomes <span class="text-muted" style="font-size: 13px" id="an-ct-n"></span></h3>
+          <div class="grid-2" id="an-ct-outcome-stats"></div>
+          <div style="position: relative; height: 300px; margin-top: 16px;">
+            <canvas id="an-ct-outcome-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Power Tiers -->
+        <div class="card" id="an-ct-tiers-card" style="display: none;">
+          <h3>Outcomes by Power Tier</h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">
+            Players bucketed into power quintiles — see how contact config interacts with attribute distribution.
+          </p>
+          <div class="table-container">
+            <table class="data-table" id="an-ct-tiers-table">
+              <thead>
+                <tr>
+                  <th>Tier</th><th>Count</th><th>Avg Power</th><th>Avg Contact</th>
+                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>2B%</th><th>3B%</th>
+                  <th>XBH%</th><th>K%</th><th>BB%</th><th>BABIP</th>
+                </tr>
+              </thead>
+              <tbody id="an-ct-tiers-tbody"></tbody>
+            </table>
+          </div>
+          <div style="position: relative; height: 300px; margin-top: 16px;">
+            <canvas id="an-ct-power-tier-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Contact Tiers -->
+        <div class="card" id="an-ct-contact-tiers-card" style="display: none;">
+          <h3>Outcomes by Contact Tier</h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">
+            Players bucketed into contact quintiles.
+          </p>
+          <div class="table-container">
+            <table class="data-table" id="an-ct-contact-tiers-table">
+              <thead>
+                <tr>
+                  <th>Tier</th><th>Count</th><th>Avg Contact</th><th>Avg Power</th>
+                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>2B%</th><th>3B%</th>
+                  <th>XBH%</th><th>K%</th><th>BB%</th><th>BABIP</th>
+                </tr>
+              </thead>
+              <tbody id="an-ct-contact-tiers-tbody"></tbody>
+            </table>
+          </div>
+          <div style="position: relative; height: 300px; margin-top: 16px;">
+            <canvas id="an-ct-contact-tier-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Leaders -->
+        <div class="card" id="an-ct-leaders-card" style="display: none;">
+          <h3>Player Leaders</h3>
+          <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;">
+            <button class="btn btn-secondary an-ct-leader-btn active" data-leader="iso">ISO</button>
+            <button class="btn btn-secondary an-ct-leader-btn" data-leader="hr_pct">HR%</button>
+            <button class="btn btn-secondary an-ct-leader-btn" data-leader="babip">BABIP</button>
+            <button class="btn btn-secondary an-ct-leader-btn" data-leader="xbh_pct">XBH%</button>
+            <button class="btn btn-secondary an-ct-leader-btn" data-leader="k_pct_low">Lowest K%</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table" id="an-ct-leaders-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Player</th><th>Power</th><th>Contact</th><th>AB</th>
+                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>2B%</th>
+                  <th>K%</th><th>BB%</th><th>BABIP</th>
+                </tr>
+              </thead>
+              <tbody id="an-ct-leaders-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- Schedule Generator Section -->
       <section id="section-schedule-gen" class="section">
         <div class="card">
@@ -2228,6 +2477,246 @@
             <button class="btn btn-primary" id="btn-sv-swap-ooc">Swap Opponents</button>
           </div>
           <pre id="sv-swap-result" class="result-box" style="margin-top: 12px; display: none"></pre>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- STAMINA SECTIONS                                             -->
+      <!-- ============================================================ -->
+
+      <!-- Stamina Overview -->
+      <section id="section-stamina-overview" class="section">
+        <div class="card">
+          <h3>Stamina Overview</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="stam-ov-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="stam-ov-level">
+                <option value="">All</option>
+                <option value="1">1 (Low-A)</option>
+                <option value="2">2</option><option value="3">3</option>
+                <option value="4">4</option><option value="5">5</option>
+                <option value="6">6</option><option value="7">7</option>
+                <option value="8">8</option><option value="9">9 (MLB)</option>
+              </select>
+            </div>
+            <button id="btn-stam-ov-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="stam-ov-status" class="status-msg"></div>
+        </div>
+        <div id="stam-ov-summary" style="display:none">
+          <div class="card" style="display:flex;gap:24px;flex-wrap:wrap">
+            <div><strong>Players:</strong> <span id="stam-ov-total">-</span></div>
+            <div><strong>Avg Stamina:</strong> <span id="stam-ov-avg">-</span></div>
+            <div><strong>Below 70:</strong> <span id="stam-ov-b70" style="color:#e67e22">-</span></div>
+            <div><strong>Below 40:</strong> <span id="stam-ov-b40" style="color:#e74c3c">-</span></div>
+            <div><strong>At Zero:</strong> <span id="stam-ov-zero" style="color:#c0392b;font-weight:bold">-</span></div>
+          </div>
+          <div class="card"><canvas id="stam-ov-chart" height="250"></canvas></div>
+          <div class="card"><div id="stam-ov-table"></div></div>
+        </div>
+      </section>
+
+      <!-- Stamina Team Detail -->
+      <section id="section-stamina-team" class="section">
+        <div class="card">
+          <h3>Team Stamina Detail</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="stam-tm-lyid"></select>
+            </div>
+            <div>
+              <label>Team</label>
+              <select id="stam-tm-team"></select>
+            </div>
+            <button id="btn-stam-tm-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="stam-tm-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="stam-tm-results" style="display:none">
+          <div id="stam-tm-table"></div>
+        </div>
+      </section>
+
+      <!-- Stamina Availability -->
+      <section id="section-stamina-availability" class="section">
+        <div class="card">
+          <h3>Pitcher Availability</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="stam-av-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="stam-av-level">
+                <option value="">All</option>
+                <option value="1">1 (Low-A)</option>
+                <option value="2">2</option><option value="3">3</option>
+                <option value="4">4</option><option value="5">5</option>
+                <option value="6">6</option><option value="7">7</option>
+                <option value="8">8</option><option value="9">9 (MLB)</option>
+              </select>
+            </div>
+            <button id="btn-stam-av-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="stam-av-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="stam-av-results" style="display:none">
+          <div id="stam-av-table"></div>
+        </div>
+      </section>
+
+      <!-- Stamina Consumption -->
+      <section id="section-stamina-consumption" class="section">
+        <div class="card">
+          <h3>Stamina Consumption Analysis</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="stam-con-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="stam-con-level">
+                <option value="">All</option>
+                <option value="1">1 (Low-A)</option>
+                <option value="2">2</option><option value="3">3</option>
+                <option value="4">4</option><option value="5">5</option>
+                <option value="6">6</option><option value="7">7</option>
+                <option value="8">8</option><option value="9">9 (MLB)</option>
+              </select>
+            </div>
+            <button id="btn-stam-con-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="stam-con-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="stam-con-results" style="display:none">
+          <div id="stam-con-table"></div>
+        </div>
+      </section>
+
+      <!-- Stamina Flow -->
+      <section id="section-stamina-flow" class="section">
+        <div class="card">
+          <h3>Stamina Flow History</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="stam-fl-lyid"></select>
+            </div>
+            <div>
+              <label>Team (optional)</label>
+              <select id="stam-fl-team"><option value="">All Teams</option></select>
+            </div>
+            <button id="btn-stam-fl-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="stam-fl-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="stam-fl-results" style="display:none">
+          <canvas id="stam-fl-chart" height="300"></canvas>
+          <div id="stam-fl-table" style="margin-top:16px"></div>
+        </div>
+      </section>
+
+      <!-- ==================== Special Events ==================== -->
+
+      <section id="section-playoffs" class="section">
+        <div class="card">
+          <h3>Playoffs</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="po-lyid"></select>
+            </div>
+            <div>
+              <label>League Level</label>
+              <select id="po-level">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">High-A (6)</option>
+                <option value="5">A (5)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <button id="btn-po-generate" class="btn btn-primary">Generate Bracket</button>
+            <button id="btn-po-advance" class="btn btn-secondary">Advance Round</button>
+            <button id="btn-po-refresh" class="btn btn-secondary">Refresh</button>
+          </div>
+          <div id="po-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="po-field-card" style="display:none">
+          <h4>Playoff Field</h4>
+          <div id="po-field"></div>
+        </div>
+        <div class="card" id="po-bracket-card" style="display:none">
+          <h4>Bracket</h4>
+          <div id="po-bracket"></div>
+        </div>
+      </section>
+
+      <section id="section-allstar" class="section">
+        <div class="card">
+          <h3>All-Star Game</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="as-lyid"></select>
+            </div>
+            <button id="btn-as-create" class="btn btn-primary">Create Event</button>
+            <button id="btn-as-refresh" class="btn btn-secondary">Load Rosters</button>
+          </div>
+          <div id="as-status" class="status-msg"></div>
+          <div>
+            <label>Event ID</label>
+            <input id="as-eid" type="number" placeholder="Event ID" style="width:100px" />
+          </div>
+        </div>
+        <div class="card" id="as-rosters-card" style="display:none">
+          <h4>Rosters</h4>
+          <div id="as-rosters"></div>
+        </div>
+      </section>
+
+      <section id="section-wbc" class="section">
+        <div class="card">
+          <h3>World Baseball Classic</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="wbc-lyid"></select>
+            </div>
+            <button id="btn-wbc-countries" class="btn btn-secondary">Check Eligible Countries</button>
+            <button id="btn-wbc-create" class="btn btn-primary">Create Event</button>
+          </div>
+          <div id="wbc-status" class="status-msg"></div>
+          <div style="margin-top:8px">
+            <label>Event ID</label>
+            <input id="wbc-eid" type="number" placeholder="Event ID" style="width:100px" />
+          </div>
+          <div class="filter-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+            <button id="btn-wbc-rosters" class="btn btn-secondary">Generate Rosters</button>
+            <button id="btn-wbc-pool-games" class="btn btn-secondary">Generate Pool Games</button>
+            <button id="btn-wbc-pool-results" class="btn btn-secondary">Process Pool Results</button>
+            <button id="btn-wbc-knockout" class="btn btn-secondary">Generate Knockout</button>
+            <button id="btn-wbc-advance" class="btn btn-secondary">Advance Knockout</button>
+            <button id="btn-wbc-cleanup" class="btn btn-secondary">Cleanup</button>
+            <button id="btn-wbc-refresh" class="btn btn-secondary">Refresh Teams</button>
+          </div>
+        </div>
+        <div class="card" id="wbc-countries-card" style="display:none">
+          <h4>Eligible Countries</h4>
+          <div id="wbc-countries"></div>
+        </div>
+        <div class="card" id="wbc-teams-card" style="display:none">
+          <h4>Teams / Pool Standings</h4>
+          <div id="wbc-teams"></div>
         </div>
       </section>
 

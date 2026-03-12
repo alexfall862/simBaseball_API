@@ -2014,12 +2014,12 @@ def _store_game_results(
             (game_id, season, league_level, season_week, season_subweek,
              home_team_id, away_team_id, home_score, away_score,
              winning_team_id, losing_team_id, winning_org_id, losing_org_id,
-             game_outcome, boxscore_json, play_by_play_json, completed_at)
+             game_outcome, boxscore_json, play_by_play_json, game_type, completed_at)
         VALUES
             (:game_id, :season, :league_level, :season_week, :season_subweek,
              :home_team_id, :away_team_id, :home_score, :away_score,
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
-             :game_outcome, :boxscore_json, :play_by_play_json, NOW())
+             :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
         ON DUPLICATE KEY UPDATE
             home_score         = VALUES(home_score),
             away_score         = VALUES(away_score),
@@ -2030,6 +2030,7 @@ def _store_game_results(
             game_outcome       = VALUES(game_outcome),
             boxscore_json      = VALUES(boxscore_json),
             play_by_play_json  = VALUES(play_by_play_json),
+            game_type          = VALUES(game_type),
             completed_at       = VALUES(completed_at)
     """)
 
@@ -2103,6 +2104,10 @@ def _store_game_results(
             (game_row.get("season_subweek") if isinstance(game_row, dict)
              else game_row["season_subweek"]) or "a"
         )
+        game_type = str(
+            (game_row.get("game_type") if isinstance(game_row, dict)
+             else game_row["game_type"]) or "regular"
+        )
 
         # Serialize boxscore and play-by-play from engine result
         # Check both top-level and nested result dict
@@ -2129,6 +2134,7 @@ def _store_game_results(
                 "game_outcome": game_outcome,
                 "boxscore_json": boxscore_str,
                 "play_by_play_json": pbp_str,
+                "game_type": game_type,
             })
             count += 1
         except Exception:
@@ -2199,12 +2205,12 @@ def _store_game_results_bulk(
             (game_id, season, league_level, season_week, season_subweek,
              home_team_id, away_team_id, home_score, away_score,
              winning_team_id, losing_team_id, winning_org_id, losing_org_id,
-             game_outcome, boxscore_json, play_by_play_json, completed_at)
+             game_outcome, boxscore_json, play_by_play_json, game_type, completed_at)
         VALUES
             (:game_id, :season, :league_level, :season_week, :season_subweek,
              :home_team_id, :away_team_id, :home_score, :away_score,
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
-             :game_outcome, :boxscore_json, :play_by_play_json, NOW())
+             :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
         ON DUPLICATE KEY UPDATE
             home_score         = VALUES(home_score),
             away_score         = VALUES(away_score),
@@ -2215,6 +2221,7 @@ def _store_game_results_bulk(
             game_outcome       = VALUES(game_outcome),
             boxscore_json      = VALUES(boxscore_json),
             play_by_play_json  = VALUES(play_by_play_json),
+            game_type          = VALUES(game_type),
             completed_at       = VALUES(completed_at)
     """)
 
@@ -2267,6 +2274,7 @@ def _store_game_results_bulk(
         league_level = int(game_row.get("league_level") if isinstance(game_row, dict) else game_row["league_level"])
         season_week = int(game_row.get("season_week") if isinstance(game_row, dict) else game_row["season_week"])
         season_subweek = str((game_row.get("season_subweek") if isinstance(game_row, dict) else game_row["season_subweek"]) or "a")
+        game_type = str((game_row.get("game_type") if isinstance(game_row, dict) else game_row["game_type"]) or "regular")
 
         boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
         pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
@@ -2290,6 +2298,7 @@ def _store_game_results_bulk(
             "game_outcome": game_outcome,
             "boxscore_json": boxscore_str,
             "play_by_play_json": pbp_str,
+            "game_type": game_type,
         })
 
     if not all_params:
@@ -2310,62 +2319,92 @@ def _update_player_state_bulk(
     league_year_id: int,
 ) -> Dict[str, int]:
     """
-    Bulk version of _update_player_state_after_subweek.
-    Batches stamina updates; injuries stay individual (need lastrowid).
+    Post-subweek state updates (bulk version).
+    This function handles:
+      1. Apply stamina drain from engine stamina_cost values.
+      2. Stamina recovery for all fatigued players (modified by durability).
+      3. Injury persistence.
     """
     from sqlalchemy import text as sa_text
-    from services.stamina import get_effective_stamina_bulk
 
-    stamina_updates = 0
     injuries_persisted = 0
+    drain_count = 0
 
-    # Collect pitcher workloads
-    pitcher_costs: Dict[int, int] = {}
+    # --- 1. STAMINA DRAIN from engine stamina_cost ---
+    # Collect stamina_cost per player from engine results.
+    # A player in both batters and pitchers has the same cost — use either, not sum.
+    player_costs = {}  # player_id -> stamina_cost
     for result in results:
-        stats = result.get("stats") or {}
-        pitchers = stats.get("pitchers") or {}
-        for pid_str, p_stats in pitchers.items():
+        nested = result.get("result") or {}
+        stats = result.get("stats") or nested.get("stats")
+        if not stats:
+            continue
+        # Pitchers first (typically higher cost)
+        for pid_str, p in (stats.get("pitchers") or {}).items():
+            cost = p.get("stamina_cost")
+            if cost is not None and int(cost) > 0:
+                player_costs[int(pid_str)] = int(cost)
+        # Batters — only add if not already seen (edge case: pitcher who batted)
+        for pid_str, b in (stats.get("batters") or {}).items():
             pid = int(pid_str)
-            ipo = int(p_stats.get("innings_pitched_outs", 0))
-            gs = int(p_stats.get("games_started", 0))
-            if gs > 0:
-                cost = _SP_BASE_STAMINA_COST + (ipo * _SP_PER_OUT_STAMINA_COST)
-            else:
-                cost = _RP_BASE_STAMINA_COST + (ipo * _RP_PER_OUT_STAMINA_COST)
-            pitcher_costs[pid] = pitcher_costs.get(pid, 0) + cost
+            if pid not in player_costs:
+                cost = b.get("stamina_cost")
+                if cost is not None and int(cost) > 0:
+                    player_costs[pid] = int(cost)
 
-    if pitcher_costs:
-        current_stamina = get_effective_stamina_bulk(
-            conn, list(pitcher_costs.keys()), league_year_id
-        )
-
-        stamina_upsert = sa_text("""
+    if player_costs:
+        # Upsert fatigue state: create row if missing (default 100), then subtract cost
+        drain_upsert = sa_text("""
             INSERT INTO player_fatigue_state
                 (player_id, league_year_id, stamina, last_updated_at)
             VALUES
-                (:player_id, :league_year_id, :stamina, NOW())
+                (:player_id, :league_year_id, GREATEST(0, 100 - :cost), NOW())
             ON DUPLICATE KEY UPDATE
-                stamina          = :stamina,
-                last_updated_at  = NOW()
+                stamina = GREATEST(0, stamina - :cost),
+                last_updated_at = NOW()
         """)
-
-        stamina_params = []
-        for pid, cost in pitcher_costs.items():
-            old_stamina = current_stamina.get(pid, 100)
-            new_stamina = max(0, old_stamina - cost)
-            stamina_params.append({
-                "player_id": pid,
-                "league_year_id": league_year_id,
-                "stamina": new_stamina,
-            })
-
+        drain_params = [
+            {"player_id": pid, "league_year_id": league_year_id, "cost": cost}
+            for pid, cost in player_costs.items()
+        ]
         try:
-            conn.execute(stamina_upsert, stamina_params)
-            stamina_updates = len(stamina_params)
-        except Exception:
-            logger.exception(
-                "update_player_state_bulk: stamina upsert failed (%d rows)", len(stamina_params)
+            conn.execute(drain_upsert, drain_params)
+            drain_count = len(drain_params)
+            logger.info(
+                "update_player_state_bulk: applied stamina drain to %d players "
+                "(total cost: %d)", drain_count, sum(player_costs.values())
             )
+        except Exception:
+            logger.exception("update_player_state_bulk: stamina drain failed")
+
+    # --- 2. REST RECOVERY for all fatigued players ---
+    recovery_sql = sa_text("""
+        UPDATE player_fatigue_state pfs
+        JOIN simbbPlayers p ON p.id = pfs.player_id
+        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(:base_recovery *
+            CASE p.durability
+                WHEN 'Iron Man'      THEN 1.5
+                WHEN 'Dependable'    THEN 1.25
+                WHEN 'Normal'        THEN 1.0
+                WHEN 'Undependable'  THEN 0.75
+                WHEN 'Tires Easily'  THEN 0.5
+                ELSE 1.0
+            END)),
+            pfs.last_updated_at = NOW()
+        WHERE pfs.league_year_id = :league_year_id
+          AND pfs.stamina < 100
+    """)
+
+    recovery_count = 0
+    try:
+        rest_result = conn.execute(recovery_sql, {
+            "base_recovery": _REST_RECOVERY_PER_SUBWEEK,
+            "league_year_id": league_year_id,
+        })
+        recovery_count = rest_result.rowcount
+        logger.info("update_player_state_bulk: %d players recovered stamina", recovery_count)
+    except Exception:
+        logger.exception("update_player_state_bulk: rest recovery failed")
 
     # Injuries stay individual (need lastrowid for state update)
     injury_insert = sa_text("""
@@ -2422,18 +2461,24 @@ def _update_player_state_bulk(
                 )
 
     logger.info(
-        "update_player_state_bulk: %d stamina updates, %d injuries persisted",
-        stamina_updates, injuries_persisted,
+        "update_player_state_bulk: %d drained, %d recovered, %d injuries persisted",
+        drain_count, recovery_count, injuries_persisted,
     )
-    return {"stamina_updates": stamina_updates, "injuries_persisted": injuries_persisted}
+    return {"drain_count": drain_count, "recovery_count": recovery_count,
+            "injuries_persisted": injuries_persisted}
 
 
-# Stamina cost constants for pitcher fatigue after a game
-_SP_BASE_STAMINA_COST = 30     # base cost for a starting pitcher appearance
-_SP_PER_OUT_STAMINA_COST = 1   # additional cost per out recorded (SP)
-_RP_BASE_STAMINA_COST = 15     # base cost for a reliever appearance
-_RP_PER_OUT_STAMINA_COST = 1   # additional cost per out recorded (RP)
-_REST_RECOVERY_PER_SUBWEEK = 5 # stamina recovery for pitchers who did NOT pitch
+# Stamina recovery constant — drain is handled entirely by the game engine
+_REST_RECOVERY_PER_SUBWEEK = 5 # stamina recovery per rest subweek (all players)
+
+# Durability tier → recovery multiplier (applied to _REST_RECOVERY_PER_SUBWEEK)
+_DURABILITY_RECOVERY_MULT = {
+    "Iron Man":      1.5,
+    "Dependable":    1.25,
+    "Normal":        1.0,
+    "Undependable":  0.75,
+    "Tires Easily":  0.5,
+}
 
 
 def _update_player_state_after_subweek(
@@ -2442,77 +2487,87 @@ def _update_player_state_after_subweek(
     league_year_id: int,
 ) -> Dict[str, int]:
     """
-    Update player fatigue and injury state after a subweek's games.
-
-    1. Pitcher stamina: decrease based on workload (innings pitched).
-    2. Pitcher rest recovery: pitchers who did NOT pitch recover a small amount.
-    3. Injury persistence: if the engine reports injuries, persist them.
-
-    Args:
-        conn:           Active SQLAlchemy connection (caller manages commit).
-        results:        Engine result dicts with stats.pitchers and optional injuries.
-        league_year_id: Current league year.
-
-    Returns:
-        Dict with counts: {"stamina_updates": N, "injuries_persisted": N}
+    Post-subweek state updates (single-game version).
+    This function handles:
+      1. Apply stamina drain from engine stamina_cost values.
+      2. Stamina recovery for all fatigued players (modified by durability).
+      3. Injury persistence.
     """
     from sqlalchemy import text as sa_text
 
-    stamina_updates = 0
     injuries_persisted = 0
+    drain_count = 0
 
-    # --- 1. Pitcher stamina updates ---
-    # Collect all pitcher workloads from game results
-    pitcher_costs: Dict[int, int] = {}  # player_id → total stamina cost this subweek
-
+    # --- 1. STAMINA DRAIN from engine stamina_cost ---
+    player_costs = {}
     for result in results:
-        stats = result.get("stats") or {}
-        pitchers = stats.get("pitchers") or {}
-
-        for pid_str, p_stats in pitchers.items():
+        nested = result.get("result") or {}
+        stats = result.get("stats") or nested.get("stats")
+        if not stats:
+            continue
+        for pid_str, p in (stats.get("pitchers") or {}).items():
+            cost = p.get("stamina_cost")
+            if cost is not None and int(cost) > 0:
+                player_costs[int(pid_str)] = int(cost)
+        for pid_str, b in (stats.get("batters") or {}).items():
             pid = int(pid_str)
-            ipo = int(p_stats.get("innings_pitched_outs", 0))
-            gs = int(p_stats.get("games_started", 0))
+            if pid not in player_costs:
+                cost = b.get("stamina_cost")
+                if cost is not None and int(cost) > 0:
+                    player_costs[pid] = int(cost)
 
-            if gs > 0:
-                cost = _SP_BASE_STAMINA_COST + (ipo * _SP_PER_OUT_STAMINA_COST)
-            else:
-                cost = _RP_BASE_STAMINA_COST + (ipo * _RP_PER_OUT_STAMINA_COST)
-
-            pitcher_costs[pid] = pitcher_costs.get(pid, 0) + cost
-
-    if pitcher_costs:
-        # Bulk-load current stamina for all pitchers who pitched
-        from services.stamina import get_effective_stamina_bulk
-        current_stamina = get_effective_stamina_bulk(
-            conn, list(pitcher_costs.keys()), league_year_id
-        )
-
-        stamina_upsert = sa_text("""
+    if player_costs:
+        drain_upsert = sa_text("""
             INSERT INTO player_fatigue_state
                 (player_id, league_year_id, stamina, last_updated_at)
             VALUES
-                (:player_id, :league_year_id, :stamina, NOW())
+                (:player_id, :league_year_id, GREATEST(0, 100 - :cost), NOW())
             ON DUPLICATE KEY UPDATE
-                stamina          = :stamina,
-                last_updated_at  = NOW()
+                stamina = GREATEST(0, stamina - :cost),
+                last_updated_at = NOW()
         """)
+        drain_params = [
+            {"player_id": pid, "league_year_id": league_year_id, "cost": cost}
+            for pid, cost in player_costs.items()
+        ]
+        try:
+            conn.execute(drain_upsert, drain_params)
+            drain_count = len(drain_params)
+            logger.info(
+                "update_player_state: applied stamina drain to %d players",
+                drain_count,
+            )
+        except Exception:
+            logger.exception("update_player_state: stamina drain failed")
 
-        for pid, cost in pitcher_costs.items():
-            old_stamina = current_stamina.get(pid, 100)
-            new_stamina = max(0, old_stamina - cost)
+    # --- 2. Rest recovery for all fatigued players ---
+    recovery_sql = sa_text("""
+        UPDATE player_fatigue_state pfs
+        JOIN simbbPlayers p ON p.id = pfs.player_id
+        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(:base_recovery *
+            CASE p.durability
+                WHEN 'Iron Man'      THEN 1.5
+                WHEN 'Dependable'    THEN 1.25
+                WHEN 'Normal'        THEN 1.0
+                WHEN 'Undependable'  THEN 0.75
+                WHEN 'Tires Easily'  THEN 0.5
+                ELSE 1.0
+            END)),
+            pfs.last_updated_at = NOW()
+        WHERE pfs.league_year_id = :league_year_id
+          AND pfs.stamina < 100
+    """)
 
-            try:
-                conn.execute(stamina_upsert, {
-                    "player_id": pid,
-                    "league_year_id": league_year_id,
-                    "stamina": new_stamina,
-                })
-                stamina_updates += 1
-            except Exception:
-                logger.exception(
-                    "update_player_state: stamina update failed for player %d", pid
-                )
+    recovery_count = 0
+    try:
+        rest_result = conn.execute(recovery_sql, {
+            "base_recovery": _REST_RECOVERY_PER_SUBWEEK,
+            "league_year_id": league_year_id,
+        })
+        recovery_count = rest_result.rowcount
+        logger.info("update_player_state: %d players recovered stamina", recovery_count)
+    except Exception:
+        logger.exception("update_player_state: rest recovery failed")
 
     # --- 2. Injury persistence (if engine reports injuries) ---
     injury_insert = sa_text("""
@@ -2549,7 +2604,6 @@ def _update_player_state_after_subweek(
             effects = inj.get("effects") or {}
 
             try:
-                # Insert the injury event
                 ev_result = conn.execute(injury_insert, {
                     "player_id": pid,
                     "injury_type_id": injury_type_id,
@@ -2558,17 +2612,12 @@ def _update_player_state_after_subweek(
                     "weeks_remaining": duration_weeks,
                     "malus_json": json.dumps(effects),
                 })
-
-                # Get the auto-increment ID of the new event
                 event_id = ev_result.lastrowid
-
-                # Update the player's injury state
                 conn.execute(injury_state_upsert, {
                     "player_id": pid,
                     "event_id": event_id,
                     "weeks_remaining": duration_weeks,
                 })
-
                 injuries_persisted += 1
             except Exception:
                 logger.exception(
@@ -2577,10 +2626,11 @@ def _update_player_state_after_subweek(
                 )
 
     logger.info(
-        "update_player_state: %d stamina updates, %d injuries persisted",
-        stamina_updates, injuries_persisted,
+        "update_player_state: %d drained, %d recovered, %d injuries persisted",
+        drain_count, recovery_count, injuries_persisted,
     )
-    return {"stamina_updates": stamina_updates, "injuries_persisted": injuries_persisted}
+    return {"drain_count": drain_count, "recovery_count": recovery_count,
+            "injuries_persisted": injuries_persisted}
 
 
 # -------------------------------------------------------------------
@@ -2825,10 +2875,18 @@ def build_week_payloads(
                         pass
 
                 # Accumulate player stats from engine box scores (bulk)
+                # Build game_type lookup from gamelist rows for this subweek
+                game_type_by_id = {}
+                for g in games:
+                    gid = int(g["id"])
+                    gt = str((g.get("game_type") if isinstance(g, dict) else g["game_type"]) or "regular")
+                    game_type_by_id[gid] = gt
+
                 try:
                     from services.stat_accumulator import accumulate_subweek_stats_bulk
                     stat_counts = accumulate_subweek_stats_bulk(
-                        conn, results, league_year_id
+                        conn, results, league_year_id,
+                        game_type_by_id=game_type_by_id,
                     )
                     conn.commit()
                     logger.info(

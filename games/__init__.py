@@ -421,7 +421,8 @@ def wipe_season():
             deleted["game_results"] = r.rowcount
 
             # 2-4. Per-game line tables (keyed by league_year_id)
-            for tbl_name in ("game_batting_lines", "game_pitching_lines"):
+            for tbl_name in ("game_batting_lines", "game_pitching_lines",
+                             "game_substitutions"):
                 r = conn.execute(sa_text(
                     f"DELETE FROM {tbl_name} WHERE league_year_id = :lyid"
                 ), {"lyid": league_year_id})
@@ -469,6 +470,18 @@ def wipe_season():
             ), {"lyid": league_year_id})
             deleted["player_fatigue_state"] = r.rowcount
 
+            # 8b. Scouting actions (what orgs have unlocked on players)
+            r = conn.execute(sa_text(
+                "DELETE FROM scouting_actions WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["scouting_actions"] = r.rowcount
+
+            # 8c. Scouting budgets (per-org spend tracking)
+            r = conn.execute(sa_text(
+                "DELETE FROM scouting_budgets WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["scouting_budgets"] = r.rowcount
+
             # 9. Reset timestamp
             conn.execute(sa_text(
                 "UPDATE timestamp_state SET "
@@ -480,10 +493,12 @@ def wipe_season():
             # 10. Reclaim disk space from deleted rows
             optimize_tables = [
                 "game_results", "game_batting_lines", "game_pitching_lines",
+                "game_substitutions",
                 "player_batting_stats", "player_pitching_stats",
                 "player_fielding_stats", "player_position_usage_week",
                 "player_injury_events", "player_fatigue_state",
                 "org_ledger_entries",
+                "scouting_actions", "scouting_budgets",
             ]
             for tbl in optimize_tables:
                 conn.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))
@@ -1081,6 +1096,19 @@ def get_game_boxscore(game_id: int):
                 ORDER BY gpl.team_id, gpl.id
             """), {"gid": game_id}).mappings().all()
 
+            # 4. Substitutions
+            sub_rows = conn.execute(sa_text("""
+                SELECT gs.inning, gs.half, gs.sub_type,
+                       gs.player_in_id, pin.firstName AS in_first, pin.lastName AS in_last,
+                       gs.player_out_id, pout.firstName AS out_first, pout.lastName AS out_last,
+                       gs.new_position
+                FROM game_substitutions gs
+                JOIN simbbPlayers pin ON pin.id = gs.player_in_id
+                JOIN simbbPlayers pout ON pout.id = gs.player_out_id
+                WHERE gs.game_id = :gid
+                ORDER BY gs.inning, gs.id
+            """), {"gid": game_id}).mappings().all()
+
         home_tid = int(gr["home_team_id"])
         away_tid = int(gr["away_team_id"])
 
@@ -1164,6 +1192,20 @@ def get_game_boxscore(game_id: int):
             linescore["away"]["H"] = away_hits
             linescore["away"]["E"] = away_errors
 
+        substitutions = [
+            {
+                "inning": int(s["inning"]),
+                "half": s["half"],
+                "type": s["sub_type"],
+                "player_in": {"id": int(s["player_in_id"]),
+                               "name": f"{s['in_first']} {s['in_last']}"},
+                "player_out": {"id": int(s["player_out_id"]),
+                                "name": f"{s['out_first']} {s['out_last']}"},
+                "new_position": s["new_position"],
+            }
+            for s in sub_rows
+        ]
+
         result = {
             "game_id": game_id,
             "home_team": {"id": home_tid, "abbrev": gr["home_abbrev"],
@@ -1179,6 +1221,7 @@ def get_game_boxscore(game_id: int):
                 "home": [_format_pitcher(r) for r in pit_rows if int(r["team_id"]) == home_tid],
                 "away": [_format_pitcher(r) for r in pit_rows if int(r["team_id"]) == away_tid],
             },
+            "substitutions": substitutions,
             "game_outcome": gr["game_outcome"],
             "season_week": int(gr["season_week"]),
             "season_subweek": gr["season_subweek"],

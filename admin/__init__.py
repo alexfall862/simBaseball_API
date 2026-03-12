@@ -1135,6 +1135,26 @@ def admin_analytics_league_years():
         return jsonify(ok=False, error="analytics_error", message=str(e)), 500
 
 
+@admin_bp.get("/analytics/teams")
+def admin_analytics_teams():
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        from db import get_engine
+        from sqlalchemy import text as sa_text
+        engine = get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(sa_text(
+                "SELECT id, team_abbrev, team_level FROM teams ORDER BY team_level, team_abbrev"
+            )).mappings().all()
+        teams = [{"id": int(r["id"]), "team_abbrev": r["team_abbrev"], "team_level": int(r["team_level"])} for r in rows]
+        return jsonify(ok=True, teams=teams)
+    except Exception as e:
+        logging.exception("analytics_teams_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
 @admin_bp.get("/analytics/batting-correlations")
 def admin_batting_correlations():
     guard = _require_admin()
@@ -1509,3 +1529,136 @@ def admin_db_storage():
     except Exception as e:
         logging.exception("db_storage_failed")
         return jsonify(ok=False, error="db_storage_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Stamina Reports
+# ---------------------------------------------------------------------------
+
+@admin_bp.get("/analytics/stamina-overview")
+def admin_stamina_overview():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(ok=False, error="missing_params"), 400
+    league_level = request.args.get("league_level", type=int)
+    try:
+        from db import get_engine
+        from services.analytics import stamina_league_overview
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = stamina_league_overview(conn, league_year_id, league_level)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("stamina_overview_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/stamina-team")
+def admin_stamina_team():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    team_id = request.args.get("team_id", type=int)
+    if not league_year_id or not team_id:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and team_id are required"), 400
+    try:
+        from db import get_engine
+        from services.analytics import stamina_team_detail
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = stamina_team_detail(conn, league_year_id, team_id)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("stamina_team_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/stamina-availability")
+def admin_stamina_availability():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(ok=False, error="missing_params"), 400
+    league_level = request.args.get("league_level", type=int)
+    try:
+        from db import get_engine
+        from services.analytics import stamina_availability_report
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = stamina_availability_report(conn, league_year_id, league_level)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("stamina_availability_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/stamina-consumption")
+def admin_stamina_consumption():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(ok=False, error="missing_params"), 400
+    league_level = request.args.get("league_level", type=int)
+    try:
+        from db import get_engine
+        from services.analytics import stamina_consumption_analysis
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = stamina_consumption_analysis(conn, league_year_id, league_level)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("stamina_consumption_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/stamina-flow")
+def admin_stamina_flow():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(ok=False, error="missing_params"), 400
+    team_id = request.args.get("team_id", type=int)
+    try:
+        from db import get_engine
+        from services.analytics import stamina_flow_history
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = stamina_flow_history(conn, league_year_id, team_id)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("stamina_flow_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/contact-breakdown")
+def admin_contact_breakdown():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    min_ab = request.args.get("min_ab", 30, type=int)
+    try:
+        from db import get_engine
+        from services.analytics import contact_type_breakdown
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = contact_type_breakdown(conn, league_year_id, league_level, min_ab)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("contact_breakdown_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500

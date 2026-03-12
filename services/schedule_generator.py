@@ -1957,6 +1957,7 @@ def add_series(
     away_team_id: int,
     week: int,
     games: int = 3,
+    game_type: str = "regular",
 ) -> Dict[str, Any]:
     """
     Insert a single series into the schedule. Useful for playoffs,
@@ -1980,6 +1981,7 @@ def add_series(
                 "league_level": league_level,
                 "season": season_id,
                 "random_seed": None,
+                "game_type": game_type,
             })
 
         gamelist = tables["gamelist"]

@@ -140,6 +140,7 @@
 
     // Cache
     document.getElementById('btn-clear-cache').addEventListener('click', clearCaches);
+    document.getElementById('btn-sim-clear-cache').addEventListener('click', clearCachesFromSim);
 
     // SQL
     document.getElementById('btn-run-sql').addEventListener('click', runSql);
@@ -262,6 +263,21 @@
     document.getElementById('btn-an-arch-load').addEventListener('click', loadArchetypes);
     document.getElementById('btn-an-pt-load').addEventListener('click', loadPitchTypes);
     document.getElementById('btn-an-dp-load').addEventListener('click', loadDefensivePositions);
+    document.getElementById('btn-an-ct-load').addEventListener('click', loadContactBreakdown);
+    document.querySelectorAll('.an-ct-leader-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.an-ct-leader-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderContactLeaders(btn.dataset.leader);
+      });
+    });
+
+    // Stamina
+    document.getElementById('btn-stam-ov-load').addEventListener('click', loadStaminaOverview);
+    document.getElementById('btn-stam-tm-load').addEventListener('click', loadStaminaTeamDetail);
+    document.getElementById('btn-stam-av-load').addEventListener('click', loadStaminaAvailability);
+    document.getElementById('btn-stam-con-load').addEventListener('click', loadStaminaConsumption);
+    document.getElementById('btn-stam-fl-load').addEventListener('click', loadStaminaFlow);
 
     // DB Storage
     document.getElementById('btn-db-storage-load').addEventListener('click', loadDbStorage);
@@ -367,6 +383,11 @@
       'analytics-archetypes': 'Archetype Validation',
       'analytics-pitchtypes': 'Pitch Type Analysis',
       'analytics-defpos': 'Defensive Positions',
+      'stamina-overview': 'Stamina Overview',
+      'stamina-team': 'Team Stamina Detail',
+      'stamina-availability': 'Pitcher Availability',
+      'stamina-consumption': 'Consumption Analysis',
+      'stamina-flow': 'Stamina Flow History',
       'db-storage': 'DB Storage',
     };
     elements.pageTitle.textContent = titles[section] || section;
@@ -438,7 +459,24 @@
       case 'analytics-archetypes':
       case 'analytics-pitchtypes':
       case 'analytics-defpos':
+      case 'analytics-contact':
         loadAnalyticsLeagueYears(section);
+        break;
+      case 'stamina-overview':
+      case 'stamina-team':
+      case 'stamina-availability':
+      case 'stamina-consumption':
+      case 'stamina-flow':
+        loadStaminaLeagueYears(section);
+        break;
+      case 'playoffs':
+        loadSpecialEventLeagueYears('po-lyid');
+        break;
+      case 'allstar':
+        loadSpecialEventLeagueYears('as-lyid');
+        break;
+      case 'wbc':
+        loadSpecialEventLeagueYears('wbc-lyid');
         break;
     }
 
@@ -1551,11 +1589,10 @@
   }
 
   // Cache
-  function clearCaches() {
-    const resultBox = document.getElementById('cache-result');
-    resultBox.textContent = 'Clearing caches...';
+  let lastCacheCleared = null;
 
-    fetch(`${ADMIN_BASE}/clear-caches`, {
+  function clearCachesCore() {
+    return fetch(`${ADMIN_BASE}/clear-caches`, {
       method: 'POST',
       credentials: 'include',
     })
@@ -1566,10 +1603,79 @@
         return r.json();
       })
       .then(data => {
+        if (data.ok) {
+          lastCacheCleared = new Date();
+          updateCacheStatusDisplay(data.cleared);
+        }
+        return data;
+      });
+  }
+
+  function updateCacheStatusDisplay(cleared) {
+    // Update Cache Manager page
+    const statusVal = document.getElementById('cache-status-value');
+    const statusSub = document.getElementById('cache-status-sub');
+    const lastVal = document.getElementById('cache-last-cleared');
+    const lastSub = document.getElementById('cache-last-cleared-sub');
+
+    if (statusVal) {
+      const hadData = cleared && Object.values(cleared).some(v => v === true);
+      statusVal.textContent = hadData ? 'Cleared' : 'Already Empty';
+      statusSub.textContent = cleared
+        ? Object.entries(cleared).map(([k, v]) => `${k}: ${v ? 'cleared' : 'empty'}`).join(', ')
+        : '';
+    }
+    if (lastVal && lastCacheCleared) {
+      lastVal.textContent = lastCacheCleared.toLocaleTimeString();
+      lastSub.textContent = lastCacheCleared.toLocaleDateString();
+    }
+
+    // Update sim page badge
+    const simBadge = document.getElementById('sim-cache-status');
+    if (simBadge) {
+      simBadge.textContent = 'Caches Clear';
+      simBadge.className = 'badge badge-success';
+    }
+  }
+
+  function clearCaches() {
+    const resultBox = document.getElementById('cache-result');
+    resultBox.textContent = 'Clearing caches...';
+
+    clearCachesCore()
+      .then(data => {
         resultBox.textContent = JSON.stringify(data, null, 2);
       })
       .catch(err => {
         resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  function clearCachesFromSim() {
+    const btn = document.getElementById('btn-sim-clear-cache');
+    const badge = document.getElementById('sim-cache-status');
+    btn.disabled = true;
+    btn.textContent = 'Clearing...';
+    badge.textContent = 'Clearing...';
+    badge.className = 'badge badge-warning';
+
+    clearCachesCore()
+      .then(data => {
+        btn.disabled = false;
+        btn.textContent = 'Clear Caches';
+        if (data.ok) {
+          badge.textContent = 'Caches Clear';
+          badge.className = 'badge badge-success';
+        } else {
+          badge.textContent = 'Error';
+          badge.className = 'badge badge-danger';
+        }
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = 'Clear Caches';
+        badge.textContent = 'Error';
+        badge.className = 'badge badge-danger';
       });
   }
 
@@ -4221,6 +4327,7 @@
       'analytics-archetypes': 'an-arch',
       'analytics-pitchtypes': 'an-pt',
       'analytics-defpos': 'an-dp',
+      'analytics-contact': 'an-ct',
     };
     const prefix = prefixMap[section];
     if (!prefix) return;
@@ -5147,6 +5254,348 @@
       .catch(err => { status.textContent = 'Error: ' + err.message; });
   }
 
+  // --- Contact Type Breakdown ---
+
+  let _contactData = null;
+  let contactOddsChart = null;
+  let contactOutcomeChart = null;
+  let contactExpectedChart = null;
+  let contactPowerTierChart = null;
+  let contactContactTierChart = null;
+
+  function loadContactBreakdown() {
+    const lyid = document.getElementById('an-ct-lyid').value;
+    const level = document.getElementById('an-ct-level').value;
+    const minAb = document.getElementById('an-ct-min-ab').value;
+    const status = document.getElementById('an-ct-status');
+    status.textContent = 'Loading...';
+
+    ['an-ct-odds-card', 'an-ct-dist-card', 'an-ct-expected-card', 'an-ct-outcome-card', 'an-ct-tiers-card', 'an-ct-contact-tiers-card', 'an-ct-leaders-card']
+      .forEach(id => document.getElementById(id).style.display = 'none');
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, min_ab: minAb });
+    fetch(`${ADMIN_BASE}/analytics/contact-breakdown?${params}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = 'Error: ' + (data.error || data.message); return; }
+        status.textContent = `${data.n} qualifying batters`;
+        _contactData = data;
+
+        renderContactOdds(data.config);
+        renderDistanceWeights(data.config);
+        renderExpectedVsActual(data.config, data.outcome_summary);
+        renderOutcomeSummary(data.outcome_summary, data.n);
+        renderPowerTiers(data.tiers);
+        renderContactTiers(data.contact_tiers);
+        renderContactLeaders('iso');
+
+        ['an-ct-odds-card', 'an-ct-dist-card', 'an-ct-expected-card', 'an-ct-outcome-card', 'an-ct-tiers-card', 'an-ct-contact-tiers-card', 'an-ct-leaders-card']
+          .forEach(id => document.getElementById(id).style.display = '');
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function renderContactOdds(config) {
+    const types = Object.keys(config.contact_odds);
+    const odds = config.contact_odds;
+    const pcts = config.contact_odds_pct;
+
+    // Table
+    const header = document.getElementById('an-ct-odds-header');
+    header.innerHTML = '<th>Metric</th>' + types.map(t => `<th>${t}</th>`).join('');
+    const tbody = document.getElementById('an-ct-odds-tbody');
+    tbody.innerHTML = `
+      <tr><td>Raw Odds</td>${types.map(t => `<td>${odds[t]}</td>`).join('')}</tr>
+      <tr><td>Share %</td>${types.map(t => `<td>${pcts[t]}%</td>`).join('')}</tr>
+    `;
+
+    // Chart
+    const ctx = document.getElementById('an-ct-odds-chart').getContext('2d');
+    if (contactOddsChart) contactOddsChart.destroy();
+    const colors = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280'];
+    contactOddsChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: types,
+        datasets: [{
+          label: 'Contact Odds Share %',
+          data: types.map(t => pcts[t]),
+          backgroundColor: types.map((_, i) => colors[i % colors.length] + '88'),
+          borderColor: types.map((_, i) => colors[i % colors.length]),
+          borderWidth: 1,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { beginAtZero: true, title: { display: true, text: '% of contacts', color: '#999' },
+               ticks: { color: '#999' }, grid: { color: '#333' } },
+          x: { ticks: { color: '#999' }, grid: { color: '#333' } }
+        }
+      }
+    });
+  }
+
+  function renderDistanceWeights(config) {
+    const dw = config.distance_weights;
+    const contactTypes = Object.keys(dw);
+    if (!contactTypes.length) return;
+
+    const zones = [...new Set(contactTypes.flatMap(ct => Object.keys(dw[ct])))];
+    const header = document.getElementById('an-ct-dist-header');
+    header.innerHTML = '<th>Contact Type</th>' + zones.map(z => `<th>${z}</th>`).join('');
+
+    const tbody = document.getElementById('an-ct-dist-tbody');
+    tbody.innerHTML = contactTypes.map(ct => {
+      const cells = zones.map(z => {
+        const val = dw[ct][z] || 0;
+        const intensity = Math.min(val, 1);
+        const bg = `rgba(59, 130, 246, ${intensity * 0.5})`;
+        return `<td style="background:${bg}">${val}</td>`;
+      }).join('');
+      return `<tr><td style="font-weight:600">${ct}</td>${cells}</tr>`;
+    }).join('');
+  }
+
+  function renderExpectedVsActual(config, os) {
+    const expected = config.expected_outcomes || {};
+    if (!Object.keys(expected).length || !os.total_ab) return;
+
+    // Map fielding outcome names to actual stat fields
+    const outcomeMap = [
+      { key: 'single',  label: '1B%',  actualKey: '1B_pct' },
+      { key: 'double',  label: '2B%',  actualKey: '2B_pct' },
+      { key: 'triple',  label: '3B%',  actualKey: '3B_pct' },
+      { key: 'homerun', label: 'HR%',  actualKey: 'HR_pct' },
+    ];
+    // Filter to outcomes that exist in the config
+    const items = outcomeMap.filter(o => expected[o.key] !== undefined);
+
+    const labels = items.map(o => o.label);
+    const expectedVals = items.map(o => expected[o.key]);
+    const actualVals = items.map(o => os[o.actualKey] || 0);
+
+    // Table
+    const header = document.getElementById('an-ct-expected-header');
+    header.innerHTML = '<th>Metric</th>' + labels.map(l => `<th>${l}</th>`).join('');
+    const tbody = document.getElementById('an-ct-expected-tbody');
+    tbody.innerHTML = `
+      <tr><td style="font-weight:600">Expected (config)</td>${expectedVals.map(v => `<td>${v.toFixed(2)}%</td>`).join('')}</tr>
+      <tr><td style="font-weight:600">Actual</td>${actualVals.map(v => `<td>${v.toFixed(2)}%</td>`).join('')}</tr>
+      <tr><td style="font-weight:600">Delta</td>${items.map((o, i) => {
+        const d = actualVals[i] - expectedVals[i];
+        const color = d > 0 ? '#10b981' : d < 0 ? '#ef4444' : '#999';
+        return `<td style="color:${color}">${d > 0 ? '+' : ''}${d.toFixed(2)}%</td>`;
+      }).join('')}</tr>
+    `;
+
+    // Grouped bar chart
+    const ctx = document.getElementById('an-ct-expected-chart').getContext('2d');
+    if (contactExpectedChart) contactExpectedChart.destroy();
+    contactExpectedChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: 'Expected (config)',
+            data: expectedVals,
+            backgroundColor: 'rgba(59, 130, 246, 0.5)',
+            borderColor: '#3b82f6',
+            borderWidth: 1,
+          },
+          {
+            label: 'Actual',
+            data: actualVals,
+            backgroundColor: 'rgba(16, 185, 129, 0.5)',
+            borderColor: '#10b981',
+            borderWidth: 1,
+          }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#ccc' } } },
+        scales: {
+          y: { beginAtZero: true, title: { display: true, text: '% of AB', color: '#999' },
+               ticks: { color: '#999' }, grid: { color: '#333' } },
+          x: { ticks: { color: '#999' }, grid: { color: '#333' } }
+        }
+      }
+    });
+  }
+
+  function renderOutcomeSummary(os, n) {
+    document.getElementById('an-ct-n').textContent = `(n=${n}, ${os.total_pa?.toLocaleString() || 0} PA)`;
+
+    const statsDiv = document.getElementById('an-ct-outcome-stats');
+    const statCards = [
+      ['AVG', os.AVG?.toFixed(3)], ['OBP', os.OBP?.toFixed(3)],
+      ['SLG', os.SLG?.toFixed(3)], ['OPS', os.OPS?.toFixed(3)],
+      ['ISO', os.ISO?.toFixed(3)], ['BABIP', os.BABIP?.toFixed(3)],
+      ['K%', os.K_pct?.toFixed(1) + '%'], ['BB%', os.BB_pct?.toFixed(1) + '%'],
+    ];
+    statsDiv.innerHTML = statCards.map(([label, val]) =>
+      `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${val || '--'}</div></div>`
+    ).join('');
+
+    // Outcome distribution chart
+    const ctx = document.getElementById('an-ct-outcome-chart').getContext('2d');
+    if (contactOutcomeChart) contactOutcomeChart.destroy();
+
+    const labels = ['1B%', '2B%', '3B%', 'HR%', 'K%', 'BB%'];
+    const values = [os['1B_pct'], os['2B_pct'], os['3B_pct'], os.HR_pct, os.K_pct, os.BB_pct];
+    const barColors = ['#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#f59e0b', '#06b6d4'];
+
+    contactOutcomeChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Rate %',
+          data: values,
+          backgroundColor: barColors.map(c => c + '88'),
+          borderColor: barColors,
+          borderWidth: 1,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { beginAtZero: true, title: { display: true, text: '% of PA/AB', color: '#999' },
+               ticks: { color: '#999' }, grid: { color: '#333' } },
+          x: { ticks: { color: '#999' }, grid: { color: '#333' } }
+        }
+      }
+    });
+  }
+
+  function _renderTierChart(canvasId, tiers, labelKey, chartRef) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    if (chartRef) chartRef.destroy();
+    const labels = tiers.map(t => t.label);
+    const datasets = [
+      { label: 'AVG',   key: 'AVG',    color: '#10b981', yAxis: 'y1' },
+      { label: 'ISO',   key: 'ISO',    color: '#ef4444', yAxis: 'y1' },
+      { label: 'BABIP', key: 'BABIP',  color: '#8b5cf6', yAxis: 'y1' },
+      { label: 'HR%',   key: 'HR_pct', color: '#f59e0b', yAxis: 'y' },
+      { label: 'K%',    key: 'K_pct',  color: '#6b7280', yAxis: 'y' },
+      { label: 'BB%',   key: 'BB_pct', color: '#06b6d4', yAxis: 'y' },
+    ];
+    return new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: datasets.map(ds => ({
+          label: ds.label,
+          data: tiers.map(t => t.stats[ds.key]),
+          borderColor: ds.color,
+          backgroundColor: ds.color + '33',
+          fill: false,
+          tension: 0.3,
+          pointRadius: 4,
+          yAxisID: ds.yAxis,
+        }))
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#ccc' } } },
+        scales: {
+          y: {
+            position: 'left', beginAtZero: true,
+            title: { display: true, text: 'Rate %', color: '#999' },
+            ticks: { color: '#999' }, grid: { color: '#333' },
+          },
+          y1: {
+            position: 'right', beginAtZero: true,
+            title: { display: true, text: 'Slash', color: '#999' },
+            ticks: { color: '#999' }, grid: { drawOnChartArea: false },
+          },
+          x: { ticks: { color: '#999' }, grid: { color: '#333' } }
+        }
+      }
+    });
+  }
+
+  function renderPowerTiers(tiers) {
+    const tbody = document.getElementById('an-ct-tiers-tbody');
+    if (!tiers.length) {
+      tbody.innerHTML = '<tr><td colspan="14" class="text-center text-muted">Not enough players for tier analysis</td></tr>';
+      return;
+    }
+    tbody.innerHTML = tiers.map(t => {
+      const s = t.stats;
+      return `<tr>
+        <td style="font-weight:600">${t.label}</td>
+        <td>${t.count}</td>
+        <td>${t.avg_power}</td>
+        <td>${t.avg_contact}</td>
+        <td>${s.AVG?.toFixed(3) || '--'}</td>
+        <td>${s.SLG?.toFixed(3) || '--'}</td>
+        <td>${s.ISO?.toFixed(3) || '--'}</td>
+        <td>${s.HR_pct?.toFixed(1) || '--'}%</td>
+        <td>${s['2B_pct']?.toFixed(1) || '--'}%</td>
+        <td>${s['3B_pct']?.toFixed(1) || '--'}%</td>
+        <td>${s.XBH_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.K_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.BB_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.BABIP?.toFixed(3) || '--'}</td>
+      </tr>`;
+    }).join('');
+    contactPowerTierChart = _renderTierChart('an-ct-power-tier-chart', tiers, 'power', contactPowerTierChart);
+  }
+
+  function renderContactTiers(tiers) {
+    const tbody = document.getElementById('an-ct-contact-tiers-tbody');
+    if (!tiers || !tiers.length) {
+      tbody.innerHTML = '<tr><td colspan="14" class="text-center text-muted">Not enough players for tier analysis</td></tr>';
+      return;
+    }
+    tbody.innerHTML = tiers.map(t => {
+      const s = t.stats;
+      return `<tr>
+        <td style="font-weight:600">${t.label}</td>
+        <td>${t.count}</td>
+        <td>${t.avg_contact}</td>
+        <td>${t.avg_power}</td>
+        <td>${s.AVG?.toFixed(3) || '--'}</td>
+        <td>${s.SLG?.toFixed(3) || '--'}</td>
+        <td>${s.ISO?.toFixed(3) || '--'}</td>
+        <td>${s.HR_pct?.toFixed(1) || '--'}%</td>
+        <td>${s['2B_pct']?.toFixed(1) || '--'}%</td>
+        <td>${s['3B_pct']?.toFixed(1) || '--'}%</td>
+        <td>${s.XBH_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.K_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.BB_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.BABIP?.toFixed(3) || '--'}</td>
+      </tr>`;
+    }).join('');
+    contactContactTierChart = _renderTierChart('an-ct-contact-tier-chart', tiers, 'contact', contactContactTierChart);
+  }
+
+  function renderContactLeaders(category) {
+    if (!_contactData) return;
+    const players = _contactData.leaders[category] || [];
+    const tbody = document.getElementById('an-ct-leaders-tbody');
+    tbody.innerHTML = players.map((p, i) => `<tr>
+      <td>${i + 1}</td>
+      <td>${p.name}</td>
+      <td>${p.power}</td>
+      <td>${p.contact}</td>
+      <td>${p.ab}</td>
+      <td>${p.AVG?.toFixed(3)}</td>
+      <td>${p.SLG?.toFixed(3)}</td>
+      <td>${p.ISO?.toFixed(3)}</td>
+      <td>${p.HR_pct?.toFixed(1)}%</td>
+      <td>${p['2B_pct']?.toFixed(1)}%</td>
+      <td>${p.K_pct?.toFixed(1)}%</td>
+      <td>${p.BB_pct?.toFixed(1)}%</td>
+      <td>${p.BABIP?.toFixed(3)}</td>
+    </tr>`).join('');
+  }
+
   // --- DB Storage ---
 
   function loadDbStorage() {
@@ -5194,7 +5643,740 @@
       .catch(err => { status.textContent = 'Error: ' + err.message; });
   }
 
+  // ---------------------------------------------------------------------------
+  // Stamina Reports
+  // ---------------------------------------------------------------------------
+
+  let staminaOverviewChart = null;
+  let staminaFlowChart = null;
+
+  function staminaColor(val) {
+    if (val >= 70) return '#27ae60';
+    if (val >= 40) return '#e67e22';
+    return '#e74c3c';
+  }
+
+  function staminaBar(val) {
+    const c = staminaColor(val);
+    return `<div style="display:flex;align-items:center;gap:6px">
+      <div style="width:80px;background:#e0e0e0;border-radius:3px;height:14px">
+        <div style="background:${c};border-radius:3px;height:14px;width:${val}%"></div>
+      </div>
+      <span style="color:${c};font-weight:600">${val}</span>
+    </div>`;
+  }
+
+  function loadStaminaLeagueYears(section) {
+    const prefixMap = {
+      'stamina-overview': 'stam-ov',
+      'stamina-team': 'stam-tm',
+      'stamina-availability': 'stam-av',
+      'stamina-consumption': 'stam-con',
+      'stamina-flow': 'stam-fl',
+    };
+    const prefix = prefixMap[section];
+    if (!prefix) return;
+    const sel = document.getElementById(`${prefix}-lyid`);
+    if (!sel || sel.options.length > 1) return;
+
+    fetch(`${ADMIN_BASE}/analytics/league-years`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) return;
+        sel.innerHTML = '';
+        (data.league_years || []).forEach(ly => {
+          const o = document.createElement('option');
+          o.value = ly.id;
+          o.textContent = ly.league_year;
+          sel.appendChild(o);
+        });
+        // For team sections, also load team dropdown
+        if (section === 'stamina-team' || section === 'stamina-flow') {
+          const teamSel = document.getElementById(`${prefix}-team`);
+          if (teamSel && teamSel.options.length <= 1) {
+            fetch(`${ADMIN_BASE}/analytics/teams`, { credentials: 'include' })
+              .then(r => r.json())
+              .then(td => {
+                if (!td.ok) return;
+                const teams = td.teams || [];
+                if (section === 'stamina-flow') {
+                  teamSel.innerHTML = '<option value="">All Teams</option>';
+                } else {
+                  teamSel.innerHTML = '';
+                }
+                teams.forEach(t => {
+                  const o = document.createElement('option');
+                  o.value = t.id;
+                  o.textContent = `${t.team_abbrev} (Lvl ${t.team_level})`;
+                  teamSel.appendChild(o);
+                });
+              });
+          }
+        }
+      });
+  }
+
+  function loadStaminaOverview() {
+    const lyid = document.getElementById('stam-ov-lyid').value;
+    const level = document.getElementById('stam-ov-level').value;
+    const status = document.getElementById('stam-ov-status');
+    status.textContent = 'Loading...';
+    document.getElementById('stam-ov-summary').style.display = 'none';
+
+    let url = `${ADMIN_BASE}/analytics/stamina-overview?league_year_id=${lyid}`;
+    if (level) url += `&league_level=${level}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('stam-ov-summary').style.display = '';
+
+        // Summary cards — separate pitcher vs position, show data coverage
+        const pt = data.pitcher_thresholds || {};
+        const bt = data.position_thresholds || {};
+        const pTracked = data.pitchers_with_data || 0;
+        const pNoData = data.pitchers_no_data || 0;
+        const bTracked = data.position_with_data || 0;
+        const bNoData = data.position_no_data || 0;
+        document.getElementById('stam-ov-total').textContent =
+          `${data.total_pitchers || 0} pitchers / ${data.total_position || 0} position`;
+        document.getElementById('stam-ov-avg').innerHTML =
+          `P: ${data.pitcher_avg_stamina ?? 'N/A'}  |  Pos: ${data.position_avg_stamina ?? 'N/A'}` +
+          (pNoData + bNoData > 0
+            ? `<br><small style="color:#999">Tracked: ${pTracked}P + ${bTracked}Pos | No data: ${pNoData}P + ${bNoData}Pos</small>`
+            : '');
+        document.getElementById('stam-ov-b70').textContent =
+          `P: ${pt.below_70 || 0}  |  Pos: ${bt.below_70 || 0}`;
+        document.getElementById('stam-ov-b40').textContent =
+          `P: ${pt.below_40 || 0}  |  Pos: ${bt.below_40 || 0}`;
+        document.getElementById('stam-ov-zero').textContent =
+          `P: ${pt.at_zero || 0}  |  Pos: ${bt.at_zero || 0}`;
+
+        // Dual histogram — pitchers vs position players
+        if (staminaOverviewChart) staminaOverviewChart.destroy();
+        const ctx = document.getElementById('stam-ov-chart').getContext('2d');
+        const labels = ['0-9','10-19','20-29','30-39','40-49','50-59','60-69','70-79','80-89','90-99','100'];
+        staminaOverviewChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: 'Pitchers',
+                data: data.pitcher_distribution,
+                backgroundColor: 'rgba(52, 152, 219, 0.7)',
+                borderColor: 'rgba(52, 152, 219, 1)',
+                borderWidth: 1,
+              },
+              {
+                label: 'Position Players',
+                data: data.position_distribution,
+                backgroundColor: 'rgba(46, 204, 113, 0.7)',
+                borderColor: 'rgba(46, 204, 113, 1)',
+                borderWidth: 1,
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            plugins: { title: { display: true, text: 'Stamina Distribution (tracked players only)' } },
+            scales: { y: { beginAtZero: true, title: { display: true, text: 'Players' } } }
+          }
+        });
+
+        // Team averages table — separate pitcher/position columns
+        let html = `<table class="data-table"><thead><tr>
+          <th>Team</th><th>Lvl</th>
+          <th>P Tracked</th><th>P Avg</th><th>P &lt;70</th><th>P &lt;40</th>
+          <th>Pos Tracked</th><th>Pos Avg</th><th>Pos &lt;70</th><th>Pos &lt;40</th>
+        </tr></thead><tbody>`;
+        data.team_averages.forEach(t => {
+          const pLabel = t.pitcher_tracked < t.pitcher_count
+            ? `${t.pitcher_tracked}/${t.pitcher_count}`
+            : `${t.pitcher_count}`;
+          const bLabel = t.position_tracked < t.position_count
+            ? `${t.position_tracked}/${t.position_count}`
+            : `${t.position_count}`;
+          html += `<tr>
+            <td>${t.team_abbrev}</td>
+            <td>${t.team_level}</td>
+            <td>${pLabel}</td>
+            <td style="color:${staminaColor(t.avg_pitcher_stamina || 100)};font-weight:600">${t.avg_pitcher_stamina ?? '<span style="color:#999">-</span>'}</td>
+            <td style="color:#e67e22">${t.pitcher_below_70 || 0}</td>
+            <td style="color:#e74c3c">${t.pitcher_below_40 || 0}</td>
+            <td>${bLabel}</td>
+            <td style="color:${staminaColor(t.avg_position_stamina || 100)};font-weight:600">${t.avg_position_stamina ?? '<span style="color:#999">-</span>'}</td>
+            <td style="color:#e67e22">${t.position_below_70 || 0}</td>
+            <td style="color:#e74c3c">${t.position_below_40 || 0}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('stam-ov-table').innerHTML = html;
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function loadStaminaTeamDetail() {
+    const lyid = document.getElementById('stam-tm-lyid').value;
+    const tid = document.getElementById('stam-tm-team').value;
+    const status = document.getElementById('stam-tm-status');
+    if (!tid) { status.textContent = 'Select a team'; return; }
+    status.textContent = 'Loading...';
+    document.getElementById('stam-tm-results').style.display = 'none';
+
+    fetch(`${ADMIN_BASE}/analytics/stamina-team?league_year_id=${lyid}&team_id=${tid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('stam-tm-results').style.display = '';
+
+        let html = '<h4 style="margin:8px 0 4px">Pitchers</h4>';
+        html += `<table class="data-table"><thead><tr>
+          <th>Name</th><th>Stamina</th><th>Durability</th><th>Endurance</th>
+          <th>G</th><th>GS</th><th>IP</th>
+          <th>Rec/SW</th><th>SW to 70</th><th>SW to 100</th>
+        </tr></thead><tbody>`;
+        data.pitchers.forEach(p => {
+          const stam = p.has_fatigue_data ? staminaBar(p.stamina) : '<span style="color:#bbb">N/A</span>';
+          html += `<tr style="${!p.has_fatigue_data ? 'opacity:0.6' : ''}">
+            <td>${p.name}</td>
+            <td>${stam}</td>
+            <td>${p.durability}</td>
+            <td>${p.pendurance_base}</td>
+            <td>${p.games}</td>
+            <td>${p.games_started}</td>
+            <td>${p.ip}</td>
+            <td>+${p.recovery_per_subweek}</td>
+            <td>${p.subweeks_to_70 ?? '-'}</td>
+            <td>${p.subweeks_to_100 ?? '-'}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+
+        // Position players
+        if (data.position_players && data.position_players.length > 0) {
+          const posTracked = data.position_players.filter(p => p.has_fatigue_data).length;
+          const posTotal = data.position_players.length;
+          html += '<h4 style="margin:16px 0 4px">Position Players</h4>';
+          if (posTracked < posTotal) {
+            html += `<p style="color:#999;font-size:13px;margin-bottom:4px">${posTracked}/${posTotal} have fatigue tracking data</p>`;
+          }
+          html += `<table class="data-table"><thead><tr>
+            <th>Name</th><th>Stamina</th><th>Durability</th>
+            <th>G</th><th>Est. Drain/G</th>
+            <th>Rec/SW</th><th>SW to 70</th><th>SW to 100</th>
+          </tr></thead><tbody>`;
+          data.position_players.forEach(p => {
+            const stam = p.has_fatigue_data ? staminaBar(p.stamina) : '<span style="color:#bbb">N/A</span>';
+            const drain = p.est_drain_per_game !== null ? p.est_drain_per_game : '<span style="color:#bbb">N/A</span>';
+            html += `<tr style="${!p.has_fatigue_data ? 'opacity:0.6' : ''}">
+              <td>${p.name}</td>
+              <td>${stam}</td>
+              <td>${p.durability}</td>
+              <td>${p.games}</td>
+              <td>${drain}</td>
+              <td>+${p.recovery_per_subweek}</td>
+              <td>${p.subweeks_to_70 ?? '-'}</td>
+              <td>${p.subweeks_to_100 ?? '-'}</td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+        }
+
+        document.getElementById('stam-tm-table').innerHTML = html;
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function loadStaminaAvailability() {
+    const lyid = document.getElementById('stam-av-lyid').value;
+    const level = document.getElementById('stam-av-level').value;
+    const status = document.getElementById('stam-av-status');
+    status.textContent = 'Loading...';
+    document.getElementById('stam-av-results').style.display = 'none';
+
+    let url = `${ADMIN_BASE}/analytics/stamina-availability?league_year_id=${lyid}`;
+    if (level) url += `&league_level=${level}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('stam-av-results').style.display = '';
+
+        const dangerBadge = (level) => {
+          if (level === 'critical') return '<span class="badge badge-danger">CRITICAL</span>';
+          if (level === 'warning') return '<span class="badge badge-warning">WARNING</span>';
+          return '<span class="badge badge-success">OK</span>';
+        };
+        let html = `<table class="data-table"><thead><tr>
+          <th>Team</th><th>Lvl</th>
+          <th>P Total</th><th>P &ge;95</th><th>P &ge;70</th><th>P &ge;40</th><th>P Status</th>
+          <th>Pos Total</th><th>Pos &ge;95</th><th>Pos &ge;70</th><th>Pos &ge;40</th><th>Pos Status</th>
+        </tr></thead><tbody>`;
+        data.teams.forEach(t => {
+          html += `<tr>
+            <td><strong>${t.team_abbrev}</strong></td>
+            <td>${t.team_level}</td>
+            <td>${t.total_pitchers}</td>
+            <td>${t.pitcher_avail_95}</td>
+            <td><strong>${t.pitcher_avail_70}</strong></td>
+            <td class="${t.pitcher_avail_40 < t.total_pitchers ? 'text-danger' : ''}">${t.pitcher_avail_40}</td>
+            <td>${dangerBadge(t.pitcher_danger)}</td>
+            <td>${t.total_position}</td>
+            <td>${t.position_avail_95}</td>
+            <td><strong>${t.position_avail_70}</strong></td>
+            <td class="${t.position_avail_40 < t.total_position ? 'text-danger' : ''}">${t.position_avail_40}</td>
+            <td>${dangerBadge(t.position_danger)}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('stam-av-table').innerHTML = html;
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function loadStaminaConsumption() {
+    const lyid = document.getElementById('stam-con-lyid').value;
+    const level = document.getElementById('stam-con-level').value;
+    const status = document.getElementById('stam-con-status');
+    status.textContent = 'Loading...';
+    document.getElementById('stam-con-results').style.display = 'none';
+
+    let url = `${ADMIN_BASE}/analytics/stamina-consumption?league_year_id=${lyid}`;
+    if (level) url += `&league_level=${level}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('stam-con-results').style.display = '';
+
+        // Pitchers section
+        let html = '<h4 style="margin:0 0 4px">Pitchers</h4>';
+        html += `<p style="margin-bottom:8px">Avg games: <strong>${data.pitcher_avg_games}</strong></p>`;
+        html += `<table class="data-table"><thead><tr>
+          <th>Name</th><th>Team</th><th>G</th><th>GS</th><th>IP</th>
+          <th>Stamina</th><th>Durability</th><th>Endur.</th>
+          <th>Est. Drain</th><th>Avg/G</th><th>Flag</th>
+        </tr></thead><tbody>`;
+        data.pitchers.forEach(p => {
+          const flag = p.overworked
+            ? '<span style="background:#e74c3c;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px">OVERWORKED</span>'
+            : '';
+          html += `<tr style="${p.overworked ? 'background:#fdf2f2' : ''}">
+            <td>${p.name}</td>
+            <td>${p.team_abbrev}</td>
+            <td>${p.games}</td>
+            <td>${p.gs}</td>
+            <td>${p.ip}</td>
+            <td>${staminaBar(p.current_stamina)}</td>
+            <td>${p.durability}</td>
+            <td>${p.pendurance_base}</td>
+            <td>${p.est_total_consumed}</td>
+            <td>${p.avg_cost_per_game}</td>
+            <td>${flag}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+
+        // Position players section
+        if (data.position_players && data.position_players.length > 0) {
+          const tracked = data.position_players.filter(p => p.has_fatigue_data).length;
+          const untracked = data.position_players.length - tracked;
+          html += '<h4 style="margin:16px 0 4px">Position Players</h4>';
+          html += `<p style="margin-bottom:8px">Avg games: <strong>${data.position_avg_games}</strong>`;
+          if (untracked > 0) {
+            html += ` &mdash; <span style="color:#999">${untracked} players have no fatigue data (engine stamina_cost not yet reporting)</span>`;
+          }
+          html += '</p>';
+          html += `<table class="data-table"><thead><tr>
+            <th>Name</th><th>Team</th><th>G</th>
+            <th>Stamina</th><th>Durability</th><th>Rec/SW</th>
+            <th>Est. Total Drain</th><th>Avg/G</th><th>Flag</th>
+          </tr></thead><tbody>`;
+          data.position_players.forEach(p => {
+            const flag = p.fatigued
+              ? '<span style="background:#e67e22;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px">FATIGUED</span>'
+              : (!p.has_fatigue_data ? '<span style="color:#bbb;font-size:11px">NO DATA</span>' : '');
+            const drainText = p.est_total_consumed !== null ? p.est_total_consumed : '<span style="color:#bbb">N/A</span>';
+            const avgText = p.avg_cost_per_game !== null ? p.avg_cost_per_game : '<span style="color:#bbb">N/A</span>';
+            const stam = p.has_fatigue_data ? staminaBar(p.current_stamina) : '<span style="color:#bbb">N/A</span>';
+            html += `<tr style="${p.fatigued ? 'background:#fef9e7' : (!p.has_fatigue_data ? 'opacity:0.6' : '')}">
+              <td>${p.name}</td>
+              <td>${p.team_abbrev}</td>
+              <td>${p.games}</td>
+              <td>${stam}</td>
+              <td>${p.durability}</td>
+              <td>+${p.recovery_per_subweek}</td>
+              <td>${drainText}</td>
+              <td>${avgText}</td>
+              <td>${flag}</td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+        }
+
+        document.getElementById('stam-con-table').innerHTML = html;
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function loadStaminaFlow() {
+    const lyid = document.getElementById('stam-fl-lyid').value;
+    const tid = document.getElementById('stam-fl-team').value;
+    const status = document.getElementById('stam-fl-status');
+    status.textContent = 'Loading...';
+    document.getElementById('stam-fl-results').style.display = 'none';
+
+    let url = `${ADMIN_BASE}/analytics/stamina-flow?league_year_id=${lyid}`;
+    if (tid) url += `&team_id=${tid}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('stam-fl-results').style.display = '';
+
+        const weeks = data.weeks || [];
+        if (!weeks.length) {
+          document.getElementById('stam-fl-table').innerHTML = '<p>No data</p>';
+          return;
+        }
+
+        // Chart
+        if (staminaFlowChart) staminaFlowChart.destroy();
+        const ctx = document.getElementById('stam-fl-chart').getContext('2d');
+        staminaFlowChart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: weeks.map(w => `Wk ${w.week}`),
+            datasets: [
+              {
+                label: 'Projected Avg Stamina',
+                data: weeks.map(w => w.projected_avg_stamina),
+                borderColor: '#2980b9',
+                backgroundColor: 'rgba(41,128,185,0.1)',
+                fill: true,
+                tension: 0.3,
+              },
+              {
+                label: 'Total Drain',
+                data: weeks.map(w => w.total_drain),
+                borderColor: '#e74c3c',
+                borderDash: [5, 5],
+                yAxisID: 'y1',
+              },
+              {
+                label: 'Est Recovery',
+                data: weeks.map(w => w.est_recovery),
+                borderColor: '#27ae60',
+                borderDash: [5, 5],
+                yAxisID: 'y1',
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            plugins: { title: { display: true, text: `Stamina Flow (${data.total_pitchers} pitchers)` } },
+            scales: {
+              y: { beginAtZero: true, max: 100, title: { display: true, text: 'Avg Stamina' } },
+              y1: { position: 'right', beginAtZero: true, title: { display: true, text: 'Drain / Recovery' }, grid: { drawOnChartArea: false } }
+            }
+          }
+        });
+
+        // Table
+        let html = `<table class="data-table"><thead><tr>
+          <th>Week</th><th>Appearances</th><th>Pitchers Used</th><th>Resting</th>
+          <th>Total Drain</th><th>Est Recovery</th><th>Net</th><th>Proj Avg</th>
+        </tr></thead><tbody>`;
+        weeks.forEach(w => {
+          const netColor = w.net_change >= 0 ? '#27ae60' : '#e74c3c';
+          html += `<tr>
+            <td>${w.week}</td>
+            <td>${w.appearances}</td>
+            <td>${w.pitchers_used}</td>
+            <td>${w.pitchers_resting}</td>
+            <td style="color:#e74c3c">${w.total_drain}</td>
+            <td style="color:#27ae60">${w.est_recovery}</td>
+            <td style="color:${netColor};font-weight:600">${w.net_change > 0 ? '+' : ''}${w.net_change}</td>
+            <td style="color:${staminaColor(w.projected_avg_stamina)};font-weight:600">${w.projected_avg_stamina}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('stam-fl-table').innerHTML = html;
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
   // Export public API
+  // =====================================================================
+  // Special Events: Playoffs, All-Star, WBC
+  // =====================================================================
+
+  function loadSpecialEventLeagueYears(selectId) {
+    const sel = document.getElementById(selectId);
+    if (!sel || sel.options.length > 1) return;
+    fetch(`${ADMIN_BASE}/analytics/league-years`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) return;
+        sel.innerHTML = '';
+        (data.league_years || []).forEach(ly => {
+          const o = document.createElement('option');
+          o.value = ly.id;
+          o.textContent = ly.league_year;
+          sel.appendChild(o);
+        });
+      });
+  }
+
+  // --- Playoffs ---
+  document.getElementById('btn-po-generate')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Generating bracket...';
+    fetch(`${API_BASE}/playoffs/generate`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: parseInt(level) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message}`; return; }
+      status.textContent = `Created ${(data.series_created || []).length} series`;
+      if (data.field) renderPlayoffField(data.field);
+      loadPlayoffBracket(lyid, level);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-po-advance')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Advancing round...';
+    fetch(`${API_BASE}/playoffs/advance`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: parseInt(level) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      status.textContent = data.status === 'complete' ? data.message : `Advanced to ${data.round_advanced}`;
+      loadPlayoffBracket(lyid, level);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-po-refresh')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    loadPlayoffBracket(lyid, level);
+  });
+
+  function loadPlayoffBracket(lyid, level) {
+    fetch(`${API_BASE}/playoffs/bracket/${lyid}/${level}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('po-bracket-card');
+        const div = document.getElementById('po-bracket');
+        if (!data.rounds || Object.keys(data.rounds).length === 0) {
+          card.style.display = 'none';
+          return;
+        }
+        card.style.display = '';
+        let html = '';
+        for (const [round, series] of Object.entries(data.rounds)) {
+          html += `<h5 style="margin-top:16px">${round}</h5>`;
+          html += '<table class="data-table"><thead><tr><th>Matchup</th><th>Score</th><th>Status</th><th>Winner</th></tr></thead><tbody>';
+          series.forEach(s => {
+            const scoreA = s.wins_a, scoreB = s.wins_b;
+            const statusBadge = s.status === 'complete'
+              ? '<span class="badge badge-success">Complete</span>'
+              : '<span class="badge badge-warning">In Progress</span>';
+            html += `<tr>
+              <td>${s.team_a.abbrev} (#${s.team_a.seed || '-'}) vs ${s.team_b.abbrev} (#${s.team_b.seed || '-'})</td>
+              <td>${scoreA} - ${scoreB}</td>
+              <td>${statusBadge}</td>
+              <td>${s.winner ? s.winner.abbrev : '-'}</td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+        }
+
+        if (data.cws_bracket) {
+          html += '<h5 style="margin-top:16px">CWS Bracket</h5>';
+          html += '<table class="data-table"><thead><tr><th>Seed</th><th>Team</th><th>Qual</th><th>Losses</th><th>Side</th></tr></thead><tbody>';
+          data.cws_bracket.forEach(t => {
+            const elim = t.eliminated ? ' style="opacity:0.4"' : '';
+            html += `<tr${elim}><td>#${t.seed}</td><td>${t.team_abbrev}</td><td>${t.qualification}</td><td>${t.losses}</td><td>${t.bracket_side}</td></tr>`;
+          });
+          html += '</tbody></table>';
+        }
+
+        div.innerHTML = html;
+      });
+  }
+
+  function renderPlayoffField(field) {
+    const card = document.getElementById('po-field-card');
+    const div = document.getElementById('po-field');
+    card.style.display = '';
+    let html = '';
+    if (Array.isArray(field)) {
+      // MiLB / CWS field
+      html += '<table class="data-table"><thead><tr><th>Seed</th><th>Team</th><th>W</th><th>L</th><th>Pct</th><th>Qual</th></tr></thead><tbody>';
+      field.forEach(t => {
+        html += `<tr><td>#${t.seed}</td><td>${t.team_abbrev}</td><td>${t.wins}</td><td>${t.losses}</td><td>${t.win_pct}</td><td>${t.qualifier}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    } else {
+      // MLB field (AL/NL)
+      for (const [conf, teams] of Object.entries(field)) {
+        html += `<h5>${conf}</h5>`;
+        html += '<table class="data-table"><thead><tr><th>Seed</th><th>Team</th><th>W</th><th>L</th><th>Pct</th><th>Qual</th></tr></thead><tbody>';
+        teams.forEach(t => {
+          html += `<tr><td>#${t.seed}</td><td>${t.team_abbrev}</td><td>${t.wins}</td><td>${t.losses}</td><td>${t.win_pct}</td><td>${t.qualifier}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+    }
+    div.innerHTML = html;
+  }
+
+  // --- All-Star ---
+  document.getElementById('btn-as-create')?.addEventListener('click', () => {
+    const lyid = document.getElementById('as-lyid').value;
+    const status = document.getElementById('as-status');
+    status.textContent = 'Creating All-Star event...';
+    fetch(`${API_BASE}/allstar/create`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message}`; return; }
+      document.getElementById('as-eid').value = data.event_id;
+      status.textContent = `Event ${data.event_id} created`;
+      loadAllStarRosters(data.event_id);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-as-refresh')?.addEventListener('click', () => {
+    const eid = document.getElementById('as-eid').value;
+    if (!eid) { document.getElementById('as-status').textContent = 'Enter event ID'; return; }
+    loadAllStarRosters(parseInt(eid));
+  });
+
+  function loadAllStarRosters(eventId) {
+    fetch(`${API_BASE}/allstar/${eventId}/rosters`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('as-rosters-card');
+        const div = document.getElementById('as-rosters');
+        if (!data.rosters) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        let html = '';
+        for (const [label, players] of Object.entries(data.rosters)) {
+          html += `<h5>${label} (${players.length} players)</h5>`;
+          html += '<table class="data-table"><thead><tr><th>Name</th><th>Team</th><th>Pos</th><th>Starter</th><th>Source</th></tr></thead><tbody>';
+          players.forEach(p => {
+            html += `<tr><td>${p.name}</td><td>${p.team || '-'}</td><td>${p.position}</td>
+              <td>${p.is_starter ? '<span class="badge badge-success">Yes</span>' : ''}</td>
+              <td>${p.source}</td></tr>`;
+          });
+          html += '</tbody></table>';
+        }
+        div.innerHTML = html;
+      });
+  }
+
+  // --- WBC ---
+  document.getElementById('btn-wbc-countries')?.addEventListener('click', () => {
+    const status = document.getElementById('wbc-status');
+    status.textContent = 'Checking eligible countries...';
+    fetch(`${API_BASE}/wbc/eligible-countries`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('wbc-countries-card');
+        const div = document.getElementById('wbc-countries');
+        card.style.display = '';
+        let html = '<table class="data-table"><thead><tr><th>#</th><th>Country</th><th>Players</th></tr></thead><tbody>';
+        (data.countries || []).forEach((c, i) => {
+          html += `<tr><td>${i + 1}</td><td>${c.country}</td><td>${c.player_count}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        div.innerHTML = html;
+        status.textContent = `Found ${(data.countries || []).length} eligible countries`;
+      }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-wbc-create')?.addEventListener('click', () => {
+    const lyid = document.getElementById('wbc-lyid').value;
+    const status = document.getElementById('wbc-status');
+    status.textContent = 'Creating WBC event...';
+    fetch(`${API_BASE}/wbc/create`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message}`; return; }
+      document.getElementById('wbc-eid').value = data.event_id;
+      status.textContent = `Event ${data.event_id} created with ${(data.teams || []).length} teams`;
+      loadWbcTeams(data.event_id);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  function wbcAction(endpoint, method = 'POST') {
+    const eid = document.getElementById('wbc-eid').value;
+    const status = document.getElementById('wbc-status');
+    if (!eid) { status.textContent = 'Enter event ID'; return; }
+    status.textContent = 'Processing...';
+    fetch(`${API_BASE}/wbc/${eid}/${endpoint}`, {
+      method, credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      status.textContent = JSON.stringify(data).substring(0, 200);
+      loadWbcTeams(eid);
+    }).catch(e => status.textContent = e.message);
+  }
+
+  document.getElementById('btn-wbc-rosters')?.addEventListener('click', () => wbcAction('generate-rosters'));
+  document.getElementById('btn-wbc-pool-games')?.addEventListener('click', () => wbcAction('generate-pool-games'));
+  document.getElementById('btn-wbc-pool-results')?.addEventListener('click', () => wbcAction('process-pool-results'));
+  document.getElementById('btn-wbc-knockout')?.addEventListener('click', () => wbcAction('generate-knockout'));
+  document.getElementById('btn-wbc-advance')?.addEventListener('click', () => wbcAction('advance-knockout'));
+  document.getElementById('btn-wbc-cleanup')?.addEventListener('click', () => wbcAction('cleanup'));
+  document.getElementById('btn-wbc-refresh')?.addEventListener('click', () => {
+    const eid = document.getElementById('wbc-eid').value;
+    if (eid) loadWbcTeams(eid);
+  });
+
+  function loadWbcTeams(eventId) {
+    fetch(`${API_BASE}/wbc/${eventId}/teams`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('wbc-teams-card');
+        const div = document.getElementById('wbc-teams');
+        const teams = data.teams || [];
+        if (!teams.length) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        let html = '<table class="data-table"><thead><tr><th>Country</th><th>Code</th><th>Pool</th><th>W</th><th>L</th><th>Status</th></tr></thead><tbody>';
+        teams.forEach(t => {
+          const elim = t.eliminated ? ' style="opacity:0.4"' : '';
+          html += `<tr${elim}><td>${t.country_name}</td><td>${t.country_code}</td><td>${t.pool_group || '-'}</td>
+            <td>${t.pool_wins}</td><td>${t.pool_losses}</td>
+            <td>${t.eliminated ? '<span class="badge badge-danger">Eliminated</span>' : '<span class="badge badge-success">Active</span>'}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        div.innerHTML = html;
+      });
+  }
+
   window.App = {
     goTo,
     refreshDashboard,

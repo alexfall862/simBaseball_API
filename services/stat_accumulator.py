@@ -23,19 +23,26 @@ def accumulate_game_stats(
     conn,
     game_result: Dict[str, Any],
     league_year_id: int,
+    game_type: str = "regular",
 ) -> Dict[str, int]:
     """
     Parse one game result and UPSERT player stats into the accumulation tables.
     Also inserts per-game batting/pitching lines for box score reconstruction.
 
+    When game_type is 'allstar' or 'wbc', season accumulation UPSERTs are
+    skipped but per-game lines are still written for box score reconstruction.
+
     Args:
         conn: Active SQLAlchemy connection (caller manages commit).
         game_result: Single entry from the engine's results array.
         league_year_id: Current league_year_id for the season context.
+        game_type: Type of game ('regular', 'playoff', 'allstar', 'wbc').
 
     Returns:
         Dict with counts: {"batters": N, "pitchers": N, "fielders": N}
     """
+    skip_season = game_type in ("allstar", "wbc")
+
     nested = game_result.get("result") or {}
     stats = game_result.get("stats") or nested.get("stats")
     if not stats:
@@ -50,15 +57,25 @@ def accumulate_game_stats(
     pitchers = stats.get("pitchers") or {}
     fielders = stats.get("fielders") or {}
 
-    b_count = _upsert_batting(conn, batters, league_year_id)
-    p_count = _upsert_pitching(conn, pitchers, league_year_id)
-    f_count = _upsert_fielding(conn, fielders, league_year_id)
+    b_count = 0
+    p_count = 0
+    f_count = 0
+    if not skip_season:
+        b_count = _upsert_batting(conn, batters, league_year_id)
+        p_count = _upsert_pitching(conn, pitchers, league_year_id)
+        f_count = _upsert_fielding(conn, fielders, league_year_id)
 
     # Per-game lines for box score reconstruction
     if game_id is not None:
         gbl_count = _insert_game_batting_lines(conn, int(game_id), batters, league_year_id)
         gpl_count = _insert_game_pitching_lines(conn, int(game_id), pitchers, league_year_id)
         print(f"[stat_accumulator] game {game_id} per-game lines: {gbl_count} batting, {gpl_count} pitching")
+
+        # Substitution tracking
+        subs = game_result.get("substitutions") or nested.get("substitutions") or []
+        sub_count = _insert_game_substitutions(conn, int(game_id), subs, league_year_id)
+        if sub_count:
+            print(f"[stat_accumulator] game {game_id} substitutions: {sub_count}")
     else:
         print(f"[stat_accumulator] game_id is NONE — skipping per-game lines. Top keys={list(game_result.keys())}, nested keys={list(nested.keys())}")
 
@@ -544,6 +561,42 @@ def _insert_game_pitching_lines(
     return count
 
 
+_GAME_SUBSTITUTION_INSERT = text("""
+    INSERT INTO game_substitutions
+        (game_id, league_year_id, inning, half, sub_type,
+         player_in_id, player_out_id, new_position)
+    VALUES
+        (:game_id, :league_year_id, :inning, :half, :sub_type,
+         :player_in_id, :player_out_id, :new_position)
+""")
+
+
+def _insert_game_substitutions(
+    conn, game_id: int, substitutions: list, league_year_id: int
+) -> int:
+    count = 0
+    for sub in substitutions:
+        try:
+            conn.execute(_GAME_SUBSTITUTION_INSERT, {
+                "game_id":        game_id,
+                "league_year_id": league_year_id,
+                "inning":         int(sub.get("inning", 0)),
+                "half":           str(sub.get("half", "")),
+                "sub_type":       str(sub.get("type", "")),
+                "player_in_id":   int(sub["player_in_id"]),
+                "player_out_id":  int(sub["player_out_id"]),
+                "new_position":   str(sub.get("new_position", "")),
+            })
+            count += 1
+        except Exception as e:
+            print(f"[stat_accumulator] SUBSTITUTION INSERT FAILED game={game_id}: {e}")
+            logger.exception(
+                "stat_accumulator: game substitution insert failed for "
+                "game %d", game_id,
+            )
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Bulk variants — collect all params across all games, execute once
 # ---------------------------------------------------------------------------
@@ -552,17 +605,31 @@ def accumulate_subweek_stats_bulk(
     conn,
     results: List[Dict[str, Any]],
     league_year_id: int,
+    game_type_by_id: Dict[int, str] = None,
 ) -> Dict[str, int]:
     """
     Bulk version of accumulate_subweek_stats.
     Collects all param dicts across all games, then executes each UPSERT
     statement once with executemany (list of param dicts).
+
+    When game_type_by_id is provided, games with type 'allstar' or 'wbc'
+    will only get per-game lines (box scores) but NOT season accumulation
+    UPSERTs.
     """
+    if game_type_by_id is None:
+        game_type_by_id = {}
+
+    # Season accumulation params (skipped for allstar/wbc)
     batting_params = []
     pitching_params = []
     fielding_params = []
+    # Per-game lines (always written for box score reconstruction)
     game_batting_params = []
     game_pitching_params = []
+    substitution_params = []
+
+    # Types that should NOT accumulate into season stats
+    NO_ACCUM_TYPES = {"allstar", "wbc"}
 
     for game_result in results:
         nested = game_result.get("result") or {}
@@ -571,6 +638,7 @@ def accumulate_subweek_stats_bulk(
             continue
 
         game_id = game_result.get("game_id") or nested.get("game_id")
+        skip_season = game_type_by_id.get(int(game_id), "regular") in NO_ACCUM_TYPES if game_id is not None else False
 
         batters = stats.get("batters") or {}
         pitchers = stats.get("pitchers") or {}
@@ -595,7 +663,8 @@ def accumulate_subweek_stats_bulk(
                     "stolen_bases":    int(b.get("stolen_bases", 0)),
                     "caught_stealing": int(b.get("caught_stealing", 0)),
                 }
-                batting_params.append(params)
+                if not skip_season:
+                    batting_params.append(params)
 
                 if game_id is not None:
                     game_batting_params.append({
@@ -626,7 +695,8 @@ def accumulate_subweek_stats_bulk(
                     "strikeouts":           int(p.get("strikeouts", 0)),
                     "home_runs_allowed":    int(p.get("home_runs_allowed", 0)),
                 }
-                pitching_params.append(params)
+                if not skip_season:
+                    pitching_params.append(params)
 
                 if game_id is not None:
                     game_pitching_params.append({
@@ -638,31 +708,53 @@ def accumulate_subweek_stats_bulk(
                     "stat_accumulator bulk: failed to build pitching params for %s", pid_str
                 )
 
-        # Fielding season stats
-        for pid_str, f in fielders.items():
-            try:
-                if "_" in pid_str:
-                    pid_part, pos_part = pid_str.rsplit("_", 1)
-                    player_id = int(pid_part)
-                    position_code = pos_part
-                else:
-                    player_id = int(pid_str)
-                    position_code = str(f.get("position_code", ""))
+        # Fielding season stats (skip for allstar/wbc)
+        if not skip_season:
+            for pid_str, f in fielders.items():
+                try:
+                    if "_" in pid_str:
+                        pid_part, pos_part = pid_str.rsplit("_", 1)
+                        player_id = int(pid_part)
+                        position_code = pos_part
+                    else:
+                        player_id = int(pid_str)
+                        position_code = str(f.get("position_code", ""))
 
-                fielding_params.append({
-                    "player_id":      player_id,
-                    "league_year_id": league_year_id,
-                    "team_id":        int(f["team_id"]),
-                    "position_code":  str(f.get("position_code", position_code)),
-                    "innings":        int(f.get("innings", 0)),
-                    "putouts":        int(f.get("putouts", 0)),
-                    "assists":        int(f.get("assists", 0)),
-                    "errors":         int(f.get("errors", 0)),
-                })
-            except Exception:
-                logger.exception(
-                    "stat_accumulator bulk: failed to build fielding params for %s", pid_str
-                )
+                    fielding_params.append({
+                        "player_id":      player_id,
+                        "league_year_id": league_year_id,
+                        "team_id":        int(f["team_id"]),
+                        "position_code":  str(f.get("position_code", position_code)),
+                        "innings":        int(f.get("innings", 0)),
+                        "putouts":        int(f.get("putouts", 0)),
+                        "assists":        int(f.get("assists", 0)),
+                        "errors":         int(f.get("errors", 0)),
+                    })
+                except Exception:
+                    logger.exception(
+                        "stat_accumulator bulk: failed to build fielding params for %s", pid_str
+                    )
+
+        # Substitutions
+        subs = game_result.get("substitutions") or nested.get("substitutions") or []
+        if game_id is not None:
+            for sub in subs:
+                try:
+                    substitution_params.append({
+                        "game_id":        int(game_id),
+                        "league_year_id": league_year_id,
+                        "inning":         int(sub.get("inning", 0)),
+                        "half":           str(sub.get("half", "")),
+                        "sub_type":       str(sub.get("type", "")),
+                        "player_in_id":   int(sub["player_in_id"]),
+                        "player_out_id":  int(sub["player_out_id"]),
+                        "new_position":   str(sub.get("new_position", "")),
+                    })
+                except Exception:
+                    logger.exception(
+                        "stat_accumulator bulk: failed to build substitution params for game %s",
+                        game_id,
+                    )
 
     # Execute each statement once with full param lists
     totals = {"batters": 0, "pitchers": 0, "fielders": 0}
@@ -700,11 +792,18 @@ def accumulate_subweek_stats_bulk(
         except Exception:
             logger.exception("stat_accumulator bulk: game pitching insert failed (%d rows)", len(game_pitching_params))
 
+    if substitution_params:
+        try:
+            conn.execute(_GAME_SUBSTITUTION_INSERT, substitution_params)
+        except Exception:
+            logger.exception("stat_accumulator bulk: substitution insert failed (%d rows)", len(substitution_params))
+
     logger.info(
         "stat_accumulator bulk: %d batters, %d pitchers, %d fielders, "
-        "%d game batting lines, %d game pitching lines",
+        "%d game batting lines, %d game pitching lines, %d substitutions",
         totals["batters"], totals["pitchers"], totals["fielders"],
         len(game_batting_params), len(game_pitching_params),
+        len(substitution_params),
     )
     return totals
 

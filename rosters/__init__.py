@@ -6,6 +6,7 @@ from sqlalchemy import MetaData, Table, select, and_, literal, func
 from sqlalchemy.exc import SQLAlchemyError
 import re
 from db import get_engine
+from services.attribute_visibility import get_visible_players_batch
 
 rosters_bp = Blueprint("rosters", __name__)
 PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
@@ -733,6 +734,36 @@ def _load_dist_by_level(conn, col_cats):
     return dist, "computed"
 
 
+def _apply_fog_of_war(conn, players_out, rows, viewing_org_id, dist_by_level, col_cats, position_weights):
+    """
+    Apply fog-of-war visibility to a list of player dicts.
+
+    If viewing_org_id is None, returns players_out unchanged (admin/legacy).
+    Otherwise, routes through the attribute_visibility service.
+
+    rows: the original SQLAlchemy rows (used to extract holding_org_id and level)
+    """
+    if not viewing_org_id:
+        return players_out
+
+    # Build lookup dicts for holding org and level from the original rows
+    holding_org_ids = {}
+    player_levels = {}
+    for row in rows:
+        m = row._mapping
+        pid = m.get("id")
+        if pid is None:
+            continue
+        holding_org_ids[pid] = m.get("org_id", 0)
+        player_levels[pid] = m.get("current_level", 0)
+
+    return get_visible_players_batch(
+        conn, players_out, viewing_org_id,
+        holding_org_ids, player_levels,
+        dist_by_level, col_cats, position_weights,
+    )
+
+
 @rosters_bp.get("/ratings/teams")
 def get_team_ratings():
     """
@@ -754,6 +785,7 @@ def get_team_ratings():
         ), 400
 
     team_abbrev = request.args.get("team")
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
 
     try:
         engine = get_engine()
@@ -770,25 +802,31 @@ def get_team_ratings():
             )
             rows = conn.execute(stmt).all()
 
+            if not rows:
+                return jsonify(
+                    {
+                        "league_level": None,
+                        "league_level_id": level,
+                        "team": team_abbrev,
+                        "count": 0,
+                        "players": [],
+                    }
+                ), 200
+
+            players_out = [
+                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
+                for row in rows
+            ]
+
+            # Apply fog-of-war if viewing_org_id provided
+            players_out = _apply_fog_of_war(
+                conn, players_out, rows, viewing_org_id,
+                dist_by_level, col_cats, position_weights,
+            )
+
     except SQLAlchemyError as e:
         current_app.logger.exception("get_team_ratings: db error")
         return jsonify(error="database_error", message=str(e)), 500
-
-    if not rows:
-        return jsonify(
-            {
-                "league_level": None,
-                "league_level_id": level,
-                "team": team_abbrev,
-                "count": 0,
-                "players": [],
-            }
-        ), 200
-
-    players_out = [
-        _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
-        for row in rows
-    ]
 
     # Determine league_level string for this level from the rows
     league_level_name = None
@@ -819,6 +857,7 @@ def get_org_ratings(org_abbrev: str):
     """
     # Pro levels range (4=scraps, 9=MLB)
     level_filter = (4, 9)
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
 
     tables = _get_tables()
     orgs = tables["organizations"]
@@ -850,21 +889,34 @@ def get_org_ratings(org_abbrev: str):
             )
             org_rows = conn.execute(org_stmt).all()
 
+            if not org_rows:
+                return jsonify(
+                    {
+                        "org": org_abbrev,
+                        "org_id": org_id,
+                        "levels": {},
+                    }
+                ), 200
+
+            # Build all player dicts first
+            all_players = [
+                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
+                for row in org_rows
+            ]
+
+            # Apply fog-of-war if viewing_org_id provided
+            all_players = _apply_fog_of_war(
+                conn, all_players, org_rows, viewing_org_id,
+                dist_by_level, col_cats, position_weights,
+            )
+
     except SQLAlchemyError as e:
         current_app.logger.exception("get_org_ratings: db error")
         return jsonify(error="database_error", message=str(e)), 500
 
-    if not org_rows:
-        return jsonify(
-            {
-                "org": org_abbrev,
-                "org_id": org_id,
-                "levels": {},
-            }
-        ), 200
-
+    # Group by level
     levels_out = {}
-    for row in org_rows:
+    for i, row in enumerate(org_rows):
         m = row._mapping
         lvl_id = m.get("current_level")
         lvl_name = m.get("league_level")
@@ -880,8 +932,7 @@ def get_org_ratings(org_abbrev: str):
                 "players": [],
             },
         )
-        player = _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
-        bucket["players"].append(player)
+        bucket["players"].append(all_players[i])
 
     # Add counts
     for bucket in levels_out.values():
@@ -1038,6 +1089,7 @@ def get_org_roster(org_abbrev: str):
       /api/v1/orgs/NYY/roster?min_level=4&max_level=9  # all pro levels
     """
     include_faces = request.args.get("include_faces", "0") == "1"
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
 
     # Parse level filters from query string
     level_filter = None
@@ -1069,6 +1121,28 @@ def get_org_roster(org_abbrev: str):
             if include_faces and rows:
                 face_data = _generate_faces_for_rows(conn, rows)
 
+            # Deduplicate by player id
+            players_out = []
+            seen_ids = set()
+            deduped_rows = []
+            for row in rows:
+                player = _build_player_with_ratings(
+                    row, dist_by_level, col_cats, position_weights
+                )
+                pid = player.get("id")
+                if pid is not None and pid in seen_ids:
+                    continue
+                if pid is not None:
+                    seen_ids.add(pid)
+                players_out.append(player)
+                deduped_rows.append(row)
+
+            # Apply fog-of-war if viewing_org_id provided
+            players_out = _apply_fog_of_war(
+                conn, players_out, deduped_rows, viewing_org_id,
+                dist_by_level, col_cats, position_weights,
+            )
+
     except SQLAlchemyError:
         return (
             jsonify(
@@ -1081,20 +1155,6 @@ def get_org_roster(org_abbrev: str):
             ),
             503,
         )
-
-    # Deduplicate by player id
-    players_out = []
-    seen_ids = set()
-    for row in rows:
-        player = _build_player_with_ratings(
-            row, dist_by_level, col_cats, position_weights
-        )
-        pid = player.get("id")
-        if pid is not None and pid in seen_ids:
-            continue
-        if pid is not None:
-            seen_ids.add(pid)
-        players_out.append(player)
 
     result = {
         "org": org_abbrev,

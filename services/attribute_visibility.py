@@ -1,0 +1,658 @@
+"""
+Fog-of-war attribute visibility system.
+
+Single source of truth for "what does org X see for player Y?"
+All fuzz is computed on the fly via deterministic hashing — never stored in DB.
+The DB stores only true values + which scouting actions each org has unlocked.
+
+Contexts:
+  college_recruiting  — college org viewing HS player (pre-signing)
+  college_roster      — any org viewing a college-level player
+  pro_draft           — MLB org viewing college/INTAM player
+  pro_roster          — any org viewing a pro player (levels 4-9)
+"""
+
+import hashlib
+import re
+from sqlalchemy import text
+
+# ---------------------------------------------------------------------------
+# Org ID boundaries (shared with scouting_service)
+# ---------------------------------------------------------------------------
+INTAM_ORG_ID = 339
+USHS_ORG_ID = 340
+COLLEGE_ORG_MIN = 31
+COLLEGE_ORG_MAX = 338
+MLB_ORG_MIN = 1
+MLB_ORG_MAX = 30
+
+# Pro levels (scraps=4 through mlb=9)
+PRO_LEVEL_MIN = 4
+PRO_LEVEL_MAX = 9
+
+# College level
+COLLEGE_LEVEL = 3
+
+# ---------------------------------------------------------------------------
+# Grade / scale constants
+# ---------------------------------------------------------------------------
+GRADE_LIST = [
+    "F", "D-", "D", "D+", "C-", "C", "C+",
+    "B-", "B", "B+", "A-", "A", "A+",
+]
+GRADE_INDEX = {g: i for i, g in enumerate(GRADE_LIST)}
+
+# 20-80 score -> letter grade mapping (for converting raw -> letter)
+_GRADE_THRESHOLDS = [
+    (80, "A+"), (75, "A"), (70, "A-"),
+    (65, "B+"), (60, "B"), (55, "B-"),
+    (50, "C+"), (45, "C"), (40, "C-"),
+    (35, "D+"), (30, "D"), (25, "D-"),
+    (20, "F"),
+]
+
+PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+
+# Actions that grant precise attribute visibility (carryover-eligible)
+_PRECISE_ATTR_ACTIONS = frozenset({
+    "draft_attrs_precise",
+    "pro_attrs_precise",
+})
+
+# Actions that grant precise potential visibility (carryover-eligible)
+_PRECISE_POT_ACTIONS = frozenset({
+    "recruit_potential_precise",
+    "college_potential_precise",
+    "draft_potential_precise",
+    "pro_potential_precise",
+})
+
+# Actions that grant fuzzed 20-80 attributes
+_FUZZED_NUMERIC_ACTIONS = frozenset({
+    "draft_attrs_fuzzed",
+})
+
+# Level 5 key for draft prospect 20-80 conversion
+DRAFT_DISPLAY_LEVEL = "a"  # Single-A
+
+
+# ---------------------------------------------------------------------------
+# Deterministic fuzz functions
+# ---------------------------------------------------------------------------
+
+def _fuzz_seed(org_id, player_id, attr_name):
+    """
+    Deterministic hash producing a stable integer for a given
+    (org, player, attribute) triple.  Same inputs always produce
+    the same output.  Different orgs see different fuzz.
+    """
+    raw = f"{org_id}:{player_id}:{attr_name}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(raw).digest()[:4], "big")
+
+
+def fuzz_letter_grade(true_grade, org_id, player_id, attr_name):
+    """
+    Shift a letter grade by 1-3 positions in GRADE_LIST.
+    Direction and magnitude are deterministic per (org, player, attr).
+    """
+    true_idx = GRADE_INDEX.get(true_grade)
+    if true_idx is None:
+        return "?"
+
+    seed = _fuzz_seed(org_id, player_id, attr_name)
+    magnitude = (seed % 3) + 1                        # 1, 2, or 3 steps
+    direction = 1 if (seed >> 2) % 2 == 0 else -1     # up or down
+
+    fuzzed_idx = true_idx + (direction * magnitude)
+    fuzzed_idx = max(0, min(len(GRADE_LIST) - 1, fuzzed_idx))
+    return GRADE_LIST[fuzzed_idx]
+
+
+def fuzz_20_80(true_score, org_id, player_id, attr_name):
+    """
+    Offset a 20-80 score by 5, 10, or 15 (1-3 steps of 5).
+    Direction and magnitude are deterministic per (org, player, attr).
+    """
+    if true_score is None:
+        return None
+
+    seed = _fuzz_seed(org_id, player_id, attr_name)
+    magnitude = ((seed % 3) + 1) * 5                  # 5, 10, or 15
+    direction = 1 if (seed >> 2) % 2 == 0 else -1
+
+    fuzzed = true_score + (direction * magnitude)
+    return max(20, min(80, fuzzed))
+
+
+# ---------------------------------------------------------------------------
+# Conversion helpers
+# ---------------------------------------------------------------------------
+
+def _to_20_80(raw_val, mean, std):
+    """Map a raw numeric value into a 20-80 scouting scale."""
+    if raw_val is None or mean is None:
+        return None
+    try:
+        x = float(raw_val)
+    except (TypeError, ValueError):
+        return None
+
+    if std is None or std <= 0:
+        z = 0.0
+    else:
+        z = (x - mean) / std
+
+    z = max(-3.0, min(3.0, z))
+    raw_score = 50.0 + (z / 3.0) * 30.0
+    raw_score = max(20.0, min(80.0, raw_score))
+    score = int(round(raw_score / 5.0) * 5)
+    return max(20, min(80, score))
+
+
+def _score_to_letter(score):
+    """Convert a 20-80 integer score to a letter grade."""
+    if score is None:
+        return "?"
+    for threshold, grade in _GRADE_THRESHOLDS:
+        if score >= threshold:
+            return grade
+    return "F"
+
+
+def base_to_letter_grade(value, mean=30.0, std=12.0):
+    """Convert a numeric _base value to a letter grade via 20-80 scale."""
+    score = _to_20_80(value, mean, std)
+    return _score_to_letter(score)
+
+
+# ---------------------------------------------------------------------------
+# Context determination
+# ---------------------------------------------------------------------------
+
+def determine_player_context(viewing_org_id, holding_org_id, player_level):
+    """
+    Classify the viewing relationship into a context string.
+
+    Returns one of:
+      'college_recruiting' — college org viewing HS player
+      'college_roster'     — any org viewing a college player
+      'pro_draft'          — MLB org viewing college/INTAM player
+      'pro_roster'         — any org viewing a pro player (levels 4-9)
+    """
+    # HS player
+    if holding_org_id == USHS_ORG_ID:
+        if COLLEGE_ORG_MIN <= viewing_org_id <= COLLEGE_ORG_MAX:
+            return "college_recruiting"
+        # Non-college orgs viewing HS: still show recruiting-style hidden view
+        return "college_recruiting"
+
+    # College or INTAM player
+    if (COLLEGE_ORG_MIN <= holding_org_id <= COLLEGE_ORG_MAX
+            or holding_org_id == INTAM_ORG_ID):
+        if MLB_ORG_MIN <= viewing_org_id <= MLB_ORG_MAX:
+            return "pro_draft"
+        return "college_roster"
+
+    # Pro player (levels 4-9)
+    if PRO_LEVEL_MIN <= (player_level or 0) <= PRO_LEVEL_MAX:
+        return "pro_roster"
+
+    # Fallback: treat as pro roster
+    return "pro_roster"
+
+
+# ---------------------------------------------------------------------------
+# Batch scouting action loader
+# ---------------------------------------------------------------------------
+
+def _load_scouting_actions_batch(conn, org_id, player_ids):
+    """
+    Load all scouting actions for (org_id, player_ids) in a single query.
+
+    Returns: {player_id: set(action_type, ...), ...}
+    """
+    if not player_ids:
+        return {}
+
+    rows = conn.execute(
+        text("""
+            SELECT player_id, action_type
+            FROM scouting_actions
+            WHERE org_id = :org_id AND player_id IN :pids
+        """),
+        {"org_id": org_id, "pids": tuple(player_ids)},
+    ).all()
+
+    result = {}
+    for pid, atype in rows:
+        result.setdefault(pid, set()).add(atype)
+    return result
+
+
+def _load_scouting_actions_single(conn, org_id, player_id):
+    """Load scouting actions for a single (org, player) pair."""
+    rows = conn.execute(
+        text("""
+            SELECT action_type FROM scouting_actions
+            WHERE org_id = :org_id AND player_id = :pid
+        """),
+        {"org_id": org_id, "pid": player_id},
+    ).all()
+    return {r[0] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Derived rating computation (from fuzzed base values)
+# ---------------------------------------------------------------------------
+
+def _compute_derived_from_values(base_values, position_weights=None):
+    """
+    Compute pitch overalls and position ratings from a dict of base attribute
+    values (already fuzzed or precise 20-80 scores).
+
+    This recomputes derived ratings from whatever values the org can see,
+    so that derived ratings are consistent with visible base attributes.
+
+    base_values: {attr_name: 20-80 score or None}
+    Returns: {derived_name: 20-80 score or None}
+    """
+    from rosters import _DEFAULT_POSITION_WEIGHTS
+
+    derived = {}
+
+    def _w_avg(components):
+        total_w = 0.0
+        total_v = 0.0
+        for col, w in components.items():
+            if w <= 0:
+                continue
+            # Check derived first (pitch_ovr referenced by position weights)
+            v = derived.get(col)
+            if v is None:
+                v = base_values.get(col)
+            if v is None:
+                continue
+            try:
+                num = float(v)
+            except (TypeError, ValueError):
+                continue
+            total_v += num * w
+            total_w += w
+        if total_w <= 0:
+            return None
+        return int(round(total_v / total_w))
+
+    # Pitch overalls
+    for i in range(1, 6):
+        prefix = f"pitch{i}_"
+        # Check if this pitch exists (has a non-None component)
+        has_pitch = any(
+            base_values.get(prefix + comp + "_display") is not None
+            for comp in ("consist", "pacc", "pbrk", "pcntrl")
+        )
+        if not has_pitch:
+            continue
+        raw = _w_avg({
+            prefix + "consist_display": 0.25,
+            prefix + "pacc_display":    0.25,
+            prefix + "pbrk_display":    0.25,
+            prefix + "pcntrl_display":  0.25,
+        })
+        if raw is not None:
+            derived[f"pitch{i}_ovr"] = raw
+
+    # Position ratings
+    weights = position_weights or _DEFAULT_POSITION_WEIGHTS
+    for rating_type, wt_map in weights.items():
+        # Remap _base keys to _display keys for lookup
+        display_wt_map = {}
+        for attr_key, w in wt_map.items():
+            if attr_key.endswith("_base"):
+                display_wt_map[attr_key.replace("_base", "_display")] = w
+            else:
+                # pitch_ovr keys are already in derived
+                display_wt_map[attr_key] = w
+        derived[rating_type] = _w_avg(display_wt_map)
+
+    return derived
+
+
+# ---------------------------------------------------------------------------
+# Core visibility application
+# ---------------------------------------------------------------------------
+
+def _apply_visibility(
+    player_dict,
+    viewing_org_id,
+    holding_org_id,
+    player_level,
+    unlocked_actions,
+    dist_config,
+    col_cats,
+    position_weights=None,
+):
+    """
+    Apply fog-of-war to a player dict (output of _build_player_with_ratings).
+
+    Mutates and returns the player_dict with:
+      - ratings: fuzzed/masked/precise based on context + unlocked actions
+      - potentials: fuzzed/masked/precise based on context + unlocked actions
+      - visibility_context: metadata about what the org can see
+
+    dist_config: {ptype: {level: {attr: {mean, std}}}} from rating_scale_config
+    """
+    player_id = player_dict.get("id")
+    context = determine_player_context(viewing_org_id, holding_org_id, player_level)
+
+    # Check carryover: any precise action from any context applies
+    has_precise_attrs = bool(unlocked_actions & _PRECISE_ATTR_ACTIONS)
+    has_precise_pot = bool(unlocked_actions & _PRECISE_POT_ACTIONS)
+    has_fuzzed_numeric = bool(unlocked_actions & _FUZZED_NUMERIC_ACTIONS)
+
+    ratings = player_dict.get("ratings", {})
+    potentials = player_dict.get("potentials", {})
+    bio = player_dict.get("bio", {})
+    ptype = (bio.get("ptype") or "").strip()
+    rating_cols = col_cats.get("rating", [])
+    pot_cols = col_cats.get("pot", [])
+
+    # Determine the level key for distribution lookups
+    level_key = player_dict.get("league_level") or player_dict.get("current_level")
+
+    # Get distribution for this player's ptype + level
+    ptype_dist = dist_config.get(ptype) or dist_config.get("all") or {}
+    dist_for_level = ptype_dist.get(level_key, {})
+
+    # For draft prospects, use Level 5 (Single-A) distributions
+    draft_dist = ptype_dist.get(DRAFT_DISPLAY_LEVEL, {})
+
+    # We need raw _base values from bio for letter grade / re-conversion.
+    # The original _build_player_with_ratings puts _base cols in bio,
+    # and the 20-80 values in ratings as *_display keys.
+
+    if context == "college_recruiting":
+        # Attributes: hidden
+        for col in rating_cols:
+            out_name = col.replace("_base", "_display")
+            ratings[out_name] = None
+        # Clear derived ratings too
+        for key in list(ratings.keys()):
+            if key.endswith("_rating") or key.endswith("_ovr"):
+                ratings[key] = None
+
+        # Potentials: ? / fuzzed / precise
+        if has_precise_pot:
+            pass  # keep potentials as-is (precise)
+        elif "recruit_potential_fuzzed" in unlocked_actions:
+            for col in pot_cols:
+                true_pot = potentials.get(col)
+                if true_pot:
+                    potentials[col] = fuzz_letter_grade(
+                        true_pot, viewing_org_id, player_id, col
+                    )
+                else:
+                    potentials[col] = "?"
+        else:
+            for col in pot_cols:
+                potentials[col] = "?"
+
+        display_format = "hidden"
+        attrs_precise = False
+        pot_precise = has_precise_pot
+
+    elif context == "college_roster":
+        # Attributes: fuzzed letter grades (ceiling — can never be precise)
+        letter_ratings = {}
+        for col in rating_cols:
+            raw_val = bio.get(col)
+            out_name = col.replace("_base", "_display")
+
+            # Get distribution for letter grade conversion
+            m_pitch = PITCH_COMPONENT_RE.match(col)
+            if m_pitch:
+                dist_key = f"pitch_{m_pitch.group(1)}"
+            else:
+                dist_key = col
+            d = dist_for_level.get(dist_key, {})
+            mean = d.get("mean", 30.0)
+            std = d.get("std", 12.0)
+
+            # Convert raw -> 20-80 -> letter grade -> fuzz
+            true_grade = base_to_letter_grade(raw_val, mean, std)
+            fuzzed = fuzz_letter_grade(
+                true_grade, viewing_org_id, player_id, col
+            )
+            letter_ratings[out_name] = fuzzed
+
+        ratings = letter_ratings
+        # Clear derived ratings (letter grade context has no numeric derived)
+        for key in list(ratings.keys()):
+            if key.endswith("_rating") or key.endswith("_ovr"):
+                pass  # these won't exist in letter_ratings dict
+        # No derived ratings in letter grade mode
+
+        # Potentials: fuzzed or precise
+        if has_precise_pot:
+            pass  # keep as-is
+        else:
+            for col in pot_cols:
+                true_pot = potentials.get(col)
+                if true_pot:
+                    potentials[col] = fuzz_letter_grade(
+                        true_pot, viewing_org_id, player_id, col
+                    )
+                else:
+                    potentials[col] = "?"
+
+        display_format = "letter_grade"
+        attrs_precise = False
+        pot_precise = has_precise_pot
+
+    elif context == "pro_draft":
+        if has_precise_attrs:
+            # Precise 20-80 at draft level (Level 5) baseline
+            # Re-convert raw values using Level 5 distributions
+            for col in rating_cols:
+                raw_val = bio.get(col)
+                out_name = col.replace("_base", "_display")
+                m_pitch = PITCH_COMPONENT_RE.match(col)
+                if m_pitch:
+                    dist_key = f"pitch_{m_pitch.group(1)}"
+                else:
+                    dist_key = col
+                d = draft_dist.get(dist_key, {})
+                if d:
+                    ratings[out_name] = _to_20_80(raw_val, d.get("mean"), d.get("std"))
+                else:
+                    ratings[out_name] = None
+
+            # Recompute derived from precise values
+            derived = _compute_derived_from_values(ratings, position_weights)
+            ratings.update(derived)
+            display_format = "20-80"
+            attrs_precise = True
+
+        elif has_fuzzed_numeric:
+            # Fuzzed 20-80 at Level 5 baseline
+            for col in rating_cols:
+                raw_val = bio.get(col)
+                out_name = col.replace("_base", "_display")
+                m_pitch = PITCH_COMPONENT_RE.match(col)
+                if m_pitch:
+                    dist_key = f"pitch_{m_pitch.group(1)}"
+                else:
+                    dist_key = col
+                d = draft_dist.get(dist_key, {})
+                if d:
+                    true_score = _to_20_80(raw_val, d.get("mean"), d.get("std"))
+                    ratings[out_name] = fuzz_20_80(
+                        true_score, viewing_org_id, player_id, col
+                    )
+                else:
+                    ratings[out_name] = None
+
+            # Recompute derived from fuzzed values
+            derived = _compute_derived_from_values(ratings, position_weights)
+            ratings.update(derived)
+            display_format = "20-80"
+            attrs_precise = False
+
+        else:
+            # Default: fuzzed letter grades (college public view)
+            letter_ratings = {}
+            for col in rating_cols:
+                raw_val = bio.get(col)
+                out_name = col.replace("_base", "_display")
+                m_pitch = PITCH_COMPONENT_RE.match(col)
+                if m_pitch:
+                    dist_key = f"pitch_{m_pitch.group(1)}"
+                else:
+                    dist_key = col
+                d = dist_for_level.get(dist_key, {})
+                mean = d.get("mean", 30.0)
+                std = d.get("std", 12.0)
+                true_grade = base_to_letter_grade(raw_val, mean, std)
+                fuzzed = fuzz_letter_grade(
+                    true_grade, viewing_org_id, player_id, col
+                )
+                letter_ratings[out_name] = fuzzed
+            ratings = letter_ratings
+            display_format = "letter_grade"
+            attrs_precise = False
+
+        # Potentials: fuzzed or precise
+        if has_precise_pot:
+            pass
+        else:
+            for col in pot_cols:
+                true_pot = potentials.get(col)
+                if true_pot:
+                    potentials[col] = fuzz_letter_grade(
+                        true_pot, viewing_org_id, player_id, col
+                    )
+                else:
+                    potentials[col] = "?"
+
+        pot_precise = has_precise_pot
+
+    elif context == "pro_roster":
+        if has_precise_attrs:
+            # Keep true 20-80 ratings as-is (already computed by _build_player_with_ratings)
+            display_format = "20-80"
+            attrs_precise = True
+        else:
+            # Fuzz the existing 20-80 ratings
+            for key, val in list(ratings.items()):
+                if val is None:
+                    continue
+                if key.endswith("_display"):
+                    attr_name = key.replace("_display", "_base")
+                    ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, attr_name)
+
+            # Recompute derived from fuzzed values
+            derived = _compute_derived_from_values(ratings, position_weights)
+            ratings.update(derived)
+            display_format = "20-80"
+            attrs_precise = False
+
+        # Potentials: fuzzed or precise
+        if has_precise_pot:
+            pass
+        else:
+            for col in pot_cols:
+                true_pot = potentials.get(col)
+                if true_pot:
+                    potentials[col] = fuzz_letter_grade(
+                        true_pot, viewing_org_id, player_id, col
+                    )
+                else:
+                    potentials[col] = "?"
+
+        pot_precise = has_precise_pot
+
+    else:
+        # Unknown context: show everything fuzzed as pro_roster
+        display_format = "20-80"
+        attrs_precise = False
+        pot_precise = False
+
+    player_dict["ratings"] = ratings
+    player_dict["potentials"] = potentials
+    player_dict["visibility_context"] = {
+        "context": context,
+        "display_format": display_format,
+        "attributes_precise": attrs_precise,
+        "potentials_precise": pot_precise,
+    }
+
+    return player_dict
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def get_visible_player(
+    conn,
+    player_dict,
+    viewing_org_id,
+    holding_org_id,
+    player_level,
+    dist_config,
+    col_cats,
+    position_weights=None,
+):
+    """
+    Apply fog-of-war to a single player dict.
+
+    player_dict: output of rosters._build_player_with_ratings()
+    viewing_org_id: the org requesting the data
+    holding_org_id: org that holds this player's contract
+    player_level: current_level from contract
+    dist_config: {ptype: {level: {attr: {mean, std}}}}
+    col_cats: {rating: [...], pot: [...], bio: [...], derived: [...]}
+    """
+    player_id = player_dict.get("id")
+    unlocked = _load_scouting_actions_single(conn, viewing_org_id, player_id)
+    return _apply_visibility(
+        player_dict, viewing_org_id, holding_org_id, player_level,
+        unlocked, dist_config, col_cats, position_weights,
+    )
+
+
+def get_visible_players_batch(
+    conn,
+    player_dicts,
+    viewing_org_id,
+    holding_org_ids,
+    player_levels,
+    dist_config,
+    col_cats,
+    position_weights=None,
+):
+    """
+    Apply fog-of-war to a list of player dicts.
+
+    player_dicts: list of outputs from rosters._build_player_with_ratings()
+    holding_org_ids: dict {player_id: holding_org_id}
+    player_levels: dict {player_id: current_level}
+    dist_config: {ptype: {level: {attr: {mean, std}}}}
+
+    Uses a single batch query for scouting actions.
+    """
+    player_ids = [p.get("id") for p in player_dicts if p.get("id") is not None]
+    actions_by_player = _load_scouting_actions_batch(conn, viewing_org_id, player_ids)
+
+    results = []
+    for pd in player_dicts:
+        pid = pd.get("id")
+        unlocked = actions_by_player.get(pid, set())
+        h_org = holding_org_ids.get(pid, 0)
+        p_level = player_levels.get(pid, 0)
+        result = _apply_visibility(
+            pd, viewing_org_id, h_org, p_level,
+            unlocked, dist_config, col_cats, position_weights,
+        )
+        results.append(result)
+
+    return results

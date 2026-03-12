@@ -23,9 +23,17 @@ from services.scouting_service import (
     get_org_scouting_actions,
     get_scouting_config,
     base_to_letter_grade,
+    ALL_ACTION_TYPES,
 )
 from services.scouting_stats import generate_scouting_stats
 from services.scouting_reports import generate_text_report
+from services.attribute_visibility import (
+    get_visible_player,
+    determine_player_context,
+    fuzz_letter_grade,
+    base_to_letter_grade as visibility_base_to_letter_grade,
+    PITCH_COMPONENT_RE as VIS_PITCH_RE,
+)
 
 scouting_bp = Blueprint("scouting", __name__)
 
@@ -34,6 +42,8 @@ INTAM_ORG_ID = 339
 USHS_ORG_ID = 340
 COLLEGE_ORG_MIN = 31
 COLLEGE_ORG_MAX = 338
+MLB_ORG_MIN = 1
+MLB_ORG_MAX = 30
 
 # Pagination defaults
 DEFAULT_PAGE = 1
@@ -116,7 +126,7 @@ def _get_scouting_columns():
 # -------------------------------------------------------------------
 
 def _build_join_chain():
-    """Build the standard contract → player join chain."""
+    """Build the standard contract -> player join chain."""
     tables = _get_tables()
     contracts = tables["contracts"]
     details = tables["contract_details"]
@@ -203,6 +213,46 @@ def _build_player_list(rows, tables):
     return players_list
 
 
+def _apply_pool_fuzz(players_list, viewing_org_id, pool):
+    """
+    Apply fog-of-war fuzz to pool listing results.
+
+    For pool listings we apply lightweight fuzz without needing the full
+    visibility service (no scouting action lookups — pool views show
+    the public fuzzed baseline).
+    """
+    if not viewing_org_id:
+        return players_list
+
+    for player in players_list:
+        pid = player.get("id")
+        if not pid:
+            continue
+
+        # Fuzz _base columns to letter grades for college/intam/hs pool views
+        if pool in ("college", "intam", "hs"):
+            for key in list(player.keys()):
+                if key.endswith("_base"):
+                    raw_val = player[key]
+                    true_grade = base_to_letter_grade(raw_val)
+                    player[key] = fuzz_letter_grade(
+                        true_grade, viewing_org_id, pid, key
+                    )
+                elif key.endswith("_pot"):
+                    if pool == "hs":
+                        player[key] = "?"
+                    else:
+                        true_pot = player[key]
+                        if true_pot:
+                            player[key] = fuzz_letter_grade(
+                                true_pot, viewing_org_id, pid, key
+                            )
+                        else:
+                            player[key] = "?"
+
+    return players_list
+
+
 # -------------------------------------------------------------------
 # Endpoint 1: Pro Scouting Pool
 # -------------------------------------------------------------------
@@ -213,9 +263,12 @@ def api_pro_pool():
     Paginated list of players eligible for pro scouting:
     - INTAM (org 339) age 18+
     - College (orgs 31-338) any age
+
+    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
     """
     try:
         page, per_page = _parse_pagination()
+        viewing_org_id = request.args.get("viewing_org_id", type=int)
         join, tables = _build_join_chain()
 
         contracts = tables["contracts"]
@@ -315,6 +368,17 @@ def api_pro_pool():
             rows = conn.execute(data_stmt).all()
 
         players_list = _build_player_list(rows, tables)
+
+        # Apply fog-of-war fuzz for pool listing
+        if viewing_org_id:
+            # Determine pool type per player based on their org
+            for p in players_list:
+                p_org = p.get("org_id", 0)
+                if p_org == INTAM_ORG_ID:
+                    _apply_pool_fuzz([p], viewing_org_id, "intam")
+                else:
+                    _apply_pool_fuzz([p], viewing_org_id, "college")
+
         pages = math.ceil(total / per_page) if per_page else 1
 
         return jsonify(
@@ -340,9 +404,12 @@ def api_college_pool():
     Paginated list of HS players available for college recruiting.
     Supports ?age=17 for "Class of" tabs (seniors, juniors, etc).
     Returns age_counts for tab badge rendering.
+
+    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
     """
     try:
         page, per_page = _parse_pagination()
+        viewing_org_id = request.args.get("viewing_org_id", type=int)
         join, tables = _build_join_chain()
 
         contracts = tables["contracts"]
@@ -418,6 +485,11 @@ def api_college_pool():
             rows = conn.execute(data_stmt).all()
 
         players_list = _build_player_list(rows, tables)
+
+        # Apply fog-of-war fuzz for HS pool
+        if viewing_org_id:
+            _apply_pool_fuzz(players_list, viewing_org_id, "hs")
+
         pages = math.ceil(total / per_page) if per_page else 1
 
         return jsonify(
@@ -473,7 +545,6 @@ def api_scouting_action():
     Spend scouting points to unlock player information.
 
     Body: { org_id, league_year_id, player_id, action_type }
-    action_type: 'hs_report' | 'hs_potential' | 'pro_numeric'
     """
     body = request.get_json(silent=True) or {}
     required = ["org_id", "league_year_id", "player_id", "action_type"]
@@ -492,6 +563,86 @@ def api_scouting_action():
                 action_type=body["action_type"],
             )
         return jsonify(result), 200
+
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+# -------------------------------------------------------------------
+# Endpoint 4b: Batch Scouting Action
+# -------------------------------------------------------------------
+
+@scouting_bp.post("/scouting/action/batch")
+def api_scouting_action_batch():
+    """
+    Batch-unlock the same action_type for multiple players.
+
+    Body: { org_id, league_year_id, player_ids: [...], action_type }
+    Validates budget upfront for total cost (per-player cost * new unlocks).
+    Returns summary with successes, already_unlocked, errors.
+    """
+    body = request.get_json(silent=True) or {}
+    required = ["org_id", "league_year_id", "player_ids", "action_type"]
+    missing = [k for k in required if k not in body]
+    if missing:
+        return jsonify(error="missing_fields", fields=missing), 400
+
+    player_ids = body.get("player_ids", [])
+    if not isinstance(player_ids, list) or len(player_ids) == 0:
+        return jsonify(error="validation", message="player_ids must be a non-empty list"), 400
+
+    if len(player_ids) > 200:
+        return jsonify(error="validation", message="Maximum 200 players per batch"), 400
+
+    action_type = body["action_type"]
+    if action_type not in ALL_ACTION_TYPES:
+        return jsonify(error="validation", message=f"Unknown action_type: {action_type}"), 400
+
+    org_id = int(body["org_id"])
+    league_year_id = int(body["league_year_id"])
+
+    try:
+        engine = get_engine()
+        successes = []
+        already_unlocked = []
+        errors = []
+
+        with engine.begin() as conn:
+            for pid in player_ids:
+                try:
+                    result = perform_scouting_action(
+                        conn,
+                        org_id=org_id,
+                        league_year_id=league_year_id,
+                        player_id=int(pid),
+                        action_type=action_type,
+                    )
+                    if result["status"] == "already_unlocked":
+                        already_unlocked.append(int(pid))
+                    else:
+                        successes.append(int(pid))
+                except ValueError as e:
+                    errors.append({"player_id": int(pid), "error": str(e)})
+
+            # Get final budget state
+            budget = get_or_create_budget(conn, org_id, league_year_id)
+
+        total_spent = sum(
+            1 for _ in successes
+        )  # actual cost per player resolved inside perform_scouting_action
+
+        return jsonify(
+            successes=successes,
+            already_unlocked=already_unlocked,
+            errors=errors,
+            budget={
+                "total_points": budget["total_points"],
+                "spent_points": budget["spent_points"],
+                "remaining_points": budget["total_points"] - budget["spent_points"],
+            },
+        ), 200
 
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
@@ -520,13 +671,9 @@ def api_scouted_player(player_id):
 
     Query params: org_id (required), league_year_id (required)
 
-    Response varies by pool and unlock level:
-      HS free:      bio + generated_stats
-      HS report:    bio + generated_stats + text_report
-      HS potential: bio + generated_stats + text_report + potentials
-      College/INTAM free:    bio + letter_grades (+ counting_stats for INTAM)
-      College/INTAM numeric: bio + attributes
-      MLB FA:       bio + attributes + potentials
+    Uses the fog-of-war visibility system to determine what the
+    requesting org can see. Response includes visibility_context
+    metadata indicating the display format.
     """
     org_id = request.args.get("org_id", type=int)
     league_year_id = request.args.get("league_year_id", type=int)
@@ -536,7 +683,7 @@ def api_scouted_player(player_id):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            # Get visibility
+            # Get visibility (pool + unlocked + available actions)
             visibility = get_player_scouting_visibility(conn, org_id, player_id)
 
             if visibility["pool"] == "none":
@@ -557,8 +704,13 @@ def api_scouted_player(player_id):
                     value = float(value)
                 player_dict[key] = value
 
+        # Pass org_id into visibility for fuzz functions
+        visibility["_org_id"] = org_id
+
         # Build response based on visibility
         response = _build_scouted_response(player_dict, visibility)
+        # Remove internal field before returning
+        del visibility["_org_id"]
         response["visibility"] = visibility
 
         return jsonify(response), 200
@@ -568,13 +720,21 @@ def api_scouted_player(player_id):
 
 
 def _build_scouted_response(player, visibility):
-    """Build the response dict with appropriate data masking."""
+    """
+    Build the response dict with fog-of-war data masking.
+
+    Applies org-specific fuzz based on pool and unlocked actions.
+    """
     pool = visibility["pool"]
-    unlocked = visibility["unlocked"]
+    unlocked = set(visibility["unlocked"])
 
     # Bio is always included
     bio = {k: player.get(k) for k in _BIO_FIELDS if k in player}
     response = {"bio": bio}
+
+    # Extract org_id from visibility context (set by the endpoint)
+    org_id = visibility.get("_org_id", 0)
+    player_id = player.get("id", 0)
 
     if pool == "hs":
         # Stats always visible for HS
@@ -585,57 +745,96 @@ def _build_scouted_response(player, visibility):
         if "hs_report" in unlocked:
             response["text_report"] = generate_text_report(player, level)
 
-        # Potentials if unlocked
-        if "hs_potential" in unlocked:
-            potentials = {}
-            for k, v in player.items():
-                if k.endswith("_pot"):
-                    potentials[k] = v
-            response["potentials"] = potentials
+        # Potentials: ? / fuzzed / precise
+        potentials = {}
+        for k, v in player.items():
+            if k.endswith("_pot"):
+                if "recruit_potential_precise" in unlocked:
+                    potentials[k] = v  # precise
+                elif "recruit_potential_fuzzed" in unlocked:
+                    potentials[k] = fuzz_letter_grade(v, org_id, player_id, k) if v else "?"
+                else:
+                    potentials[k] = "?"
+        response["potentials"] = potentials
 
     elif pool in ("college", "intam"):
         level = pool
 
-        # Letter grades always visible (convert _base to grade)
+        # Letter grades: fuzzed per viewing org
         letter_grades = {}
         for k, v in player.items():
             if k.endswith("_base"):
-                ability_name = k[:-5]  # strip _base
-                letter_grades[ability_name] = base_to_letter_grade(v)
+                true_grade = base_to_letter_grade(v)
+                letter_grades[k[:-5]] = fuzz_letter_grade(
+                    true_grade, org_id, player_id, k
+                ) if org_id else true_grade
         response["letter_grades"] = letter_grades
 
         # INTAM: counting stats always visible
         if pool == "intam":
             response["counting_stats"] = generate_scouting_stats(player, level)
 
-        # Numeric attributes if unlocked
-        if "pro_numeric" in unlocked:
+        # Numeric attributes if unlocked (draft scouting)
+        if "draft_attrs_precise" in unlocked:
             attributes = {}
             for k, v in player.items():
                 if k.endswith("_base"):
                     attributes[k] = v
-            # Include pitch OVRs
             for i in range(1, 6):
                 ovr_key = f"pitch{i}_ovr"
                 if ovr_key in player:
                     attributes[ovr_key] = player[ovr_key]
             response["attributes"] = attributes
+            response["display_format"] = "20-80"
+        elif "draft_attrs_fuzzed" in unlocked:
+            # Fuzzed 20-80 (raw values fuzzed — actual 20-80 conversion
+            # happens at the display layer with Level 5 distributions)
+            attributes = {}
+            for k, v in player.items():
+                if k.endswith("_base"):
+                    attributes[k] = v  # raw values; frontend converts with Level 5 dist
+            for i in range(1, 6):
+                ovr_key = f"pitch{i}_ovr"
+                if ovr_key in player:
+                    attributes[ovr_key] = player[ovr_key]
+            response["attributes"] = attributes
+            response["display_format"] = "20-80-fuzzed"
 
-    elif pool == "mlb_fa":
-        # Full visibility
-        attributes = {}
+        # Potentials
         potentials = {}
+        for k, v in player.items():
+            if k.endswith("_pot"):
+                if "draft_potential_precise" in unlocked or "college_potential_precise" in unlocked:
+                    potentials[k] = v  # precise
+                else:
+                    potentials[k] = fuzz_letter_grade(v, org_id, player_id, k) if v else "?"
+        response["potentials"] = potentials
+
+    elif pool == "pro":
+        # Pro roster: fuzzed 20-80 or precise
+        attributes = {}
         for k, v in player.items():
             if k.endswith("_base"):
                 attributes[k] = v
-            elif k.endswith("_pot"):
-                potentials[k] = v
-        # Include pitch OVRs
         for i in range(1, 6):
             ovr_key = f"pitch{i}_ovr"
             if ovr_key in player:
                 attributes[ovr_key] = player[ovr_key]
         response["attributes"] = attributes
+
+        if "pro_attrs_precise" in unlocked or "draft_attrs_precise" in unlocked:
+            response["display_format"] = "20-80"
+        else:
+            response["display_format"] = "20-80-fuzzed"
+
+        # Potentials
+        potentials = {}
+        for k, v in player.items():
+            if k.endswith("_pot"):
+                if "pro_potential_precise" in unlocked or "draft_potential_precise" in unlocked:
+                    potentials[k] = v
+                else:
+                    potentials[k] = fuzz_letter_grade(v, org_id, player_id, k) if v else "?"
         response["potentials"] = potentials
 
     return response

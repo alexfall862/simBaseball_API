@@ -93,6 +93,7 @@ def get_landing(org_id: int):
             top_fielder   = _get_top_fielder(conn, tables, ctx, team_ids)
             injury_report = _get_injury_report(conn, tables, org_id)
             all_teams     = _get_all_teams(conn, tables)
+            special_events = _get_special_events(conn, ctx)
 
             # Financials — graceful fallback if ledger table is empty/missing
             financials = None
@@ -125,6 +126,7 @@ def get_landing(org_id: int):
             "SeasonContext":  ctx,
             "Financials":    financials,
             "FaceData":      face_data,
+            "SpecialEvents": special_events,
         }), 200
 
     except SQLAlchemyError:
@@ -163,6 +165,7 @@ def get_landing_all():
             standings = _get_standings(conn, tables, ctx)
             all_teams = _get_all_teams(conn, tables)
             all_games = _get_all_games_unfiltered(conn, tables, ctx)
+            special_events = _get_special_events(conn, ctx)
 
             # ── Enumerate orgs ───────────────────────────────────
             orgs_table = tables["organizations"]
@@ -226,12 +229,13 @@ def get_landing_all():
                 }
 
         return jsonify({
-            "SeasonContext": ctx,
-            "Standings":    standings,
-            "AllTeams":     all_teams,
-            "AllGames":     all_games,
-            "FaceData":     all_face_data,
-            "Orgs":         orgs_map,
+            "SeasonContext":  ctx,
+            "Standings":      standings,
+            "AllTeams":       all_teams,
+            "AllGames":       all_games,
+            "FaceData":       all_face_data,
+            "SpecialEvents":  special_events,
+            "Orgs":           orgs_map,
         }), 200
 
     except SQLAlchemyError:
@@ -896,26 +900,26 @@ def _get_standings(conn, tables, ctx):
             FROM teams t
             LEFT JOIN (
                 SELECT winning_team_id, COUNT(*) AS wins
-                FROM game_results WHERE season = :season_id
+                FROM game_results WHERE season = :season_id AND game_type = 'regular'
                 GROUP BY winning_team_id
             ) w ON w.winning_team_id = t.id
             LEFT JOIN (
                 SELECT losing_team_id, COUNT(*) AS losses
-                FROM game_results WHERE season = :season_id
+                FROM game_results WHERE season = :season_id AND game_type = 'regular'
                 GROUP BY losing_team_id
             ) l ON l.losing_team_id = t.id
             LEFT JOIN (
                 SELECT gr.winning_team_id, COUNT(*) AS conf_wins
                 FROM game_results gr
                 JOIN gamelist gl ON gl.id = gr.game_id
-                WHERE gr.season = :season_id AND gl.is_conference = 1
+                WHERE gr.season = :season_id AND gr.game_type = 'regular' AND gl.is_conference = 1
                 GROUP BY gr.winning_team_id
             ) cw ON cw.winning_team_id = t.id
             LEFT JOIN (
                 SELECT gr.losing_team_id, COUNT(*) AS conf_losses
                 FROM game_results gr
                 JOIN gamelist gl ON gl.id = gr.game_id
-                WHERE gr.season = :season_id AND gl.is_conference = 1
+                WHERE gr.season = :season_id AND gr.game_type = 'regular' AND gl.is_conference = 1
                 GROUP BY gr.losing_team_id
             ) cl ON cl.losing_team_id = t.id
             WHERE t.team_level >= 3
@@ -936,12 +940,12 @@ def _get_standings(conn, tables, ctx):
             FROM teams t
             LEFT JOIN (
                 SELECT winning_team_id, COUNT(*) AS wins
-                FROM game_results WHERE season = :season_id
+                FROM game_results WHERE season = :season_id AND game_type = 'regular'
                 GROUP BY winning_team_id
             ) w ON w.winning_team_id = t.id
             LEFT JOIN (
                 SELECT losing_team_id, COUNT(*) AS losses
-                FROM game_results WHERE season = :season_id
+                FROM game_results WHERE season = :season_id AND game_type = 'regular'
                 GROUP BY losing_team_id
             ) l ON l.losing_team_id = t.id
             WHERE t.team_level >= 3
@@ -1013,6 +1017,7 @@ def _get_all_games(conn, tables, ctx, team_ids):
             gl.away_team  AS away_team_id,
             gl.season_week AS week,
             gl.season_subweek AS game_day,
+            gl.game_type,
             gr.home_score,
             gr.away_score,
             gr.game_outcome,
@@ -1041,6 +1046,7 @@ def _get_all_games_unfiltered(conn, tables, ctx):
             gl.away_team  AS away_team_id,
             gl.season_week AS week,
             gl.season_subweek AS game_day,
+            gl.game_type,
             gr.home_score,
             gr.away_score,
             gr.game_outcome,
@@ -1053,6 +1059,155 @@ def _get_all_games_unfiltered(conn, tables, ctx):
 
     rows = conn.execute(sql, {"season_id": season_id}).all()
     return [_row_to_dict(r) for r in rows]
+
+
+def _get_special_events(conn, ctx):
+    """
+    Return active special events (WBC, All-Star, Playoffs) for the current
+    league year so the frontend can render them.
+    """
+    league_year_id = ctx.get("league_year_id")
+    if not league_year_id:
+        return []
+
+    events = []
+
+    # WBC and All-Star events from special_events table
+    try:
+        se_rows = conn.execute(text("""
+            SELECT id, league_year_id, event_type, status,
+                   created_at, completed_at, metadata_json
+            FROM special_events
+            WHERE league_year_id = :lyid
+            ORDER BY created_at DESC
+        """), {"lyid": league_year_id}).mappings().all()
+
+        for r in se_rows:
+            evt = {
+                "id": int(r["id"]),
+                "league_year_id": int(r["league_year_id"]),
+                "event_type": r["event_type"],
+                "status": r["status"],
+                "created_at": str(r["created_at"]) if r["created_at"] else None,
+                "completed_at": str(r["completed_at"]) if r["completed_at"] else None,
+            }
+
+            # For WBC events, include teams and pool standings
+            if r["event_type"] == "wbc":
+                wbc_rows = conn.execute(text("""
+                    SELECT country_name, country_code, pool_group,
+                           pool_wins, pool_losses, eliminated, seed
+                    FROM wbc_teams WHERE event_id = :eid
+                    ORDER BY pool_group, pool_wins DESC, pool_losses ASC
+                """), {"eid": int(r["id"])}).mappings().all()
+                evt["teams"] = [{
+                    "country_name": w["country_name"],
+                    "country_code": w["country_code"],
+                    "pool_group": w["pool_group"],
+                    "pool_wins": int(w["pool_wins"]),
+                    "pool_losses": int(w["pool_losses"]),
+                    "eliminated": bool(w["eliminated"]),
+                    "seed": int(w["seed"]) if w["seed"] else None,
+                } for w in wbc_rows]
+
+                # Include WBC games
+                import json
+                meta = json.loads(r["metadata_json"] or "{}")
+                team_map = meta.get("team_map", {})
+                team_ids = list(team_map.values())
+                if team_ids:
+                    placeholders = ",".join(str(tid) for tid in team_ids)
+                    wbc_games = conn.execute(text(f"""
+                        SELECT gl.id, gl.home_team AS home_team_id,
+                               gl.away_team AS away_team_id,
+                               gl.season_week AS week,
+                               gl.season_subweek AS game_day,
+                               gl.game_type,
+                               gr.home_score, gr.away_score, gr.game_outcome,
+                               CASE WHEN gr.game_id IS NOT NULL THEN 1 ELSE 0 END AS is_complete
+                        FROM gamelist gl
+                        LEFT JOIN game_results gr ON gr.game_id = gl.id
+                        WHERE gl.game_type = 'wbc'
+                          AND (gl.home_team IN ({placeholders})
+                               OR gl.away_team IN ({placeholders}))
+                        ORDER BY gl.season_week, gl.season_subweek
+                    """)).mappings().all()
+                    evt["games"] = [dict(g) for g in wbc_games]
+                    evt["team_map"] = team_map
+
+            # For All-Star events, include rosters
+            if r["event_type"] == "allstar":
+                roster_rows = conn.execute(text("""
+                    SELECT ser.team_label, ser.player_id, ser.position_code,
+                           ser.is_starter, p.firstName, p.lastName
+                    FROM special_event_rosters ser
+                    JOIN simbbPlayers p ON p.id = ser.player_id
+                    WHERE ser.event_id = :eid
+                    ORDER BY ser.team_label, ser.is_starter DESC, ser.position_code
+                """), {"eid": int(r["id"])}).mappings().all()
+                rosters = {}
+                for rr in roster_rows:
+                    label = rr["team_label"]
+                    rosters.setdefault(label, []).append({
+                        "player_id": int(rr["player_id"]),
+                        "name": f"{rr['firstName']} {rr['lastName']}".strip(),
+                        "position": rr["position_code"],
+                        "is_starter": bool(rr["is_starter"]),
+                    })
+                evt["rosters"] = rosters
+
+            events.append(evt)
+    except Exception:
+        log.debug("bootstrap: special_events table unavailable, skipping")
+
+    # Playoff status from playoff_series table
+    try:
+        ps_rows = conn.execute(text("""
+            SELECT league_level, round, series_number,
+                   team_a_id, team_b_id, seed_a, seed_b,
+                   wins_a, wins_b, series_length, status,
+                   winner_team_id, start_week, conference
+            FROM playoff_series
+            WHERE league_year_id = :lyid
+            ORDER BY league_level DESC, round, series_number
+        """), {"lyid": league_year_id}).mappings().all()
+
+        if ps_rows:
+            # Group by league_level
+            by_level = {}
+            for r in ps_rows:
+                lvl = int(r["league_level"])
+                by_level.setdefault(lvl, []).append({
+                    "round": r["round"],
+                    "series_number": int(r["series_number"]),
+                    "team_a_id": int(r["team_a_id"]),
+                    "team_b_id": int(r["team_b_id"]),
+                    "seed_a": int(r["seed_a"]) if r["seed_a"] else None,
+                    "seed_b": int(r["seed_b"]) if r["seed_b"] else None,
+                    "wins_a": int(r["wins_a"]),
+                    "wins_b": int(r["wins_b"]),
+                    "series_length": int(r["series_length"]),
+                    "status": r["status"],
+                    "winner_team_id": int(r["winner_team_id"]) if r["winner_team_id"] else None,
+                    "start_week": int(r["start_week"]),
+                    "conference": r["conference"],
+                })
+
+            for lvl, series_list in by_level.items():
+                total = len(series_list)
+                completed = sum(1 for s in series_list if s["status"] == "complete")
+                events.append({
+                    "id": None,
+                    "league_year_id": league_year_id,
+                    "event_type": "playoff",
+                    "league_level": lvl,
+                    "status": "complete" if total == completed else "in_progress",
+                    "series": series_list,
+                })
+    except Exception:
+        log.debug("bootstrap: playoff_series table unavailable, skipping")
+
+    return events
 
 
 def _get_notifications(conn, tables, team_ids):
