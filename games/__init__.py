@@ -494,17 +494,19 @@ def wipe_season():
             ), {"lyid": league_year_id})
             deleted["recruiting_commitments"] = r.rowcount
 
-            # 8f. Recruiting rankings
-            r = conn.execute(sa_text(
-                "DELETE FROM recruiting_rankings WHERE league_year_id = :lyid"
-            ), {"lyid": league_year_id})
-            deleted["recruiting_rankings"] = r.rowcount
+            # 8f. Recruiting rankings — NOT wiped; recomputed on advance-week
 
             # 8g. Recruiting state
             r = conn.execute(sa_text(
                 "DELETE FROM recruiting_state WHERE league_year_id = :lyid"
             ), {"lyid": league_year_id})
             deleted["recruiting_state"] = r.rowcount
+
+            # 8h. Recruiting board (org watchlists)
+            r = conn.execute(sa_text(
+                "DELETE FROM recruiting_board WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["recruiting_board"] = r.rowcount
 
             # 9. Reset timestamp
             conn.execute(sa_text(
@@ -524,7 +526,7 @@ def wipe_season():
                 "org_ledger_entries",
                 "scouting_actions", "scouting_budgets",
                 "recruiting_investments", "recruiting_commitments",
-                "recruiting_rankings", "recruiting_state",
+                "recruiting_state", "recruiting_board",
             ]
             for tbl in optimize_tables:
                 conn.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))
