@@ -390,6 +390,7 @@
       'stamina-flow': 'Stamina Flow History',
       'db-storage': 'DB Storage',
       'batting-lab': 'Batting Lab',
+      'recruiting-admin': 'Recruiting Admin',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -483,6 +484,10 @@
       case 'recruiting':
         loadSpecialEventLeagueYears('rec-lyid');
         loadRecruitingState();
+        break;
+      case 'recruiting-admin':
+        loadSpecialEventLeagueYears('radm-lyid');
+        loadRecruitingAdmin();
         break;
       case 'batting-lab':
         loadBlabHistory();
@@ -6881,6 +6886,352 @@
   document.getElementById('rec-lyid')?.addEventListener('change', () => {
     loadRecruitingState();
   });
+
+  // ======================================================================
+  // Recruiting Admin
+  // ======================================================================
+  let radmWeeklyChart = null;
+  let radmPaceChart = null;
+  let radmOrgDetailChart = null;
+
+  function radmLyid() { return document.getElementById('radm-lyid')?.value; }
+
+  function loadRecruitingAdmin() {
+    const lyid = radmLyid();
+    if (!lyid) return;
+    const status = document.getElementById('radm-status');
+    status.textContent = 'Loading…';
+    status.className = 'status-msg info';
+
+    // Load summary report
+    fetch(`${API_BASE}/recruiting/admin/report/summary?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { status.textContent = data.message; status.className = 'status-msg error'; return; }
+        status.textContent = '';
+        status.className = '';
+
+        // State card
+        const stateCard = document.getElementById('radm-state-card');
+        stateCard.style.display = '';
+        document.getElementById('radm-state-info').innerHTML =
+          `<span class="badge badge-${data.status === 'active' ? 'success' : data.status === 'complete' ? 'info' : 'warning'}">${data.status}</span> ` +
+          `Week <strong>${data.current_week}</strong> &mdash; ` +
+          `Pool: ${data.pool_size} &bull; Committed: ${data.committed_count} &bull; Remaining: ${data.uncommitted_count}`;
+
+        // Wipe card
+        document.getElementById('radm-wipe-card').style.display = '';
+
+        // Summary grid
+        const summCard = document.getElementById('radm-summary-card');
+        summCard.style.display = '';
+        const grid = document.getElementById('radm-summary-grid');
+        const stats = [
+          ['Active Orgs', data.active_orgs],
+          ['Players Targeted', data.targeted_players],
+          ['Total Points', data.total_points_invested.toLocaleString()],
+          ['Total Allocations', data.total_allocations.toLocaleString()],
+          ['Commitments', data.committed_count],
+          ['Unique Orgs Committing', data.unique_orgs_committing],
+          ['Avg Winning Points', data.avg_winning_points],
+        ];
+        grid.innerHTML = stats.map(([label, val]) =>
+          `<div style="background:var(--bg-dark);padding:12px;border-radius:6px;text-align:center">
+            <div style="font-size:1.4em;font-weight:bold;color:var(--accent)">${val}</div>
+            <div style="font-size:.85em;color:var(--text-secondary)">${label}</div>
+          </div>`
+        ).join('');
+
+        // Star distribution in summary
+        const starDist = data.star_distribution || {};
+        const commitByStar = data.committed_by_star || {};
+        if (Object.keys(starDist).length) {
+          let starHtml = '<div style="margin-top:12px"><h5>Star Distribution (Pool / Committed)</h5><table class="data-table"><thead><tr><th>Stars</th><th>Pool</th><th>Committed</th><th>%</th></tr></thead><tbody>';
+          for (let s = 5; s >= 1; s--) {
+            const pool = starDist[s] || 0;
+            const comm = commitByStar[s] || 0;
+            const pct = pool > 0 ? Math.round(comm / pool * 100) : 0;
+            starHtml += `<tr><td>${'★'.repeat(s)}</td><td>${pool}</td><td>${comm}</td><td>${pct}%</td></tr>`;
+          }
+          starHtml += '</tbody></table></div>';
+          grid.innerHTML += starHtml;
+        }
+
+        // Weekly trend chart
+        const weeks = data.weekly_trend || [];
+        if (weeks.length) {
+          if (radmWeeklyChart) radmWeeklyChart.destroy();
+          radmWeeklyChart = new Chart(document.getElementById('radm-weekly-chart'), {
+            type: 'bar',
+            data: {
+              labels: weeks.map(w => `Wk ${w.week}`),
+              datasets: [
+                { label: 'Points Spent', data: weeks.map(w => w.points_spent), backgroundColor: 'rgba(54,162,235,.7)' },
+                { label: 'Active Orgs', data: weeks.map(w => w.active_orgs), type: 'line', borderColor: '#ff9f40', yAxisID: 'y1', fill: false },
+              ]
+            },
+            options: {
+              responsive: true,
+              plugins: { legend: { labels: { color: '#ccc' } } },
+              scales: {
+                x: { ticks: { color: '#aaa' }, grid: { color: 'rgba(255,255,255,.05)' } },
+                y: { ticks: { color: '#aaa' }, grid: { color: 'rgba(255,255,255,.08)' }, title: { display: true, text: 'Points', color: '#aaa' } },
+                y1: { position: 'right', ticks: { color: '#aaa' }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Orgs', color: '#aaa' } },
+              }
+            }
+          });
+        }
+
+        // Commitment pace chart
+        const pace = data.commitment_pace || [];
+        if (pace.length) {
+          if (radmPaceChart) radmPaceChart.destroy();
+          let cumulative = 0;
+          const cumData = pace.map(p => { cumulative += p.commitments; return cumulative; });
+          radmPaceChart = new Chart(document.getElementById('radm-pace-chart'), {
+            type: 'line',
+            data: {
+              labels: pace.map(p => `Wk ${p.week}`),
+              datasets: [
+                { label: 'Per Week', data: pace.map(p => p.commitments), backgroundColor: 'rgba(75,192,192,.5)', type: 'bar' },
+                { label: 'Cumulative', data: cumData, borderColor: '#ff6384', fill: false },
+              ]
+            },
+            options: {
+              responsive: true,
+              plugins: { legend: { labels: { color: '#ccc' } } },
+              scales: {
+                x: { ticks: { color: '#aaa' }, grid: { color: 'rgba(255,255,255,.05)' } },
+                y: { ticks: { color: '#aaa' }, grid: { color: 'rgba(255,255,255,.08)' } },
+              }
+            }
+          });
+        }
+
+        // Load leaderboard + demand
+        loadRadmLeaderboard();
+        loadRadmDemand();
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  }
+
+  function loadRadmLeaderboard() {
+    const lyid = radmLyid();
+    if (!lyid) return;
+    fetch(`${API_BASE}/recruiting/admin/report/org-leaderboard?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) return;
+        const card = document.getElementById('radm-leaderboard-card');
+        card.style.display = '';
+        const container = document.getElementById('radm-leaderboard-table');
+        if (!data.orgs || !data.orgs.length) { container.innerHTML = '<p style="color:var(--text-secondary)">No investment activity yet.</p>'; return; }
+        let html = '<table class="data-table"><thead><tr><th>Org</th><th>Points</th><th>Players</th><th>Weeks</th><th>Util%</th><th>Commits</th><th>Elite</th><th>Avg★</th></tr></thead><tbody>';
+        data.orgs.forEach(o => {
+          html += `<tr style="cursor:pointer" data-org="${o.org_id}">
+            <td>${o.org_abbrev}</td><td>${o.total_points.toLocaleString()}</td><td>${o.players_targeted}</td>
+            <td>${o.weeks_active}</td><td>${o.budget_utilization_pct}%</td>
+            <td>${o.commitments}</td><td>${o.elite_commitments}</td><td>${o.avg_commit_star}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+
+        // Click to drill into org detail
+        container.querySelectorAll('tr[data-org]').forEach(tr => {
+          tr.addEventListener('click', () => loadRadmOrgDetail(parseInt(tr.dataset.org)));
+        });
+      });
+  }
+
+  function loadRadmDemand() {
+    const lyid = radmLyid();
+    if (!lyid) return;
+    const star = document.getElementById('radm-demand-star')?.value || '';
+    const limit = document.getElementById('radm-demand-limit')?.value || 50;
+    let url = `${API_BASE}/recruiting/admin/report/player-demand?league_year_id=${lyid}&limit=${limit}`;
+    if (star) url += `&star_rating=${star}`;
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) return;
+        const card = document.getElementById('radm-demand-card');
+        card.style.display = '';
+        const container = document.getElementById('radm-demand-table');
+        if (!data.players || !data.players.length) { container.innerHTML = '<p style="color:var(--text-secondary)">No investment activity yet.</p>'; return; }
+        let html = '<table class="data-table"><thead><tr><th>Player</th><th>Type</th><th>★</th><th>Rank</th><th>Orgs</th><th>Interest</th><th>Last Wk</th><th>Status</th></tr></thead><tbody>';
+        data.players.forEach(p => {
+          const statusBadge = p.status === 'committed'
+            ? `<span class="badge badge-success">${p.committed_to?.org_abbrev || 'committed'}</span>`
+            : '<span class="badge badge-warning">open</span>';
+          html += `<tr><td>${p.player_name}</td><td>${p.ptype}</td><td>${p.star_rating ?? '-'}</td>
+            <td>${p.rank_overall ?? '-'}</td><td>${p.num_orgs}</td><td>${p.total_interest.toLocaleString()}</td>
+            <td>${p.last_active_week}</td><td>${statusBadge}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      });
+  }
+
+  function loadRadmOrgDetail(orgId) {
+    const lyid = radmLyid();
+    if (!lyid) return;
+    fetch(`${API_BASE}/recruiting/admin/report/org-detail/${orgId}?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) return;
+        const card = document.getElementById('radm-orgdetail-card');
+        card.style.display = '';
+        card.scrollIntoView({ behavior: 'smooth' });
+        document.getElementById('radm-orgdetail-title').textContent = `${data.org_abbrev} (Org ${data.org_id}) — Total: ${data.total_invested.toLocaleString()} pts`;
+
+        // Weekly spend chart
+        const ws = data.weekly_spend || [];
+        if (ws.length) {
+          if (radmOrgDetailChart) radmOrgDetailChart.destroy();
+          radmOrgDetailChart = new Chart(document.getElementById('radm-orgdetail-chart'), {
+            type: 'bar',
+            data: {
+              labels: ws.map(w => `Wk ${w.week}`),
+              datasets: [{ label: 'Points', data: ws.map(w => w.points_spent), backgroundColor: 'rgba(54,162,235,.7)' }]
+            },
+            options: {
+              responsive: true,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { ticks: { color: '#aaa' }, grid: { color: 'rgba(255,255,255,.05)' } },
+                y: { ticks: { color: '#aaa' }, grid: { color: 'rgba(255,255,255,.08)' }, max: 100 },
+              }
+            }
+          });
+        }
+
+        // Commitments won
+        const commDiv = document.getElementById('radm-orgdetail-commits');
+        if (data.commitments_won.length) {
+          let chtml = '<table class="data-table"><thead><tr><th>Player</th><th>★</th><th>Week</th><th>Points</th></tr></thead><tbody>';
+          data.commitments_won.forEach(c => {
+            chtml += `<tr><td>${c.player_name}</td><td>${c.star_rating}</td><td>${c.week_committed}</td><td>${c.points_total}</td></tr>`;
+          });
+          chtml += '</tbody></table>';
+          commDiv.innerHTML = chtml;
+        } else {
+          commDiv.innerHTML = '<p style="color:var(--text-secondary)">No commitments won yet.</p>';
+        }
+
+        // All invested players
+        const plDiv = document.getElementById('radm-orgdetail-players');
+        if (data.invested_players.length) {
+          let phtml = '<table class="data-table"><thead><tr><th>Player</th><th>Type</th><th>★</th><th>Invested</th><th>Outcome</th></tr></thead><tbody>';
+          data.invested_players.forEach(p => {
+            let badge = '';
+            if (p.outcome === 'won') badge = '<span class="badge badge-success">Won</span>';
+            else if (p.outcome === 'lost') badge = `<span class="badge badge-danger">Lost → ${p.committed_to}</span>`;
+            else badge = '<span class="badge badge-warning">Active</span>';
+            phtml += `<tr><td>${p.player_name}</td><td>${p.ptype}</td><td>${p.star_rating ?? '-'}</td><td>${p.total_invested}</td><td>${badge}</td></tr>`;
+          });
+          phtml += '</tbody></table>';
+          plDiv.innerHTML = phtml;
+        } else {
+          plDiv.innerHTML = '<p style="color:var(--text-secondary)">No investments.</p>';
+        }
+      });
+  }
+
+  // Admin action helpers
+  function radmPost(endpoint, extraBody, successMsg) {
+    const lyid = radmLyid();
+    if (!lyid) return;
+    const status = document.getElementById('radm-status');
+    status.textContent = 'Processing…';
+    status.className = 'status-msg info';
+    const body = { league_year_id: parseInt(lyid), ...extraBody };
+    fetch(`${API_BASE}/recruiting/admin/${endpoint}`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.message;
+          status.className = 'status-msg error';
+        } else {
+          status.textContent = typeof successMsg === 'function' ? successMsg(data) : successMsg;
+          status.className = 'status-msg success';
+          loadRecruitingAdmin();
+        }
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  }
+
+  function radmWipePost(endpoint, successMsg) {
+    const lyid = radmLyid();
+    if (!lyid) return;
+    const wipeStatus = document.getElementById('radm-wipe-status');
+    const orgVal = document.getElementById('radm-wipe-org')?.value;
+    const playerVal = document.getElementById('radm-wipe-player')?.value;
+    const body = { league_year_id: parseInt(lyid) };
+    if (orgVal) body.org_id = parseInt(orgVal);
+    if (playerVal) body.player_id = parseInt(playerVal);
+
+    wipeStatus.textContent = 'Processing…';
+    wipeStatus.className = 'status-msg info';
+    fetch(`${API_BASE}/recruiting/admin/${endpoint}`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          wipeStatus.textContent = data.message;
+          wipeStatus.className = 'status-msg error';
+        } else {
+          wipeStatus.textContent = `${successMsg}: ${data.deleted} rows (scope: ${data.scope})`;
+          wipeStatus.className = 'status-msg success';
+          loadRecruitingAdmin();
+        }
+      })
+      .catch(e => { wipeStatus.textContent = e.message; wipeStatus.className = 'status-msg error'; });
+  }
+
+  // Button handlers
+  document.getElementById('btn-radm-refresh')?.addEventListener('click', loadRecruitingAdmin);
+
+  document.getElementById('radm-lyid')?.addEventListener('change', loadRecruitingAdmin);
+
+  document.getElementById('btn-radm-reset-week')?.addEventListener('click', () => {
+    const week = parseInt(document.getElementById('radm-target-week')?.value || 1);
+    if (!confirm(`Reset recruiting to week ${week}? This does NOT wipe investments or commitments.`)) return;
+    radmPost('reset-week', { target_week: week }, d => `Reset to week ${d.current_week} (${d.status})`);
+  });
+
+  document.getElementById('btn-radm-full-reset')?.addEventListener('click', () => {
+    if (!confirm('Full reset: wipe all investments, commitments, and boards? Rankings are preserved.')) return;
+    radmPost('full-reset', {}, d => {
+      const parts = Object.entries(d.deleted).filter(([k]) => k !== 'state_reset').map(([k, v]) => `${k}: ${v}`);
+      return `Full reset complete. ${parts.join(', ')}`;
+    });
+  });
+
+  document.getElementById('btn-radm-wipe-investments')?.addEventListener('click', () => {
+    if (!confirm('Wipe investments with the selected scope?')) return;
+    radmWipePost('wipe-investments', 'Investments wiped');
+  });
+
+  document.getElementById('btn-radm-wipe-commitments')?.addEventListener('click', () => {
+    if (!confirm('Wipe commitments with the selected scope?')) return;
+    radmWipePost('wipe-commitments', 'Commitments wiped');
+  });
+
+  document.getElementById('btn-radm-wipe-boards')?.addEventListener('click', () => {
+    if (!confirm('Wipe boards with the selected scope?')) return;
+    radmWipePost('wipe-boards', 'Boards wiped');
+  });
+
+  // Re-filter demand on filter change
+  document.getElementById('radm-demand-star')?.addEventListener('change', loadRadmDemand);
+  document.getElementById('radm-demand-limit')?.addEventListener('change', loadRadmDemand);
 
   // ======================================================================
   // Batting Lab

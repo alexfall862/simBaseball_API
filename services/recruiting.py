@@ -762,17 +762,35 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
     ).first()
 
     if not ranking:
-        return None
-
-    m = ranking._mapping
-    result = {
-        "player_id": player_id,
-        "player_name": f"{m['firstname']} {m['lastname']}",
-        "ptype": m["ptype"],
-        "star_rating": m["star_rating"],
-        "rank_overall": m["rank_overall"],
-        "rank_by_ptype": m["rank_by_ptype"],
-    }
+        # Fall back to base player info when rankings haven't been generated
+        player = conn.execute(
+            text("""
+                SELECT id, firstname, lastname, ptype
+                FROM simbbPlayers WHERE id = :pid
+            """),
+            {"pid": player_id},
+        ).first()
+        if not player:
+            return None
+        pm = player._mapping
+        result = {
+            "player_id": player_id,
+            "player_name": f"{pm['firstname']} {pm['lastname']}",
+            "ptype": pm["ptype"],
+            "star_rating": None,
+            "rank_overall": None,
+            "rank_by_ptype": None,
+        }
+    else:
+        m = ranking._mapping
+        result = {
+            "player_id": player_id,
+            "player_name": f"{m['firstname']} {m['lastname']}",
+            "ptype": m["ptype"],
+            "star_rating": m["star_rating"],
+            "rank_overall": m["rank_overall"],
+            "rank_by_ptype": m["rank_by_ptype"],
+        }
 
     # Commitment status
     commitment = conn.execute(

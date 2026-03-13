@@ -178,6 +178,9 @@
       <a href="#" class="nav-item" data-section="recruiting">
         <span class="nav-icon">&#127891;</span> Recruiting
       </a>
+      <a href="#" class="nav-item" data-section="recruiting-admin">
+        <span class="nav-icon">&#9881;</span> Recruiting Admin
+      </a>
     </div>
 
     <div class="nav-section">
@@ -2873,6 +2876,119 @@
               <div id="rec-commitments-table" style="max-height:400px;overflow-y:auto"></div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- Recruiting Admin -->
+      <section id="section-recruiting-admin" class="section">
+        <!-- Controls Card -->
+        <div class="card">
+          <h3>Recruiting Administration</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="radm-lyid"></select>
+            </div>
+            <button id="btn-radm-refresh" class="btn btn-secondary">Refresh</button>
+          </div>
+          <div id="radm-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+
+        <!-- State & Week Controls -->
+        <div class="card" id="radm-state-card" style="display:none">
+          <h4>State &amp; Week Controls</h4>
+          <div id="radm-state-info" style="margin-bottom:12px"></div>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>Target Week</label>
+              <input type="number" id="radm-target-week" value="1" min="0" max="21" style="width:70px">
+            </div>
+            <button id="btn-radm-reset-week" class="btn btn-primary">Reset to Week</button>
+            <button id="btn-radm-full-reset" class="btn btn-danger">Full Reset (preserve rankings)</button>
+          </div>
+        </div>
+
+        <!-- Scoped Wipe Controls -->
+        <div class="card" id="radm-wipe-card" style="display:none">
+          <h4>Scoped Data Wipes</h4>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>Org ID (optional)</label>
+              <input type="number" id="radm-wipe-org" placeholder="all orgs" style="width:100px">
+            </div>
+            <div>
+              <label>Player ID (optional)</label>
+              <input type="number" id="radm-wipe-player" placeholder="all players" style="width:100px">
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+            <button id="btn-radm-wipe-investments" class="btn btn-danger">Wipe Investments</button>
+            <button id="btn-radm-wipe-commitments" class="btn btn-danger">Wipe Commitments</button>
+            <button id="btn-radm-wipe-boards" class="btn btn-danger">Wipe Boards</button>
+          </div>
+          <div id="radm-wipe-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Summary Report -->
+        <div class="card" id="radm-summary-card" style="display:none">
+          <h4>Recruiting Summary</h4>
+          <div id="radm-summary-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px"></div>
+          <div style="display:flex;gap:24px;flex-wrap:wrap">
+            <div style="flex:1;min-width:350px">
+              <h5>Weekly Investment Trend</h5>
+              <canvas id="radm-weekly-chart" width="500" height="250"></canvas>
+            </div>
+            <div style="flex:1;min-width:350px">
+              <h5>Commitment Pace</h5>
+              <canvas id="radm-pace-chart" width="500" height="250"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Org Leaderboard -->
+        <div class="card" id="radm-leaderboard-card" style="display:none">
+          <h4>Org Leaderboard</h4>
+          <div id="radm-leaderboard-table" style="max-height:500px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Player Demand -->
+        <div class="card" id="radm-demand-card" style="display:none">
+          <h4>Most Recruited Players</h4>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:8px">
+            <div>
+              <label>Star Filter</label>
+              <select id="radm-demand-star">
+                <option value="">All</option>
+                <option value="5">5-Star</option>
+                <option value="4">4-Star</option>
+                <option value="3">3-Star</option>
+                <option value="2">2-Star</option>
+                <option value="1">1-Star</option>
+              </select>
+            </div>
+            <div>
+              <label>Limit</label>
+              <input type="number" id="radm-demand-limit" value="50" min="10" max="200" style="width:70px">
+            </div>
+          </div>
+          <div id="radm-demand-table" style="max-height:500px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Org Detail (shown on leaderboard row click) -->
+        <div class="card" id="radm-orgdetail-card" style="display:none">
+          <h4 id="radm-orgdetail-title">Org Detail</h4>
+          <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+            <div style="flex:1;min-width:350px">
+              <h5>Weekly Spend</h5>
+              <canvas id="radm-orgdetail-chart" width="500" height="200"></canvas>
+            </div>
+            <div style="flex:1;min-width:250px">
+              <h5>Commitments Won</h5>
+              <div id="radm-orgdetail-commits" style="max-height:200px;overflow-y:auto"></div>
+            </div>
+          </div>
+          <h5>All Invested Players</h5>
+          <div id="radm-orgdetail-players" style="max-height:400px;overflow-y:auto"></div>
         </div>
       </section>
 
