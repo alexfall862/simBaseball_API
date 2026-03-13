@@ -778,7 +778,7 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
     commitment = conn.execute(
         text("""
             SELECT rc.org_id, rc.week_committed, rc.points_total,
-                   o.abbreviation AS org_abbrev
+                   o.org_abbrev AS org_abbrev
             FROM recruiting_commitments rc
             JOIN organizations o ON o.id = rc.org_id
             WHERE rc.player_id = :pid AND rc.league_year_id = :ly
@@ -904,7 +904,7 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     commitments = conn.execute(
         text(f"""
             SELECT rc.player_id, rc.org_id, rc.week_committed,
-                   o.abbreviation AS org_abbrev
+                   o.org_abbrev AS org_abbrev
             FROM recruiting_commitments rc
             JOIN organizations o ON o.id = rc.org_id
             WHERE rc.league_year_id = :ly

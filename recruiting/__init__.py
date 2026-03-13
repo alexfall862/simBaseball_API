@@ -421,7 +421,7 @@ def commitments():
                     SELECT rc.player_id, rc.org_id, rc.week_committed,
                            rc.points_total, rc.star_rating,
                            p.firstname, p.lastname, p.ptype,
-                           o.abbreviation AS org_abbrev
+                           o.org_abbrev AS org_abbrev
                     FROM recruiting_commitments rc
                     JOIN simbbPlayers p ON p.id = rc.player_id
                     JOIN organizations o ON o.id = rc.org_id
