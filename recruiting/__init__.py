@@ -269,6 +269,92 @@ def invest():
 
 
 # ---------------------------------------------------------------------------
+# GET /recruiting/investments/<org_id>
+# ---------------------------------------------------------------------------
+@recruiting_bp.get("/recruiting/investments/<int:org_id>")
+def get_investments(org_id: int):
+    """
+    Current week's investments for an org, plus budget info.
+    Query params: league_year_id
+    """
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(error="missing_param",
+                       message="league_year_id required"), 400
+
+    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+        return jsonify(error="validation_error",
+                       message="Only college orgs can recruit"), 400
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            # Get recruiting state
+            state = conn.execute(
+                sa_text("""
+                    SELECT current_week, status FROM recruiting_state
+                    WHERE league_year_id = :ly
+                """),
+                {"ly": league_year_id},
+            ).first()
+
+            current_week = state[0] if state else 0
+            status = state[1] if state else "pending"
+
+            # Get config for budget limits
+            config_rows = conn.execute(
+                sa_text("SELECT config_key, config_value FROM recruiting_config")
+            ).all()
+            config = {r[0]: r[1] for r in config_rows}
+            weekly_budget = int(config.get("points_per_week", 100))
+            max_per_player = int(config.get("max_points_per_player_per_week", 20))
+
+            # This week's investments
+            week_rows = conn.execute(
+                sa_text("""
+                    SELECT ri.player_id, ri.points,
+                           p.firstname, p.lastname, p.ptype
+                    FROM recruiting_investments ri
+                    JOIN simbbPlayers p ON p.id = ri.player_id
+                    WHERE ri.org_id = :org
+                      AND ri.league_year_id = :ly
+                      AND ri.week = :week
+                    ORDER BY ri.points DESC
+                """),
+                {"org": org_id, "ly": league_year_id, "week": current_week},
+            ).all()
+
+            investments = []
+            spent = 0
+            for r in week_rows:
+                pts = int(r[1])
+                spent += pts
+                investments.append({
+                    "player_id": r[0],
+                    "points": pts,
+                    "player_name": f"{r[2]} {r[3]}",
+                    "ptype": r[4],
+                })
+
+        return jsonify(
+            current_week=current_week,
+            status=status,
+            weekly_budget=weekly_budget,
+            max_per_player=max_per_player,
+            spent=spent,
+            budget_remaining=weekly_budget - spent,
+            investments=investments,
+        )
+
+    except SQLAlchemyError as e:
+        log.exception("get_investments db error org=%s ly=%s", org_id, league_year_id)
+        return jsonify(error="database_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("get_investments error org=%s ly=%s", org_id, league_year_id)
+        return jsonify(error="server_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
 # POST /recruiting/advance-week
 # ---------------------------------------------------------------------------
 @recruiting_bp.post("/recruiting/advance-week")
