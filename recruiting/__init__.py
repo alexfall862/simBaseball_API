@@ -16,9 +16,13 @@ Endpoints:
   GET  /recruiting/commitments       — public commitment list
 """
 
+import logging
+
 from flask import Blueprint, jsonify, request
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text as sa_text
+
+log = logging.getLogger(__name__)
 
 from db import get_engine
 from services.recruiting import (
@@ -321,7 +325,11 @@ def board(org_id: int):
         )
 
     except SQLAlchemyError as e:
+        log.exception("recruiting board db error org=%s ly=%s", org_id, league_year_id)
         return jsonify(error="database_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("recruiting board error org=%s ly=%s", org_id, league_year_id)
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # ---------------------------------------------------------------------------
