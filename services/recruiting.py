@@ -969,3 +969,60 @@ def _weighted_lottery(weights):
 
     # Fallback (shouldn't reach here)
     return weights[-1][0]
+
+
+# ---------------------------------------------------------------------------
+# Board management
+# ---------------------------------------------------------------------------
+
+def add_to_recruiting_board(conn, org_id, league_year_id, player_id):
+    """
+    Add a player to an org's recruiting board.
+    Returns "added" or "already_on_board".
+    """
+    existing = conn.execute(
+        text("""
+            SELECT id FROM recruiting_board
+            WHERE org_id = :org AND league_year_id = :ly AND player_id = :pid
+        """),
+        {"org": org_id, "ly": league_year_id, "pid": player_id},
+    ).first()
+
+    if existing:
+        return "already_on_board"
+
+    conn.execute(
+        text("""
+            INSERT INTO recruiting_board (org_id, league_year_id, player_id)
+            VALUES (:org, :ly, :pid)
+        """),
+        {"org": org_id, "ly": league_year_id, "pid": player_id},
+    )
+    return "added"
+
+
+def remove_from_recruiting_board(conn, org_id, league_year_id, player_id):
+    """
+    Remove a player from an org's recruiting board.
+    Returns "removed" or "not_on_board".
+    """
+    result = conn.execute(
+        text("""
+            DELETE FROM recruiting_board
+            WHERE org_id = :org AND league_year_id = :ly AND player_id = :pid
+        """),
+        {"org": org_id, "ly": league_year_id, "pid": player_id},
+    )
+    return "removed" if result.rowcount > 0 else "not_on_board"
+
+
+def get_recruiting_board_ids(conn, org_id, league_year_id):
+    """Return set of player_ids on an org's recruiting board."""
+    rows = conn.execute(
+        text("""
+            SELECT player_id FROM recruiting_board
+            WHERE org_id = :org AND league_year_id = :ly
+        """),
+        {"org": org_id, "ly": league_year_id},
+    ).all()
+    return {r[0] for r in rows}

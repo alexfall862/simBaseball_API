@@ -250,6 +250,7 @@ def _aggregate_batting_stats(
         "doubles": 0,
         "triples": 0,
         "home_runs": 0,
+        "inside_the_park_hr": 0,
         "walks": 0,
         "strikeouts": 0,
         "runs": 0,
@@ -284,6 +285,7 @@ def _aggregate_batting_stats(
             totals["doubles"] += int(b.get("doubles", 0))
             totals["triples"] += int(b.get("triples", 0))
             totals["home_runs"] += int(b.get("home_runs", 0))
+            totals["inside_the_park_hr"] += int(b.get("inside_the_park_hr", 0))
             totals["strikeouts"] += int(b.get("strikeouts", 0))
             totals["runs"] += int(b.get("runs", 0))
             totals["rbi"] += int(b.get("rbi", 0))
@@ -303,6 +305,7 @@ def _compute_rate_stats(totals: Dict[str, Any]) -> Dict[str, Any]:
     d = totals.get("doubles", 0)
     t = totals.get("triples", 0)
     hr = totals.get("home_runs", 0)
+    itphr = totals.get("inside_the_park_hr", 0)
     bb = totals.get("walks", 0)
     k = totals.get("strikeouts", 0)
 
@@ -323,6 +326,8 @@ def _compute_rate_stats(totals: Dict[str, Any]) -> Dict[str, Any]:
         "iso": round(iso, 3),
         "k_pct": round(k_pct * 100, 1),
         "bb_pct": round(bb_pct * 100, 1),
+        "itphr": itphr,
+        "itphr_pct": round(itphr / max(hr, 1) * 100, 1) if hr else 0.0,
     }
 
 
@@ -399,11 +404,11 @@ def run_tier_sweep(
             INSERT INTO batting_lab_results
                 (run_id, scenario_key, tier_label, games_played,
                  plate_appearances, at_bats, hits, doubles_ct, triples_ct,
-                 home_runs, walks, strikeouts, runs, rbi, stolen_bases,
+                 home_runs, inside_the_park_hr, walks, strikeouts, runs, rbi, stolen_bases,
                  avg_score_home, avg_score_away, raw_json)
             VALUES
                 (:run_id, :scenario_key, :tier_label, :games_played,
-                 :pa, :ab, :h, :d, :t, :hr, :bb, :k, :r, :rbi, :sb,
+                 :pa, :ab, :h, :d, :t, :hr, :itphr, :bb, :k, :r, :rbi, :sb,
                  :ash, :asa, :raw)
             ON DUPLICATE KEY UPDATE
                 games_played = VALUES(games_played),
@@ -413,6 +418,7 @@ def run_tier_sweep(
                 doubles_ct = VALUES(doubles_ct),
                 triples_ct = VALUES(triples_ct),
                 home_runs = VALUES(home_runs),
+                inside_the_park_hr = VALUES(inside_the_park_hr),
                 walks = VALUES(walks),
                 strikeouts = VALUES(strikeouts),
                 runs = VALUES(runs),
@@ -432,6 +438,7 @@ def run_tier_sweep(
             "d": totals["doubles"],
             "t": totals["triples"],
             "hr": totals["home_runs"],
+            "itphr": totals["inside_the_park_hr"],
             "bb": totals["walks"],
             "k": totals["strikeouts"],
             "r": totals["runs"],
@@ -511,7 +518,7 @@ def get_run_results(conn, run_id: int) -> Dict[str, Any]:
 
     result_rows = conn.execute(sa_text(
         "SELECT scenario_key, tier_label, games_played, plate_appearances, at_bats, "
-        "hits, doubles_ct, triples_ct, home_runs, walks, strikeouts, runs, rbi, "
+        "hits, doubles_ct, triples_ct, home_runs, inside_the_park_hr, walks, strikeouts, runs, rbi, "
         "stolen_bases, avg_score_home, avg_score_away, raw_json "
         "FROM batting_lab_results WHERE run_id = :id ORDER BY scenario_key"
     ), {"id": run_id}).all()
@@ -536,6 +543,7 @@ def get_run_results(conn, run_id: int) -> Dict[str, Any]:
             "doubles": rm["doubles_ct"],
             "triples": rm["triples_ct"],
             "home_runs": rm["home_runs"],
+            "inside_the_park_hr": rm["inside_the_park_hr"],
             "walks": rm["walks"],
             "strikeouts": rm["strikeouts"],
             "runs": rm["runs"],

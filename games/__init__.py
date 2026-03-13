@@ -1100,7 +1100,8 @@ def get_game_boxscore(game_id: int):
                 SELECT gbl.player_id, gbl.team_id,
                        p.firstName, p.lastName,
                        gbl.at_bats, gbl.runs, gbl.hits, gbl.doubles_hit,
-                       gbl.triples, gbl.home_runs, gbl.rbi, gbl.walks,
+                       gbl.triples, gbl.home_runs, gbl.inside_the_park_hr,
+                       gbl.rbi, gbl.walks,
                        gbl.strikeouts, gbl.stolen_bases, gbl.caught_stealing
                 FROM game_batting_lines gbl
                 JOIN simbbPlayers p ON p.id = gbl.player_id
@@ -1115,7 +1116,7 @@ def get_game_boxscore(game_id: int):
                        gpl.games_started, gpl.win, gpl.loss, gpl.save_recorded,
                        gpl.innings_pitched_outs, gpl.hits_allowed, gpl.runs_allowed,
                        gpl.earned_runs, gpl.walks, gpl.strikeouts,
-                       gpl.home_runs_allowed
+                       gpl.home_runs_allowed, gpl.inside_the_park_hr_allowed
                 FROM game_pitching_lines gpl
                 JOIN simbbPlayers p ON p.id = gpl.player_id
                 WHERE gpl.game_id = :gid
@@ -1145,6 +1146,7 @@ def get_game_boxscore(game_id: int):
                 "ab": int(r["at_bats"]), "r": int(r["runs"]),
                 "h": int(r["hits"]), "2b": int(r["doubles_hit"]),
                 "3b": int(r["triples"]), "hr": int(r["home_runs"]),
+                "itphr": int(r["inside_the_park_hr"]),
                 "rbi": int(r["rbi"]), "bb": int(r["walks"]),
                 "so": int(r["strikeouts"]), "sb": int(r["stolen_bases"]),
                 "cs": int(r["caught_stealing"]),
@@ -1167,7 +1169,8 @@ def get_game_boxscore(game_id: int):
                 "ip": ip, "h": int(r["hits_allowed"]),
                 "r": int(r["runs_allowed"]), "er": int(r["earned_runs"]),
                 "bb": int(r["walks"]), "so": int(r["strikeouts"]),
-                "hr": int(r["home_runs_allowed"]), "dec": dec,
+                "hr": int(r["home_runs_allowed"]),
+                "itphr": int(r["inside_the_park_hr_allowed"]), "dec": dec,
             }
 
         import json as _json

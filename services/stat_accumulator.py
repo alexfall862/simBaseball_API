@@ -137,24 +137,27 @@ _BATTING_UPSERT = text("""
     INSERT INTO player_batting_stats
         (player_id, league_year_id, team_id,
          games, at_bats, runs, hits, doubles_hit, triples,
-         home_runs, rbi, walks, strikeouts, stolen_bases, caught_stealing)
+         home_runs, inside_the_park_hr, rbi, walks, strikeouts,
+         stolen_bases, caught_stealing)
     VALUES
         (:player_id, :league_year_id, :team_id,
          1, :at_bats, :runs, :hits, :doubles, :triples,
-         :home_runs, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing)
+         :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
+         :stolen_bases, :caught_stealing)
     ON DUPLICATE KEY UPDATE
-        games           = games + 1,
-        at_bats         = at_bats + VALUES(at_bats),
-        runs            = runs + VALUES(runs),
-        hits            = hits + VALUES(hits),
-        doubles_hit     = doubles_hit + VALUES(doubles_hit),
-        triples         = triples + VALUES(triples),
-        home_runs       = home_runs + VALUES(home_runs),
-        rbi             = rbi + VALUES(rbi),
-        walks           = walks + VALUES(walks),
-        strikeouts      = strikeouts + VALUES(strikeouts),
-        stolen_bases    = stolen_bases + VALUES(stolen_bases),
-        caught_stealing = caught_stealing + VALUES(caught_stealing)
+        games              = games + 1,
+        at_bats            = at_bats + VALUES(at_bats),
+        runs               = runs + VALUES(runs),
+        hits               = hits + VALUES(hits),
+        doubles_hit        = doubles_hit + VALUES(doubles_hit),
+        triples            = triples + VALUES(triples),
+        home_runs          = home_runs + VALUES(home_runs),
+        inside_the_park_hr = inside_the_park_hr + VALUES(inside_the_park_hr),
+        rbi                = rbi + VALUES(rbi),
+        walks              = walks + VALUES(walks),
+        strikeouts         = strikeouts + VALUES(strikeouts),
+        stolen_bases       = stolen_bases + VALUES(stolen_bases),
+        caught_stealing    = caught_stealing + VALUES(caught_stealing)
 """)
 
 _PITCHING_UPSERT = text("""
@@ -162,25 +165,26 @@ _PITCHING_UPSERT = text("""
         (player_id, league_year_id, team_id,
          games, games_started, wins, losses, saves,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
-         walks, strikeouts, home_runs_allowed)
+         walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed)
     VALUES
         (:player_id, :league_year_id, :team_id,
          1, :games_started, :win, :loss, :save,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
-         :walks, :strikeouts, :home_runs_allowed)
+         :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)
     ON DUPLICATE KEY UPDATE
-        games                = games + 1,
-        games_started        = games_started + VALUES(games_started),
-        wins                 = wins + VALUES(wins),
-        losses               = losses + VALUES(losses),
-        saves                = saves + VALUES(saves),
-        innings_pitched_outs = innings_pitched_outs + VALUES(innings_pitched_outs),
-        hits_allowed         = hits_allowed + VALUES(hits_allowed),
-        runs_allowed         = runs_allowed + VALUES(runs_allowed),
-        earned_runs          = earned_runs + VALUES(earned_runs),
-        walks                = walks + VALUES(walks),
-        strikeouts           = strikeouts + VALUES(strikeouts),
-        home_runs_allowed    = home_runs_allowed + VALUES(home_runs_allowed)
+        games                       = games + 1,
+        games_started               = games_started + VALUES(games_started),
+        wins                        = wins + VALUES(wins),
+        losses                      = losses + VALUES(losses),
+        saves                       = saves + VALUES(saves),
+        innings_pitched_outs        = innings_pitched_outs + VALUES(innings_pitched_outs),
+        hits_allowed                = hits_allowed + VALUES(hits_allowed),
+        runs_allowed                = runs_allowed + VALUES(runs_allowed),
+        earned_runs                 = earned_runs + VALUES(earned_runs),
+        walks                       = walks + VALUES(walks),
+        strikeouts                  = strikeouts + VALUES(strikeouts),
+        home_runs_allowed           = home_runs_allowed + VALUES(home_runs_allowed),
+        inside_the_park_hr_allowed  = inside_the_park_hr_allowed + VALUES(inside_the_park_hr_allowed)
 """)
 
 _FIELDING_UPSERT = text("""
@@ -206,20 +210,21 @@ def _upsert_batting(
     for player_id_str, b in batters.items():
         try:
             conn.execute(_BATTING_UPSERT, {
-                "player_id":       int(player_id_str),
-                "league_year_id":  league_year_id,
-                "team_id":         int(b["team_id"]),
-                "at_bats":         int(b.get("at_bats", 0)),
-                "runs":            int(b.get("runs", 0)),
-                "hits":            int(b.get("hits", 0)),
-                "doubles":         int(b.get("doubles", 0)),
-                "triples":         int(b.get("triples", 0)),
-                "home_runs":       int(b.get("home_runs", 0)),
-                "rbi":             int(b.get("rbi", 0)),
-                "walks":           int(b.get("walks", 0)),
-                "strikeouts":      int(b.get("strikeouts", 0)),
-                "stolen_bases":    int(b.get("stolen_bases", 0)),
-                "caught_stealing": int(b.get("caught_stealing", 0)),
+                "player_id":          int(player_id_str),
+                "league_year_id":     league_year_id,
+                "team_id":            int(b["team_id"]),
+                "at_bats":            int(b.get("at_bats", 0)),
+                "runs":               int(b.get("runs", 0)),
+                "hits":               int(b.get("hits", 0)),
+                "doubles":            int(b.get("doubles", 0)),
+                "triples":            int(b.get("triples", 0)),
+                "home_runs":          int(b.get("home_runs", 0)),
+                "inside_the_park_hr": int(b.get("inside_the_park_hr", 0)),
+                "rbi":                int(b.get("rbi", 0)),
+                "walks":              int(b.get("walks", 0)),
+                "strikeouts":         int(b.get("strikeouts", 0)),
+                "stolen_bases":       int(b.get("stolen_bases", 0)),
+                "caught_stealing":    int(b.get("caught_stealing", 0)),
             })
             count += 1
         except Exception:
@@ -237,20 +242,21 @@ def _upsert_pitching(
     for player_id_str, p in pitchers.items():
         try:
             conn.execute(_PITCHING_UPSERT, {
-                "player_id":            int(player_id_str),
-                "league_year_id":       league_year_id,
-                "team_id":              int(p["team_id"]),
-                "games_started":        int(p.get("games_started", 0)),
-                "win":                  int(p.get("win", 0)),
-                "loss":                 int(p.get("loss", 0)),
-                "save":                 int(p.get("save", 0)),
-                "innings_pitched_outs": int(p.get("innings_pitched_outs", 0)),
-                "hits_allowed":         int(p.get("hits_allowed", 0)),
-                "runs_allowed":         int(p.get("runs_allowed", 0)),
-                "earned_runs":          int(p.get("earned_runs", 0)),
-                "walks":                int(p.get("walks", 0)),
-                "strikeouts":           int(p.get("strikeouts", 0)),
-                "home_runs_allowed":    int(p.get("home_runs_allowed", 0)),
+                "player_id":                   int(player_id_str),
+                "league_year_id":              league_year_id,
+                "team_id":                     int(p["team_id"]),
+                "games_started":               int(p.get("games_started", 0)),
+                "win":                         int(p.get("win", 0)),
+                "loss":                        int(p.get("loss", 0)),
+                "save":                        int(p.get("save", 0)),
+                "innings_pitched_outs":        int(p.get("innings_pitched_outs", 0)),
+                "hits_allowed":                int(p.get("hits_allowed", 0)),
+                "runs_allowed":                int(p.get("runs_allowed", 0)),
+                "earned_runs":                 int(p.get("earned_runs", 0)),
+                "walks":                       int(p.get("walks", 0)),
+                "strikeouts":                  int(p.get("strikeouts", 0)),
+                "home_runs_allowed":           int(p.get("home_runs_allowed", 0)),
+                "inside_the_park_hr_allowed":  int(p.get("inside_the_park_hr_allowed", 0)),
             })
             count += 1
         except Exception:
@@ -450,23 +456,26 @@ _GAME_BATTING_INSERT = text("""
     INSERT INTO game_batting_lines
         (game_id, player_id, team_id, league_year_id,
          at_bats, runs, hits, doubles_hit, triples,
-         home_runs, rbi, walks, strikeouts, stolen_bases, caught_stealing)
+         home_runs, inside_the_park_hr, rbi, walks, strikeouts,
+         stolen_bases, caught_stealing)
     VALUES
         (:game_id, :player_id, :team_id, :league_year_id,
          :at_bats, :runs, :hits, :doubles, :triples,
-         :home_runs, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing)
+         :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
+         :stolen_bases, :caught_stealing)
     ON DUPLICATE KEY UPDATE
-        at_bats         = VALUES(at_bats),
-        runs            = VALUES(runs),
-        hits            = VALUES(hits),
-        doubles_hit     = VALUES(doubles_hit),
-        triples         = VALUES(triples),
-        home_runs       = VALUES(home_runs),
-        rbi             = VALUES(rbi),
-        walks           = VALUES(walks),
-        strikeouts      = VALUES(strikeouts),
-        stolen_bases    = VALUES(stolen_bases),
-        caught_stealing = VALUES(caught_stealing)
+        at_bats            = VALUES(at_bats),
+        runs               = VALUES(runs),
+        hits               = VALUES(hits),
+        doubles_hit        = VALUES(doubles_hit),
+        triples            = VALUES(triples),
+        home_runs          = VALUES(home_runs),
+        inside_the_park_hr = VALUES(inside_the_park_hr),
+        rbi                = VALUES(rbi),
+        walks              = VALUES(walks),
+        strikeouts         = VALUES(strikeouts),
+        stolen_bases       = VALUES(stolen_bases),
+        caught_stealing    = VALUES(caught_stealing)
 """)
 
 _GAME_PITCHING_INSERT = text("""
@@ -474,24 +483,25 @@ _GAME_PITCHING_INSERT = text("""
         (game_id, player_id, team_id, league_year_id,
          games_started, win, loss, save_recorded,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
-         walks, strikeouts, home_runs_allowed)
+         walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed)
     VALUES
         (:game_id, :player_id, :team_id, :league_year_id,
          :games_started, :win, :loss, :save,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
-         :walks, :strikeouts, :home_runs_allowed)
+         :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)
     ON DUPLICATE KEY UPDATE
-        games_started        = VALUES(games_started),
-        win                  = VALUES(win),
-        loss                 = VALUES(loss),
-        save_recorded        = VALUES(save_recorded),
-        innings_pitched_outs = VALUES(innings_pitched_outs),
-        hits_allowed         = VALUES(hits_allowed),
-        runs_allowed         = VALUES(runs_allowed),
-        earned_runs          = VALUES(earned_runs),
-        walks                = VALUES(walks),
-        strikeouts           = VALUES(strikeouts),
-        home_runs_allowed    = VALUES(home_runs_allowed)
+        games_started               = VALUES(games_started),
+        win                         = VALUES(win),
+        loss                        = VALUES(loss),
+        save_recorded               = VALUES(save_recorded),
+        innings_pitched_outs        = VALUES(innings_pitched_outs),
+        hits_allowed                = VALUES(hits_allowed),
+        runs_allowed                = VALUES(runs_allowed),
+        earned_runs                 = VALUES(earned_runs),
+        walks                       = VALUES(walks),
+        strikeouts                  = VALUES(strikeouts),
+        home_runs_allowed           = VALUES(home_runs_allowed),
+        inside_the_park_hr_allowed  = VALUES(inside_the_park_hr_allowed)
 """)
 
 
@@ -502,21 +512,22 @@ def _insert_game_batting_lines(
     for player_id_str, b in batters.items():
         try:
             conn.execute(_GAME_BATTING_INSERT, {
-                "game_id":         game_id,
-                "player_id":       int(player_id_str),
-                "team_id":         int(b["team_id"]),
-                "league_year_id":  league_year_id,
-                "at_bats":         int(b.get("at_bats", 0)),
-                "runs":            int(b.get("runs", 0)),
-                "hits":            int(b.get("hits", 0)),
-                "doubles":         int(b.get("doubles", 0)),
-                "triples":         int(b.get("triples", 0)),
-                "home_runs":       int(b.get("home_runs", 0)),
-                "rbi":             int(b.get("rbi", 0)),
-                "walks":           int(b.get("walks", 0)),
-                "strikeouts":      int(b.get("strikeouts", 0)),
-                "stolen_bases":    int(b.get("stolen_bases", 0)),
-                "caught_stealing": int(b.get("caught_stealing", 0)),
+                "game_id":            game_id,
+                "player_id":          int(player_id_str),
+                "team_id":            int(b["team_id"]),
+                "league_year_id":     league_year_id,
+                "at_bats":            int(b.get("at_bats", 0)),
+                "runs":               int(b.get("runs", 0)),
+                "hits":               int(b.get("hits", 0)),
+                "doubles":            int(b.get("doubles", 0)),
+                "triples":            int(b.get("triples", 0)),
+                "home_runs":          int(b.get("home_runs", 0)),
+                "inside_the_park_hr": int(b.get("inside_the_park_hr", 0)),
+                "rbi":                int(b.get("rbi", 0)),
+                "walks":              int(b.get("walks", 0)),
+                "strikeouts":         int(b.get("strikeouts", 0)),
+                "stolen_bases":       int(b.get("stolen_bases", 0)),
+                "caught_stealing":    int(b.get("caught_stealing", 0)),
             })
             count += 1
         except Exception as e:
@@ -535,21 +546,22 @@ def _insert_game_pitching_lines(
     for player_id_str, p in pitchers.items():
         try:
             conn.execute(_GAME_PITCHING_INSERT, {
-                "game_id":              game_id,
-                "player_id":            int(player_id_str),
-                "team_id":              int(p["team_id"]),
-                "league_year_id":       league_year_id,
-                "games_started":        int(p.get("games_started", 0)),
-                "win":                  int(p.get("win", 0)),
-                "loss":                 int(p.get("loss", 0)),
-                "save":                 int(p.get("save", 0)),
-                "innings_pitched_outs": int(p.get("innings_pitched_outs", 0)),
-                "hits_allowed":         int(p.get("hits_allowed", 0)),
-                "runs_allowed":         int(p.get("runs_allowed", 0)),
-                "earned_runs":          int(p.get("earned_runs", 0)),
-                "walks":                int(p.get("walks", 0)),
-                "strikeouts":           int(p.get("strikeouts", 0)),
-                "home_runs_allowed":    int(p.get("home_runs_allowed", 0)),
+                "game_id":                     game_id,
+                "player_id":                   int(player_id_str),
+                "team_id":                     int(p["team_id"]),
+                "league_year_id":              league_year_id,
+                "games_started":               int(p.get("games_started", 0)),
+                "win":                         int(p.get("win", 0)),
+                "loss":                        int(p.get("loss", 0)),
+                "save":                        int(p.get("save", 0)),
+                "innings_pitched_outs":        int(p.get("innings_pitched_outs", 0)),
+                "hits_allowed":                int(p.get("hits_allowed", 0)),
+                "runs_allowed":                int(p.get("runs_allowed", 0)),
+                "earned_runs":                 int(p.get("earned_runs", 0)),
+                "walks":                       int(p.get("walks", 0)),
+                "strikeouts":                  int(p.get("strikeouts", 0)),
+                "home_runs_allowed":           int(p.get("home_runs_allowed", 0)),
+                "inside_the_park_hr_allowed":  int(p.get("inside_the_park_hr_allowed", 0)),
             })
             count += 1
         except Exception as e:
@@ -648,20 +660,21 @@ def accumulate_subweek_stats_bulk(
         for pid_str, b in batters.items():
             try:
                 params = {
-                    "player_id":       int(pid_str),
-                    "league_year_id":  league_year_id,
-                    "team_id":         int(b["team_id"]),
-                    "at_bats":         int(b.get("at_bats", 0)),
-                    "runs":            int(b.get("runs", 0)),
-                    "hits":            int(b.get("hits", 0)),
-                    "doubles":         int(b.get("doubles", 0)),
-                    "triples":         int(b.get("triples", 0)),
-                    "home_runs":       int(b.get("home_runs", 0)),
-                    "rbi":             int(b.get("rbi", 0)),
-                    "walks":           int(b.get("walks", 0)),
-                    "strikeouts":      int(b.get("strikeouts", 0)),
-                    "stolen_bases":    int(b.get("stolen_bases", 0)),
-                    "caught_stealing": int(b.get("caught_stealing", 0)),
+                    "player_id":          int(pid_str),
+                    "league_year_id":     league_year_id,
+                    "team_id":            int(b["team_id"]),
+                    "at_bats":            int(b.get("at_bats", 0)),
+                    "runs":               int(b.get("runs", 0)),
+                    "hits":               int(b.get("hits", 0)),
+                    "doubles":            int(b.get("doubles", 0)),
+                    "triples":            int(b.get("triples", 0)),
+                    "home_runs":          int(b.get("home_runs", 0)),
+                    "inside_the_park_hr": int(b.get("inside_the_park_hr", 0)),
+                    "rbi":                int(b.get("rbi", 0)),
+                    "walks":              int(b.get("walks", 0)),
+                    "strikeouts":         int(b.get("strikeouts", 0)),
+                    "stolen_bases":       int(b.get("stolen_bases", 0)),
+                    "caught_stealing":    int(b.get("caught_stealing", 0)),
                 }
                 if not skip_season:
                     batting_params.append(params)
@@ -680,20 +693,21 @@ def accumulate_subweek_stats_bulk(
         for pid_str, p in pitchers.items():
             try:
                 params = {
-                    "player_id":            int(pid_str),
-                    "league_year_id":       league_year_id,
-                    "team_id":              int(p["team_id"]),
-                    "games_started":        int(p.get("games_started", 0)),
-                    "win":                  int(p.get("win", 0)),
-                    "loss":                 int(p.get("loss", 0)),
-                    "save":                 int(p.get("save", 0)),
-                    "innings_pitched_outs": int(p.get("innings_pitched_outs", 0)),
-                    "hits_allowed":         int(p.get("hits_allowed", 0)),
-                    "runs_allowed":         int(p.get("runs_allowed", 0)),
-                    "earned_runs":          int(p.get("earned_runs", 0)),
-                    "walks":                int(p.get("walks", 0)),
-                    "strikeouts":           int(p.get("strikeouts", 0)),
-                    "home_runs_allowed":    int(p.get("home_runs_allowed", 0)),
+                    "player_id":                   int(pid_str),
+                    "league_year_id":              league_year_id,
+                    "team_id":                     int(p["team_id"]),
+                    "games_started":               int(p.get("games_started", 0)),
+                    "win":                         int(p.get("win", 0)),
+                    "loss":                        int(p.get("loss", 0)),
+                    "save":                        int(p.get("save", 0)),
+                    "innings_pitched_outs":        int(p.get("innings_pitched_outs", 0)),
+                    "hits_allowed":                int(p.get("hits_allowed", 0)),
+                    "runs_allowed":                int(p.get("runs_allowed", 0)),
+                    "earned_runs":                 int(p.get("earned_runs", 0)),
+                    "walks":                       int(p.get("walks", 0)),
+                    "strikeouts":                  int(p.get("strikeouts", 0)),
+                    "home_runs_allowed":           int(p.get("home_runs_allowed", 0)),
+                    "inside_the_park_hr_allowed":  int(p.get("inside_the_park_hr_allowed", 0)),
                 }
                 if not skip_season:
                     pitching_params.append(params)

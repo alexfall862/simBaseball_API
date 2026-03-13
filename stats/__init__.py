@@ -125,7 +125,8 @@ def batting_leaderboard():
             rows = conn.execute(sa_text(f"""
                 SELECT bs.player_id, bs.team_id, bs.games, bs.at_bats,
                        bs.runs, bs.hits, bs.doubles_hit, bs.triples,
-                       bs.home_runs, bs.rbi, bs.walks, bs.strikeouts,
+                       bs.home_runs, bs.inside_the_park_hr,
+                       bs.rbi, bs.walks, bs.strikeouts,
                        bs.stolen_bases, bs.caught_stealing,
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
@@ -146,6 +147,7 @@ def batting_leaderboard():
             bb = int(r["walks"])
             so = int(r["strikeouts"])
             hr = int(r["home_runs"])
+            itphr = int(r["inside_the_park_hr"])
             d = int(r["doubles_hit"])
             t = int(r["triples"])
             sb = int(r["stolen_bases"])
@@ -177,7 +179,7 @@ def batting_leaderboard():
                 "g": int(r["games"]), "ab": ab, "pa": pa,
                 "r": int(r["runs"]), "h": h,
                 "2b": d, "3b": t,
-                "hr": hr, "rbi": int(r["rbi"]),
+                "hr": hr, "itphr": itphr, "rbi": int(r["rbi"]),
                 "bb": bb, "so": so,
                 "sb": sb, "cs": cs, "tb": tb,
                 "avg": f"{avg_val:.3f}",
@@ -310,6 +312,7 @@ def pitching_leaderboard():
                        ps.innings_pitched_outs, ps.hits_allowed,
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
+                       ps.inside_the_park_hr_allowed,
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
                        tm.team_level AS team_level
@@ -335,6 +338,7 @@ def pitching_leaderboard():
             bb = int(r["walks"])
             so = int(r["strikeouts"])
             hra = int(r["home_runs_allowed"])
+            itphra = int(r["inside_the_park_hr_allowed"])
 
             ip_f = ipo / 3.0
             bf = int(ip_f) * 3 + h + bb  # approx batters faced
@@ -364,7 +368,7 @@ def pitching_leaderboard():
                 "w": w, "l": l, "sv": sv,
                 "ip": f"{ipo // 3}.{ipo % 3}",
                 "h": h, "r": ra, "er": er,
-                "bb": bb, "so": so, "hr": hra,
+                "bb": bb, "so": so, "hr": hra, "itphr": itphra,
                 "era": f"{era_val:.2f}",
                 "whip": f"{whip_val:.2f}",
                 "k9": f"{k9_val:.1f}",
@@ -561,7 +565,9 @@ def team_stats():
                        SUM(bs.games) AS g, SUM(bs.at_bats) AS ab,
                        SUM(bs.runs) AS r, SUM(bs.hits) AS h,
                        SUM(bs.doubles_hit) AS `2b`, SUM(bs.triples) AS `3b`,
-                       SUM(bs.home_runs) AS hr, SUM(bs.rbi) AS rbi,
+                       SUM(bs.home_runs) AS hr,
+                       SUM(bs.inside_the_park_hr) AS itphr,
+                       SUM(bs.rbi) AS rbi,
                        SUM(bs.walks) AS bb, SUM(bs.strikeouts) AS so,
                        SUM(bs.stolen_bases) AS sb,
                        SUM(bs.caught_stealing) AS cs
@@ -583,7 +589,8 @@ def team_stats():
                        SUM(ps.runs_allowed) AS ra,
                        SUM(ps.earned_runs) AS er,
                        SUM(ps.walks) AS bb, SUM(ps.strikeouts) AS so,
-                       SUM(ps.home_runs_allowed) AS hra
+                       SUM(ps.home_runs_allowed) AS hra,
+                       SUM(ps.inside_the_park_hr_allowed) AS itphra
                 FROM player_pitching_stats ps
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE ps.league_year_id = :lyid {level_filter}
@@ -598,6 +605,7 @@ def team_stats():
             bb = int(r["bb"])
             so = int(r["so"])
             hr = int(r["hr"])
+            itphr = int(r["itphr"])
             d = int(r["2b"])
             t = int(r["3b"])
             sb = int(r["sb"])
@@ -617,7 +625,7 @@ def team_stats():
                 "g": int(r["g"]), "ab": ab, "pa": pa,
                 "r": int(r["r"]), "h": h,
                 "2b": d, "3b": t,
-                "hr": hr, "rbi": int(r["rbi"]),
+                "hr": hr, "itphr": itphr, "rbi": int(r["rbi"]),
                 "bb": bb, "so": so,
                 "sb": sb, "cs": cs, "tb": tb,
                 "avg": f"{avg_val:.3f}",
@@ -637,6 +645,7 @@ def team_stats():
             bb = int(r["bb"])
             so = int(r["so"])
             hra = int(r["hra"])
+            itphra = int(r["itphra"])
             ip_f = ipo / 3.0
             era_val = er * 27.0 / ipo if ipo else 0
             whip_val = (bb + h) * 3.0 / ipo if ipo else 0
@@ -651,7 +660,7 @@ def team_stats():
                 "w": w, "l": l, "sv": int(r["sv"]),
                 "ip": f"{ipo // 3}.{ipo % 3}",
                 "h": h, "r": int(r["ra"]),
-                "er": er, "bb": bb, "so": so, "hr": hra,
+                "er": er, "bb": bb, "so": so, "hr": hra, "itphr": itphra,
                 "era": f"{era_val:.2f}",
                 "whip": f"{whip_val:.2f}",
                 "k9": f"{k9_val:.1f}",
@@ -703,7 +712,8 @@ def player_stats(player_id: int):
             batting = conn.execute(sa_text(f"""
                 SELECT bs.league_year_id, bs.team_id, bs.games, bs.at_bats,
                        bs.runs, bs.hits, bs.doubles_hit, bs.triples,
-                       bs.home_runs, bs.rbi, bs.walks, bs.strikeouts,
+                       bs.home_runs, bs.inside_the_park_hr,
+                       bs.rbi, bs.walks, bs.strikeouts,
                        bs.stolen_bases, bs.caught_stealing,
                        tm.team_abbrev AS team_abbrev
                 FROM player_batting_stats bs
@@ -725,6 +735,7 @@ def player_stats(player_id: int):
                        ps.innings_pitched_outs, ps.hits_allowed,
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
+                       ps.inside_the_park_hr_allowed,
                        tm.team_abbrev AS team_abbrev
                 FROM player_pitching_stats ps
                 JOIN teams tm ON tm.id = ps.team_id
@@ -793,6 +804,7 @@ def player_stats(player_id: int):
                 gamelog_bat = conn.execute(sa_text(f"""
                     SELECT gbl.game_id, gbl.team_id, gbl.at_bats, gbl.runs,
                            gbl.hits, gbl.doubles_hit, gbl.triples, gbl.home_runs,
+                           gbl.inside_the_park_hr,
                            gbl.rbi, gbl.walks, gbl.strikeouts,
                            gbl.stolen_bases, gbl.caught_stealing,
                            gr.season_week, gr.season_subweek,
@@ -820,6 +832,7 @@ def player_stats(player_id: int):
                            gpl.innings_pitched_outs, gpl.hits_allowed,
                            gpl.runs_allowed, gpl.earned_runs,
                            gpl.walks, gpl.strikeouts, gpl.home_runs_allowed,
+                           gpl.inside_the_park_hr_allowed,
                            gr.season_week, gr.season_subweek,
                            CASE WHEN gr.home_team_id = gpl.team_id
                                 THEN at2.team_abbrev
@@ -844,7 +857,8 @@ def player_stats(player_id: int):
                 "g": int(r["games"]), "ab": ab,
                 "r": int(r["runs"]), "h": h,
                 "2b": int(r["doubles_hit"]), "3b": int(r["triples"]),
-                "hr": int(r["home_runs"]), "rbi": int(r["rbi"]),
+                "hr": int(r["home_runs"]), "itphr": int(r["inside_the_park_hr"]),
+                "rbi": int(r["rbi"]),
                 "bb": bb, "so": int(r["strikeouts"]),
                 "sb": int(r["stolen_bases"]), "cs": int(r["caught_stealing"]),
                 "avg": f"{h / ab:.3f}" if ab else ".000",
@@ -865,6 +879,7 @@ def player_stats(player_id: int):
                 "h": int(r["hits_allowed"]), "r": int(r["runs_allowed"]),
                 "er": er, "bb": int(r["walks"]),
                 "so": int(r["strikeouts"]), "hr": int(r["home_runs_allowed"]),
+                "itphr": int(r["inside_the_park_hr_allowed"]),
                 "era": f"{er * 27.0 / ipo:.2f}" if ipo else "0.00",
             }
 
@@ -908,6 +923,7 @@ def player_stats(player_id: int):
                 "ab": int(r["at_bats"]), "r": int(r["runs"]),
                 "h": int(r["hits"]), "2b": int(r["doubles_hit"]),
                 "3b": int(r["triples"]), "hr": int(r["home_runs"]),
+                "itphr": int(r["inside_the_park_hr"]),
                 "rbi": int(r["rbi"]), "bb": int(r["walks"]),
                 "so": int(r["strikeouts"]),
             } for r in gamelog_bat]
@@ -922,6 +938,8 @@ def player_stats(player_id: int):
                 "h": int(r["hits_allowed"]), "r": int(r["runs_allowed"]),
                 "er": int(r["earned_runs"]), "bb": int(r["walks"]),
                 "so": int(r["strikeouts"]),
+                "hr": int(r["home_runs_allowed"]),
+                "itphr": int(r["inside_the_park_hr_allowed"]),
                 "dec": "W" if int(r["win"]) else ("L" if int(r["loss"]) else
                        ("S" if int(r["save_recorded"]) else "")),
             } for r in gamelog_pit]

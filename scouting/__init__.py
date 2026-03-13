@@ -61,6 +61,36 @@ ALLOWED_SORTS = {
     "catchframe_base", "catchsequence_base",
     "pendurance_base", "pgencontrol_base", "pthrowpower_base",
     "psequencing_base", "pickoff_base",
+    "star_rating",
+}
+
+# Potential (_pot) fields that use letter-grade sort ordering
+POT_SORT_FIELDS = {
+    "contact_pot", "power_pot", "eye_pot", "discipline_pot",
+    "speed_pot", "baserunning_pot",
+    "fieldcatch_pot", "fieldreact_pot", "throwacc_pot", "throwpower_pot",
+    "pendurance_pot", "pgencontrol_pot", "pthrowpower_pot", "psequencing_pot",
+}
+
+# Letter-grade sort order (lower number = better grade)
+_GRADE_ORDER = {
+    "A+": 1, "A": 2, "A-": 3,
+    "B+": 4, "B": 5, "B-": 6,
+    "C+": 7, "C": 8, "C-": 9,
+    "D+": 10, "D": 11, "D-": 12,
+    "F": 13, "N": 14,
+}
+_GRADE_ORDER_WORST = 15  # for null/unknown values
+
+# Generated-stats sort aliases (Python-side sorting after stat computation)
+GENERATED_STAT_SORTS = {
+    "batting_avg":    ("batting", "avg"),
+    "batting_obp":    ("batting", "obp"),
+    "batting_slg":    ("batting", "slg"),
+    "batting_hr":     ("batting", "home_runs"),
+    "pitching_era":   ("pitching", "era"),
+    "pitching_k9":    ("pitching", "k_per_9"),
+    "pitching_whip":  ("pitching", "whip"),
 }
 
 
@@ -161,18 +191,47 @@ def _parse_pagination():
 
 
 def _parse_sort(tables):
-    """Parse sort column and direction from query string. Returns (column, direction)."""
+    """
+    Parse sort column and direction from query string.
+
+    Returns (sql_order_clause_or_None, python_sort_key_or_None, direction).
+
+    For regular columns and _pot fields: returns (sql_clause, None, dir).
+    For generated-stat aliases: returns (None, sort_key_name, dir)
+        so the caller knows to sort in Python after stat generation.
+    For star_rating: returns (None, "star_rating", dir) — also Python-side
+        since star_rating is added after the SQL query.
+    """
     sort_name = request.args.get("sort", "lastname")
     direction = request.args.get("dir", "asc").lower()
-
-    if sort_name not in ALLOWED_SORTS:
-        sort_name = "lastname"
     if direction not in ("asc", "desc"):
         direction = "asc"
 
+    # Generated-stat sort → Python-side
+    if sort_name in GENERATED_STAT_SORTS:
+        return None, sort_name, direction
+
+    # star_rating → Python-side (added post-query)
+    if sort_name == "star_rating":
+        return None, "star_rating", direction
+
+    # Potential field → SQL CASE expression for letter-grade ordering
+    if sort_name in POT_SORT_FIELDS:
+        players = tables["players"]
+        pot_col = players.c[sort_name]
+        whens = [(pot_col == grade, rank) for grade, rank in _GRADE_ORDER.items()]
+        sort_expr = case(*whens, else_=_GRADE_ORDER_WORST)
+        sql_clause = sort_expr.asc() if direction == "asc" else sort_expr.desc()
+        return sql_clause, None, direction
+
+    # Regular column sort
+    if sort_name not in ALLOWED_SORTS:
+        sort_name = "lastname"
+
     players = tables["players"]
     sort_col = players.c[sort_name]
-    return sort_col.asc() if direction == "asc" else sort_col.desc()
+    sql_clause = sort_col.asc() if direction == "asc" else sort_col.desc()
+    return sql_clause, None, direction
 
 
 def _apply_common_filters(conditions, tables):
@@ -328,7 +387,9 @@ def api_pro_pool():
             conditions.append(shares.c.orgID == org_id)
 
         where = and_(*conditions)
-        order = _parse_sort(tables)
+        sql_order, _, _ = _parse_sort(tables)
+        if sql_order is None:
+            sql_order = tables["players"].c.lastname.asc()
 
         # Build column selection
         scouting_cols = _get_scouting_columns()
@@ -382,7 +443,7 @@ def api_pro_pool():
                 select(*select_cols)
                 .select_from(join)
                 .where(where)
-                .order_by(order)
+                .order_by(sql_order)
                 .limit(per_page)
                 .offset((page - 1) * per_page)
             )
@@ -454,7 +515,8 @@ def api_college_pool():
         _apply_common_filters(conditions, tables)
 
         where = and_(*conditions)
-        order = _parse_sort(tables)
+        sql_order, py_sort_key, sort_dir = _parse_sort(tables)
+        python_side_sort = py_sort_key is not None
 
         # Build column selection
         scouting_cols = _get_scouting_columns()
@@ -494,15 +556,24 @@ def api_college_pool():
             age_rows = conn.execute(age_counts_stmt).all()
             age_counts = {str(row[0]): row[1] for row in age_rows}
 
-            # Paginated data
+            # Paginated data — if Python-side sort, fetch all rows
+            # (sort happens after stat generation); otherwise SQL paginates
             data_stmt = (
                 select(*select_cols)
                 .select_from(join)
                 .where(where)
-                .order_by(order)
-                .limit(per_page)
-                .offset((page - 1) * per_page)
             )
+            if python_side_sort:
+                data_stmt = data_stmt.order_by(
+                    tables["players"].c.lastname.asc()
+                )
+            else:
+                data_stmt = (
+                    data_stmt
+                    .order_by(sql_order)
+                    .limit(per_page)
+                    .offset((page - 1) * per_page)
+                )
             rows = conn.execute(data_stmt).all()
 
             # Batch-fetch star ratings from recruiting_rankings
@@ -533,6 +604,26 @@ def api_college_pool():
         # Generate deterministic stats from raw attributes (before fuzz)
         for player in players_list:
             player["generated_stats"] = generate_scouting_stats(player, "hs")
+
+        # Python-side sort for generated stats and star_rating
+        if python_side_sort:
+            reverse = sort_dir == "desc"
+            if py_sort_key == "star_rating":
+                players_list.sort(
+                    key=lambda p: (p.get("star_rating") or 0),
+                    reverse=reverse,
+                )
+            elif py_sort_key in GENERATED_STAT_SORTS:
+                section, field = GENERATED_STAT_SORTS[py_sort_key]
+                players_list.sort(
+                    key=lambda p: (
+                        (p.get("generated_stats") or {}).get(section, {}).get(field) or 0
+                    ),
+                    reverse=reverse,
+                )
+            # Manual pagination after sort
+            start = (page - 1) * per_page
+            players_list = players_list[start:start + per_page]
 
         # Apply fog-of-war fuzz for HS pool
         if viewing_org_id:
@@ -592,7 +683,9 @@ def api_intam_pool():
             conditions.append(players.c.age <= max_age)
 
         where = and_(*conditions)
-        order = _parse_sort(tables)
+        sql_order, _, _ = _parse_sort(tables)
+        if sql_order is None:
+            sql_order = tables["players"].c.lastname.asc()
 
         scouting_cols = _get_scouting_columns()
         select_cols = [
@@ -615,7 +708,7 @@ def api_intam_pool():
                 select(*select_cols)
                 .select_from(join)
                 .where(where)
-                .order_by(order)
+                .order_by(sql_order)
                 .limit(per_page)
                 .offset((page - 1) * per_page)
             )
@@ -691,7 +784,9 @@ def api_mlb_pool():
             conditions.append(contracts.c.current_level == level)
 
         where = and_(*conditions)
-        order = _parse_sort(tables)
+        sql_order, _, _ = _parse_sort(tables)
+        if sql_order is None:
+            sql_order = tables["players"].c.lastname.asc()
 
         scouting_cols = _get_scouting_columns()
         select_cols = [
@@ -737,7 +832,7 @@ def api_mlb_pool():
                 select(*select_cols)
                 .select_from(join)
                 .where(where)
-                .order_by(order)
+                .order_by(sql_order)
                 .limit(per_page)
                 .offset((page - 1) * per_page)
             )

@@ -2776,7 +2776,8 @@ def contact_type_breakdown(
             single_rate = fw_norm.get("single", 0)
             double_rate = fw_norm.get("double", 0)
             triple_rate = fw_norm.get("triple", 0)
-            hr_rate = fw_norm.get("homerun", 0)
+            hr_rate = fw_norm.get("homerun", 0) + fw_norm.get("inside_the_park_hr", 0)
+            itphr_rate = fw_norm.get("inside_the_park_hr", 0)
             hit_rate = single_rate + double_rate + triple_rate + hr_rate
 
             # Compute expected slash line for balls put in play as this contact type
@@ -2792,6 +2793,7 @@ def contact_type_breakdown(
                 "2B_pct": round(double_rate * 100, 2),
                 "3B_pct": round(triple_rate * 100, 2),
                 "HR_pct": round(hr_rate * 100, 2),
+                "ITPHR_pct": round(itphr_rate * 100, 2),
                 "hit_pct": round(hit_rate * 100, 2),
                 "AVG": round(avg, 4),
                 "SLG": round(slg, 4),

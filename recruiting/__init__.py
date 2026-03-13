@@ -8,6 +8,8 @@ Endpoints:
   POST /recruiting/invest            — submit weekly investments
   POST /recruiting/advance-week      — admin: advance recruiting one week
   GET  /recruiting/board/<org_id>    — org's recruiting board (fog-of-war)
+  POST /recruiting/board/add         — add player to board
+  POST /recruiting/board/remove      — remove player from board
   GET  /recruiting/player/<pid>      — single player detail (fog-of-war)
   GET  /recruiting/commitments       — public commitment list
 """
@@ -24,6 +26,9 @@ from services.recruiting import (
     advance_recruiting_week,
     get_player_recruiting_status,
     get_org_recruiting_board,
+    add_to_recruiting_board,
+    remove_from_recruiting_board,
+    get_recruiting_board_ids,
     COLLEGE_ORG_MIN,
     COLLEGE_ORG_MAX,
 )
@@ -258,7 +263,11 @@ def board(org_id: int):
     try:
         with engine.connect() as conn:
             players = get_org_recruiting_board(conn, org_id, league_year_id)
-        return jsonify(players=players)
+            board_ids = get_recruiting_board_ids(conn, org_id, league_year_id)
+        return jsonify(
+            players=players,
+            board_player_ids=sorted(board_ids),
+        )
 
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500
@@ -386,6 +395,64 @@ def commitments():
             total=count_row,
             total_pages=total_pages,
         )
+
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /recruiting/board/add
+# ---------------------------------------------------------------------------
+@recruiting_bp.post("/recruiting/board/add")
+def board_add():
+    """Add a player to an org's recruiting board."""
+    data = request.get_json(silent=True) or {}
+    org_id = data.get("org_id")
+    league_year_id = data.get("league_year_id")
+    player_id = data.get("player_id")
+
+    if not all([org_id, league_year_id, player_id]):
+        return jsonify(error="missing_param",
+                       message="org_id, league_year_id, and player_id required"), 400
+
+    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+        return jsonify(error="validation_error",
+                       message="Only college orgs have recruiting boards"), 400
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            status = add_to_recruiting_board(conn, org_id, league_year_id, player_id)
+        return jsonify(status=status, player_id=player_id)
+
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /recruiting/board/remove
+# ---------------------------------------------------------------------------
+@recruiting_bp.post("/recruiting/board/remove")
+def board_remove():
+    """Remove a player from an org's recruiting board."""
+    data = request.get_json(silent=True) or {}
+    org_id = data.get("org_id")
+    league_year_id = data.get("league_year_id")
+    player_id = data.get("player_id")
+
+    if not all([org_id, league_year_id, player_id]):
+        return jsonify(error="missing_param",
+                       message="org_id, league_year_id, and player_id required"), 400
+
+    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+        return jsonify(error="validation_error",
+                       message="Only college orgs have recruiting boards"), 400
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            status = remove_from_recruiting_board(conn, org_id, league_year_id, player_id)
+        return jsonify(status=status, player_id=player_id)
 
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500
