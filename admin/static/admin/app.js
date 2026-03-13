@@ -461,6 +461,7 @@
       case 'analytics-pitchtypes':
       case 'analytics-defpos':
       case 'analytics-contact':
+      case 'analytics-hr-depth':
         loadAnalyticsLeagueYears(section);
         break;
       case 'stamina-overview':
@@ -4336,6 +4337,7 @@
       'analytics-pitchtypes': 'an-pt',
       'analytics-defpos': 'an-dp',
       'analytics-contact': 'an-ct',
+      'analytics-hr-depth': 'an-hrd',
     };
     const prefix = prefixMap[section];
     if (!prefix) return;
@@ -5377,6 +5379,7 @@
       { key: 'double',  label: '2B%',  actualKey: '2B_pct' },
       { key: 'triple',  label: '3B%',  actualKey: '3B_pct' },
       { key: 'homerun', label: 'HR%',  actualKey: 'HR_pct' },
+      { key: 'inside_the_park_hr', label: 'ITPHR%', actualKey: 'ITPHR_pct' },
     ];
     // Filter to outcomes that exist in the config
     const items = outcomeMap.filter(o => expected[o.key] !== undefined);
@@ -5453,9 +5456,9 @@
     const ctx = document.getElementById('an-ct-outcome-chart').getContext('2d');
     if (contactOutcomeChart) contactOutcomeChart.destroy();
 
-    const labels = ['1B%', '2B%', '3B%', 'HR%', 'K%', 'BB%'];
-    const values = [os['1B_pct'], os['2B_pct'], os['3B_pct'], os.HR_pct, os.K_pct, os.BB_pct];
-    const barColors = ['#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#f59e0b', '#06b6d4'];
+    const labels = ['1B%', '2B%', '3B%', 'HR%', 'ITPHR%', 'K%', 'BB%'];
+    const values = [os['1B_pct'], os['2B_pct'], os['3B_pct'], os.HR_pct, os.ITPHR_pct || 0, os.K_pct, os.BB_pct];
+    const barColors = ['#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#fb923c', '#f59e0b', '#06b6d4'];
 
     contactOutcomeChart = new Chart(ctx, {
       type: 'bar',
@@ -5490,6 +5493,7 @@
       { label: 'ISO',   key: 'ISO',    color: '#ef4444', yAxis: 'y1' },
       { label: 'BABIP', key: 'BABIP',  color: '#8b5cf6', yAxis: 'y1' },
       { label: 'HR%',   key: 'HR_pct', color: '#f59e0b', yAxis: 'y' },
+      { label: 'ITPHR%', key: 'ITPHR_pct', color: '#fb923c', yAxis: 'y' },
       { label: 'K%',    key: 'K_pct',  color: '#6b7280', yAxis: 'y' },
       { label: 'BB%',   key: 'BB_pct', color: '#06b6d4', yAxis: 'y' },
     ];
@@ -5531,7 +5535,7 @@
   function renderPowerTiers(tiers) {
     const tbody = document.getElementById('an-ct-tiers-tbody');
     if (!tiers.length) {
-      tbody.innerHTML = '<tr><td colspan="14" class="text-center text-muted">Not enough players for tier analysis</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" class="text-center text-muted">Not enough players for tier analysis</td></tr>';
       return;
     }
     tbody.innerHTML = tiers.map(t => {
@@ -5545,6 +5549,7 @@
         <td>${s.SLG?.toFixed(3) || '--'}</td>
         <td>${s.ISO?.toFixed(3) || '--'}</td>
         <td>${s.HR_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.ITPHR_pct?.toFixed(1) || '--'}%</td>
         <td>${s['2B_pct']?.toFixed(1) || '--'}%</td>
         <td>${s['3B_pct']?.toFixed(1) || '--'}%</td>
         <td>${s.XBH_pct?.toFixed(1) || '--'}%</td>
@@ -5559,7 +5564,7 @@
   function renderContactTiers(tiers) {
     const tbody = document.getElementById('an-ct-contact-tiers-tbody');
     if (!tiers || !tiers.length) {
-      tbody.innerHTML = '<tr><td colspan="14" class="text-center text-muted">Not enough players for tier analysis</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" class="text-center text-muted">Not enough players for tier analysis</td></tr>';
       return;
     }
     tbody.innerHTML = tiers.map(t => {
@@ -5573,6 +5578,7 @@
         <td>${s.SLG?.toFixed(3) || '--'}</td>
         <td>${s.ISO?.toFixed(3) || '--'}</td>
         <td>${s.HR_pct?.toFixed(1) || '--'}%</td>
+        <td>${s.ITPHR_pct?.toFixed(1) || '--'}%</td>
         <td>${s['2B_pct']?.toFixed(1) || '--'}%</td>
         <td>${s['3B_pct']?.toFixed(1) || '--'}%</td>
         <td>${s.XBH_pct?.toFixed(1) || '--'}%</td>
@@ -5588,7 +5594,7 @@
   function renderPerContactType(types) {
     const tbody = document.getElementById('an-ct-bytype-tbody');
     if (!types || !types.length) {
-      tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No contact type data</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted">No contact type data</td></tr>';
       return;
     }
 
@@ -5600,6 +5606,7 @@
       <td>${t['2B_pct']}%</td>
       <td>${t['3B_pct']}%</td>
       <td>${t.HR_pct}%</td>
+      <td>${t.ITPHR_pct || 0}%</td>
       <td><strong>${t.hit_pct}%</strong></td>
       <td>${t.AVG.toFixed(3)}</td>
       <td>${t.SLG.toFixed(3)}</td>
@@ -5621,6 +5628,7 @@
           { label: '2B%', data: types.map(t => t['2B_pct']), backgroundColor: '#22c55e88', borderColor: '#22c55e', borderWidth: 1 },
           { label: '3B%', data: types.map(t => t['3B_pct']), backgroundColor: '#f59e0b88', borderColor: '#f59e0b', borderWidth: 1 },
           { label: 'HR%', data: types.map(t => t.HR_pct), backgroundColor: '#ef444488', borderColor: '#ef4444', borderWidth: 1 },
+          { label: 'ITPHR%', data: types.map(t => t.ITPHR_pct || 0), backgroundColor: '#fb923c88', borderColor: '#fb923c', borderWidth: 1 },
         ],
       },
       options: {
@@ -5653,12 +5661,221 @@
       <td>${p.SLG?.toFixed(3)}</td>
       <td>${p.ISO?.toFixed(3)}</td>
       <td>${p.HR_pct?.toFixed(1)}%</td>
+      <td>${p.ITPHR_pct?.toFixed(1) || '0.0'}%</td>
       <td>${p['2B_pct']?.toFixed(1)}%</td>
       <td>${p.K_pct?.toFixed(1)}%</td>
       <td>${p.BB_pct?.toFixed(1)}%</td>
-      <td>${p.BABIP?.toFixed(3)}</td>
     </tr>`).join('');
   }
+
+  // --- HR Depth Analysis ---
+
+  let hrdContactChart = null;
+  let hrdDepthChart = null;
+  let hrdHeatmapChart = null;
+
+  const CONTACT_COLORS = {
+    barrel: '#ef4444', solid: '#f59e0b', flare: '#10b981', burner: '#3b82f6',
+    topped: '#8b5cf6', under: '#06b6d4', weak: '#6b7280', unknown: '#374151',
+  };
+  const DEPTH_ORDER = ['homerun', 'deep_of', 'middle_of', 'shallow_of', 'deep_if', 'middle_if', 'shallow_if', 'mound', 'catcher', 'unknown'];
+
+  function loadHrDepth() {
+    const lyid = document.getElementById('an-hrd-lyid')?.value;
+    const level = document.getElementById('an-hrd-level')?.value;
+    const gtype = document.getElementById('an-hrd-gtype')?.value;
+    const status = document.getElementById('an-hrd-status');
+    if (!lyid || !level) { status.textContent = 'Select league year and level.'; return; }
+    status.textContent = 'Loading play-by-play data... this may take a moment.';
+
+    ['an-hrd-summary-card', 'an-hrd-contact-card', 'an-hrd-depth-card', 'an-hrd-cross-card']
+      .forEach(id => document.getElementById(id).style.display = 'none');
+
+    const params = new URLSearchParams({ league_year_id: lyid, league_level: level, game_type: gtype });
+    fetch(`/admin/analytics/hr-depth?${params}`, { credentials: 'include' })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        if (!data.ok) { status.textContent = data.message || 'Error'; return; }
+        status.textContent = '';
+        renderHrdSummary(data);
+        renderHrdContactType(data.by_contact_type, data.total_hr);
+        renderHrdHitDepth(data.by_hit_depth, data.total_hr);
+        renderHrdCrossTab(data.cross_tab, data.by_contact_type, data.by_hit_depth, data.total_hr);
+        ['an-hrd-summary-card', 'an-hrd-contact-card', 'an-hrd-depth-card', 'an-hrd-cross-card']
+          .forEach(id => document.getElementById(id).style.display = '');
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function renderHrdSummary(data) {
+    const statsDiv = document.getElementById('an-hrd-summary-stats');
+    const itphrPct = data.total_hr > 0 ? (data.total_itphr / data.total_hr * 100).toFixed(1) : '0.0';
+    const cards = [
+      ['Games Scanned', data.games_scanned.toLocaleString()],
+      ['Total HRs', data.total_hr.toLocaleString()],
+      ['Inside-the-Park', `${data.total_itphr} (${itphrPct}%)`],
+      ['Over-the-Fence', (data.total_hr - data.total_itphr).toLocaleString()],
+    ];
+    statsDiv.innerHTML = cards.map(([label, val]) =>
+      `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${val}</div></div>`
+    ).join('');
+  }
+
+  function renderHrdContactType(byContact, totalHr) {
+    const tbody = document.getElementById('an-hrd-contact-tbody');
+    tbody.innerHTML = byContact.map(r => `<tr>
+      <td><strong>${r.batted_ball}</strong></td>
+      <td>${r.count.toLocaleString()}</td>
+      <td>${r.pct}%</td>
+    </tr>`).join('');
+
+    const ctx = document.getElementById('an-hrd-contact-chart').getContext('2d');
+    if (hrdContactChart) hrdContactChart.destroy();
+    const labels = byContact.map(r => r.batted_ball);
+    const values = byContact.map(r => r.count);
+    const colors = labels.map(l => (CONTACT_COLORS[l] || '#6b7280') + 'cc');
+    const borders = labels.map(l => CONTACT_COLORS[l] || '#6b7280');
+
+    hrdContactChart = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{ data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#ccc', padding: 12 } },
+          tooltip: {
+            callbacks: {
+              label: item => `${item.label}: ${item.raw.toLocaleString()} (${(item.raw / totalHr * 100).toFixed(1)}%)`,
+            },
+          },
+        },
+      },
+    });
+  }
+
+  function renderHrdHitDepth(byDepth, totalHr) {
+    const tbody = document.getElementById('an-hrd-depth-tbody');
+    tbody.innerHTML = byDepth.map(r => `<tr>
+      <td><strong>${r.hit_depth}</strong></td>
+      <td>${r.count.toLocaleString()}</td>
+      <td>${r.pct}%</td>
+    </tr>`).join('');
+
+    const ctx = document.getElementById('an-hrd-depth-chart').getContext('2d');
+    if (hrdDepthChart) hrdDepthChart.destroy();
+    const depthColors = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#a78bfa'];
+
+    hrdDepthChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: byDepth.map(r => r.hit_depth),
+        datasets: [{
+          label: 'HR Count',
+          data: byDepth.map(r => r.count),
+          backgroundColor: byDepth.map((_, i) => depthColors[i % depthColors.length] + '88'),
+          borderColor: byDepth.map((_, i) => depthColors[i % depthColors.length]),
+          borderWidth: 1,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: item => `${item.raw.toLocaleString()} HRs (${(item.raw / totalHr * 100).toFixed(1)}%)`,
+            },
+          },
+        },
+        scales: {
+          y: { beginAtZero: true, title: { display: true, text: 'Count', color: '#999' },
+               ticks: { color: '#999' }, grid: { color: '#333' } },
+          x: { ticks: { color: '#999', maxRotation: 45 }, grid: { color: '#333' } },
+        },
+      },
+    });
+  }
+
+  function renderHrdCrossTab(crossTab, byContact, byDepth, totalHr) {
+    // Build a pivot: rows = contact types, cols = hit depths
+    const contactTypes = byContact.map(r => r.batted_ball);
+    const hitDepths = byDepth.map(r => r.hit_depth);
+    // Sort depths by DEPTH_ORDER where possible
+    hitDepths.sort((a, b) => {
+      const ia = DEPTH_ORDER.indexOf(a), ib = DEPTH_ORDER.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+
+    // Build lookup
+    const lookup = {};
+    crossTab.forEach(r => { lookup[`${r.batted_ball}|${r.hit_depth}`] = r.count; });
+
+    // Header
+    const header = document.getElementById('an-hrd-cross-header');
+    header.innerHTML = '<th>Contact Type</th>' + hitDepths.map(d => `<th>${d}</th>`).join('') + '<th>Total</th>';
+
+    // Body
+    const tbody = document.getElementById('an-hrd-cross-tbody');
+    // Find max for heat coloring
+    const allCounts = crossTab.map(r => r.count);
+    const maxCount = Math.max(...allCounts, 1);
+
+    tbody.innerHTML = contactTypes.map(ct => {
+      let rowTotal = 0;
+      const cells = hitDepths.map(hd => {
+        const count = lookup[`${ct}|${hd}`] || 0;
+        rowTotal += count;
+        const intensity = count / maxCount;
+        const bg = count > 0 ? `rgba(239, 68, 68, ${(intensity * 0.6 + 0.05).toFixed(2)})` : 'transparent';
+        return `<td style="background: ${bg}; text-align: center">${count || ''}</td>`;
+      }).join('');
+      return `<tr><td><strong>${ct}</strong></td>${cells}<td style="font-weight: 600">${rowTotal}</td></tr>`;
+    }).join('');
+
+    // Totals row
+    const totalsRow = hitDepths.map(hd => {
+      let colTotal = 0;
+      contactTypes.forEach(ct => { colTotal += lookup[`${ct}|${hd}`] || 0; });
+      return `<td style="font-weight: 600; text-align: center">${colTotal}</td>`;
+    }).join('');
+    tbody.innerHTML += `<tr><td style="font-weight: 600">Total</td>${totalsRow}<td style="font-weight: 600">${totalHr}</td></tr>`;
+
+    // Stacked bar chart: contact types stacked, x-axis = hit depth
+    const ctx = document.getElementById('an-hrd-heatmap-chart').getContext('2d');
+    if (hrdHeatmapChart) hrdHeatmapChart.destroy();
+
+    const datasets = contactTypes.map(ct => ({
+      label: ct,
+      data: hitDepths.map(hd => lookup[`${ct}|${hd}`] || 0),
+      backgroundColor: (CONTACT_COLORS[ct] || '#6b7280') + '88',
+      borderColor: CONTACT_COLORS[ct] || '#6b7280',
+      borderWidth: 1,
+    }));
+
+    hrdHeatmapChart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels: hitDepths, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: '#ccc' } },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: { stacked: true, ticks: { color: '#9ca3af', maxRotation: 45 }, grid: { color: '#333' } },
+          y: { stacked: true, beginAtZero: true,
+               title: { display: true, text: 'HR Count', color: '#999' },
+               ticks: { color: '#9ca3af' }, grid: { color: '#333' } },
+        },
+      },
+    });
+  }
+
+  // Wire up HR Depth load button
+  document.getElementById('btn-an-hrd-load')?.addEventListener('click', loadHrDepth);
 
   // --- DB Storage ---
 
@@ -6781,7 +6998,7 @@
 
         // ── Data table ──
         let html = '<table class="data-table"><thead><tr>' +
-          '<th>Tier</th><th>G</th><th>PA</th><th>AB</th><th>H</th><th>2B</th><th>3B</th><th>HR</th>' +
+          '<th>Tier</th><th>G</th><th>PA</th><th>AB</th><th>H</th><th>2B</th><th>3B</th><th>HR</th><th>ITPHR</th>' +
           '<th>BB</th><th>K</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th><th>ISO</th>' +
           '<th>K%</th><th>BB%</th><th>R/G</th>' +
           '</tr></thead><tbody>';
@@ -6797,6 +7014,7 @@
             <td>${t.doubles}</td>
             <td>${t.triples}</td>
             <td>${t.home_runs}</td>
+            <td>${t.inside_the_park_hr || 0}</td>
             <td>${t.walks}</td>
             <td>${t.strikeouts}</td>
             <td>${(t.avg || 0).toFixed(3)}</td>

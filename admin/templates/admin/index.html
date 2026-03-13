@@ -136,6 +136,9 @@
       <a href="#" class="nav-item" data-section="analytics-contact">
         <span class="nav-icon">&#128165;</span> Contact Breakdown
       </a>
+      <a href="#" class="nav-item" data-section="analytics-hr-depth">
+        <span class="nav-icon">&#127951;</span> HR Depth
+      </a>
     </div>
 
     <div class="nav-section">
@@ -2141,7 +2144,7 @@
               <thead>
                 <tr>
                   <th>Tier</th><th>Count</th><th>Avg Power</th><th>Avg Contact</th>
-                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>2B%</th><th>3B%</th>
+                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>ITPHR%</th><th>2B%</th><th>3B%</th>
                   <th>XBH%</th><th>K%</th><th>BB%</th><th>BABIP</th>
                 </tr>
               </thead>
@@ -2164,7 +2167,7 @@
               <thead>
                 <tr>
                   <th>Tier</th><th>Count</th><th>Avg Contact</th><th>Avg Power</th>
-                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>2B%</th><th>3B%</th>
+                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>ITPHR%</th><th>2B%</th><th>3B%</th>
                   <th>XBH%</th><th>K%</th><th>BB%</th><th>BABIP</th>
                 </tr>
               </thead>
@@ -2188,7 +2191,7 @@
               <thead>
                 <tr>
                   <th>Contact Type</th><th>Freq %</th>
-                  <th>Out%</th><th>1B%</th><th>2B%</th><th>3B%</th><th>HR%</th>
+                  <th>Out%</th><th>1B%</th><th>2B%</th><th>3B%</th><th>HR%</th><th>ITPHR%</th>
                   <th>Hit%</th><th>AVG</th><th>SLG</th><th>ISO</th>
                 </tr>
               </thead>
@@ -2215,12 +2218,95 @@
               <thead>
                 <tr>
                   <th>#</th><th>Player</th><th>Power</th><th>Contact</th><th>AB</th>
-                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>2B%</th>
+                  <th>AVG</th><th>SLG</th><th>ISO</th><th>HR%</th><th>ITPHR%</th><th>2B%</th>
                   <th>K%</th><th>BB%</th><th>BABIP</th>
                 </tr>
               </thead>
               <tbody id="an-ct-leaders-tbody"></tbody>
             </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- HR Depth Analysis Section -->
+      <section id="section-analytics-hr-depth" class="section">
+        <div class="card">
+          <h3>HR Depth Analysis</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Break down home runs by contact type (Batted Ball) and hit depth from play-by-play data.
+            Identifies which contact/depth combinations are producing HRs.
+          </p>
+          <div class="form-row" style="margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+            <label>League Year: <select id="an-hrd-lyid" style="width: 100px"></select></label>
+            <label>Level: <select id="an-hrd-level" style="width: 80px">
+              <option value="9">9 - MLB</option><option value="8">8 - AAA</option><option value="7">7 - AA</option>
+              <option value="6">6 - High-A</option><option value="5">5 - A</option><option value="4">4 - Scraps</option><option value="3">3 - College</option>
+            </select></label>
+            <label>Game Type: <select id="an-hrd-gtype" style="width: 100px">
+              <option value="regular">Regular</option><option value="playoff">Playoff</option>
+              <option value="allstar">All-Star</option><option value="wbc">WBC</option>
+            </select></label>
+            <button class="btn btn-primary" id="btn-an-hrd-load">Load</button>
+          </div>
+          <div id="an-hrd-status" class="text-muted"></div>
+        </div>
+
+        <!-- Summary cards -->
+        <div class="card" id="an-hrd-summary-card" style="display: none;">
+          <h3>Summary</h3>
+          <div class="grid-2" id="an-hrd-summary-stats"></div>
+        </div>
+
+        <!-- By Contact Type -->
+        <div class="card" id="an-hrd-contact-card" style="display: none;">
+          <h3>HRs by Contact Type (Batted Ball)</h3>
+          <div style="display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start;">
+            <div style="flex: 1; min-width: 300px; overflow-x: auto;">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Contact Type</th><th>Count</th><th>% of HRs</th></tr>
+                </thead>
+                <tbody id="an-hrd-contact-tbody"></tbody>
+              </table>
+            </div>
+            <div style="flex: 1; min-width: 300px; position: relative; height: 300px;">
+              <canvas id="an-hrd-contact-chart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- By Hit Depth -->
+        <div class="card" id="an-hrd-depth-card" style="display: none;">
+          <h3>HRs by Hit Depth</h3>
+          <div style="display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start;">
+            <div style="flex: 1; min-width: 300px; overflow-x: auto;">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Hit Depth</th><th>Count</th><th>% of HRs</th></tr>
+                </thead>
+                <tbody id="an-hrd-depth-tbody"></tbody>
+              </table>
+            </div>
+            <div style="flex: 1; min-width: 300px; position: relative; height: 300px;">
+              <canvas id="an-hrd-depth-chart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cross-tab -->
+        <div class="card" id="an-hrd-cross-card" style="display: none;">
+          <h3>Cross-Tab: Contact Type x Hit Depth</h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">
+            Each cell shows the HR count for that contact type + hit depth combination.
+          </p>
+          <div style="overflow-x: auto;">
+            <table class="data-table" id="an-hrd-cross-table">
+              <thead><tr id="an-hrd-cross-header"></tr></thead>
+              <tbody id="an-hrd-cross-tbody"></tbody>
+            </table>
+          </div>
+          <div style="position: relative; height: 350px; margin-top: 16px;">
+            <canvas id="an-hrd-heatmap-chart"></canvas>
           </div>
         </div>
       </section>

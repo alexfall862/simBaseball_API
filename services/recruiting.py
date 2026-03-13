@@ -863,7 +863,7 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
         """),
         {"org": org_id, "ly": league_year_id},
     ).all()
-    your_points = {r[0]: r[1] for r in invested}
+    your_points = {r[0]: int(r[1]) for r in invested}
 
     # Merge both sources
     player_ids = list(board_pids | set(your_points.keys()))
@@ -926,7 +926,7 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
         """),
         params,
     ).all()
-    interest_map = {r[0]: (r[1], r[2]) for r in interest_data}
+    interest_map = {r[0]: (int(r[1]), int(r[2])) for r in interest_data}
 
     board = []
     for pid in player_ids:
@@ -975,6 +975,7 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
             }
         else:
             entry["status"] = "uncommitted"
+            entry["committed_to"] = None
 
         board.append(entry)
 

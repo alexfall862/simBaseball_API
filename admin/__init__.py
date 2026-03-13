@@ -1664,6 +1664,29 @@ def admin_contact_breakdown():
         return jsonify(ok=False, error="analytics_error", message=str(e)), 500
 
 
+@admin_bp.get("/analytics/hr-depth")
+def admin_hr_depth():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    game_type = request.args.get("game_type", "regular")
+    try:
+        from db import get_engine
+        from services.analytics import hr_depth_analysis
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = hr_depth_analysis(conn, league_year_id, league_level, game_type)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("hr_depth_analysis_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
 # ── Batting Lab ──────────────────────────────────────────────────────
 
 @admin_bp.get("/batting-lab/runs")

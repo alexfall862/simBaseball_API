@@ -2586,6 +2586,7 @@ def contact_type_breakdown(
             SUM(bs.doubles_hit) AS total_2b,
             SUM(bs.triples) AS total_3b,
             SUM(bs.home_runs) AS total_hr,
+            SUM(bs.inside_the_park_hr) AS total_itphr,
             SUM(bs.walks) AS total_bb,
             SUM(bs.strikeouts) AS total_k,
             SUM(bs.runs) AS total_r,
@@ -2606,6 +2607,7 @@ def contact_type_breakdown(
     d = float(agg["total_2b"] or 0)
     t = float(agg["total_3b"] or 0)
     hr = float(agg["total_hr"] or 0)
+    itphr = float(agg["total_itphr"] or 0)
     bb = float(agg["total_bb"] or 0)
     k = float(agg["total_k"] or 0)
     singles = h - d - t - hr
@@ -2628,7 +2630,8 @@ def contact_type_breakdown(
             "OPS": round(obp + slg, 4),
             "ISO": round(iso, 4),
             "BABIP": round(babip, 4),
-            "HR_pct": round(hr / ab * 100, 2),
+            "HR_pct": round((hr - itphr) / ab * 100, 2),
+            "ITPHR_pct": round(itphr / ab * 100, 2),
             "2B_pct": round(d / ab * 100, 2),
             "3B_pct": round(t / ab * 100, 2),
             "1B_pct": round(singles / ab * 100, 2),
@@ -2646,7 +2649,7 @@ def contact_type_breakdown(
         SELECT bs.player_id, p.firstName, p.lastName,
                p.power_base, p.contact_base,
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
-               bs.home_runs, bs.walks, bs.strikeouts
+               bs.home_runs, bs.inside_the_park_hr, bs.walks, bs.strikeouts
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -2667,6 +2670,7 @@ def contact_type_breakdown(
         p_2b = float(row["doubles_hit"])
         p_3b = float(row["triples"])
         p_hr = float(row["home_runs"])
+        p_itphr = float(row["inside_the_park_hr"] or 0)
         p_bb = float(row["walks"])
         p_k = float(row["strikeouts"])
         p_pa = p_ab + p_bb
@@ -2688,7 +2692,8 @@ def contact_type_breakdown(
             "SLG": round(p_slg, 4),
             "ISO": round(p_iso, 4),
             "BABIP": round(p_babip, 4),
-            "HR_pct": round(p_hr / p_ab * 100, 2),
+            "HR_pct": round((p_hr - p_itphr) / p_ab * 100, 2),
+            "ITPHR_pct": round(p_itphr / p_ab * 100, 2),
             "2B_pct": round(p_2b / p_ab * 100, 2),
             "3B_pct": round(p_3b / p_ab * 100, 2),
             "K_pct": round(p_k / p_pa * 100, 2),
@@ -2711,7 +2716,7 @@ def contact_type_breakdown(
             if not bucket:
                 continue
 
-            stats_to_avg = ["AVG", "SLG", "ISO", "BABIP", "HR_pct", "2B_pct",
+            stats_to_avg = ["AVG", "SLG", "ISO", "BABIP", "HR_pct", "ITPHR_pct", "2B_pct",
                             "3B_pct", "K_pct", "BB_pct", "XBH_pct"]
             avg_stats = {}
             for stat in stats_to_avg:
@@ -2742,7 +2747,7 @@ def contact_type_breakdown(
             if not bucket:
                 continue
 
-            stats_to_avg = ["AVG", "SLG", "ISO", "BABIP", "HR_pct", "2B_pct",
+            stats_to_avg = ["AVG", "SLG", "ISO", "BABIP", "HR_pct", "ITPHR_pct", "2B_pct",
                             "3B_pct", "K_pct", "BB_pct", "XBH_pct"]
             avg_stats = {}
             for stat in stats_to_avg:
@@ -2792,7 +2797,7 @@ def contact_type_breakdown(
                 "1B_pct": round(single_rate * 100, 2),
                 "2B_pct": round(double_rate * 100, 2),
                 "3B_pct": round(triple_rate * 100, 2),
-                "HR_pct": round(hr_rate * 100, 2),
+                "HR_pct": round((hr_rate - itphr_rate) * 100, 2),
                 "ITPHR_pct": round(itphr_rate * 100, 2),
                 "hit_pct": round(hit_rate * 100, 2),
                 "AVG": round(avg, 4),
@@ -2824,4 +2829,136 @@ def contact_type_breakdown(
         "per_contact_type": per_contact_type,
         "leaders": leaders,
         "n": len(player_data),
+    }
+
+
+# ===================================================================
+# HR Depth Analysis — play-by-play home run breakdown
+# ===================================================================
+
+
+def hr_depth_analysis(
+    conn,
+    league_year_id: int,
+    league_level: int,
+    game_type: str = "regular",
+) -> Dict[str, Any]:
+    """
+    Parse play-by-play JSON from game_results to break down home runs
+    by Batted Ball (contact type) and Hit Depth.
+
+    Returns cross-tabulation counts plus marginal totals for charting.
+    """
+    import json as _json
+
+    # Resolve season IDs for this league_year_id
+    season_sql = sa_text("""
+        SELECT s.id
+        FROM seasons s
+        JOIN league_years ly ON ly.league_year = s.year
+        WHERE ly.id = :lyid
+    """)
+    season_rows = conn.execute(season_sql, {"lyid": league_year_id}).all()
+    season_ids = [r[0] for r in season_rows]
+    if not season_ids:
+        return {"total_hr": 0, "total_itphr": 0, "cross_tab": [],
+                "by_contact_type": [], "by_hit_depth": [], "games_scanned": 0}
+
+    # Fetch PBP blobs — only games that have PBP data
+    placeholders = ", ".join(f":sid{i}" for i in range(len(season_ids)))
+    params: Dict[str, Any] = {f"sid{i}": sid for i, sid in enumerate(season_ids)}
+    params["level"] = league_level
+    params["gtype"] = game_type
+
+    pbp_sql = sa_text(f"""
+        SELECT gr.play_by_play_json
+        FROM game_results gr
+        WHERE gr.season IN ({placeholders})
+          AND gr.league_level = :level
+          AND gr.game_type = :gtype
+          AND gr.play_by_play_json IS NOT NULL
+    """)
+    rows = conn.execute(pbp_sql, params).all()
+
+    # Parse all PBP and collect HR plays
+    from collections import Counter
+
+    cross_counter: Counter = Counter()  # (batted_ball, hit_depth) -> count
+    hr_total = 0
+    itphr_total = 0
+    games_scanned = len(rows)
+
+    for (pbp_raw,) in rows:
+        if not pbp_raw:
+            continue
+        try:
+            plays = _json.loads(pbp_raw) if isinstance(pbp_raw, str) else pbp_raw
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(plays, list):
+            continue
+
+        for play in plays:
+            if not isinstance(play, dict):
+                continue
+            # Only look at plays where the at-bat ended
+            if not play.get("AB_Over"):
+                continue
+
+            def_outcome = play.get("Defensive Outcome")
+            is_hr = play.get("Is_Homerun", False)
+            if not is_hr and def_outcome not in ("homerun", "inside_the_park_hr"):
+                continue
+
+            batted_ball = play.get("Batted Ball") or "unknown"
+            hit_depth = play.get("Hit Depth") or "unknown"
+
+            # Normalise None-string values
+            if batted_ball in ("None", "none"):
+                batted_ball = "unknown"
+            if hit_depth in ("None", "none"):
+                hit_depth = "unknown"
+
+            cross_counter[(batted_ball, hit_depth)] += 1
+            hr_total += 1
+            if def_outcome == "inside_the_park_hr":
+                itphr_total += 1
+
+    # Build cross-tab rows
+    cross_tab = []
+    for (bb, hd), count in sorted(cross_counter.items(), key=lambda x: -x[1]):
+        cross_tab.append({
+            "batted_ball": bb,
+            "hit_depth": hd,
+            "count": count,
+            "pct": round(count / hr_total * 100, 1) if hr_total else 0,
+        })
+
+    # Marginals — by contact type
+    contact_counter: Counter = Counter()
+    for (bb, _), count in cross_counter.items():
+        contact_counter[bb] += count
+    by_contact_type = [
+        {"batted_ball": bb, "count": c,
+         "pct": round(c / hr_total * 100, 1) if hr_total else 0}
+        for bb, c in sorted(contact_counter.items(), key=lambda x: -x[1])
+    ]
+
+    # Marginals — by hit depth
+    depth_counter: Counter = Counter()
+    for (_, hd), count in cross_counter.items():
+        depth_counter[hd] += count
+    by_hit_depth = [
+        {"hit_depth": hd, "count": c,
+         "pct": round(c / hr_total * 100, 1) if hr_total else 0}
+        for hd, c in sorted(depth_counter.items(), key=lambda x: -x[1])
+    ]
+
+    return {
+        "total_hr": hr_total,
+        "total_itphr": itphr_total,
+        "games_scanned": games_scanned,
+        "cross_tab": cross_tab,
+        "by_contact_type": by_contact_type,
+        "by_hit_depth": by_hit_depth,
     }
