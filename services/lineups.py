@@ -876,7 +876,7 @@ def build_defense_and_lineup(
             if chosen in remaining_ids:
                 remaining_ids.remove(chosen)
 
-    # DH assignment (optional; for now we run use_dh=False in callers)
+    # DH assignment
     if use_dh:
         best_pid = None
         best_score = None
@@ -892,6 +892,22 @@ def build_defense_and_lineup(
             if best_pid is None or score > best_score:
                 best_pid = pid
                 best_score = score
+
+        # Fallback: if no remaining player passed availability, pick the
+        # best remaining player regardless of stamina so the DH slot is
+        # never left empty in a DH league (avoids pitcher batting).
+        if best_pid is None and remaining_ids:
+            fallback_pid = None
+            fallback_score = None
+            for pid in remaining_ids:
+                p = players_by_id[pid]
+                base_pos_rating = _get_rating(p, "dh_rating")
+                off_score = _compute_offense_score(p)
+                score = base_pos_rating * 0.7 + off_score * 0.3
+                if fallback_pid is None or score > fallback_score:
+                    fallback_pid = pid
+                    fallback_score = score
+            best_pid = fallback_pid
 
         if best_pid is not None:
             defense["dh"] = best_pid
@@ -990,6 +1006,22 @@ def build_defense_and_lineup_from_cache(
             if best_pid is None or score > best_score:
                 best_pid = pid
                 best_score = score
+
+        # Fallback: pick best remaining player regardless of stamina
+        # so the DH slot is never empty in a DH league.
+        if best_pid is None and remaining_ids:
+            fallback_pid = None
+            fallback_score = None
+            for pid in remaining_ids:
+                p = players_by_id[pid]
+                base_pos_rating = _get_rating(p, "dh_rating")
+                off_score = _compute_offense_score(p)
+                score = base_pos_rating * 0.7 + off_score * 0.3
+                if fallback_pid is None or score > fallback_score:
+                    fallback_pid = pid
+                    fallback_score = score
+            best_pid = fallback_pid
+
         if best_pid is not None:
             defense["dh"] = best_pid
             if best_pid in remaining_ids:

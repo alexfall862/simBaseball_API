@@ -356,6 +356,77 @@ def _get_org_team_ids(org):
     return ids
 
 
+def _attach_visibility_context(conn, org_id, roster_map):
+    """
+    Add a ``visibility_context`` dict to every player in *roster_map* so the
+    frontend knows the fuzz/precision state without per-player scouting calls.
+
+    Single bulk query against ``scouting_actions`` — no N+1.
+    """
+    # Collect every player id across all teams
+    all_players = []
+    for team_players in roster_map.values():
+        all_players.extend(team_players)
+
+    if not all_players:
+        return
+
+    player_ids = [p["id"] for p in all_players]
+
+    # Bulk-load unlocked scouting actions for this org + these players
+    unlocked_map: dict[int, set[str]] = {}
+    if player_ids:
+        placeholders = ", ".join(f":pid{i}" for i in range(len(player_ids)))
+        params = {"org_id": org_id}
+        params.update({f"pid{i}": pid for i, pid in enumerate(player_ids)})
+        rows = conn.execute(
+            text(
+                f"SELECT player_id, action_type FROM scouting_actions "
+                f"WHERE org_id = :org_id AND player_id IN ({placeholders})"
+            ),
+            params,
+        ).all()
+        for r in rows:
+            unlocked_map.setdefault(r[0], set()).add(r[1])
+
+    for p in all_players:
+        pid = p["id"]
+        level = p.get("current_level")
+        unlocked = unlocked_map.get(pid, set())
+
+        # Determine pool from level
+        if level == 1:
+            pool = "hs"
+        elif level in (2, 3):
+            pool = "college"
+        else:
+            pool = "pro"
+
+        # Determine display format and precision flags
+        if pool == "pro":
+            p["visibility_context"] = {
+                "context": "pro_roster",
+                "display_format": "20-80",
+                "attributes_precise": "pro_attrs_precise" in unlocked,
+                "potentials_precise": "pro_potential_precise" in unlocked,
+            }
+        elif pool == "college":
+            p["visibility_context"] = {
+                "context": "college_roster",
+                "display_format": "letter_grade",
+                "attributes_precise": "draft_attrs_precise" in unlocked,
+                "potentials_precise": "college_potential_precise" in unlocked,
+            }
+        else:
+            # HS — attributes always hidden
+            p["visibility_context"] = {
+                "context": "hs_roster",
+                "display_format": "hidden",
+                "attributes_precise": False,
+                "potentials_precise": "recruit_potential_precise" in unlocked,
+            }
+
+
 def _get_roster_map(conn, tables, org_id):
     """
     Players keyed by team_id, with 20-80 scaled ratings and position ratings.
@@ -545,6 +616,9 @@ def _get_roster_map(conn, tables, org_id):
             "potentials": potentials,
         }
         roster_map.setdefault(team_id, []).append(player)
+
+    # --- Visibility context: bulk-load scouting unlocks for this org ---
+    _attach_visibility_context(conn, org_id, roster_map)
 
     return roster_map
 
