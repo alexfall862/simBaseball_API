@@ -9,9 +9,12 @@ unlocking player information, and visibility-based player profiles.
 All endpoints under /scouting/.
 """
 
+import logging
 import math
 import re
 from flask import Blueprint, jsonify, request
+
+log = logging.getLogger(__name__)
 from sqlalchemy import MetaData, Table, select, and_, or_, func, case, literal, text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -560,8 +563,12 @@ def api_pro_pool():
             players=players_list,
         ), 200
 
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error loading pro scouting pool"), 500
+    except SQLAlchemyError as e:
+        log.exception("pro-pool db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("pro-pool error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # -------------------------------------------------------------------
@@ -746,8 +753,12 @@ def api_college_pool():
             players=players_list,
         ), 200
 
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error loading college recruiting pool"), 500
+    except SQLAlchemyError as e:
+        log.exception("college-pool db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("college-pool error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # -------------------------------------------------------------------
@@ -835,8 +846,12 @@ def api_intam_pool():
             players=players_list,
         ), 200
 
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error loading INTAM scouting pool"), 500
+    except SQLAlchemyError as e:
+        log.exception("intam-pool db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("intam-pool error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # -------------------------------------------------------------------
@@ -960,8 +975,12 @@ def api_mlb_pool():
             players=players_list,
         ), 200
 
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error loading MLB scouting pool"), 500
+    except SQLAlchemyError as e:
+        log.exception("mlb-pool db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("mlb-pool error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # -------------------------------------------------------------------
@@ -990,8 +1009,12 @@ def api_scouting_budget(org_id):
 
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error"), 500
+    except SQLAlchemyError as e:
+        log.exception("scouting db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # -------------------------------------------------------------------
@@ -1025,8 +1048,12 @@ def api_scouting_action():
 
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error"), 500
+    except SQLAlchemyError as e:
+        log.exception("scouting db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # -------------------------------------------------------------------
@@ -1105,8 +1132,12 @@ def api_scouting_action_batch():
 
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error"), 500
+    except SQLAlchemyError as e:
+        log.exception("scouting db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 # -------------------------------------------------------------------
@@ -1174,8 +1205,12 @@ def api_scouted_player(player_id):
 
         return jsonify(response), 200
 
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error"), 500
+    except SQLAlchemyError as e:
+        log.exception("scouting db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting error")
+        return jsonify(error="server_error", message=str(e)), 500
 
 
 def _build_scouted_response(player, visibility):
@@ -1327,5 +1362,9 @@ def api_scouting_actions(org_id):
             actions=actions,
         ), 200
 
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error"), 500
+    except SQLAlchemyError as e:
+        log.exception("scouting db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting error")
+        return jsonify(error="server_error", message=str(e)), 500
