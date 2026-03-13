@@ -218,7 +218,7 @@ def generate_face(
         # Optional features (probability-controlled)
         "EyeLine":    _optional(EYELINE_IDS, "eyeLine_pct"),
         "HairBG":     _optional(HAIRBG_IDS, "hairBg_pct"),
-        "FacialHair": _optional(FACIALHAIR_IDS, "facialHair_pct"),
+        "FacialHair": (_facial_hair := _optional(FACIALHAIR_IDS, "facialHair_pct")),
         "Glasses":    _optional(GLASSES_IDS, "glasses_pct"),
         "Accessories": _optional(ACCESSORIES_IDS, "accessories_pct"),
         "MiscLine":   _optional(MISCLINE_IDS, "miscLine_pct"),
@@ -233,12 +233,17 @@ def generate_face(
         "EyeAngle":      _ranged("EyeAngle"),
         "EyeBrowAngle":  _ranged("EyeBrowAngle"),
 
-        # Head shave intensity
-        "FacialHairShave": str(round(rng.uniform(*_SHAVE_RANGE), 2)),
+        # Head shave intensity — consume RNG slot always for sequence
+        # stability, but zero it out when there is no facial hair so
+        # the stubble/shadow layer is not drawn
+        "FacialHairShave": (
+            lambda v: str(round(v, 2)) if _facial_hair != "none" else "0"
+        )(rng.uniform(*_SHAVE_RANGE)),
 
         # Colors
         "SkinColor":  rng.choice(SKIN_COLORS),
-        "HairColor":  rng.choice(HAIR_COLORS),
+        "HairColor":  (_hair_color := rng.choice(HAIR_COLORS)),
+        "FacialHairColor": _hair_color,
 
         # Flips
         "HairFlip":  rng.choice([True, False]),

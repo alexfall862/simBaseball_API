@@ -2515,7 +2515,7 @@ def contact_type_breakdown(
 
     # ── 1. Load configured contact odds & distance weights ──────────────
     odds_sql = sa_text("""
-        SELECT ct.name AS contact_type, co.odds
+        SELECT ct.name AS contact_type, co.odds, ct.sort_order
         FROM level_contact_odds co
         JOIN contact_types ct ON ct.id = co.contact_type_id
         WHERE co.league_level = :level
