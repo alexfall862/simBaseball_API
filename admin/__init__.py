@@ -1662,3 +1662,82 @@ def admin_contact_breakdown():
     except Exception as e:
         logging.exception("contact_breakdown_failed")
         return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+# ── Batting Lab ──────────────────────────────────────────────────────
+
+@admin_bp.get("/batting-lab/runs")
+def admin_batting_lab_runs():
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        from db import get_engine
+        from services.batting_lab import list_runs
+        engine = get_engine()
+        with engine.connect() as conn:
+            runs = list_runs(conn)
+        return jsonify(ok=True, runs=runs)
+    except Exception as e:
+        logging.exception("batting_lab_list_failed")
+        return jsonify(ok=False, error="batting_lab_error", message=str(e)), 500
+
+
+@admin_bp.get("/batting-lab/results/<int:run_id>")
+def admin_batting_lab_results(run_id: int):
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        from db import get_engine
+        from services.batting_lab import get_run_results
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = get_run_results(conn, run_id)
+        if result is None:
+            return jsonify(ok=False, error="not_found"), 404
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("batting_lab_results_failed")
+        return jsonify(ok=False, error="batting_lab_error", message=str(e)), 500
+
+
+@admin_bp.post("/batting-lab/run")
+def admin_batting_lab_run():
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    data = request.get_json(force=True, silent=True) or {}
+    league_level = data.get("league_level")
+    games_per_tier = data.get("games_per_tier", 50)
+    label = data.get("label", "")
+
+    if not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_level required"), 400
+
+    games_per_tier = max(1, min(500, int(games_per_tier)))
+
+    try:
+        from db import get_engine
+        from services.batting_lab import execute_batting_lab_run
+        engine = get_engine()
+
+        # Create the run record
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO batting_lab_runs (label, league_level, games_per_scenario, scenario_type) "
+                "VALUES (:label, :ll, :gpt, 'tier_sweep')"
+            ), {"label": label, "ll": int(league_level), "gpt": games_per_tier})
+            row = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+            run_id = int(row)
+
+        # Execute synchronously (engine calls are fast for small batches)
+        result = execute_batting_lab_run(run_id, int(league_level), games_per_tier)
+
+        return jsonify(ok=True, run_id=run_id, message=f"Completed {len(result.get('tiers', {}))} tiers")
+
+    except Exception as e:
+        logging.exception("batting_lab_run_failed")
+        return jsonify(ok=False, error="batting_lab_error", message=str(e)), 500

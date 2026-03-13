@@ -2760,6 +2760,44 @@ def contact_type_breakdown(
                 "stats": avg_stats,
             })
 
+    # ── 3c. Per-contact-type expected batting profile ─────────────────
+    per_contact_type = []
+    if fielding_weights and contact_odds_pct:
+        for ct in sorted(contact_odds_pct.keys(),
+                         key=lambda c: next(
+                             (r["sort_order"] for r in odds_rows
+                              if r["contact_type"] == c), 99)):
+            fw = fielding_weights.get(ct, {})
+            fw_total = sum(fw.values()) or 1.0
+            fw_norm = {o: v / fw_total for o, v in fw.items()}
+
+            # Map fielding outcomes to batting stat categories
+            out_rate = fw_norm.get("out", 0)
+            single_rate = fw_norm.get("single", 0)
+            double_rate = fw_norm.get("double", 0)
+            triple_rate = fw_norm.get("triple", 0)
+            hr_rate = fw_norm.get("homerun", 0)
+            hit_rate = single_rate + double_rate + triple_rate + hr_rate
+
+            # Compute expected slash line for balls put in play as this contact type
+            avg = hit_rate
+            slg = (single_rate + 2 * double_rate + 3 * triple_rate + 4 * hr_rate) if hit_rate > 0 else 0
+            iso = slg - avg if avg > 0 else 0
+
+            per_contact_type.append({
+                "contact_type": ct,
+                "frequency_pct": contact_odds_pct.get(ct, 0),
+                "out_pct": round(out_rate * 100, 2),
+                "1B_pct": round(single_rate * 100, 2),
+                "2B_pct": round(double_rate * 100, 2),
+                "3B_pct": round(triple_rate * 100, 2),
+                "HR_pct": round(hr_rate * 100, 2),
+                "hit_pct": round(hit_rate * 100, 2),
+                "AVG": round(avg, 4),
+                "SLG": round(slg, 4),
+                "ISO": round(iso, 4),
+            })
+
     # ── 4. Player leaders ───────────────────────────────────────────────
     top_n = 10
     leaders = {
@@ -2781,6 +2819,7 @@ def contact_type_breakdown(
         "outcome_summary": outcome_summary,
         "tiers": tiers,
         "contact_tiers": contact_tiers,
+        "per_contact_type": per_contact_type,
         "leaders": leaders,
         "n": len(player_data),
     }

@@ -1,0 +1,971 @@
+"""
+College recruiting system — weighted lottery.
+
+Manages star rankings, weekly point investments, commitment resolution,
+and fog-of-war interest gauges. All functions take a SQLAlchemy Core connection.
+"""
+
+import hashlib
+import random
+from sqlalchemy import text
+
+
+# ---------------------------------------------------------------------------
+# Org ID boundaries
+# ---------------------------------------------------------------------------
+COLLEGE_ORG_MIN = 31
+COLLEGE_ORG_MAX = 338
+INTAM_ORG_ID = 339
+USHS_ORG_ID = 340
+
+# Star percentile breakpoints (cumulative upper bound -> star)
+_STAR_BREAKS = [
+    (0.50, 1),
+    (0.70, 2),
+    (0.90, 3),
+    (0.98, 4),
+    (1.00, 5),
+]
+
+# Interest gauge buckets for fog-of-war
+_INTEREST_BUCKETS = ["Low", "Medium", "High", "Very High"]
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+def get_recruiting_config(conn):
+    """Read recruiting_config into a {key: value} dict."""
+    rows = conn.execute(
+        text("SELECT config_key, config_value FROM recruiting_config")
+    ).all()
+    return {r[0]: r[1] for r in rows}
+
+
+def _cfg_int(config, key, fallback):
+    return int(float(config.get(key, fallback)))
+
+
+def _cfg_float(config, key, fallback):
+    return float(config.get(key, fallback))
+
+
+# ---------------------------------------------------------------------------
+# Star rankings
+# ---------------------------------------------------------------------------
+
+def compute_star_rankings(conn, league_year_id):
+    """
+    Compute composite scores for all HS seniors (org 340) and assign
+    star ratings via percentile bucketing.
+
+    Returns count of ranked players.
+    """
+    # Fetch HS players (held by org 340) with their base attributes and pots
+    rows = conn.execute(
+        text("""
+            SELECT p.id, p.ptype,
+                   p.contact_base, p.power_base, p.discipline_base,
+                   p.eye_base, p.speed_base, p.baserunning_base,
+                   p.throwpower_base, p.throwacc_base,
+                   p.fieldcatch_base, p.fieldreact_base, p.fieldspot_base,
+                   p.pendurance_base, p.pgencontrol_base, p.pthrowpower_base,
+                   p.psequencing_base,
+                   p.pitch1_pacc_base, p.pitch1_pbrk_base,
+                   p.pitch1_pcntrl_base, p.pitch1_consist_base,
+                   p.pitch2_pacc_base, p.pitch2_pbrk_base,
+                   p.pitch2_pcntrl_base, p.pitch2_consist_base,
+                   p.contact_pot, p.power_pot, p.discipline_pot,
+                   p.eye_pot, p.speed_pot
+            FROM simbbPlayers p
+            JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+            JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+            WHERE cts.orgID = :ushs
+        """),
+        {"ushs": USHS_ORG_ID},
+    ).all()
+
+    if not rows:
+        return 0
+
+    # Grade -> numeric value for pot bonus
+    grade_val = {
+        "A+": 6, "A": 5, "A-": 4,
+        "B+": 3, "B": 2, "B-": 1,
+        "C+": 0, "C": -1, "C-": -2,
+        "D+": -3, "D": -4, "D-": -5,
+        "F": -6,
+    }
+
+    # Compute composite scores
+    scored = []
+    for r in rows:
+        m = r._mapping
+
+        # Sum all _base attributes (position + pitcher)
+        base_sum = 0.0
+        base_count = 0
+        for key in (
+            "contact_base", "power_base", "discipline_base",
+            "eye_base", "speed_base", "baserunning_base",
+            "throwpower_base", "throwacc_base",
+            "fieldcatch_base", "fieldreact_base", "fieldspot_base",
+            "pendurance_base", "pgencontrol_base", "pthrowpower_base",
+            "psequencing_base",
+            "pitch1_pacc_base", "pitch1_pbrk_base",
+            "pitch1_pcntrl_base", "pitch1_consist_base",
+            "pitch2_pacc_base", "pitch2_pbrk_base",
+            "pitch2_pcntrl_base", "pitch2_consist_base",
+        ):
+            val = m.get(key)
+            if val is not None:
+                try:
+                    base_sum += float(val)
+                    base_count += 1
+                except (TypeError, ValueError):
+                    pass
+
+        base_avg = base_sum / max(base_count, 1)
+
+        # Pot bonus: average of key potential grades
+        pot_bonus = 0.0
+        pot_count = 0
+        for key in ("contact_pot", "power_pot", "discipline_pot",
+                     "eye_pot", "speed_pot"):
+            g = m.get(key)
+            if g and g in grade_val:
+                pot_bonus += grade_val[g]
+                pot_count += 1
+
+        pot_avg = (pot_bonus / max(pot_count, 1)) * 2  # scale pot contribution
+
+        composite = base_avg + pot_avg
+        scored.append((m["id"], m["ptype"], composite))
+
+    # Sort by composite descending
+    scored.sort(key=lambda x: x[2], reverse=True)
+    total = len(scored)
+
+    # Assign star ratings by percentile
+    ranked = []
+    for rank_idx, (pid, ptype, comp) in enumerate(scored):
+        pct = (rank_idx + 1) / total  # percentile (lower = better)
+        star = 1
+        for upper_bound, s in _STAR_BREAKS:
+            if pct <= upper_bound:
+                star = s
+                break
+        # Reverse star assignment: top percentile = 5 star
+        # pct 0.0-0.02 -> 5 star, 0.02-0.10 -> 4 star, etc.
+        # Need to flip: rank 1 = best = lowest pct
+        star = 1
+        reverse_pct = rank_idx / max(total, 1)  # 0 = best
+        if reverse_pct < 0.02:
+            star = 5
+        elif reverse_pct < 0.10:
+            star = 4
+        elif reverse_pct < 0.30:
+            star = 3
+        elif reverse_pct < 0.50:
+            star = 2
+        else:
+            star = 1
+
+        ranked.append({
+            "player_id": pid,
+            "ptype": ptype,
+            "composite": comp,
+            "star": star,
+            "rank_overall": rank_idx + 1,
+        })
+
+    # Compute rank_by_ptype
+    ptype_counters = {}
+    for r in ranked:
+        pt = r["ptype"] or "Unknown"
+        ptype_counters[pt] = ptype_counters.get(pt, 0) + 1
+        r["rank_by_ptype"] = ptype_counters[pt]
+
+    # Clear old rankings for this year and insert fresh
+    conn.execute(
+        text("DELETE FROM recruiting_rankings WHERE league_year_id = :ly"),
+        {"ly": league_year_id},
+    )
+
+    for r in ranked:
+        conn.execute(
+            text("""
+                INSERT INTO recruiting_rankings
+                    (player_id, league_year_id, composite_score,
+                     star_rating, rank_overall, rank_by_ptype)
+                VALUES (:pid, :ly, :comp, :star, :rank, :rpt)
+            """),
+            {
+                "pid": r["player_id"],
+                "ly": league_year_id,
+                "comp": round(r["composite"], 4),
+                "star": r["star"],
+                "rank": r["rank_overall"],
+                "rpt": r["rank_by_ptype"],
+            },
+        )
+
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Investment submission
+# ---------------------------------------------------------------------------
+
+def submit_weekly_investments(conn, org_id, league_year_id, week, investments):
+    """
+    Validate and record weekly recruiting point investments.
+
+    investments: list of {"player_id": int, "points": int}
+
+    Returns: {"accepted": [...], "errors": [...], "budget_remaining": int}
+    """
+    config = get_recruiting_config(conn)
+    max_per_player = _cfg_int(config, "max_points_per_player_per_week", 20)
+    weekly_budget = _cfg_int(config, "points_per_week", 100)
+
+    # Validate org is a college org
+    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+        raise ValueError("Only college organizations can recruit")
+
+    # Validate recruiting is active and correct week
+    state = conn.execute(
+        text("""
+            SELECT current_week, status FROM recruiting_state
+            WHERE league_year_id = :ly
+        """),
+        {"ly": league_year_id},
+    ).first()
+
+    if not state:
+        raise ValueError("Recruiting has not been initialized for this year")
+    if state[1] != "active":
+        raise ValueError(f"Recruiting is not active (status: {state[1]})")
+    if state[0] != week:
+        raise ValueError(f"Current week is {state[0]}, not {week}")
+
+    # Check total points this week for this org (already spent)
+    existing_total = conn.execute(
+        text("""
+            SELECT COALESCE(SUM(points), 0)
+            FROM recruiting_investments
+            WHERE org_id = :org AND league_year_id = :ly AND week = :week
+        """),
+        {"org": org_id, "ly": league_year_id, "week": week},
+    ).scalar()
+
+    accepted = []
+    errors = []
+    points_used = existing_total
+
+    for inv in investments:
+        pid = inv["player_id"]
+        pts = inv["points"]
+
+        # Validate points
+        if pts <= 0:
+            errors.append({"player_id": pid, "error": "Points must be positive"})
+            continue
+        if pts > max_per_player:
+            errors.append({"player_id": pid, "error": f"Max {max_per_player} per player per week"})
+            continue
+
+        # Check budget
+        if points_used + pts > weekly_budget:
+            errors.append({"player_id": pid, "error": "Exceeds weekly budget"})
+            continue
+
+        # Verify player is in HS pool and not committed
+        player_check = conn.execute(
+            text("""
+                SELECT cts.orgID
+                FROM contracts c
+                JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+                JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                WHERE c.playerID = :pid AND c.isActive = 1
+                LIMIT 1
+            """),
+            {"pid": pid},
+        ).first()
+
+        if not player_check or player_check[0] != USHS_ORG_ID:
+            errors.append({"player_id": pid, "error": "Player not in HS pool"})
+            continue
+
+        # Check not already committed
+        committed = conn.execute(
+            text("""
+                SELECT id FROM recruiting_commitments
+                WHERE player_id = :pid AND league_year_id = :ly
+            """),
+            {"pid": pid, "ly": league_year_id},
+        ).first()
+
+        if committed:
+            errors.append({"player_id": pid, "error": "Player already committed"})
+            continue
+
+        # Check existing investment this week for this player
+        existing_inv = conn.execute(
+            text("""
+                SELECT points FROM recruiting_investments
+                WHERE org_id = :org AND player_id = :pid
+                  AND league_year_id = :ly AND week = :week
+            """),
+            {"org": org_id, "pid": pid, "ly": league_year_id, "week": week},
+        ).first()
+
+        if existing_inv:
+            # Replace existing investment (adjust budget tracking)
+            old_pts = existing_inv[0]
+            net_change = pts - old_pts
+            if points_used + net_change > weekly_budget:
+                errors.append({"player_id": pid, "error": "Exceeds weekly budget"})
+                continue
+
+            conn.execute(
+                text("""
+                    UPDATE recruiting_investments
+                    SET points = :pts
+                    WHERE org_id = :org AND player_id = :pid
+                      AND league_year_id = :ly AND week = :week
+                """),
+                {"pts": pts, "org": org_id, "pid": pid,
+                 "ly": league_year_id, "week": week},
+            )
+            points_used += net_change
+        else:
+            conn.execute(
+                text("""
+                    INSERT INTO recruiting_investments
+                        (org_id, player_id, league_year_id, week, points)
+                    VALUES (:org, :pid, :ly, :week, :pts)
+                """),
+                {"org": org_id, "pid": pid, "ly": league_year_id,
+                 "week": week, "pts": pts},
+            )
+            points_used += pts
+
+        accepted.append({"player_id": pid, "points": pts})
+
+    return {
+        "accepted": accepted,
+        "errors": errors,
+        "budget_remaining": weekly_budget - points_used,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Weekly resolution
+# ---------------------------------------------------------------------------
+
+def resolve_recruiting_week(conn, league_year_id, week, config=None):
+    """
+    Resolve one week of recruiting: check commitment thresholds,
+    run weighted lottery for any that meet threshold.
+
+    Returns: {"commitments": [...], "uncommitted_count": int}
+    """
+    if config is None:
+        config = get_recruiting_config(conn)
+
+    exponent = _cfg_float(config, "lottery_exponent", 1.3)
+    snipe_pct = _cfg_float(config, "snipe_threshold_pct", 0.80)
+    snipe_weeks = _cfg_int(config, "snipe_cooldown_weeks", 2)
+    snipe_mult = _cfg_float(config, "snipe_threshold_mult", 1.3)
+
+    # Star thresholds
+    star_config = {}
+    for s in range(1, 6):
+        star_config[s] = {
+            "base": _cfg_float(config, f"star{s}_base", 20 * s),
+            "decay": _cfg_float(config, f"star{s}_decay", s),
+        }
+
+    # Get all uncommitted players with investments this year
+    invested_players = conn.execute(
+        text("""
+            SELECT DISTINCT ri.player_id
+            FROM recruiting_investments ri
+            WHERE ri.league_year_id = :ly
+              AND ri.player_id NOT IN (
+                  SELECT player_id FROM recruiting_commitments
+                  WHERE league_year_id = :ly
+              )
+        """),
+        {"ly": league_year_id},
+    ).all()
+
+    commitments = []
+    uncommitted_count = 0
+
+    for (player_id,) in invested_players:
+        # Get star rating
+        star_row = conn.execute(
+            text("""
+                SELECT star_rating FROM recruiting_rankings
+                WHERE player_id = :pid AND league_year_id = :ly
+            """),
+            {"pid": player_id, "ly": league_year_id},
+        ).first()
+
+        star = star_row[0] if star_row else 1
+        sc = star_config.get(star, star_config[1])
+        threshold = sc["base"] - (week * sc["decay"])
+        threshold = max(threshold, 0)
+
+        # Get cumulative investments per org
+        org_totals = conn.execute(
+            text("""
+                SELECT org_id, SUM(points) AS total_pts,
+                       MIN(week) AS first_week
+                FROM recruiting_investments
+                WHERE player_id = :pid AND league_year_id = :ly
+                GROUP BY org_id
+                ORDER BY total_pts DESC
+            """),
+            {"pid": player_id, "ly": league_year_id},
+        ).all()
+
+        if not org_totals:
+            continue
+
+        total_interest = sum(r[1] for r in org_totals)
+        leader_pts = org_totals[0][1]
+
+        # Anti-snipe check
+        snipe_active = False
+        for r in org_totals:
+            oid, pts, first_wk = r[0], r[1], r[2]
+            if oid == org_totals[0][0]:
+                continue  # skip leader
+            if pts >= snipe_pct * leader_pts:
+                # Check if this org only started investing recently
+                if first_wk > (week - snipe_weeks):
+                    snipe_active = True
+                    break
+
+        if snipe_active:
+            threshold *= snipe_mult
+
+        # Check if threshold met
+        if total_interest >= threshold:
+            # Run weighted lottery
+            weights = []
+            for r in org_totals:
+                oid, pts = r[0], r[1]
+                weights.append((oid, pts ** exponent))
+
+            winner_org = _weighted_lottery(weights)
+
+            # Find winner's total points
+            winner_pts = 0
+            for r in org_totals:
+                if r[0] == winner_org:
+                    winner_pts = r[1]
+                    break
+
+            conn.execute(
+                text("""
+                    INSERT INTO recruiting_commitments
+                        (player_id, org_id, league_year_id,
+                         week_committed, points_total, star_rating)
+                    VALUES (:pid, :org, :ly, :week, :pts, :star)
+                """),
+                {
+                    "pid": player_id, "org": winner_org,
+                    "ly": league_year_id, "week": week,
+                    "pts": winner_pts, "star": star,
+                },
+            )
+            commitments.append({
+                "player_id": player_id,
+                "org_id": winner_org,
+                "week": week,
+                "points_total": winner_pts,
+                "star_rating": star,
+            })
+        else:
+            uncommitted_count += 1
+
+    return {
+        "commitments": commitments,
+        "uncommitted_count": uncommitted_count,
+    }
+
+
+def resolve_week_20_cleanup(conn, league_year_id, config=None):
+    """
+    Week 20 cleanup: all remaining players with ANY investment
+    commit to their point leader. Uninvested players are leftovers.
+
+    Returns: {"commitments": [...], "leftovers": int}
+    """
+    # Get all uncommitted invested players
+    remaining = conn.execute(
+        text("""
+            SELECT DISTINCT ri.player_id
+            FROM recruiting_investments ri
+            WHERE ri.league_year_id = :ly
+              AND ri.player_id NOT IN (
+                  SELECT player_id FROM recruiting_commitments
+                  WHERE league_year_id = :ly
+              )
+        """),
+        {"ly": league_year_id},
+    ).all()
+
+    commitments = []
+    for (player_id,) in remaining:
+        # Find point leader
+        leader = conn.execute(
+            text("""
+                SELECT org_id, SUM(points) AS total_pts
+                FROM recruiting_investments
+                WHERE player_id = :pid AND league_year_id = :ly
+                GROUP BY org_id
+                ORDER BY total_pts DESC
+                LIMIT 1
+            """),
+            {"pid": player_id, "ly": league_year_id},
+        ).first()
+
+        if not leader:
+            continue
+
+        # Get star rating
+        star_row = conn.execute(
+            text("""
+                SELECT star_rating FROM recruiting_rankings
+                WHERE player_id = :pid AND league_year_id = :ly
+            """),
+            {"pid": player_id, "ly": league_year_id},
+        ).first()
+        star = star_row[0] if star_row else 1
+
+        conn.execute(
+            text("""
+                INSERT INTO recruiting_commitments
+                    (player_id, org_id, league_year_id,
+                     week_committed, points_total, star_rating)
+                VALUES (:pid, :org, :ly, 20, :pts, :star)
+            """),
+            {
+                "pid": player_id, "org": leader[0],
+                "ly": league_year_id, "pts": leader[1],
+                "star": star,
+            },
+        )
+        commitments.append({
+            "player_id": player_id,
+            "org_id": leader[0],
+            "week": 20,
+            "points_total": leader[1],
+            "star_rating": star,
+        })
+
+    # Count leftovers (HS players with no investment at all)
+    leftover_count = conn.execute(
+        text("""
+            SELECT COUNT(*)
+            FROM simbbPlayers p
+            JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+            JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+            WHERE cts.orgID = :ushs
+              AND p.id NOT IN (
+                  SELECT player_id FROM recruiting_commitments
+                  WHERE league_year_id = :ly
+              )
+        """),
+        {"ushs": USHS_ORG_ID, "ly": league_year_id},
+    ).scalar()
+
+    return {
+        "commitments": commitments,
+        "leftovers": leftover_count or 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Week advancement orchestrator
+# ---------------------------------------------------------------------------
+
+def advance_recruiting_week(conn, league_year_id):
+    """
+    Advance recruiting by one week.
+
+    - Week 0 -> 1: compute star rankings, set status='active'
+    - Week 1-19: resolve completed week's commitments
+    - Week 20: resolve + cleanup (remaining go to leader)
+    - Week > 20: set status='complete'
+
+    Returns summary dict.
+    """
+    config = get_recruiting_config(conn)
+    total_weeks = _cfg_int(config, "recruiting_weeks", 20)
+
+    # Get or create recruiting state
+    state = conn.execute(
+        text("""
+            SELECT current_week, status FROM recruiting_state
+            WHERE league_year_id = :ly
+        """),
+        {"ly": league_year_id},
+    ).first()
+
+    if not state:
+        conn.execute(
+            text("""
+                INSERT INTO recruiting_state (league_year_id, current_week, status)
+                VALUES (:ly, 0, 'pending')
+            """),
+            {"ly": league_year_id},
+        )
+        current_week = 0
+        status = "pending"
+    else:
+        current_week = state[0]
+        status = state[1]
+
+    if status == "complete":
+        return {"status": "complete", "message": "Recruiting already complete"}
+
+    new_week = current_week + 1
+    result = {"previous_week": current_week, "new_week": new_week}
+
+    if current_week == 0:
+        # Initialize: compute star rankings
+        ranked_count = compute_star_rankings(conn, league_year_id)
+        result["ranked_players"] = ranked_count
+
+        conn.execute(
+            text("""
+                UPDATE recruiting_state
+                SET current_week = 1, status = 'active'
+                WHERE league_year_id = :ly
+            """),
+            {"ly": league_year_id},
+        )
+        result["status"] = "active"
+        result["new_week"] = 1
+        return result
+
+    # Resolve the just-completed week
+    week_result = resolve_recruiting_week(
+        conn, league_year_id, current_week, config
+    )
+    result["commitments"] = week_result["commitments"]
+    result["uncommitted_count"] = week_result["uncommitted_count"]
+
+    if current_week >= total_weeks:
+        # Week 20 cleanup
+        cleanup = resolve_week_20_cleanup(conn, league_year_id, config)
+        result["cleanup_commitments"] = cleanup["commitments"]
+        result["leftovers"] = cleanup["leftovers"]
+
+        conn.execute(
+            text("""
+                UPDATE recruiting_state
+                SET current_week = :week, status = 'complete'
+                WHERE league_year_id = :ly
+            """),
+            {"week": new_week, "ly": league_year_id},
+        )
+        result["status"] = "complete"
+    else:
+        conn.execute(
+            text("""
+                UPDATE recruiting_state
+                SET current_week = :week
+                WHERE league_year_id = :ly
+            """),
+            {"week": new_week, "ly": league_year_id},
+        )
+        result["status"] = "active"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Player recruiting status (fog-of-war)
+# ---------------------------------------------------------------------------
+
+def get_player_recruiting_status(conn, player_id, league_year_id,
+                                  viewing_org_id=None):
+    """
+    Get recruiting status for a player with fog-of-war.
+
+    Returns: {
+        star_rating, rank_overall, rank_by_ptype, ptype,
+        status ('uncommitted' | 'committed'),
+        commitment (if committed): {org_id, week, org_name},
+        interest_gauge (fuzzed per viewing_org),
+        competitor_count,
+        your_investment (if viewing_org_id provided),
+    }
+    """
+    # Star ranking
+    ranking = conn.execute(
+        text("""
+            SELECT rr.star_rating, rr.rank_overall, rr.rank_by_ptype,
+                   rr.composite_score, p.ptype, p.firstname, p.lastname
+            FROM recruiting_rankings rr
+            JOIN simbbPlayers p ON p.id = rr.player_id
+            WHERE rr.player_id = :pid AND rr.league_year_id = :ly
+        """),
+        {"pid": player_id, "ly": league_year_id},
+    ).first()
+
+    if not ranking:
+        return None
+
+    m = ranking._mapping
+    result = {
+        "player_id": player_id,
+        "player_name": f"{m['firstname']} {m['lastname']}",
+        "ptype": m["ptype"],
+        "star_rating": m["star_rating"],
+        "rank_overall": m["rank_overall"],
+        "rank_by_ptype": m["rank_by_ptype"],
+    }
+
+    # Commitment status
+    commitment = conn.execute(
+        text("""
+            SELECT rc.org_id, rc.week_committed, rc.points_total,
+                   o.abbreviation AS org_abbrev
+            FROM recruiting_commitments rc
+            JOIN organizations o ON o.id = rc.org_id
+            WHERE rc.player_id = :pid AND rc.league_year_id = :ly
+        """),
+        {"pid": player_id, "ly": league_year_id},
+    ).first()
+
+    if commitment:
+        cm = commitment._mapping
+        result["status"] = "committed"
+        result["commitment"] = {
+            "org_id": cm["org_id"],
+            "org_abbrev": cm["org_abbrev"],
+            "week_committed": cm["week_committed"],
+            "points_total": cm["points_total"],
+        }
+    else:
+        result["status"] = "uncommitted"
+
+    # Competitor count and total interest
+    org_investments = conn.execute(
+        text("""
+            SELECT org_id, SUM(points) AS total_pts
+            FROM recruiting_investments
+            WHERE player_id = :pid AND league_year_id = :ly
+            GROUP BY org_id
+        """),
+        {"pid": player_id, "ly": league_year_id},
+    ).all()
+
+    total_interest = sum(r[1] for r in org_investments)
+    result["competitor_count"] = len(org_investments)
+
+    # Interest gauge (fuzzed per viewing org)
+    result["interest_gauge"] = _fuzz_interest_gauge(
+        total_interest, viewing_org_id, player_id
+    )
+
+    # Viewing org's own investment
+    if viewing_org_id is not None:
+        own_pts = conn.execute(
+            text("""
+                SELECT COALESCE(SUM(points), 0)
+                FROM recruiting_investments
+                WHERE org_id = :org AND player_id = :pid
+                  AND league_year_id = :ly
+            """),
+            {"org": viewing_org_id, "pid": player_id, "ly": league_year_id},
+        ).scalar()
+        result["your_investment"] = own_pts
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Org recruiting board
+# ---------------------------------------------------------------------------
+
+def get_org_recruiting_board(conn, org_id, league_year_id):
+    """
+    Get an org's full recruiting board: all players they've invested in,
+    with cumulative points, star rating, and fuzzed interest gauges.
+    """
+    # All players this org has invested in
+    invested = conn.execute(
+        text("""
+            SELECT ri.player_id, SUM(ri.points) AS your_points
+            FROM recruiting_investments ri
+            WHERE ri.org_id = :org AND ri.league_year_id = :ly
+            GROUP BY ri.player_id
+        """),
+        {"org": org_id, "ly": league_year_id},
+    ).all()
+
+    if not invested:
+        return []
+
+    player_ids = [r[0] for r in invested]
+    your_points = {r[0]: r[1] for r in invested}
+
+    # Batch fetch rankings
+    placeholders = ", ".join([f":p{i}" for i in range(len(player_ids))])
+    params = {"ly": league_year_id}
+    params.update({f"p{i}": pid for i, pid in enumerate(player_ids)})
+
+    rankings = conn.execute(
+        text(f"""
+            SELECT rr.player_id, rr.star_rating, rr.rank_overall,
+                   p.firstname, p.lastname, p.ptype
+            FROM recruiting_rankings rr
+            JOIN simbbPlayers p ON p.id = rr.player_id
+            WHERE rr.league_year_id = :ly
+              AND rr.player_id IN ({placeholders})
+        """),
+        params,
+    ).all()
+    rank_map = {r[0]: r._mapping for r in rankings}
+
+    # Batch fetch commitments
+    commitments = conn.execute(
+        text(f"""
+            SELECT rc.player_id, rc.org_id, rc.week_committed,
+                   o.abbreviation AS org_abbrev
+            FROM recruiting_commitments rc
+            JOIN organizations o ON o.id = rc.org_id
+            WHERE rc.league_year_id = :ly
+              AND rc.player_id IN ({placeholders})
+        """),
+        params,
+    ).all()
+    commit_map = {r[0]: r._mapping for r in commitments}
+
+    # Batch fetch total interest per player + competitor count
+    interest_data = conn.execute(
+        text(f"""
+            SELECT player_id, COUNT(DISTINCT org_id) AS num_orgs,
+                   SUM(points) AS total_pts
+            FROM recruiting_investments
+            WHERE league_year_id = :ly
+              AND player_id IN ({placeholders})
+            GROUP BY player_id
+        """),
+        params,
+    ).all()
+    interest_map = {r[0]: (r[1], r[2]) for r in interest_data}
+
+    board = []
+    for pid in player_ids:
+        rm = rank_map.get(pid)
+        if not rm:
+            continue
+
+        entry = {
+            "player_id": pid,
+            "player_name": f"{rm['firstname']} {rm['lastname']}",
+            "ptype": rm["ptype"],
+            "star_rating": rm["star_rating"],
+            "rank_overall": rm["rank_overall"],
+            "your_points": your_points.get(pid, 0),
+        }
+
+        # Interest gauge (fuzzed)
+        num_orgs, total_pts = interest_map.get(pid, (0, 0))
+        entry["interest_gauge"] = _fuzz_interest_gauge(
+            total_pts, org_id, pid
+        )
+        entry["competitor_count"] = num_orgs
+
+        # Commitment status
+        cm = commit_map.get(pid)
+        if cm:
+            entry["status"] = "committed"
+            entry["committed_to"] = {
+                "org_id": cm["org_id"],
+                "org_abbrev": cm["org_abbrev"],
+                "week_committed": cm["week_committed"],
+            }
+        else:
+            entry["status"] = "uncommitted"
+
+        board.append(entry)
+
+    # Sort: uncommitted first (by star desc), then committed
+    board.sort(key=lambda x: (
+        0 if x["status"] == "uncommitted" else 1,
+        -x["star_rating"],
+        x["rank_overall"],
+    ))
+
+    return board
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _fuzz_seed(org_id, player_id, key):
+    """Deterministic hash for fog-of-war fuzzing."""
+    raw = f"{org_id}:{player_id}:{key}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(raw).digest()[:4], "big")
+
+
+def _fuzz_interest_gauge(total_interest, org_id, player_id):
+    """
+    Convert total interest into a fuzzed bucket label.
+
+    True buckets based on total interest:
+      0-49: Low, 50-149: Medium, 150-299: High, 300+: Very High
+
+    Then shift ±1 tier per org for fog-of-war.
+    """
+    if total_interest < 50:
+        true_idx = 0
+    elif total_interest < 150:
+        true_idx = 1
+    elif total_interest < 300:
+        true_idx = 2
+    else:
+        true_idx = 3
+
+    if org_id is None:
+        return _INTEREST_BUCKETS[true_idx]
+
+    seed = _fuzz_seed(org_id, player_id, "interest")
+    direction = 1 if (seed % 2 == 0) else -1
+    fuzzed_idx = true_idx + direction
+    fuzzed_idx = max(0, min(len(_INTEREST_BUCKETS) - 1, fuzzed_idx))
+    return _INTEREST_BUCKETS[fuzzed_idx]
+
+
+def _weighted_lottery(weights):
+    """
+    Given list of (org_id, weight), pick a winner via weighted random draw.
+    """
+    total = sum(w for _, w in weights)
+    if total <= 0:
+        return weights[0][0] if weights else None
+
+    r = random.random() * total
+    cumulative = 0.0
+    for org_id, w in weights:
+        cumulative += w
+        if r <= cumulative:
+            return org_id
+
+    # Fallback (shouldn't reach here)
+    return weights[-1][0]

@@ -273,6 +273,12 @@ def create_app(config_object=Config):
     except Exception as e:
         app.logger.exception("Failed to register wbc blueprint: %s", e)
 
+    try:
+        from recruiting import recruiting_bp
+        app.register_blueprint(recruiting_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register recruiting blueprint: %s", e)
+
     from admin import admin_bp
     # Secure session cookie
     app.secret_key = os.getenv("FLASK_SECRET", os.urandom(32))

@@ -482,6 +482,30 @@ def wipe_season():
             ), {"lyid": league_year_id})
             deleted["scouting_budgets"] = r.rowcount
 
+            # 8d. Recruiting investments
+            r = conn.execute(sa_text(
+                "DELETE FROM recruiting_investments WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["recruiting_investments"] = r.rowcount
+
+            # 8e. Recruiting commitments
+            r = conn.execute(sa_text(
+                "DELETE FROM recruiting_commitments WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["recruiting_commitments"] = r.rowcount
+
+            # 8f. Recruiting rankings
+            r = conn.execute(sa_text(
+                "DELETE FROM recruiting_rankings WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["recruiting_rankings"] = r.rowcount
+
+            # 8g. Recruiting state
+            r = conn.execute(sa_text(
+                "DELETE FROM recruiting_state WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["recruiting_state"] = r.rowcount
+
             # 9. Reset timestamp
             conn.execute(sa_text(
                 "UPDATE timestamp_state SET "
@@ -499,6 +523,8 @@ def wipe_season():
                 "player_injury_events", "player_fatigue_state",
                 "org_ledger_entries",
                 "scouting_actions", "scouting_budgets",
+                "recruiting_investments", "recruiting_commitments",
+                "recruiting_rankings", "recruiting_state",
             ]
             for tbl in optimize_tables:
                 conn.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))

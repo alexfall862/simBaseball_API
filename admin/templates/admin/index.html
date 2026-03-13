@@ -171,6 +171,20 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Recruiting</div>
+      <a href="#" class="nav-item" data-section="recruiting">
+        <span class="nav-icon">&#127891;</span> Recruiting
+      </a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Testing</div>
+      <a href="#" class="nav-item" data-section="batting-lab">
+        <span class="nav-icon">&#9879;</span> Batting Lab
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Administration</div>
       <a href="#" class="nav-item" data-section="cache">
         <span class="nav-icon">&#128451;</span> Cache Manager
@@ -2162,6 +2176,30 @@
           </div>
         </div>
 
+        <!-- Per Contact Type Batting Profile -->
+        <div class="card" id="an-ct-bytype-card" style="display: none;">
+          <h3>Expected Batting Line by Contact Type</h3>
+          <p class="text-muted" style="margin-bottom: 8px; font-size: 13px">
+            Derived from fielding weights config. Shows the expected outcome distribution
+            when a ball is put in play as each contact type.
+          </p>
+          <div style="overflow-x: auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Contact Type</th><th>Freq %</th>
+                  <th>Out%</th><th>1B%</th><th>2B%</th><th>3B%</th><th>HR%</th>
+                  <th>Hit%</th><th>AVG</th><th>SLG</th><th>ISO</th>
+                </tr>
+              </thead>
+              <tbody id="an-ct-bytype-tbody"></tbody>
+            </table>
+          </div>
+          <div style="position: relative; height: 300px; margin-top: 16px;">
+            <canvas id="an-ct-bytype-chart"></canvas>
+          </div>
+        </div>
+
         <!-- Leaders -->
         <div class="card" id="an-ct-leaders-card" style="display: none;">
           <h3>Player Leaders</h3>
@@ -2717,6 +2755,97 @@
         <div class="card" id="wbc-teams-card" style="display:none">
           <h4>Teams / Pool Standings</h4>
           <div id="wbc-teams"></div>
+        </div>
+      </section>
+
+      <section id="section-recruiting" class="section">
+        <div class="card">
+          <h3>College Recruiting</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="rec-lyid"></select>
+            </div>
+            <button id="btn-rec-compute" class="btn btn-primary">Compute Rankings</button>
+            <button id="btn-rec-advance" class="btn btn-secondary">Advance Week</button>
+            <button id="btn-rec-refresh" class="btn btn-secondary">Refresh</button>
+          </div>
+          <div id="rec-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="rec-state-card" style="display:none">
+          <h4>Recruiting State</h4>
+          <div id="rec-state-info" style="margin-bottom:12px"></div>
+          <div style="display:flex;gap:24px;flex-wrap:wrap">
+            <div>
+              <h5>Star Distribution</h5>
+              <canvas id="rec-star-chart" width="300" height="200"></canvas>
+            </div>
+            <div style="flex:1;min-width:300px">
+              <h5>Recent Commitments</h5>
+              <div id="rec-commitments-table" style="max-height:400px;overflow-y:auto"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Batting Lab -->
+      <section id="section-batting-lab" class="section">
+        <div class="card">
+          <h3>Batting Lab</h3>
+          <p style="color:var(--text-secondary);margin-bottom:12px">
+            Run synthetic games through the engine to test batting outcomes by player attribute tier.
+            Pitchers are held constant at average (50); only batter attributes vary.
+          </p>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Level</label>
+              <select id="blab-level">
+                <option value="9">9 — MLB</option>
+                <option value="8">8 — AAA</option>
+                <option value="7">7 — AA</option>
+                <option value="6">6 — High-A</option>
+                <option value="5">5 — Low-A</option>
+                <option value="3">3 — College</option>
+              </select>
+            </div>
+            <div>
+              <label>Games per Tier</label>
+              <input type="number" id="blab-games" value="50" min="1" max="500" style="width:80px">
+            </div>
+            <div>
+              <label>Label (optional)</label>
+              <input type="text" id="blab-label" placeholder="e.g. baseline v2" style="width:160px">
+            </div>
+            <button id="btn-blab-run" class="btn btn-primary">Run Tier Sweep</button>
+          </div>
+          <div id="blab-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Run history -->
+        <div class="card" id="blab-history-card">
+          <h4>Run History</h4>
+          <div id="blab-history-table" style="max-height:260px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Results detail (shown when a run is selected) -->
+        <div class="card" id="blab-results-card" style="display:none">
+          <h4 id="blab-results-title">Results</h4>
+          <div id="blab-results-info" style="margin-bottom:12px"></div>
+
+          <!-- Charts row -->
+          <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+            <div>
+              <h5>Slash Lines by Tier</h5>
+              <canvas id="blab-slash-chart" width="420" height="240"></canvas>
+            </div>
+            <div>
+              <h5>Rate Stats by Tier</h5>
+              <canvas id="blab-rate-chart" width="420" height="240"></canvas>
+            </div>
+          </div>
+
+          <!-- Data table -->
+          <div id="blab-results-table" style="overflow-x:auto"></div>
         </div>
       </section>
 

@@ -505,7 +505,34 @@ def api_college_pool():
             )
             rows = conn.execute(data_stmt).all()
 
+            # Batch-fetch star ratings from recruiting_rankings
+            star_map = {}
+            league_year_id = request.args.get("league_year_id", type=int)
+            if league_year_id and rows:
+                pids = [r._mapping["id"] for r in rows]
+                ph = ", ".join([f":p{i}" for i in range(len(pids))])
+                star_params = {"ly": league_year_id}
+                star_params.update({f"p{i}": pid for i, pid in enumerate(pids)})
+                star_rows = conn.execute(
+                    sa_text(f"""
+                        SELECT player_id, star_rating
+                        FROM recruiting_rankings
+                        WHERE league_year_id = :ly
+                          AND player_id IN ({ph})
+                    """),
+                    star_params,
+                ).all()
+                star_map = {r[0]: r[1] for r in star_rows}
+
         players_list = _build_player_list(rows, tables)
+
+        # Add star_rating to each player
+        for player in players_list:
+            player["star_rating"] = star_map.get(player["id"])
+
+        # Generate deterministic stats from raw attributes (before fuzz)
+        for player in players_list:
+            player["generated_stats"] = generate_scouting_stats(player, "hs")
 
         # Apply fog-of-war fuzz for HS pool
         if viewing_org_id:

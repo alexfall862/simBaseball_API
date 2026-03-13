@@ -389,6 +389,7 @@
       'stamina-consumption': 'Consumption Analysis',
       'stamina-flow': 'Stamina Flow History',
       'db-storage': 'DB Storage',
+      'batting-lab': 'Batting Lab',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -477,6 +478,13 @@
         break;
       case 'wbc':
         loadSpecialEventLeagueYears('wbc-lyid');
+        break;
+      case 'recruiting':
+        loadSpecialEventLeagueYears('rec-lyid');
+        loadRecruitingState();
+        break;
+      case 'batting-lab':
+        loadBlabHistory();
         break;
     }
 
@@ -5270,7 +5278,7 @@
     const status = document.getElementById('an-ct-status');
     status.textContent = 'Loading...';
 
-    ['an-ct-odds-card', 'an-ct-dist-card', 'an-ct-expected-card', 'an-ct-outcome-card', 'an-ct-tiers-card', 'an-ct-contact-tiers-card', 'an-ct-leaders-card']
+    ['an-ct-odds-card', 'an-ct-dist-card', 'an-ct-expected-card', 'an-ct-outcome-card', 'an-ct-tiers-card', 'an-ct-contact-tiers-card', 'an-ct-bytype-card', 'an-ct-leaders-card']
       .forEach(id => document.getElementById(id).style.display = 'none');
 
     const params = new URLSearchParams({ league_year_id: lyid, league_level: level, min_ab: minAb });
@@ -5287,9 +5295,10 @@
         renderOutcomeSummary(data.outcome_summary, data.n);
         renderPowerTiers(data.tiers);
         renderContactTiers(data.contact_tiers);
+        renderPerContactType(data.per_contact_type || []);
         renderContactLeaders('iso');
 
-        ['an-ct-odds-card', 'an-ct-dist-card', 'an-ct-expected-card', 'an-ct-outcome-card', 'an-ct-tiers-card', 'an-ct-contact-tiers-card', 'an-ct-leaders-card']
+        ['an-ct-odds-card', 'an-ct-dist-card', 'an-ct-expected-card', 'an-ct-outcome-card', 'an-ct-tiers-card', 'an-ct-contact-tiers-card', 'an-ct-bytype-card', 'an-ct-leaders-card']
           .forEach(id => document.getElementById(id).style.display = '');
       })
       .catch(err => { status.textContent = 'Error: ' + err.message; });
@@ -5573,6 +5582,61 @@
       </tr>`;
     }).join('');
     contactContactTierChart = _renderTierChart('an-ct-contact-tier-chart', tiers, 'contact', contactContactTierChart);
+  }
+
+  let contactByTypeChart = null;
+  function renderPerContactType(types) {
+    const tbody = document.getElementById('an-ct-bytype-tbody');
+    if (!types || !types.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No contact type data</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = types.map(t => `<tr>
+      <td><strong>${t.contact_type}</strong></td>
+      <td>${t.frequency_pct}%</td>
+      <td>${t.out_pct}%</td>
+      <td>${t['1B_pct']}%</td>
+      <td>${t['2B_pct']}%</td>
+      <td>${t['3B_pct']}%</td>
+      <td>${t.HR_pct}%</td>
+      <td><strong>${t.hit_pct}%</strong></td>
+      <td>${t.AVG.toFixed(3)}</td>
+      <td>${t.SLG.toFixed(3)}</td>
+      <td>${t.ISO.toFixed(3)}</td>
+    </tr>`).join('');
+
+    // Stacked bar chart: outcome distribution per contact type
+    const labels = types.map(t => t.contact_type);
+    const ctx = document.getElementById('an-ct-bytype-chart').getContext('2d');
+    if (contactByTypeChart) contactByTypeChart.destroy();
+
+    contactByTypeChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Out%', data: types.map(t => t.out_pct), backgroundColor: '#6b728088', borderColor: '#6b7280', borderWidth: 1 },
+          { label: '1B%', data: types.map(t => t['1B_pct']), backgroundColor: '#3b82f688', borderColor: '#3b82f6', borderWidth: 1 },
+          { label: '2B%', data: types.map(t => t['2B_pct']), backgroundColor: '#22c55e88', borderColor: '#22c55e', borderWidth: 1 },
+          { label: '3B%', data: types.map(t => t['3B_pct']), backgroundColor: '#f59e0b88', borderColor: '#f59e0b', borderWidth: 1 },
+          { label: 'HR%', data: types.map(t => t.HR_pct), backgroundColor: '#ef444488', borderColor: '#ef4444', borderWidth: 1 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: '#9ca3af' } },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: { stacked: true, ticks: { color: '#9ca3af' }, grid: { color: '#333' } },
+          y: { stacked: true, beginAtZero: true, max: 100,
+               title: { display: true, text: '% of outcomes', color: '#999' },
+               ticks: { color: '#9ca3af' }, grid: { color: '#333' } },
+        },
+      },
+    });
   }
 
   function renderContactLeaders(category) {
@@ -6377,6 +6441,364 @@
       });
   }
 
+  // ======================================================================
+  // Recruiting
+  // ======================================================================
+  let recStarChart = null;
+
+  function loadRecruitingState() {
+    const lyid = document.getElementById('rec-lyid')?.value;
+    if (!lyid) return;
+
+    // Load state
+    fetch(`${API_BASE}/recruiting/state?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('rec-state-card');
+        card.style.display = '';
+        const info = document.getElementById('rec-state-info');
+        const totalWeeks = data.total_weeks || 20;
+        info.innerHTML = `
+          <div style="display:flex;gap:24px;flex-wrap:wrap">
+            <div><strong>Status:</strong> <span class="badge badge-${data.status === 'active' ? 'success' : data.status === 'complete' ? 'info' : 'warning'}">${data.status || 'pending'}</span></div>
+            <div><strong>Current Week:</strong> ${data.current_week || 0} / ${totalWeeks}</div>
+          </div>
+        `;
+      })
+      .catch(() => {});
+
+    // Load rankings star distribution
+    fetch(`${API_BASE}/recruiting/rankings?league_year_id=${lyid}&per_page=1`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.total > 0) {
+          loadStarDistribution(lyid);
+        }
+      })
+      .catch(() => {});
+
+    // Load recent commitments
+    fetch(`${API_BASE}/recruiting/commitments?league_year_id=${lyid}&per_page=20`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const container = document.getElementById('rec-commitments-table');
+        if (!data.commitments || data.commitments.length === 0) {
+          container.innerHTML = '<p style="color:var(--text-secondary)">No commitments yet.</p>';
+          return;
+        }
+        let html = '<table class="data-table"><thead><tr><th>Week</th><th>Player</th><th>Type</th><th>Stars</th><th>School</th><th>Points</th></tr></thead><tbody>';
+        data.commitments.forEach(c => {
+          const stars = '\u2605'.repeat(c.star_rating) + '\u2606'.repeat(5 - c.star_rating);
+          html += `<tr><td>${c.week_committed}</td><td>${c.player_name}</td><td>${c.ptype}</td><td>${stars}</td><td>${c.org_abbrev}</td><td>${c.points_total}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(() => {});
+  }
+
+  function loadStarDistribution(lyid) {
+    // Fetch counts per star rating
+    const promises = [1, 2, 3, 4, 5].map(star =>
+      fetch(`${API_BASE}/recruiting/rankings?league_year_id=${lyid}&star_rating=${star}&per_page=1`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(d => ({ star, count: d.total || 0 }))
+    );
+
+    Promise.all(promises).then(results => {
+      const labels = results.map(r => r.star + '\u2605');
+      const counts = results.map(r => r.count);
+      const canvas = document.getElementById('rec-star-chart');
+      if (!canvas) return;
+
+      if (recStarChart) recStarChart.destroy();
+
+      recStarChart = new Chart(canvas, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Players',
+            data: counts,
+            backgroundColor: ['#6b7280', '#3b82f6', '#22c55e', '#f59e0b', '#ef4444'],
+          }],
+        },
+        options: {
+          responsive: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { beginAtZero: true, ticks: { color: '#9ca3af' }, grid: { color: '#374151' } },
+            x: { ticks: { color: '#9ca3af' }, grid: { display: false } },
+          },
+        },
+      });
+    });
+  }
+
+  // Compute Rankings button
+  document.getElementById('btn-rec-compute')?.addEventListener('click', () => {
+    const lyid = document.getElementById('rec-lyid').value;
+    if (!lyid) return;
+    const status = document.getElementById('rec-status');
+    status.textContent = 'Computing rankings...';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/recruiting/advance-week`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.message || 'Error';
+          status.className = 'status-msg error';
+        } else {
+          const msg = data.ranked_players
+            ? `Ranked ${data.ranked_players} players. Status: ${data.status}`
+            : `Week ${data.new_week}: ${(data.commitments || []).length} commitments, ${data.uncommitted_count || 0} uncommitted. Status: ${data.status}`;
+          status.textContent = msg;
+          status.className = 'status-msg success';
+          loadRecruitingState();
+        }
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  });
+
+  // Advance Week button
+  document.getElementById('btn-rec-advance')?.addEventListener('click', () => {
+    const lyid = document.getElementById('rec-lyid').value;
+    if (!lyid) return;
+    const status = document.getElementById('rec-status');
+    status.textContent = 'Advancing week...';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/recruiting/advance-week`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.message || 'Error';
+          status.className = 'status-msg error';
+        } else {
+          let msg = `Advanced to week ${data.new_week}. Status: ${data.status}.`;
+          const commits = (data.commitments || []).length + (data.cleanup_commitments || []).length;
+          if (commits > 0) msg += ` ${commits} new commitments.`;
+          if (data.leftovers !== undefined) msg += ` ${data.leftovers} leftovers.`;
+          status.textContent = msg;
+          status.className = 'status-msg success';
+          loadRecruitingState();
+        }
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  });
+
+  // Refresh button
+  document.getElementById('btn-rec-refresh')?.addEventListener('click', () => {
+    loadRecruitingState();
+  });
+
+  // Re-load state when league year changes
+  document.getElementById('rec-lyid')?.addEventListener('change', () => {
+    loadRecruitingState();
+  });
+
+  // ======================================================================
+  // Batting Lab
+  // ======================================================================
+  let blabSlashChart = null;
+  let blabRateChart = null;
+
+  function loadBlabHistory() {
+    fetch('/admin/batting-lab/runs', { credentials: 'include' })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(data => {
+        const div = document.getElementById('blab-history-table');
+        if (!data.ok || !data.runs || data.runs.length === 0) {
+          div.innerHTML = '<p style="color:var(--text-secondary)">No runs yet. Configure and click "Run Tier Sweep" above.</p>';
+          return;
+        }
+        let html = '<table class="data-table"><thead><tr>' +
+          '<th>ID</th><th>Label</th><th>Level</th><th>Games/Tier</th><th>Status</th><th>Created</th><th>Action</th>' +
+          '</tr></thead><tbody>';
+        data.runs.forEach(r => {
+          const statusCls = r.status === 'complete' ? 'badge-success' :
+            r.status === 'running' ? 'badge-warning' :
+            r.status === 'error' ? 'badge-danger' : '';
+          html += `<tr>
+            <td>${r.id}</td>
+            <td>${r.label || '-'}</td>
+            <td>${r.league_level}</td>
+            <td>${r.games_per_scenario}</td>
+            <td><span class="badge ${statusCls}">${r.status}</span></td>
+            <td>${r.created_at ? r.created_at.substring(0, 16) : '-'}</td>
+            <td>${r.status === 'complete' ? `<button class="btn btn-sm btn-secondary" onclick="App.loadBlabResults(${r.id})">View</button>` : ''}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        div.innerHTML = html;
+      })
+      .catch(() => {});
+  }
+
+  function loadBlabResults(runId) {
+    fetch(`/admin/batting-lab/results/${runId}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) return;
+
+        const card = document.getElementById('blab-results-card');
+        card.style.display = '';
+
+        const run = data.run;
+        document.getElementById('blab-results-title').textContent =
+          `Results: ${run.label || 'Run #' + run.id} (Level ${run.league_level}, ${run.games_per_scenario} games/tier)`;
+
+        const info = document.getElementById('blab-results-info');
+        info.innerHTML = `<span class="badge badge-success">${run.status}</span>` +
+          (run.completed_at ? ` <span style="color:var(--text-secondary);margin-left:8px">${run.completed_at.substring(0, 16)}</span>` : '');
+
+        const tiers = data.tiers || [];
+        if (tiers.length === 0) return;
+
+        // ── Slash line chart (AVG / OBP / SLG grouped bar) ──
+        const tierLabels = tiers.map(t => t.tier_label);
+        const avgData = tiers.map(t => t.avg || 0);
+        const obpData = tiers.map(t => t.obp || 0);
+        const slgData = tiers.map(t => t.slg || 0);
+
+        const slashCanvas = document.getElementById('blab-slash-chart');
+        if (blabSlashChart) blabSlashChart.destroy();
+        blabSlashChart = new Chart(slashCanvas, {
+          type: 'bar',
+          data: {
+            labels: tierLabels,
+            datasets: [
+              { label: 'AVG', data: avgData, backgroundColor: '#3b82f6' },
+              { label: 'OBP', data: obpData, backgroundColor: '#10b981' },
+              { label: 'SLG', data: slgData, backgroundColor: '#f59e0b' },
+            ],
+          },
+          options: {
+            responsive: false,
+            plugins: { legend: { labels: { color: '#9ca3af' } } },
+            scales: {
+              y: { beginAtZero: true, max: 0.7, ticks: { color: '#9ca3af' }, grid: { color: '#374151' } },
+              x: { ticks: { color: '#9ca3af' }, grid: { display: false } },
+            },
+          },
+        });
+
+        // ── Rate chart (K%, BB%) ──
+        const kData = tiers.map(t => t.k_pct || 0);
+        const bbData = tiers.map(t => t.bb_pct || 0);
+
+        const rateCanvas = document.getElementById('blab-rate-chart');
+        if (blabRateChart) blabRateChart.destroy();
+        blabRateChart = new Chart(rateCanvas, {
+          type: 'bar',
+          data: {
+            labels: tierLabels,
+            datasets: [
+              { label: 'K%', data: kData, backgroundColor: '#ef4444' },
+              { label: 'BB%', data: bbData, backgroundColor: '#8b5cf6' },
+            ],
+          },
+          options: {
+            responsive: false,
+            plugins: { legend: { labels: { color: '#9ca3af' } } },
+            scales: {
+              y: { beginAtZero: true, ticks: { color: '#9ca3af', callback: v => v + '%' }, grid: { color: '#374151' } },
+              x: { ticks: { color: '#9ca3af' }, grid: { display: false } },
+            },
+          },
+        });
+
+        // ── Data table ──
+        let html = '<table class="data-table"><thead><tr>' +
+          '<th>Tier</th><th>G</th><th>PA</th><th>AB</th><th>H</th><th>2B</th><th>3B</th><th>HR</th>' +
+          '<th>BB</th><th>K</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th><th>ISO</th>' +
+          '<th>K%</th><th>BB%</th><th>R/G</th>' +
+          '</tr></thead><tbody>';
+        tiers.forEach(t => {
+          const gp = t.games_played || 1;
+          const rpg = ((t.runs || 0) / gp).toFixed(1);
+          html += `<tr>
+            <td><strong>${t.tier_label}</strong></td>
+            <td>${t.games_played}</td>
+            <td>${t.plate_appearances}</td>
+            <td>${t.at_bats}</td>
+            <td>${t.hits}</td>
+            <td>${t.doubles}</td>
+            <td>${t.triples}</td>
+            <td>${t.home_runs}</td>
+            <td>${t.walks}</td>
+            <td>${t.strikeouts}</td>
+            <td>${(t.avg || 0).toFixed(3)}</td>
+            <td>${(t.obp || 0).toFixed(3)}</td>
+            <td>${(t.slg || 0).toFixed(3)}</td>
+            <td>${(t.ops || 0).toFixed(3)}</td>
+            <td>${(t.iso || 0).toFixed(3)}</td>
+            <td>${(t.k_pct || 0).toFixed(1)}%</td>
+            <td>${(t.bb_pct || 0).toFixed(1)}%</td>
+            <td>${rpg}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('blab-results-table').innerHTML = html;
+
+        // Scroll to results
+        card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      })
+      .catch(() => {});
+  }
+
+  // Run button
+  document.getElementById('btn-blab-run')?.addEventListener('click', () => {
+    const level = document.getElementById('blab-level').value;
+    const games = document.getElementById('blab-games').value;
+    const label = document.getElementById('blab-label').value;
+    const status = document.getElementById('blab-status');
+
+    status.textContent = 'Running tier sweep... this may take a minute.';
+    status.className = 'status-msg info';
+
+    fetch('/admin/batting-lab/run', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_level: parseInt(level),
+        games_per_tier: parseInt(games),
+        label: label,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          status.textContent = data.message || 'Complete';
+          status.className = 'status-msg success';
+          loadBlabHistory();
+          if (data.run_id) loadBlabResults(data.run_id);
+        } else {
+          status.textContent = data.message || 'Error';
+          status.className = 'status-msg error';
+        }
+      })
+      .catch(e => {
+        status.textContent = 'Request failed: ' + e.message;
+        status.className = 'status-msg error';
+      });
+  });
+
   window.App = {
     goTo,
     refreshDashboard,
@@ -6389,6 +6811,7 @@
     rollbackTx,
     editGame,
     drillCorrelation,
+    loadBlabResults,
   };
 
   // Initialize on DOM ready
