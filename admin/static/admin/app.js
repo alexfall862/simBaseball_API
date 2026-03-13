@@ -6598,6 +6598,63 @@
       .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
   });
 
+  // Regenerate Stars button
+  document.getElementById('btn-rec-regenerate')?.addEventListener('click', () => {
+    const lyid = document.getElementById('rec-lyid').value;
+    if (!lyid) return;
+    const status = document.getElementById('rec-status');
+    status.textContent = 'Regenerating star rankings...';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/recruiting/rankings/regenerate`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.message || 'Error';
+          status.className = 'status-msg error';
+        } else {
+          status.textContent = `Regenerated stars for ${data.ranked_players} players.`;
+          status.className = 'status-msg success';
+          loadRecruitingState();
+        }
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  });
+
+  // Wipe Stars button
+  document.getElementById('btn-rec-wipe')?.addEventListener('click', () => {
+    const lyid = document.getElementById('rec-lyid').value;
+    if (!lyid) return;
+    if (!confirm('Wipe all star rankings for this league year? This cannot be undone.')) return;
+    const status = document.getElementById('rec-status');
+    status.textContent = 'Wiping star rankings...';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/recruiting/rankings/wipe`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.message || 'Error';
+          status.className = 'status-msg error';
+        } else {
+          status.textContent = `Wiped ${data.deleted} star rankings.`;
+          status.className = 'status-msg success';
+          loadRecruitingState();
+        }
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  });
+
   // Refresh button
   document.getElementById('btn-rec-refresh')?.addEventListener('click', () => {
     loadRecruitingState();

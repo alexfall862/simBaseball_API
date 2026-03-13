@@ -18,13 +18,16 @@ COLLEGE_ORG_MAX = 338
 INTAM_ORG_ID = 339
 USHS_ORG_ID = 340
 
-# Star percentile breakpoints (cumulative upper bound -> star)
-_STAR_BREAKS = [
-    (0.50, 1),
-    (0.70, 2),
-    (0.90, 3),
-    (0.98, 4),
-    (1.00, 5),
+# Star distribution (cumulative upper bound from TOP -> star)
+# Applied separately within position players and pitchers
+# Top 1% -> 5 star, next 2% -> 4 star, next 7% -> 3 star,
+# next 30% -> 2 star, bottom 60% -> 1 star
+_STAR_THRESHOLDS = [
+    (0.01, 5),
+    (0.03, 4),   # 0.01 + 0.02
+    (0.10, 3),   # 0.03 + 0.07
+    (0.40, 2),   # 0.10 + 0.30
+    (1.00, 1),   # 0.40 + 0.60
 ]
 
 # Interest gauge buckets for fog-of-war
@@ -55,14 +58,103 @@ def _cfg_float(config, key, fallback):
 # Star rankings
 # ---------------------------------------------------------------------------
 
+def _assign_stars(scored_list):
+    """
+    Assign star ratings to a sorted (desc) list of (pid, ptype, composite).
+    Uses _STAR_THRESHOLDS distribution applied within the group.
+    Returns list of dicts with star assigned.
+    """
+    total = len(scored_list)
+    result = []
+    for idx, (pid, ptype, comp) in enumerate(scored_list):
+        pct = idx / max(total, 1)  # 0 = best
+        star = 1
+        for upper_bound, s in _STAR_THRESHOLDS:
+            if pct < upper_bound:
+                star = s
+                break
+        result.append({
+            "player_id": pid,
+            "ptype": ptype,
+            "composite": comp,
+            "star": star,
+        })
+    return result
+
+
+# Grade -> numeric value for pot bonus
+_GRADE_VAL = {
+    "A+": 6, "A": 5, "A-": 4,
+    "B+": 3, "B": 2, "B-": 1,
+    "C+": 0, "C": -1, "C-": -2,
+    "D+": -3, "D": -4, "D-": -5,
+    "F": -6,
+}
+
+# Position player attributes for composite scoring
+_POS_BASE_ATTRS = [
+    "contact_base", "power_base", "discipline_base",
+    "eye_base", "speed_base", "baserunning_base",
+    "throwpower_base", "throwacc_base",
+    "fieldcatch_base", "fieldreact_base", "fieldspot_base",
+]
+_POS_POT_ATTRS = [
+    "contact_pot", "power_pot", "discipline_pot",
+    "eye_pot", "speed_pot",
+]
+
+# Pitcher attributes for composite scoring
+_PIT_BASE_ATTRS = [
+    "pendurance_base", "pgencontrol_base", "pthrowpower_base",
+    "psequencing_base",
+    "pitch1_pacc_base", "pitch1_pbrk_base",
+    "pitch1_pcntrl_base", "pitch1_consist_base",
+    "pitch2_pacc_base", "pitch2_pbrk_base",
+    "pitch2_pcntrl_base", "pitch2_consist_base",
+    "throwpower_base", "throwacc_base",
+]
+_PIT_POT_ATTRS = [
+    "pendurance_pot", "pgencontrol_pot", "pthrowpower_pot",
+    "psequencing_pot",
+]
+
+
+def _compute_composite(m, base_attrs, pot_attrs):
+    """Compute composite score from base attributes + pot bonus."""
+    base_sum = 0.0
+    base_count = 0
+    for key in base_attrs:
+        val = m.get(key)
+        if val is not None:
+            try:
+                base_sum += float(val)
+                base_count += 1
+            except (TypeError, ValueError):
+                pass
+    base_avg = base_sum / max(base_count, 1)
+
+    pot_bonus = 0.0
+    pot_count = 0
+    for key in pot_attrs:
+        g = m.get(key)
+        if g and g in _GRADE_VAL:
+            pot_bonus += _GRADE_VAL[g]
+            pot_count += 1
+    pot_avg = (pot_bonus / max(pot_count, 1)) * 2
+
+    return base_avg + pot_avg
+
+
 def compute_star_rankings(conn, league_year_id):
     """
-    Compute composite scores for all HS seniors (org 340) and assign
-    star ratings via percentile bucketing.
+    Compute composite scores for all HS players (org 340) and assign
+    star ratings using separate distributions for position players
+    and pitchers so each group has equal star representation.
+
+    Distribution per group: 5-star 1%, 4-star 2%, 3-star 7%, 2-star 30%, 1-star 60%.
 
     Returns count of ranked players.
     """
-    # Fetch HS players (held by org 340) with their base attributes and pots
     rows = conn.execute(
         text("""
             SELECT p.id, p.ptype,
@@ -77,7 +169,9 @@ def compute_star_rankings(conn, league_year_id):
                    p.pitch2_pacc_base, p.pitch2_pbrk_base,
                    p.pitch2_pcntrl_base, p.pitch2_consist_base,
                    p.contact_pot, p.power_pot, p.discipline_pot,
-                   p.eye_pot, p.speed_pot
+                   p.eye_pot, p.speed_pot,
+                   p.pendurance_pot, p.pgencontrol_pot,
+                   p.pthrowpower_pot, p.psequencing_pot
             FROM simbbPlayers p
             JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
             JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
@@ -90,100 +184,34 @@ def compute_star_rankings(conn, league_year_id):
     if not rows:
         return 0
 
-    # Grade -> numeric value for pot bonus
-    grade_val = {
-        "A+": 6, "A": 5, "A-": 4,
-        "B+": 3, "B": 2, "B-": 1,
-        "C+": 0, "C": -1, "C-": -2,
-        "D+": -3, "D": -4, "D-": -5,
-        "F": -6,
-    }
-
-    # Compute composite scores
-    scored = []
+    # Split by ptype, score with ptype-appropriate attributes
+    pos_scored = []
+    pit_scored = []
     for r in rows:
         m = r._mapping
-
-        # Sum all _base attributes (position + pitcher)
-        base_sum = 0.0
-        base_count = 0
-        for key in (
-            "contact_base", "power_base", "discipline_base",
-            "eye_base", "speed_base", "baserunning_base",
-            "throwpower_base", "throwacc_base",
-            "fieldcatch_base", "fieldreact_base", "fieldspot_base",
-            "pendurance_base", "pgencontrol_base", "pthrowpower_base",
-            "psequencing_base",
-            "pitch1_pacc_base", "pitch1_pbrk_base",
-            "pitch1_pcntrl_base", "pitch1_consist_base",
-            "pitch2_pacc_base", "pitch2_pbrk_base",
-            "pitch2_pcntrl_base", "pitch2_consist_base",
-        ):
-            val = m.get(key)
-            if val is not None:
-                try:
-                    base_sum += float(val)
-                    base_count += 1
-                except (TypeError, ValueError):
-                    pass
-
-        base_avg = base_sum / max(base_count, 1)
-
-        # Pot bonus: average of key potential grades
-        pot_bonus = 0.0
-        pot_count = 0
-        for key in ("contact_pot", "power_pot", "discipline_pot",
-                     "eye_pot", "speed_pot"):
-            g = m.get(key)
-            if g and g in grade_val:
-                pot_bonus += grade_val[g]
-                pot_count += 1
-
-        pot_avg = (pot_bonus / max(pot_count, 1)) * 2  # scale pot contribution
-
-        composite = base_avg + pot_avg
-        scored.append((m["id"], m["ptype"], composite))
-
-    # Sort by composite descending
-    scored.sort(key=lambda x: x[2], reverse=True)
-    total = len(scored)
-
-    # Assign star ratings by percentile
-    ranked = []
-    for rank_idx, (pid, ptype, comp) in enumerate(scored):
-        pct = (rank_idx + 1) / total  # percentile (lower = better)
-        star = 1
-        for upper_bound, s in _STAR_BREAKS:
-            if pct <= upper_bound:
-                star = s
-                break
-        # Reverse star assignment: top percentile = 5 star
-        # pct 0.0-0.02 -> 5 star, 0.02-0.10 -> 4 star, etc.
-        # Need to flip: rank 1 = best = lowest pct
-        star = 1
-        reverse_pct = rank_idx / max(total, 1)  # 0 = best
-        if reverse_pct < 0.02:
-            star = 5
-        elif reverse_pct < 0.10:
-            star = 4
-        elif reverse_pct < 0.30:
-            star = 3
-        elif reverse_pct < 0.50:
-            star = 2
+        ptype = m["ptype"] or "Position"
+        if ptype == "Pitcher":
+            comp = _compute_composite(m, _PIT_BASE_ATTRS, _PIT_POT_ATTRS)
+            pit_scored.append((m["id"], ptype, comp))
         else:
-            star = 1
+            comp = _compute_composite(m, _POS_BASE_ATTRS, _POS_POT_ATTRS)
+            pos_scored.append((m["id"], ptype, comp))
 
-        ranked.append({
-            "player_id": pid,
-            "ptype": ptype,
-            "composite": comp,
-            "star": star,
-            "rank_overall": rank_idx + 1,
-        })
+    # Sort each group by composite descending, assign stars independently
+    pos_scored.sort(key=lambda x: x[2], reverse=True)
+    pit_scored.sort(key=lambda x: x[2], reverse=True)
 
-    # Compute rank_by_ptype
+    pos_ranked = _assign_stars(pos_scored)
+    pit_ranked = _assign_stars(pit_scored)
+
+    # Merge and sort by composite for overall ranking
+    all_ranked = pos_ranked + pit_ranked
+    all_ranked.sort(key=lambda x: x["composite"], reverse=True)
+
+    # Assign overall rank and ptype rank
     ptype_counters = {}
-    for r in ranked:
+    for idx, r in enumerate(all_ranked):
+        r["rank_overall"] = idx + 1
         pt = r["ptype"] or "Unknown"
         ptype_counters[pt] = ptype_counters.get(pt, 0) + 1
         r["rank_by_ptype"] = ptype_counters[pt]
@@ -194,7 +222,7 @@ def compute_star_rankings(conn, league_year_id):
         {"ly": league_year_id},
     )
 
-    for r in ranked:
+    for r in all_ranked:
         conn.execute(
             text("""
                 INSERT INTO recruiting_rankings
@@ -212,7 +240,16 @@ def compute_star_rankings(conn, league_year_id):
             },
         )
 
-    return total
+    return len(all_ranked)
+
+
+def wipe_star_rankings(conn, league_year_id):
+    """Delete all star rankings for a league year. Returns count deleted."""
+    result = conn.execute(
+        text("DELETE FROM recruiting_rankings WHERE league_year_id = :ly"),
+        {"ly": league_year_id},
+    )
+    return result.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -802,10 +839,21 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
 
 def get_org_recruiting_board(conn, org_id, league_year_id):
     """
-    Get an org's full recruiting board: all players they've invested in,
-    with cumulative points, star rating, and fuzzed interest gauges.
+    Get an org's full recruiting board: all players on the explicit board
+    OR invested in, with cumulative points, star rating, and fuzzed
+    interest gauges.
     """
-    # All players this org has invested in
+    # Players explicitly added to the recruiting_board table
+    board_rows = conn.execute(
+        text("""
+            SELECT player_id FROM recruiting_board
+            WHERE org_id = :org AND league_year_id = :ly
+        """),
+        {"org": org_id, "ly": league_year_id},
+    ).all()
+    board_pids = {r[0] for r in board_rows}
+
+    # Players this org has invested in
     invested = conn.execute(
         text("""
             SELECT ri.player_id, SUM(ri.points) AS your_points
@@ -815,12 +863,13 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
         """),
         {"org": org_id, "ly": league_year_id},
     ).all()
-
-    if not invested:
-        return []
-
-    player_ids = [r[0] for r in invested]
     your_points = {r[0]: r[1] for r in invested}
+
+    # Merge both sources
+    player_ids = list(board_pids | set(your_points.keys()))
+
+    if not player_ids:
+        return []
 
     # Batch fetch rankings
     placeholders = ", ".join([f":p{i}" for i in range(len(player_ids))])
@@ -839,6 +888,17 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
         params,
     ).all()
     rank_map = {r[0]: r._mapping for r in rankings}
+
+    # Also fetch basic player info for board players that may lack rankings
+    player_info = conn.execute(
+        text(f"""
+            SELECT id, firstname, lastname, ptype
+            FROM simbbPlayers
+            WHERE id IN ({placeholders})
+        """),
+        params,
+    ).all()
+    player_info_map = {r[0]: r._mapping for r in player_info}
 
     # Batch fetch commitments
     commitments = conn.execute(
@@ -871,17 +931,31 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     board = []
     for pid in player_ids:
         rm = rank_map.get(pid)
-        if not rm:
+        pi = player_info_map.get(pid)
+        if not rm and not pi:
             continue
 
-        entry = {
-            "player_id": pid,
-            "player_name": f"{rm['firstname']} {rm['lastname']}",
-            "ptype": rm["ptype"],
-            "star_rating": rm["star_rating"],
-            "rank_overall": rm["rank_overall"],
-            "your_points": your_points.get(pid, 0),
-        }
+        if rm:
+            entry = {
+                "player_id": pid,
+                "player_name": f"{rm['firstname']} {rm['lastname']}",
+                "ptype": rm["ptype"],
+                "star_rating": rm["star_rating"],
+                "rank_overall": rm["rank_overall"],
+                "your_points": your_points.get(pid, 0),
+            }
+        else:
+            # Board player without rankings yet
+            entry = {
+                "player_id": pid,
+                "player_name": f"{pi['firstname']} {pi['lastname']}",
+                "ptype": pi["ptype"],
+                "star_rating": None,
+                "rank_overall": None,
+                "your_points": your_points.get(pid, 0),
+            }
+
+        entry["on_board"] = pid in board_pids
 
         # Interest gauge (fuzzed)
         num_orgs, total_pts = interest_map.get(pid, (0, 0))
@@ -907,8 +981,8 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     # Sort: uncommitted first (by star desc), then committed
     board.sort(key=lambda x: (
         0 if x["status"] == "uncommitted" else 1,
-        -x["star_rating"],
-        x["rank_overall"],
+        -(x["star_rating"] or 0),
+        x["rank_overall"] or 999999,
     ))
 
     return board

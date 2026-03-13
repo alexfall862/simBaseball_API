@@ -84,14 +84,33 @@ _GRADE_ORDER_WORST = 15  # for null/unknown values
 
 # Generated-stats sort aliases (Python-side sorting after stat computation)
 GENERATED_STAT_SORTS = {
+    # Batting
     "batting_avg":    ("batting", "avg"),
     "batting_obp":    ("batting", "obp"),
     "batting_slg":    ("batting", "slg"),
     "batting_hr":     ("batting", "home_runs"),
+    "batting_rbi":    ("batting", "rbi"),
+    "batting_runs":   ("batting", "runs"),
+    "batting_sb":     ("batting", "stolen_bases"),
+    "batting_so":     ("batting", "strikeouts"),
+    # Pitching
     "pitching_era":   ("pitching", "era"),
     "pitching_k9":    ("pitching", "k_per_9"),
+    "pitching_bb9":   ("pitching", "bb_per_9"),
     "pitching_whip":  ("pitching", "whip"),
+    "pitching_wins":  ("pitching", "wins"),
+    "pitching_so":    ("pitching", "strikeouts"),
+    "pitching_ip":    ("pitching", "innings_pitched"),
+    # Fielding
+    "fielding_fpct":  ("fielding", "fielding_pct"),
+    "fielding_errors": ("fielding", "errors"),
+    "fielding_po":    ("fielding", "putouts"),
+    "fielding_a":     ("fielding", "assists"),
 }
+
+# Generated-stats filter aliases — same mapping, used for min/max filters
+# Query params: ?filter_batting_avg_min=0.250&filter_pitching_era_max=4.50
+GENERATED_STAT_FILTERS = GENERATED_STAT_SORTS  # same key → (section, field)
 
 
 # -------------------------------------------------------------------
@@ -235,7 +254,7 @@ def _parse_sort(tables):
 
 
 def _apply_common_filters(conditions, tables):
-    """Apply ptype, area, and search filters from query string."""
+    """Apply ptype, area, search, pot whitelist, and base range filters."""
     players = tables["players"]
 
     ptype = request.args.get("ptype")
@@ -255,6 +274,75 @@ def _apply_common_filters(conditions, tables):
                 players.c.lastname.like(pattern),
             )
         )
+
+    # Potential grade whitelist filters: ?filter_contact_pot=A+,A,A-
+    for pot_field in POT_SORT_FIELDS:
+        param = request.args.get(f"filter_{pot_field}")
+        if param:
+            allowed_grades = [g.strip() for g in param.split(",") if g.strip() in _GRADE_ORDER or g.strip() == "N"]
+            if allowed_grades:
+                conditions.append(players.c[pot_field].in_(allowed_grades))
+
+    # Base attribute range filters: ?filter_power_base_min=50&filter_power_base_max=80
+    for col_name in ALLOWED_SORTS:
+        if not col_name.endswith("_base"):
+            continue
+        min_val = request.args.get(f"filter_{col_name}_min", type=float)
+        max_val = request.args.get(f"filter_{col_name}_max", type=float)
+        if min_val is not None:
+            conditions.append(players.c[col_name] >= min_val)
+        if max_val is not None:
+            conditions.append(players.c[col_name] <= max_val)
+
+    # Star rating range: ?filter_star_rating_min=3&filter_star_rating_max=5
+    # (handled Python-side since star_rating is added post-query)
+
+
+def _parse_python_filters():
+    """
+    Parse generated-stat and star_rating filters from query string.
+
+    Returns a list of (test_fn, label) tuples. Each test_fn takes a player
+    dict and returns True if the player passes the filter.
+
+    Query params:
+      ?filter_batting_avg_min=0.250
+      ?filter_batting_avg_max=0.350
+      ?filter_pitching_era_max=4.50
+      ?filter_fielding_fpct_min=0.950
+      ?filter_star_rating_min=3
+      ?filter_star_rating_max=5
+    """
+    filters = []
+
+    # Generated stat range filters
+    for key, (section, field) in GENERATED_STAT_FILTERS.items():
+        min_val = request.args.get(f"filter_{key}_min", type=float)
+        max_val = request.args.get(f"filter_{key}_max", type=float)
+        if min_val is not None:
+            v = min_val
+            filters.append(
+                lambda p, s=section, f=field, mv=v: (
+                    (p.get("generated_stats") or {}).get(s, {}).get(f) or 0
+                ) >= mv
+            )
+        if max_val is not None:
+            v = max_val
+            filters.append(
+                lambda p, s=section, f=field, mv=v: (
+                    (p.get("generated_stats") or {}).get(s, {}).get(f) or 0
+                ) <= mv
+            )
+
+    # Star rating range
+    sr_min = request.args.get("filter_star_rating_min", type=float)
+    sr_max = request.args.get("filter_star_rating_max", type=float)
+    if sr_min is not None:
+        filters.append(lambda p, mv=sr_min: (p.get("star_rating") or 0) >= mv)
+    if sr_max is not None:
+        filters.append(lambda p, mv=sr_max: (p.get("star_rating") or 0) <= mv)
+
+    return filters
 
 
 def _build_player_list(rows, tables):
@@ -516,7 +604,10 @@ def api_college_pool():
 
         where = and_(*conditions)
         sql_order, py_sort_key, sort_dir = _parse_sort(tables)
-        python_side_sort = py_sort_key is not None
+        py_filters = _parse_python_filters()
+        # Need Python-side processing if sorting by generated stat/star
+        # or if any generated-stat / star_rating filters are active
+        needs_python_pass = py_sort_key is not None or len(py_filters) > 0
 
         # Build column selection
         scouting_cols = _get_scouting_columns()
@@ -529,14 +620,6 @@ def api_college_pool():
 
         engine = get_engine()
         with engine.connect() as conn:
-            # Total count (with current filters)
-            count_stmt = (
-                select(func.count())
-                .select_from(join)
-                .where(where)
-            )
-            total = conn.execute(count_stmt).scalar()
-
             # Age breakdown counts (always full HS pool, ignoring age filter)
             hs_base_conditions = [
                 contracts.c.isActive == 1,
@@ -556,18 +639,26 @@ def api_college_pool():
             age_rows = conn.execute(age_counts_stmt).all()
             age_counts = {str(row[0]): row[1] for row in age_rows}
 
-            # Paginated data — if Python-side sort, fetch all rows
-            # (sort happens after stat generation); otherwise SQL paginates
+            # When Python-side filters/sort are needed, fetch all matching
+            # rows so we can filter + sort + paginate in Python.
+            # Otherwise SQL handles pagination directly.
             data_stmt = (
                 select(*select_cols)
                 .select_from(join)
                 .where(where)
             )
-            if python_side_sort:
+            if needs_python_pass:
                 data_stmt = data_stmt.order_by(
                     tables["players"].c.lastname.asc()
                 )
             else:
+                # Total count only needed for SQL-paginated path
+                count_stmt = (
+                    select(func.count())
+                    .select_from(join)
+                    .where(where)
+                )
+                total = conn.execute(count_stmt).scalar()
                 data_stmt = (
                     data_stmt
                     .order_by(sql_order)
@@ -605,15 +696,23 @@ def api_college_pool():
         for player in players_list:
             player["generated_stats"] = generate_scouting_stats(player, "hs")
 
-        # Python-side sort for generated stats and star_rating
-        if python_side_sort:
+        # Python-side filter + sort + paginate
+        if needs_python_pass:
+            # Apply generated-stat and star_rating filters
+            if py_filters:
+                players_list = [
+                    p for p in players_list
+                    if all(fn(p) for fn in py_filters)
+                ]
+
+            # Sort
             reverse = sort_dir == "desc"
             if py_sort_key == "star_rating":
                 players_list.sort(
                     key=lambda p: (p.get("star_rating") or 0),
                     reverse=reverse,
                 )
-            elif py_sort_key in GENERATED_STAT_SORTS:
+            elif py_sort_key and py_sort_key in GENERATED_STAT_SORTS:
                 section, field = GENERATED_STAT_SORTS[py_sort_key]
                 players_list.sort(
                     key=lambda p: (
@@ -621,7 +720,14 @@ def api_college_pool():
                     ),
                     reverse=reverse,
                 )
-            # Manual pagination after sort
+            elif sql_order is not None:
+                # Filters active but SQL sort — data is already ordered
+                pass
+
+            # Total reflects post-filter count
+            total = len(players_list)
+
+            # Manual pagination
             start = (page - 1) * per_page
             players_list = players_list[start:start + per_page]
 

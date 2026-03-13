@@ -4,6 +4,8 @@ College recruiting endpoints — weighted lottery system.
 
 Endpoints:
   GET  /recruiting/rankings          — public star rankings
+  POST /recruiting/rankings/wipe     — admin: delete all rankings for year
+  POST /recruiting/rankings/regenerate — admin: recompute rankings for year
   GET  /recruiting/state             — current recruiting phase state
   POST /recruiting/invest            — submit weekly investments
   POST /recruiting/advance-week      — admin: advance recruiting one week
@@ -22,6 +24,7 @@ from db import get_engine
 from services.recruiting import (
     get_recruiting_config,
     compute_star_rankings,
+    wipe_star_rankings,
     submit_weekly_investments,
     advance_recruiting_week,
     get_player_recruiting_status,
@@ -132,6 +135,54 @@ def rankings():
             total=count_row,
             total_pages=total_pages,
         )
+
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /recruiting/rankings/wipe
+# ---------------------------------------------------------------------------
+@recruiting_bp.post("/recruiting/rankings/wipe")
+def rankings_wipe():
+    """Admin: wipe all star rankings for a league year."""
+    data = request.get_json(silent=True) or {}
+    league_year_id = data.get("league_year_id")
+
+    if not league_year_id:
+        return jsonify(error="missing_param",
+                       message="league_year_id required"), 400
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            deleted = wipe_star_rankings(conn, league_year_id)
+        return jsonify(status="wiped", deleted=deleted,
+                       league_year_id=league_year_id)
+
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /recruiting/rankings/regenerate
+# ---------------------------------------------------------------------------
+@recruiting_bp.post("/recruiting/rankings/regenerate")
+def rankings_regenerate():
+    """Admin: wipe and recompute star rankings for a league year."""
+    data = request.get_json(silent=True) or {}
+    league_year_id = data.get("league_year_id")
+
+    if not league_year_id:
+        return jsonify(error="missing_param",
+                       message="league_year_id required"), 400
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            ranked_count = compute_star_rankings(conn, league_year_id)
+        return jsonify(status="regenerated", ranked_players=ranked_count,
+                       league_year_id=league_year_id)
 
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500
