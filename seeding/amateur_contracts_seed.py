@@ -32,7 +32,7 @@ INTAM_ORG_ID = 339
 INTAM_LEVEL = 2
 
 COLLEGE_LEVEL = 3
-COLLEGE_ORG_IDS = list(range(31, 339))  # 31..338 inclusive (308 orgs)
+COLLEGE_ORG_IDS = list(range(31, 339)) + [341, 342]  # 31..338 + 341..342 (310 college orgs, skipping 339=INTAM, 340=USHS)
 
 TARGET_PITCHERS_PER_ORG = 17
 TARGET_BATTERS_PER_ORG = 17
@@ -574,7 +574,7 @@ def populate_college_orgs(
 
             # Insert contract details
             detail_rows = []
-            for pid, cinfo in pid_to_cinfo.items():
+            for cinfo in pid_to_cinfo.values():
                 for yr in range(1, cinfo["years"] + 1):
                     detail_rows.append({
                         "contractID": cinfo["contract_id"],
