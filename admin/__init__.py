@@ -535,6 +535,45 @@ def admin_fix_amateur_contracts():
         return jsonify(ok=False, error="migration_failed", message=str(e)), 500
 
 
+@admin_bp.post("/populate-college-orgs")
+def admin_populate_college_orgs():
+    """
+    Generate players and college contracts for specific org IDs.
+
+    POST /admin/populate-college-orgs
+    Body: {
+        "org_ids": [341, 342],
+        "pitchers_per_org": 17,
+        "batters_per_org": 17
+    }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    org_ids = body.get("org_ids")
+    if not org_ids or not isinstance(org_ids, list):
+        return jsonify(ok=False, error="missing_params",
+                       message="org_ids (list of ints) is required"), 400
+
+    try:
+        from seeding.amateur_contracts_seed import populate_college_orgs
+        from db import get_engine
+
+        result = populate_college_orgs(
+            org_ids=[int(o) for o in org_ids],
+            pitchers_per_org=int(body.get("pitchers_per_org", 17)),
+            batters_per_org=int(body.get("batters_per_org", 17)),
+            engine=get_engine(),
+        )
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_populate_college_orgs failed")
+        return jsonify(ok=False, error="populate_failed", message=str(e)), 500
+
+
 # ---------------------------------------------------------------------------
 # Schedule generator endpoints
 # ---------------------------------------------------------------------------
@@ -1833,6 +1872,46 @@ def admin_generate_default_gameplans():
         logging.exception("admin_generate_default_gameplans failed")
         return jsonify(ok=False, error="generation_failed",
                        message=str(e), _code_version="unknown"), 500
+
+
+# ---------------------------------------------------------------------------
+# Season Archive
+# ---------------------------------------------------------------------------
+
+@admin_bp.post("/season/archive")
+def admin_season_archive():
+    """Archive a completed season's ephemeral data."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    league_year_id = body.get("league_year_id")
+    dry_run = body.get("dry_run", True)
+
+    if league_year_id is None:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id is required"), 400
+
+    try:
+        from db import get_engine
+        from services.season_archive import archive_season
+
+        engine = get_engine()
+        result = archive_season(
+            engine,
+            league_year_id=int(league_year_id),
+            dry_run=bool(dry_run),
+        )
+
+        return jsonify(ok=True, **result)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="validation", message=str(e)), 400
+    except Exception as e:
+        logging.exception("admin_season_archive failed")
+        return jsonify(ok=False, error="archive_failed",
+                       message=str(e)), 500
 
 
 # ---------------------------------------------------------------------------

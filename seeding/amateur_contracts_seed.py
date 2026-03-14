@@ -429,3 +429,198 @@ def _distribute_college_players(
         assignments.append((p, org_id))
 
     return assignments
+
+
+# ── Targeted college population ──────────────────────────────────────────
+
+def populate_college_orgs(
+    org_ids: List[int],
+    pitchers_per_org: int = TARGET_PITCHERS_PER_ORG,
+    batters_per_org: int = TARGET_BATTERS_PER_ORG,
+    engine=None,
+) -> Dict[str, Any]:
+    """
+    Generate players and create college contracts for specific org IDs.
+
+    For each org, generates the requested number of pitchers and batters
+    (ages 19-23, USA origin) and creates 4-year college contracts.
+
+    Args:
+        org_ids: List of organization IDs to populate.
+        pitchers_per_org: Number of pitchers per org (default 17).
+        batters_per_org: Number of batters per org (default 17).
+        engine: SQLAlchemy engine (optional, uses default if None).
+
+    Returns:
+        Summary dict with counts.
+    """
+    if engine is None:
+        engine = get_engine()
+
+    from player_engine.player_generation import generate_player
+    from player_engine.db_helpers import SeedCache
+
+    md = MetaData()
+    contracts_t = Table("contracts", md, autoload_with=engine)
+    details_t = Table("contractDetails", md, autoload_with=engine)
+    shares_t = Table("contractTeamShare", md, autoload_with=engine)
+
+    total_players = 0
+    total_contracts = 0
+    total_details = 0
+    total_shares = 0
+    org_results = {}
+
+    with engine.begin() as conn:
+        cache = SeedCache(conn)
+        from sqlalchemy import text as sa_text
+        max_id = conn.execute(sa_text(
+            "SELECT COALESCE(MAX(id), 0) FROM simbbPlayers"
+        )).scalar()
+        next_id = max_id + 1
+
+        for org_id in org_ids:
+            org_players = []
+
+            # Generate pitchers
+            for _ in range(pitchers_per_org):
+                age = random.choice([19, 20, 21, 22, 23])
+                p = generate_player(conn, age=age, seed_cache=cache,
+                                    next_id=next_id)
+                # Force USA origin and Pitcher type
+                conn.execute(sa_text(
+                    "UPDATE simbbPlayers SET intorusa = 'usa', ptype = 'Pitcher' "
+                    "WHERE id = :pid"
+                ), {"pid": p["id"]})
+                p["intorusa"] = "usa"
+                p["ptype"] = "Pitcher"
+                org_players.append(p)
+                next_id = p["id"] + 1
+
+            # Generate batters (position players)
+            for _ in range(batters_per_org):
+                age = random.choice([19, 20, 21, 22, 23])
+                p = generate_player(conn, age=age, seed_cache=cache,
+                                    next_id=next_id)
+                # Force USA origin; ptype is already random position
+                ptype = p.get("ptype", "Position")
+                if ptype == "Pitcher":
+                    ptype = "Position"
+                conn.execute(sa_text(
+                    "UPDATE simbbPlayers SET intorusa = 'usa', ptype = :ptype "
+                    "WHERE id = :pid"
+                ), {"pid": p["id"], "ptype": ptype})
+                p["intorusa"] = "usa"
+                p["ptype"] = ptype
+                org_players.append(p)
+                next_id = p["id"] + 1
+
+            total_players += len(org_players)
+
+            # Create contracts for all players in this org
+            contract_rows = []
+            for p in org_players:
+                is_redshirt = random.random() < REDSHIRT_RATE
+                years = 5 if is_redshirt else 4
+                current_year = p["age"] - 18
+                if current_year > years:
+                    is_redshirt = True
+                    years = 5
+                if current_year <= 0 or current_year > years:
+                    continue
+                contract_rows.append({
+                    "playerID": p["id"],
+                    "years": years,
+                    "current_year": current_year,
+                    "isExtension": 1 if is_redshirt else 0,
+                    "isBuyout": 0,
+                    "isActive": 1,
+                    "bonus": Decimal("0.00"),
+                    "signingOrg": org_id,
+                    "current_level": COLLEGE_LEVEL,
+                    "leagueYearSigned": LEAGUE_YEAR,
+                    "isFinished": 0,
+                    "onIR": 0,
+                })
+
+            if not contract_rows:
+                org_results[org_id] = {"players": len(org_players),
+                                       "contracts": 0}
+                continue
+
+            conn.execute(contracts_t.insert(), contract_rows)
+            total_contracts += len(contract_rows)
+
+            # Get contract IDs back
+            assigned_pids = [cr["playerID"] for cr in contract_rows]
+            new_contracts = conn.execute(
+                select(
+                    contracts_t.c.id,
+                    contracts_t.c.playerID,
+                    contracts_t.c.years,
+                ).where(and_(
+                    contracts_t.c.playerID.in_(assigned_pids),
+                    contracts_t.c.isFinished == 0,
+                    contracts_t.c.current_level == COLLEGE_LEVEL,
+                ))
+            ).all()
+
+            pid_to_cinfo = {}
+            for row in new_contracts:
+                m = row._mapping
+                pid_to_cinfo[m["playerID"]] = {
+                    "contract_id": m["id"], "years": m["years"],
+                }
+
+            # Insert contract details
+            detail_rows = []
+            for pid, cinfo in pid_to_cinfo.items():
+                for yr in range(1, cinfo["years"] + 1):
+                    detail_rows.append({
+                        "contractID": cinfo["contract_id"],
+                        "year": yr,
+                        "salary": MINOR_SALARY,
+                    })
+
+            if detail_rows:
+                conn.execute(details_t.insert(), detail_rows)
+                total_details += len(detail_rows)
+
+            # Insert contract team shares
+            all_details = conn.execute(
+                select(details_t.c.id, details_t.c.contractID)
+                .where(details_t.c.contractID.in_(
+                    [c["contract_id"] for c in pid_to_cinfo.values()]
+                ))
+            ).all()
+
+            share_rows = []
+            for drow in all_details:
+                dm = drow._mapping
+                share_rows.append({
+                    "contractDetailsID": dm["id"],
+                    "orgID": org_id,
+                    "isHolder": 1,
+                    "salary_share": Decimal("1.00"),
+                })
+
+            if share_rows:
+                conn.execute(shares_t.insert(), share_rows)
+                total_shares += len(share_rows)
+
+            org_results[org_id] = {
+                "players": len(org_players),
+                "contracts": len(contract_rows),
+            }
+
+    log.info("populate_college_orgs: orgs=%s players=%d contracts=%d",
+             org_ids, total_players, total_contracts)
+
+    return {
+        "org_ids": org_ids,
+        "total_players_generated": total_players,
+        "total_contracts": total_contracts,
+        "total_details": total_details,
+        "total_shares": total_shares,
+        "per_org": org_results,
+    }

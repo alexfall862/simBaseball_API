@@ -686,6 +686,26 @@
           </div>
           <pre id="gameplan-gen-result" class="result-box" style="margin-top: 12px"></pre>
         </div>
+
+        <!-- Season Archive -->
+        <div class="card">
+          <h3>Season Archive</h3>
+          <p class="text-muted">Archive a completed season's ephemeral data (per-game lines, play-by-play, substitutions, fatigue, ledger detail). Preserves accumulated stats, standings, and schedules.</p>
+          <div class="form-row" style="gap:12px; align-items:flex-end; flex-wrap:wrap;">
+            <div class="form-group">
+              <label for="archive-league-year-id">League Year ID</label>
+              <input type="number" id="archive-league-year-id" min="1" style="width:100px">
+            </div>
+            <div class="form-group" style="display:flex; align-items:center; gap:6px; padding-bottom:4px;">
+              <input type="checkbox" id="archive-dry-run" checked>
+              <label for="archive-dry-run" style="margin:0">Dry Run</label>
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-primary" id="btn-season-archive">Archive Season</button>
+          </div>
+          <pre id="season-archive-result" class="result-box" style="margin-top: 12px"></pre>
+        </div>
       </section>
 
       <!-- Rating Config Section -->
@@ -1484,6 +1504,29 @@
             <h4>Seeding Summary</h4>
             <div class="kv-table" id="amateur-seed-kv"></div>
           </div>
+        </div>
+
+        <div class="card" style="margin-top: 24px">
+          <h3>Populate College Orgs</h3>
+          <p class="text-muted">Generate players and create college contracts for specific organizations. Use this to populate new schools without affecting existing rosters.</p>
+          <div class="form-row" style="gap:12px; align-items:flex-end; flex-wrap:wrap;">
+            <div class="form-group">
+              <label for="pop-org-ids">Org IDs (comma-separated)</label>
+              <input type="text" id="pop-org-ids" placeholder="341, 342" style="width:200px">
+            </div>
+            <div class="form-group">
+              <label for="pop-pitchers">Pitchers / org</label>
+              <input type="number" id="pop-pitchers" value="17" min="1" max="30" style="width:80px">
+            </div>
+            <div class="form-group">
+              <label for="pop-batters">Batters / org</label>
+              <input type="number" id="pop-batters" value="17" min="1" max="30" style="width:80px">
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 12px">
+            <button class="btn btn-primary" id="btn-populate-college">Populate Orgs</button>
+          </div>
+          <pre id="populate-college-result" class="result-box" style="margin-top: 12px"></pre>
         </div>
       </section>
 

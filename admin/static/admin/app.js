@@ -131,6 +131,10 @@
     const btnGenGP = document.getElementById('btn-generate-gameplans');
     if (btnGenGP) btnGenGP.addEventListener('click', generateDefaultGameplans);
 
+    // Season Archive
+    const btnArchive = document.getElementById('btn-season-archive');
+    if (btnArchive) btnArchive.addEventListener('click', archiveSeason);
+
     // Weight Calibration
     const _calListeners = {
       'btn-cal-run': runCalibration,
@@ -221,6 +225,7 @@
     // Amateur Seeding
     document.getElementById('btn-amateur-preview').addEventListener('click', loadAmateurPreview);
     document.getElementById('btn-amateur-seed').addEventListener('click', runAmateurSeed);
+    document.getElementById('btn-populate-college').addEventListener('click', populateCollegeOrgs);
 
     // End of Season
     document.getElementById('btn-eos-run').addEventListener('click', runEndOfSeason);
@@ -1305,6 +1310,56 @@
               data.errors.map(e => `  Team ${e.team_id}: ${e.message}`).join('\n');
           }
           resultBox.textContent = msg;
+        } else {
+          resultBox.textContent = `Error: ${data.message || 'unknown'}`;
+        }
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  // Season Archive
+  function archiveSeason() {
+    const resultBox = document.getElementById('season-archive-result');
+    const lyid = document.getElementById('archive-league-year-id').value;
+    const dryRun = document.getElementById('archive-dry-run').checked;
+
+    if (!lyid) { resultBox.textContent = 'Please enter a League Year ID.'; return; }
+
+    resultBox.textContent = dryRun
+      ? `Counting rows for league_year_id ${lyid} (dry run)...`
+      : `Archiving season data for league_year_id ${lyid}...`;
+
+    fetch(`${ADMIN_BASE}/season/archive`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_year_id: parseInt(lyid),
+        dry_run: dryRun,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          const mode = data.dry_run ? 'DRY RUN' : 'ARCHIVED';
+          let lines = [`${mode} — Season ${data.league_year} (ly_id ${data.league_year_id})\n`];
+          if (data.tables) {
+            lines.push('Tables:');
+            for (const [table, info] of Object.entries(data.tables)) {
+              if (typeof info === 'object' && info !== null) {
+                const parts = Object.entries(info).map(([k, v]) => `${k}: ${v}`).join(', ');
+                lines.push(`  ${table}: ${parts}`);
+              }
+            }
+          }
+          if (data.warnings && data.warnings.length > 0) {
+            lines.push(`\nWarnings (${data.warnings.length}):`);
+            data.warnings.forEach(w => lines.push(`  - ${w}`));
+          }
+          if (data.preserved) {
+            lines.push(`\nPreserved: ${data.preserved.join(', ')}`);
+          }
+          resultBox.textContent = lines.join('\n');
         } else {
           resultBox.textContent = `Error: ${data.message || 'unknown'}`;
         }
@@ -3485,6 +3540,53 @@
         btn.textContent = 'Seed Amateur Contracts';
         alert('Error: ' + err.message);
       });
+  }
+
+  function populateCollegeOrgs() {
+    const resultBox = document.getElementById('populate-college-result');
+    const orgIdsRaw = document.getElementById('pop-org-ids').value.trim();
+    const pitchers = parseInt(document.getElementById('pop-pitchers').value) || 17;
+    const batters = parseInt(document.getElementById('pop-batters').value) || 17;
+
+    if (!orgIdsRaw) { resultBox.textContent = 'Please enter org IDs.'; return; }
+
+    const orgIds = orgIdsRaw.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+    if (orgIds.length === 0) { resultBox.textContent = 'Invalid org IDs.'; return; }
+
+    const totalPlayers = orgIds.length * (pitchers + batters);
+    if (!confirm(`This will generate ${totalPlayers} players across ${orgIds.length} org(s) and create college contracts. Continue?`)) {
+      return;
+    }
+
+    resultBox.textContent = `Generating ${totalPlayers} players for orgs ${orgIds.join(', ')}...`;
+
+    fetch(`${ADMIN_BASE}/populate-college-orgs`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        org_ids: orgIds,
+        pitchers_per_org: pitchers,
+        batters_per_org: batters,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          let lines = [`Done — ${data.total_players_generated} players, ${data.total_contracts} contracts\n`];
+          if (data.per_org) {
+            for (const [orgId, info] of Object.entries(data.per_org)) {
+              lines.push(`  Org ${orgId}: ${info.players} players, ${info.contracts} contracts`);
+            }
+          }
+          lines.push(`\nDetails rows: ${data.total_details}`);
+          lines.push(`Share rows: ${data.total_shares}`);
+          resultBox.textContent = lines.join('\n');
+        } else {
+          resultBox.textContent = `Error: ${data.message || 'unknown'}`;
+        }
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
   }
 
   function loadEndOfSeason() {
