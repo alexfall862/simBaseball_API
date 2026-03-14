@@ -1792,3 +1792,196 @@ def admin_fill_listed_positions():
     except Exception as e:
         logging.exception("admin_fill_listed_positions failed")
         return jsonify(ok=False, error="fill_failed", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Weight Calibration
+# ---------------------------------------------------------------------------
+
+@admin_bp.post("/calibration/run")
+def admin_calibration_run():
+    """Run OLS regression calibration to derive position weights from game data."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    league_year_id = body.get("league_year_id")
+    league_level = body.get("league_level")
+
+    if league_year_id is None or league_level is None:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level required"), 400
+
+    config = body.get("config", {})
+    config["name"] = body.get("name", config.get("name"))
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import run_calibration
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = run_calibration(
+                conn, int(league_year_id), int(league_level), config
+            )
+
+        # Clean up positions for JSON (strip large lists)
+        positions_summary = {}
+        for rt, cal in result.get("positions", {}).items():
+            positions_summary[rt] = {
+                "position_code": cal.get("position_code"),
+                "n": cal.get("n", 0),
+                "offense_r2": cal.get("offense_r2"),
+                "defense_r2": cal.get("defense_r2"),
+                "r2": cal.get("r2"),
+                "skipped": cal.get("skipped", False),
+                "warnings": cal.get("warnings", []),
+                "weights": cal.get("weights", {}),
+            }
+
+        return jsonify(ok=True, profile_id=result["profile_id"],
+                       name=result["name"], positions=positions_summary)
+
+    except Exception as e:
+        logging.exception("admin_calibration_run failed")
+        return jsonify(ok=False, error="calibration_failed", message=str(e)), 500
+
+
+@admin_bp.get("/calibration/profiles")
+def admin_calibration_profiles():
+    """List all weight profiles."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import get_profiles
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            profiles = get_profiles(conn)
+
+        # Convert datetimes to strings
+        for p in profiles:
+            if p.get("created_at"):
+                p["created_at"] = str(p["created_at"])
+
+        return jsonify(ok=True, profiles=profiles)
+
+    except Exception as e:
+        logging.exception("admin_calibration_profiles failed")
+        return jsonify(ok=False, error="load_failed", message=str(e)), 500
+
+
+@admin_bp.get("/calibration/profiles/<int:profile_id>")
+def admin_calibration_profile_detail(profile_id):
+    """Get a single profile with full weight breakdown."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import get_profile_detail
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            detail = get_profile_detail(conn, profile_id)
+
+        if not detail:
+            return jsonify(ok=False, error="not_found"), 404
+
+        if detail.get("created_at"):
+            detail["created_at"] = str(detail["created_at"])
+
+        return jsonify(ok=True, profile=detail)
+
+    except Exception as e:
+        logging.exception("admin_calibration_profile_detail failed")
+        return jsonify(ok=False, error="load_failed", message=str(e)), 500
+
+
+@admin_bp.get("/calibration/compare")
+def admin_calibration_compare():
+    """Compare two profiles side-by-side."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    a = request.args.get("a", type=int)
+    b = request.args.get("b", type=int)
+    if not a or not b:
+        return jsonify(ok=False, error="missing_params",
+                       message="a and b profile IDs required"), 400
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import compare_profiles
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = compare_profiles(conn, a, b)
+
+        if "error" in result:
+            return jsonify(ok=False, error=result["error"]), 404
+
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_calibration_compare failed")
+        return jsonify(ok=False, error="compare_failed", message=str(e)), 500
+
+
+@admin_bp.post("/calibration/activate/<int:profile_id>")
+def admin_calibration_activate(profile_id):
+    """Activate a weight profile — writes to rating_overall_weights."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import activate_profile
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = activate_profile(conn, profile_id)
+
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_calibration_activate failed")
+        return jsonify(ok=False, error="activate_failed", message=str(e)), 500
+
+
+@admin_bp.post("/calibration/profiles")
+def admin_calibration_create_manual():
+    """Create a manual weight profile."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    name = body.get("name")
+    description = body.get("description", "")
+    weights = body.get("weights")
+
+    if not name or not weights:
+        return jsonify(ok=False, error="missing_params",
+                       message="name and weights required"), 400
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import create_manual_profile
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            profile_id = create_manual_profile(conn, name, description, weights)
+
+        return jsonify(ok=True, profile_id=profile_id)
+
+    except Exception as e:
+        logging.exception("admin_calibration_create_manual failed")
+        return jsonify(ok=False, error="create_failed", message=str(e)), 500

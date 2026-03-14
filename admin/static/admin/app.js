@@ -127,6 +127,17 @@
     const btnFillLP = document.getElementById('btn-fill-listed-positions');
     if (btnFillLP) btnFillLP.addEventListener('click', fillListedPositions);
 
+    // Weight Calibration
+    const _calListeners = {
+      'btn-cal-run': runCalibration,
+      'btn-cal-load-profiles': loadCalibrationProfiles,
+      'btn-cal-compare': compareCalibrationProfiles,
+    };
+    for (const [id, fn] of Object.entries(_calListeners)) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', fn);
+    }
+
     // Organizations
     document.getElementById('btn-refresh-orgs').addEventListener('click', loadOrganizations);
     document.getElementById('org-select').addEventListener('change', loadOrgDetail);
@@ -468,6 +479,9 @@
       case 'analytics-contact':
       case 'analytics-hr-depth':
         loadAnalyticsLeagueYears(section);
+        break;
+      case 'weight-calibration':
+        loadCalibrationInit();
         break;
       case 'stamina-overview':
       case 'stamina-team':
@@ -7448,6 +7462,302 @@
       });
   });
 
+  // ===========================================================================
+  // Weight Calibration
+  // ===========================================================================
+
+  function loadCalibrationInit() {
+    // Populate league year dropdown
+    const sel = document.getElementById('cal-lyid');
+    if (!sel || sel.options.length > 1) {
+      loadCalibrationProfiles();
+      return;
+    }
+    fetch(`${ADMIN_BASE}/analytics/league-years`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) return;
+        sel.innerHTML = '';
+        (data.league_years || []).forEach(ly => {
+          const opt = document.createElement('option');
+          opt.value = ly.id;
+          opt.textContent = `${ly.league_year} (ID ${ly.id})`;
+          sel.appendChild(opt);
+        });
+      })
+      .catch(() => {});
+    loadCalibrationProfiles();
+  }
+
+  function runCalibration() {
+    const resultBox = document.getElementById('cal-run-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = 'Running calibration...';
+
+    const body = {
+      league_year_id: parseInt(document.getElementById('cal-lyid').value, 10),
+      league_level: parseInt(document.getElementById('cal-level').value, 10),
+      config: {
+        min_innings: parseInt(document.getElementById('cal-min-inn').value, 10) || 50,
+        min_ipo: parseInt(document.getElementById('cal-min-ipo').value, 10) || 60,
+      },
+    };
+    const name = document.getElementById('cal-name').value.trim();
+    if (name) body.name = name;
+
+    fetch(`${ADMIN_BASE}/calibration/run`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) {
+          resultBox.textContent = 'Error: ' + (data.message || 'unknown');
+          return;
+        }
+        resultBox.textContent = `Profile "${data.name}" created (ID ${data.profile_id})`;
+        renderCalibrationResults(data.positions);
+        loadCalibrationProfiles();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  function renderCalibrationResults(positions) {
+    const card = document.getElementById('cal-results-card');
+    const tbody = document.getElementById('cal-results-tbody');
+    card.style.display = '';
+    tbody.innerHTML = '';
+
+    const posOrder = [
+      'c_rating', 'fb_rating', 'sb_rating', 'tb_rating', 'ss_rating',
+      'lf_rating', 'cf_rating', 'rf_rating', 'dh_rating', 'sp_rating', 'rp_rating',
+    ];
+    const posLabels = {
+      c_rating: 'C', fb_rating: '1B', sb_rating: '2B', tb_rating: '3B',
+      ss_rating: 'SS', lf_rating: 'LF', cf_rating: 'CF', rf_rating: 'RF',
+      dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
+    };
+
+    for (const rt of posOrder) {
+      const cal = positions[rt];
+      if (!cal) continue;
+      const tr = document.createElement('tr');
+      const status = cal.skipped ? 'Skipped' : 'OK';
+      const statusCls = cal.skipped ? 'color: var(--warning)' : 'color: var(--success, #4caf50)';
+      const offR2 = cal.offense_r2 != null ? cal.offense_r2.toFixed(3) : '—';
+      const defR2 = cal.defense_r2 != null ? cal.defense_r2.toFixed(3) : (cal.r2 != null ? cal.r2.toFixed(3) + ' (pit)' : '—');
+      const warns = (cal.warnings || []).length;
+      tr.innerHTML = `
+        <td>${posLabels[rt] || rt}</td>
+        <td>${cal.n || 0}</td>
+        <td>${offR2}</td>
+        <td>${defR2}</td>
+        <td style="${statusCls}">${status}</td>
+        <td>${warns > 0 ? warns + ' warning(s)' : '—'}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function loadCalibrationProfiles() {
+    const tbody = document.getElementById('cal-profiles-tbody');
+    if (!tbody) return;
+
+    fetch(`${ADMIN_BASE}/calibration/profiles`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) return;
+        tbody.innerHTML = '';
+
+        // Also populate compare dropdowns
+        const selA = document.getElementById('cal-compare-a');
+        const selB = document.getElementById('cal-compare-b');
+        if (selA) selA.innerHTML = '';
+        if (selB) selB.innerHTML = '';
+
+        (data.profiles || []).forEach(p => {
+          const tr = document.createElement('tr');
+          const activeBadge = p.is_active ? '<span style="color: var(--success, #4caf50); font-weight: bold;">Active</span>' : '';
+          const level = p.league_level != null ? p.league_level : '—';
+          tr.innerHTML = `
+            <td>${p.name}</td>
+            <td>${p.source}</td>
+            <td>${level}</td>
+            <td>${activeBadge}</td>
+            <td>${p.created_at || ''}</td>
+            <td>
+              <button class="btn btn-sm btn-secondary" onclick="App.viewCalProfile(${p.id})">View</button>
+              ${!p.is_active ? `<button class="btn btn-sm btn-warning" onclick="App.activateCalProfile(${p.id})">Activate</button>` : ''}
+            </td>
+          `;
+          tbody.appendChild(tr);
+
+          // Populate compare selects
+          if (selA) {
+            const optA = document.createElement('option');
+            optA.value = p.id;
+            optA.textContent = p.name;
+            selA.appendChild(optA);
+          }
+          if (selB) {
+            const optB = document.createElement('option');
+            optB.value = p.id;
+            optB.textContent = p.name;
+            selB.appendChild(optB);
+          }
+        });
+
+        // Show compare card if 2+ profiles
+        const compareCard = document.getElementById('cal-compare-card');
+        if (compareCard) {
+          compareCard.style.display = (data.profiles || []).length >= 2 ? '' : 'none';
+        }
+      })
+      .catch(() => {});
+  }
+
+  function viewCalProfile(profileId) {
+    const card = document.getElementById('cal-detail-card');
+    const title = document.getElementById('cal-detail-title');
+    const content = document.getElementById('cal-detail-content');
+    card.style.display = '';
+    content.innerHTML = '<p class="text-muted">Loading...</p>';
+
+    fetch(`${ADMIN_BASE}/calibration/profiles/${profileId}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) {
+          content.innerHTML = '<p class="text-muted">Failed to load.</p>';
+          return;
+        }
+        const p = data.profile;
+        title.textContent = `Profile: ${p.name}`;
+
+        let html = '';
+        const weights = p.weights || {};
+        const posOrder = [
+          'c_rating', 'fb_rating', 'sb_rating', 'tb_rating', 'ss_rating',
+          'lf_rating', 'cf_rating', 'rf_rating', 'dh_rating', 'sp_rating', 'rp_rating',
+        ];
+        const posLabels = {
+          c_rating: 'C', fb_rating: '1B', sb_rating: '2B', tb_rating: '3B',
+          ss_rating: 'SS', lf_rating: 'LF', cf_rating: 'CF', rf_rating: 'RF',
+          dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
+        };
+
+        // Collect all attributes across all positions
+        const allAttrs = new Set();
+        for (const rt of posOrder) {
+          for (const attr of Object.keys(weights[rt] || {})) {
+            allAttrs.add(attr);
+          }
+        }
+        const attrList = [...allAttrs].sort();
+
+        // Build heatmap table
+        html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>Attribute</th>';
+        for (const rt of posOrder) {
+          if (weights[rt]) html += `<th>${posLabels[rt]}</th>`;
+        }
+        html += '</tr></thead><tbody>';
+
+        for (const attr of attrList) {
+          html += `<tr><td style="font-size: 0.85em;">${attr.replace(/_base$/, '').replace(/_/g, ' ')}</td>`;
+          for (const rt of posOrder) {
+            if (!weights[rt]) continue;
+            const w = weights[rt][attr] || 0;
+            const intensity = Math.min(w * 4, 1.0); // scale for visibility
+            const bg = w > 0 ? `rgba(76, 175, 80, ${intensity})` : '';
+            html += `<td style="text-align: center; background: ${bg};">${w > 0 ? w.toFixed(3) : ''}</td>`;
+          }
+          html += '</tr>';
+        }
+        html += '</tbody></table></div>';
+
+        // Show calibration metadata if available
+        if (p.calibration) {
+          html += '<h4 style="margin-top: 16px;">Calibration Details</h4>';
+          html += `<pre class="result-box">${JSON.stringify(p.calibration.results, null, 2)}</pre>`;
+        }
+
+        content.innerHTML = html;
+      })
+      .catch(err => { content.innerHTML = '<p class="text-muted">Error: ' + err.message + '</p>'; });
+  }
+
+  function activateCalProfile(profileId) {
+    if (!confirm('Activate this profile? This will update the live position rating weights.')) return;
+
+    fetch(`${ADMIN_BASE}/calibration/activate/${profileId}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          alert(`Activated — ${data.entries} weight entries applied.`);
+          loadCalibrationProfiles();
+        } else {
+          alert('Error: ' + (data.message || 'unknown'));
+        }
+      })
+      .catch(err => alert('Error: ' + err.message));
+  }
+
+  function compareCalibrationProfiles() {
+    const a = document.getElementById('cal-compare-a').value;
+    const b = document.getElementById('cal-compare-b').value;
+    if (!a || !b || a === b) {
+      alert('Select two different profiles to compare.');
+      return;
+    }
+
+    const content = document.getElementById('cal-compare-content');
+    content.innerHTML = '<p class="text-muted">Loading...</p>';
+
+    fetch(`${ADMIN_BASE}/calibration/compare?a=${a}&b=${b}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) {
+          content.innerHTML = '<p class="text-muted">Failed to load.</p>';
+          return;
+        }
+
+        const posLabels = {
+          c_rating: 'C', fb_rating: '1B', sb_rating: '2B', tb_rating: '3B',
+          ss_rating: 'SS', lf_rating: 'LF', cf_rating: 'CF', rf_rating: 'RF',
+          dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
+        };
+
+        let html = `<p><strong>${data.profile_a.name}</strong> vs <strong>${data.profile_b.name}</strong></p>`;
+        const comparison = data.comparison || {};
+
+        for (const [rt, entries] of Object.entries(comparison)) {
+          html += `<h4 style="margin-top: 12px;">${posLabels[rt] || rt}</h4>`;
+          html += '<div class="table-wrap"><table class="data-table"><thead><tr>';
+          html += `<th>Attribute</th><th>${data.profile_a.name}</th><th>${data.profile_b.name}</th><th>Delta</th>`;
+          html += '</tr></thead><tbody>';
+
+          for (const e of entries) {
+            const deltaColor = e.delta > 0 ? 'color: var(--success, #4caf50)' : e.delta < 0 ? 'color: var(--warning, #ff9800)' : '';
+            html += `<tr>
+              <td>${e.attribute.replace(/_base$/, '').replace(/_/g, ' ')}</td>
+              <td>${e.weight_a.toFixed(4)}</td>
+              <td>${e.weight_b.toFixed(4)}</td>
+              <td style="${deltaColor}">${e.delta > 0 ? '+' : ''}${e.delta.toFixed(4)}</td>
+            </tr>`;
+          }
+          html += '</tbody></table></div>';
+        }
+
+        content.innerHTML = html;
+      })
+      .catch(err => { content.innerHTML = '<p class="text-muted">Error: ' + err.message + '</p>'; });
+  }
+
   window.App = {
     goTo,
     refreshDashboard,
@@ -7461,6 +7771,8 @@
     editGame,
     drillCorrelation,
     loadBlabResults,
+    viewCalProfile,
+    activateCalProfile,
   };
 
   // Initialize on DOM ready

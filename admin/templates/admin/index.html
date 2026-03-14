@@ -139,6 +139,9 @@
       <a href="#" class="nav-item" data-section="analytics-hr-depth">
         <span class="nav-icon">&#127951;</span> HR Depth
       </a>
+      <a href="#" class="nav-item" data-section="weight-calibration">
+        <span class="nav-icon">&#9878;</span> Weight Calibration
+      </a>
     </div>
 
     <div class="nav-section">
@@ -2321,6 +2324,117 @@
           <div style="position: relative; height: 350px; margin-top: 16px;">
             <canvas id="an-hrd-heatmap-chart"></canvas>
           </div>
+        </div>
+      </section>
+
+      <!-- Weight Calibration Section -->
+      <section id="section-weight-calibration" class="section">
+        <!-- Run Calibration -->
+        <div class="card">
+          <h3>Run Calibration</h3>
+          <p class="text-muted">Derive position weights from game stats via OLS regression. Requires a completed season with stats data.</p>
+          <div class="form-row" style="margin-top: 12px; gap: 12px; flex-wrap: wrap;">
+            <div class="form-group" style="min-width: 140px;">
+              <label>League Year</label>
+              <select id="cal-lyid" class="form-control"></select>
+            </div>
+            <div class="form-group" style="min-width: 100px;">
+              <label>Level</label>
+              <select id="cal-level" class="form-control">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">A+ (6)</option>
+                <option value="5">A (5)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <div class="form-group" style="min-width: 100px;">
+              <label>Min Innings</label>
+              <input type="number" id="cal-min-inn" class="form-control" value="50" min="10" max="500">
+            </div>
+            <div class="form-group" style="min-width: 100px;">
+              <label>Min IPO (pitchers)</label>
+              <input type="number" id="cal-min-ipo" class="form-control" value="60" min="10" max="500">
+            </div>
+          </div>
+          <div class="form-group" style="margin-top: 8px; max-width: 400px;">
+            <label>Profile Name (optional)</label>
+            <input type="text" id="cal-name" class="form-control" placeholder="Auto-generated if blank">
+          </div>
+          <div class="button-group" style="margin-top: 12px;">
+            <button class="btn btn-primary" id="btn-cal-run">Run Calibration</button>
+          </div>
+          <pre id="cal-run-result" class="result-box" style="margin-top: 12px; display: none;"></pre>
+        </div>
+
+        <!-- Calibration Results -->
+        <div class="card" id="cal-results-card" style="display: none;">
+          <h3>Calibration Results</h3>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Position</th>
+                  <th>N</th>
+                  <th>Offense R²</th>
+                  <th>Defense R²</th>
+                  <th>Status</th>
+                  <th>Warnings</th>
+                </tr>
+              </thead>
+              <tbody id="cal-results-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Profiles -->
+        <div class="card">
+          <h3>Weight Profiles</h3>
+          <p class="text-muted">Manage and compare weight profiles. Activate a profile to push its weights into the live rating system.</p>
+          <div class="button-group" style="margin-bottom: 12px;">
+            <button class="btn btn-secondary" id="btn-cal-load-profiles">Refresh Profiles</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Source</th>
+                  <th>Level</th>
+                  <th>Active</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="cal-profiles-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Profile Detail / Comparison -->
+        <div class="card" id="cal-detail-card" style="display: none;">
+          <h3 id="cal-detail-title">Profile Detail</h3>
+          <div id="cal-detail-content"></div>
+        </div>
+
+        <!-- Comparison -->
+        <div class="card" id="cal-compare-card" style="display: none;">
+          <h3>Profile Comparison</h3>
+          <div class="form-row" style="gap: 12px; margin-bottom: 12px;">
+            <div class="form-group" style="min-width: 140px;">
+              <label>Profile A</label>
+              <select id="cal-compare-a" class="form-control"></select>
+            </div>
+            <div class="form-group" style="min-width: 140px;">
+              <label>Profile B</label>
+              <select id="cal-compare-b" class="form-control"></select>
+            </div>
+            <div style="align-self: flex-end;">
+              <button class="btn btn-secondary" id="btn-cal-compare">Compare</button>
+            </div>
+          </div>
+          <div id="cal-compare-content"></div>
         </div>
       </section>
 

@@ -140,8 +140,25 @@ def batting_leaderboard():
                 LIMIT :limit OFFSET :offset
             """), params).mappings().all()
 
+            # Bulk-load listed positions for players in results
+            from services.listed_position import POSITION_DISPLAY
+            player_ids = [int(r["player_id"]) for r in rows]
+            pos_map = {}
+            if player_ids:
+                ph = ", ".join(f":pid{i}" for i in range(len(player_ids)))
+                pp = {f"pid{i}": pid for i, pid in enumerate(player_ids)}
+                pp["lyid2"] = league_year_id
+                pos_rows = conn.execute(sa_text(f"""
+                    SELECT player_id, position_code
+                    FROM player_listed_position
+                    WHERE player_id IN ({ph}) AND league_year_id = :lyid2
+                """), pp).all()
+                for pr in pos_rows:
+                    pos_map[int(pr[0])] = POSITION_DISPLAY.get(pr[1], pr[1])
+
         leaders = []
         for i, r in enumerate(rows):
+            pid = int(r["player_id"])
             ab = int(r["at_bats"])
             h = int(r["hits"])
             bb = int(r["walks"])
@@ -171,11 +188,12 @@ def batting_leaderboard():
 
             leaders.append({
                 "rank": offset + i + 1,
-                "player_id": int(r["player_id"]),
+                "player_id": pid,
                 "name": f"{r['firstName']} {r['lastName']}",
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
                 "team_level": int(r["team_level"]),
+                "position": pos_map.get(pid),
                 "g": int(r["games"]), "ab": ab, "pa": pa,
                 "r": int(r["runs"]), "h": h,
                 "2b": d, "3b": t,
