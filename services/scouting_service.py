@@ -7,13 +7,11 @@ and permission validation. All functions take a SQLAlchemy Core connection.
 
 from sqlalchemy import text
 
-# Org ID boundaries
-INTAM_ORG_ID = 339
-USHS_ORG_ID = 340
-COLLEGE_ORG_MIN = 31
-COLLEGE_ORG_MAX = 342
-MLB_ORG_MIN = 1
-MLB_ORG_MAX = 30
+from services.org_constants import (
+    INTAM_ORG_ID, USHS_ORG_ID,
+    MLB_ORG_MIN, MLB_ORG_MAX,
+    is_college_org,
+)
 
 # All valid scouting action types
 ALL_ACTION_TYPES = frozenset({
@@ -250,21 +248,21 @@ def _validate_scouting_permission(conn, org_id, player_id, action_type):
 
     # HS recruiting actions: college orgs only, on HS players
     if action_type in ("hs_report", "recruit_potential_fuzzed", "recruit_potential_precise"):
-        if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+        if not is_college_org(org_id):
             raise ValueError("Only college organizations can scout HS players")
         if target_org_id != USHS_ORG_ID:
             raise ValueError("HS scouting actions only apply to USHS players")
 
     # College potential: any org, on college players
     elif action_type == "college_potential_precise":
-        if not (COLLEGE_ORG_MIN <= target_org_id <= COLLEGE_ORG_MAX):
+        if not is_college_org(target_org_id):
             raise ValueError("College potential scouting only applies to college players")
 
     # Draft scouting: MLB orgs, on college/INTAM players
     elif action_type in ("draft_attrs_fuzzed", "draft_attrs_precise", "draft_potential_precise"):
         if not (MLB_ORG_MIN <= org_id <= MLB_ORG_MAX):
             raise ValueError("Only MLB organizations can draft-scout college/INTAM players")
-        if not (COLLEGE_ORG_MIN <= target_org_id <= INTAM_ORG_ID):
+        if not (is_college_org(target_org_id) or target_org_id == INTAM_ORG_ID):
             raise ValueError("Draft scouting only applies to college or INTAM players")
 
     # Pro roster scouting: any org, on pro-level players
@@ -318,7 +316,7 @@ def get_player_scouting_visibility(conn, org_id, player_id):
     # Determine pool
     if holding_org == USHS_ORG_ID:
         pool = "hs"
-    elif COLLEGE_ORG_MIN <= holding_org <= COLLEGE_ORG_MAX:
+    elif is_college_org(holding_org):
         pool = "college"
     elif holding_org == INTAM_ORG_ID:
         pool = "intam"
@@ -339,7 +337,7 @@ def get_player_scouting_visibility(conn, org_id, player_id):
     # Build available actions based on pool and org type
     available = []
 
-    if pool == "hs" and COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX:
+    if pool == "hs" and is_college_org(org_id):
         # College recruiting pipeline
         if "hs_report" not in unlocked_set:
             available.append("hs_report")

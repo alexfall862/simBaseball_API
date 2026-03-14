@@ -36,9 +36,8 @@ from services.recruiting import (
     add_to_recruiting_board,
     remove_from_recruiting_board,
     get_recruiting_board_ids,
-    COLLEGE_ORG_MIN,
-    COLLEGE_ORG_MAX,
 )
+from services.org_constants import is_college_org
 
 recruiting_bp = Blueprint("recruiting", __name__)
 
@@ -282,7 +281,7 @@ def get_investments(org_id: int):
         return jsonify(error="missing_param",
                        message="league_year_id required"), 400
 
-    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+    if not is_college_org(org_id):
         return jsonify(error="validation_error",
                        message="Only college orgs can recruit"), 400
 
@@ -396,7 +395,7 @@ def board(org_id: int):
         return jsonify(error="missing_param",
                        message="league_year_id required"), 400
 
-    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+    if not is_college_org(org_id):
         return jsonify(error="validation_error",
                        message="Only college orgs have recruiting boards"), 400
 
@@ -560,7 +559,7 @@ def board_add():
         return jsonify(error="missing_param",
                        message="org_id, league_year_id, and player_id required"), 400
 
-    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+    if not is_college_org(org_id):
         return jsonify(error="validation_error",
                        message="Only college orgs have recruiting boards"), 400
 
@@ -589,7 +588,7 @@ def board_remove():
         return jsonify(error="missing_param",
                        message="org_id, league_year_id, and player_id required"), 400
 
-    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+    if not is_college_org(org_id):
         return jsonify(error="validation_error",
                        message="Only college orgs have recruiting boards"), 400
 

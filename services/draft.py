@@ -49,11 +49,11 @@ def _t(conn) -> Dict[str, Table]:
     return _get_tables(conn.engine)
 
 
-# Org ID boundaries (shared with recruiting)
-COLLEGE_ORG_MIN = 31
-COLLEGE_ORG_MAX = 342
-INTAM_ORG_ID = 339
-USHS_ORG_ID = 340
+from services.org_constants import (
+    COLLEGE_ORG_MIN,
+    INTAM_ORG_ID, USHS_ORG_ID,
+    is_college_org,
+)
 
 # Default minor league level for drafted players
 DRAFT_TARGET_LEVEL = 5
@@ -265,9 +265,9 @@ def _populate_eligible_players(conn, league_year_id: int) -> int:
         JOIN contracts c ON c.playerID = p.id AND c.isFinished = 0
         JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
         JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
-        WHERE cts.orgID BETWEEN :cmin AND :cmax
+        WHERE (cts.orgID BETWEEN :cmin AND 338 OR cts.orgID IN (341, 342))
         ON DUPLICATE KEY UPDATE source = 'college'
-    """), {"lyid": league_year_id, "cmin": COLLEGE_ORG_MIN, "cmax": COLLEGE_ORG_MAX})
+    """), {"lyid": league_year_id, "cmin": COLLEGE_ORG_MIN})
 
     # Insert HS players
     conn.execute(text("""

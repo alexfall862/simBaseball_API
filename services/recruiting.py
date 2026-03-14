@@ -9,14 +9,10 @@ import hashlib
 import random
 from sqlalchemy import text
 
-
-# ---------------------------------------------------------------------------
-# Org ID boundaries
-# ---------------------------------------------------------------------------
-COLLEGE_ORG_MIN = 31
-COLLEGE_ORG_MAX = 342
-INTAM_ORG_ID = 339
-USHS_ORG_ID = 340
+from services.org_constants import (
+    INTAM_ORG_ID, USHS_ORG_ID,
+    is_college_org,
+)
 
 # Star distribution (cumulative upper bound from TOP -> star)
 # Applied separately within position players and pitchers
@@ -269,7 +265,7 @@ def submit_weekly_investments(conn, org_id, league_year_id, week, investments):
     weekly_budget = _cfg_int(config, "points_per_week", 100)
 
     # Validate org is a college org
-    if not (COLLEGE_ORG_MIN <= org_id <= COLLEGE_ORG_MAX):
+    if not is_college_org(org_id):
         raise ValueError("Only college organizations can recruit")
 
     # Validate recruiting is active and correct week

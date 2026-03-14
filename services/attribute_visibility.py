@@ -16,15 +16,11 @@ import hashlib
 import re
 from sqlalchemy import text
 
-# ---------------------------------------------------------------------------
-# Org ID boundaries (shared with scouting_service)
-# ---------------------------------------------------------------------------
-INTAM_ORG_ID = 339
-USHS_ORG_ID = 340
-COLLEGE_ORG_MIN = 31
-COLLEGE_ORG_MAX = 342
-MLB_ORG_MIN = 1
-MLB_ORG_MAX = 30
+from services.org_constants import (
+    INTAM_ORG_ID, USHS_ORG_ID,
+    MLB_ORG_MIN, MLB_ORG_MAX,
+    is_college_org,
+)
 
 # Pro levels (scraps=4 through mlb=9)
 PRO_LEVEL_MIN = 4
@@ -181,14 +177,13 @@ def determine_player_context(viewing_org_id, holding_org_id, player_level):
     """
     # HS player
     if holding_org_id == USHS_ORG_ID:
-        if COLLEGE_ORG_MIN <= viewing_org_id <= COLLEGE_ORG_MAX:
+        if is_college_org(viewing_org_id):
             return "college_recruiting"
         # Non-college orgs viewing HS: still show recruiting-style hidden view
         return "college_recruiting"
 
     # College or INTAM player
-    if (COLLEGE_ORG_MIN <= holding_org_id <= COLLEGE_ORG_MAX
-            or holding_org_id == INTAM_ORG_ID):
+    if is_college_org(holding_org_id) or holding_org_id == INTAM_ORG_ID:
         if MLB_ORG_MIN <= viewing_org_id <= MLB_ORG_MAX:
             return "pro_draft"
         return "college_roster"

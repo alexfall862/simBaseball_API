@@ -42,13 +42,12 @@ from services.rating_config import get_rating_config_by_level_name
 
 scouting_bp = Blueprint("scouting", __name__)
 
-# Org ID constants
-INTAM_ORG_ID = 339
-USHS_ORG_ID = 340
-COLLEGE_ORG_MIN = 31
-COLLEGE_ORG_MAX = 342
-MLB_ORG_MIN = 1
-MLB_ORG_MAX = 30
+from services.org_constants import (
+    COLLEGE_ORG_MIN,
+    INTAM_ORG_ID, USHS_ORG_ID,
+    MLB_ORG_MIN, MLB_ORG_MAX,
+    is_college_org,
+)
 
 # Pagination defaults
 DEFAULT_PAGE = 1
@@ -470,8 +469,11 @@ def api_pro_pool():
         pool_condition = or_(
             and_(shares.c.orgID == INTAM_ORG_ID, players.c.age >= 18),
             and_(
-                shares.c.orgID >= COLLEGE_ORG_MIN,
-                shares.c.orgID <= COLLEGE_ORG_MAX,
+                or_(
+                    and_(shares.c.orgID >= COLLEGE_ORG_MIN,
+                         shares.c.orgID <= 338),
+                    shares.c.orgID.in_([341, 342]),
+                ),
             ),
         )
         conditions.append(pool_condition)
@@ -526,8 +528,11 @@ def api_pro_pool():
                 .select_from(join)
                 .where(and_(
                     *pool_conditions,
-                    shares.c.orgID >= COLLEGE_ORG_MIN,
-                    shares.c.orgID <= COLLEGE_ORG_MAX,
+                    or_(
+                        and_(shares.c.orgID >= COLLEGE_ORG_MIN,
+                             shares.c.orgID <= 338),
+                        shares.c.orgID.in_([341, 342]),
+                    ),
                 ))
             )
             intam_count_stmt = (
