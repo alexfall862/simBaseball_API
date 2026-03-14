@@ -1261,6 +1261,21 @@ def api_scouted_player(player_id):
         response = _build_scouted_response(player_dict, visibility, dist_by_level)
         response["contract"] = contract
 
+        # Attach listed position
+        try:
+            from services.listed_position import POSITION_DISPLAY
+            with engine.connect() as conn2:
+                lp_row = conn2.execute(sa_text(
+                    "SELECT position_code FROM player_listed_position "
+                    "WHERE player_id = :pid LIMIT 1"
+                ), {"pid": player_id}).first()
+            if lp_row:
+                response["listed_position"] = POSITION_DISPLAY.get(lp_row[0], lp_row[0])
+            else:
+                response["listed_position"] = None
+        except Exception:
+            response["listed_position"] = None
+
         # Remove internal field before returning
         del visibility["_org_id"]
         response["visibility"] = visibility

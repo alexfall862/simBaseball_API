@@ -548,6 +548,15 @@ def put_defense(team_id: int):
                 ))
             conn.commit()
 
+            # Refresh listed positions for this team after defense plan change
+            try:
+                from services.listed_position import refresh_team, _resolve_league_year_id
+                lyid = _resolve_league_year_id(conn)
+                refresh_team(conn, team_id, lyid)
+                conn.commit()
+            except Exception:
+                log.debug("listed position refresh after defense save failed, continuing")
+
             rows = conn.execute(
                 select(tbl).where(tbl.c.team_id == team_id)
                 .order_by(tbl.c.position_code, tbl.c.priority)
@@ -703,6 +712,15 @@ def put_rotation(team_id: int):
 
             conn.commit()
 
+            # Refresh listed positions (SP/RP classification may have changed)
+            try:
+                from services.listed_position import refresh_team, _resolve_league_year_id
+                lyid = _resolve_league_year_id(conn)
+                refresh_team(conn, team_id, lyid)
+                conn.commit()
+            except Exception:
+                log.debug("listed position refresh after rotation save failed, continuing")
+
             # Read back
             rot_row = conn.execute(
                 select(rotation_tbl).where(rotation_tbl.c.team_id == team_id).limit(1)
@@ -804,6 +822,15 @@ def put_bullpen(team_id: int):
                     role=p.get("role", "middle"),
                 ))
             conn.commit()
+
+            # Refresh listed positions (bullpen membership affects RP classification)
+            try:
+                from services.listed_position import refresh_team, _resolve_league_year_id
+                lyid = _resolve_league_year_id(conn)
+                refresh_team(conn, team_id, lyid)
+                conn.commit()
+            except Exception:
+                log.debug("listed position refresh after bullpen save failed, continuing")
 
             rows = conn.execute(
                 select(tbl).where(tbl.c.team_id == team_id).order_by(tbl.c.slot.asc())
@@ -930,5 +957,84 @@ def put_face_config():
         return jsonify(existing), 200
     except SQLAlchemyError:
         log.exception("gameplanning: put face-config db error")
+        return jsonify(error="db_unavailable",
+                       message="Database temporarily unavailable"), 503
+
+
+# ---------------------------------------------------------------------------
+# Listed Position — override CRUD
+# ---------------------------------------------------------------------------
+_LISTED_POS_CODES = {"c", "fb", "sb", "tb", "ss", "lf", "cf", "rf", "dh", "sp", "rp"}
+
+
+@gameplanning_bp.get("/gameplanning/team/<int:team_id>/player/<int:player_id>/listed-position")
+def get_listed_position(team_id: int, player_id: int):
+    """Get a player's listed position on a team."""
+    from services.listed_position import (
+        get_listed_position as _get, _resolve_league_year_id,
+    )
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            lyid = _resolve_league_year_id(conn)
+            result = _get(conn, player_id, team_id, lyid)
+        if not result:
+            return jsonify(error="not_found",
+                           message="No listed position for this player/team"), 404
+        return jsonify(player_id=player_id, team_id=team_id, **result), 200
+    except SQLAlchemyError:
+        log.exception("gameplanning: get listed-position db error")
+        return jsonify(error="db_unavailable",
+                       message="Database temporarily unavailable"), 503
+
+
+@gameplanning_bp.put("/gameplanning/team/<int:team_id>/player/<int:player_id>/listed-position")
+def put_listed_position(team_id: int, player_id: int):
+    """Set a user override for a player's listed position."""
+    from services.listed_position import (
+        set_override, get_listed_position as _get, _resolve_league_year_id,
+        POSITION_DISPLAY,
+    )
+    body = request.get_json(silent=True) or {}
+    pos = body.get("position_code")
+    if pos not in _LISTED_POS_CODES:
+        return jsonify(
+            error="validation_error",
+            message=f"position_code must be one of: {', '.join(sorted(_LISTED_POS_CODES))}",
+        ), 400
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            lyid = _resolve_league_year_id(conn)
+            set_override(conn, player_id, team_id, lyid, pos)
+            conn.commit()
+            result = _get(conn, player_id, team_id, lyid)
+        return jsonify(player_id=player_id, team_id=team_id, **result), 200
+    except SQLAlchemyError:
+        log.exception("gameplanning: put listed-position db error")
+        return jsonify(error="db_unavailable",
+                       message="Database temporarily unavailable"), 503
+
+
+@gameplanning_bp.delete("/gameplanning/team/<int:team_id>/player/<int:player_id>/listed-position")
+def delete_listed_position(team_id: int, player_id: int):
+    """Remove a user override; fall back to derived position."""
+    from services.listed_position import (
+        clear_override, get_listed_position as _get, _resolve_league_year_id,
+    )
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            lyid = _resolve_league_year_id(conn)
+            clear_override(conn, player_id, team_id, lyid)
+            conn.commit()
+            result = _get(conn, player_id, team_id, lyid)
+        if result:
+            return jsonify(player_id=player_id, team_id=team_id, **result), 200
+        return jsonify(player_id=player_id, team_id=team_id,
+                       position_code=None, source=None, display=None), 200
+    except SQLAlchemyError:
+        log.exception("gameplanning: delete listed-position db error")
         return jsonify(error="db_unavailable",
                        message="Database temporarily unavailable"), 503

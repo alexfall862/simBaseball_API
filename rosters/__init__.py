@@ -1143,6 +1143,25 @@ def get_org_roster(org_abbrev: str):
                 dist_by_level, col_cats, position_weights,
             )
 
+            # Attach listed positions
+            try:
+                from services.listed_position import POSITION_DISPLAY
+                from sqlalchemy import text as sa_text
+                pids = [p["id"] for p in players_out if p.get("id")]
+                if pids:
+                    ph = ", ".join(f":p{i}" for i in range(len(pids)))
+                    prm = {f"p{i}": pid for i, pid in enumerate(pids)}
+                    lp_rows = conn.execute(sa_text(
+                        f"SELECT player_id, position_code "
+                        f"FROM player_listed_position "
+                        f"WHERE player_id IN ({ph})"
+                    ), prm).all()
+                    lp_map = {r[0]: POSITION_DISPLAY.get(r[1], r[1]) for r in lp_rows}
+                    for p in players_out:
+                        p["listed_position"] = lp_map.get(p["id"])
+            except Exception:
+                pass
+
     except SQLAlchemyError:
         return (
             jsonify(

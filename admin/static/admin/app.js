@@ -123,6 +123,10 @@
       if (el) el.addEventListener('click', fn);
     }
 
+    // Listed Positions
+    const btnFillLP = document.getElementById('btn-fill-listed-positions');
+    if (btnFillLP) btnFillLP.addEventListener('click', fillListedPositions);
+
     // Organizations
     document.getElementById('btn-refresh-orgs').addEventListener('click', loadOrganizations);
     document.getElementById('org-select').addEventListener('change', loadOrgDetail);
@@ -1232,6 +1236,25 @@
       .then(data => {
         resultBox.textContent = JSON.stringify(data, null, 2);
         loadTimestamp();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  // Listed Positions — manual fill
+  function fillListedPositions() {
+    const resultBox = document.getElementById('listed-pos-result');
+    resultBox.textContent = 'Filling listed positions...';
+
+    fetch(`${ADMIN_BASE}/fill-listed-positions`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = data.ok
+          ? `Done — ${data.total} players updated.`
+          : `Error: ${data.message || 'unknown'}`;
       })
       .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
   }

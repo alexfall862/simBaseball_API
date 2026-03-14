@@ -793,6 +793,19 @@ def _choose_player_for_position(
             best_pid = pid
             best_score = base_score
 
+    # Desperation pass: if every remaining field player failed stamina,
+    # pick the best one anyway so the position is never sent as None
+    # (which crashes the engine).
+    if best_pid is None and remaining_field_ids:
+        for pid in remaining_field_ids:
+            p = players_by_id[pid]
+            base_pos_rating = _get_rating(p, rating_key) if rating_key else 0.0
+            off_score = _compute_offense_score(p)
+            base_score = base_pos_rating * 0.7 + off_score * 0.3
+            if best_pid is None or base_score > best_score:
+                best_pid = pid
+                best_score = base_score
+
     return best_pid
 
 

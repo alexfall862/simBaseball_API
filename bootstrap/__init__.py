@@ -102,6 +102,19 @@ def get_landing(org_id: int):
             except Exception:
                 log.debug("bootstrap: financials unavailable, skipping")
 
+            # Listed positions — attach to each player in RosterMap
+            try:
+                from services.listed_position import get_listed_positions_for_teams
+                lyid = ctx["current_league_year_id"]
+                team_ids_for_pos = list(roster_map.keys())
+                pos_by_team = get_listed_positions_for_teams(conn, team_ids_for_pos, lyid)
+                for tid, players in roster_map.items():
+                    pos_map = pos_by_team.get(tid, {})
+                    for p in players:
+                        p["listed_position"] = pos_map.get(p["id"])
+            except Exception:
+                log.debug("bootstrap: listed positions unavailable, skipping")
+
             # Face data — deterministic player portraits for facesjs
             face_data = {}
             try:
@@ -204,6 +217,19 @@ def get_landing_all():
                 financials = None
                 try:
                     financials = _get_financials(conn, tables, oid, ctx)
+                except Exception:
+                    pass
+
+                # Listed positions per org's roster
+                try:
+                    from services.listed_position import get_listed_positions_for_teams
+                    lyid = ctx["current_league_year_id"]
+                    tids = list(roster_map.keys())
+                    pos_by_team = get_listed_positions_for_teams(conn, tids, lyid)
+                    for tid, players in roster_map.items():
+                        pos_map = pos_by_team.get(tid, {})
+                        for p in players:
+                            p["listed_position"] = pos_map.get(p["id"])
                 except Exception:
                     pass
 

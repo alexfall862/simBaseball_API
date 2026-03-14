@@ -1764,3 +1764,31 @@ def admin_batting_lab_run():
     except Exception as e:
         logging.exception("batting_lab_run_failed")
         return jsonify(ok=False, error="batting_lab_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Listed Positions — manual fill
+# ---------------------------------------------------------------------------
+
+@admin_bp.post("/fill-listed-positions")
+def admin_fill_listed_positions():
+    """Derive and upsert listed positions for every team with active rosters."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from services.listed_position import refresh_all_teams, _resolve_league_year_id
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            league_year_id = _resolve_league_year_id(conn)
+            total = refresh_all_teams(conn, league_year_id)
+
+        return jsonify(ok=True, total=total,
+                       message=f"Listed positions filled for {total} players")
+
+    except Exception as e:
+        logging.exception("admin_fill_listed_positions failed")
+        return jsonify(ok=False, error="fill_failed", message=str(e)), 500

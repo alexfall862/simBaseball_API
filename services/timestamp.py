@@ -837,6 +837,21 @@ def advance_week(broadcast: bool = True) -> bool:
             except Exception as e:
                 logger.exception(f"Week books failed for week {current_week}, continuing")
 
+            # Refresh listed positions for all teams
+            try:
+                from sqlalchemy import text as _text
+                from services.listed_position import refresh_all_teams
+                ly_row = conn.execute(
+                    _text("SELECT id FROM league_years WHERE league_year = :yr"),
+                    {"yr": league_year},
+                ).first()
+                if ly_row:
+                    refresh_all_teams(conn, int(ly_row[0]))
+                    conn.commit()
+                    logger.info(f"Listed positions refreshed for week {new_week}")
+            except Exception:
+                logger.exception("Listed position refresh failed, continuing")
+
             # Broadcast to WebSocket clients
             if broadcast:
                 from services.websocket_manager import ws_manager
