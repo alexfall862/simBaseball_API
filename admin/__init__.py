@@ -1795,6 +1795,46 @@ def admin_fill_listed_positions():
 
 
 # ---------------------------------------------------------------------------
+# Default Gameplan Generation
+# ---------------------------------------------------------------------------
+
+@admin_bp.post("/generate-default-gameplans")
+def admin_generate_default_gameplans():
+    """Generate default gameplans (defense, rotation, bullpen) for all teams at a level."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    team_level = body.get("team_level")
+    league_year_id = body.get("league_year_id")
+    overwrite = bool(body.get("overwrite", False))
+
+    if team_level is None or league_year_id is None:
+        return jsonify(ok=False, error="missing_params",
+                       message="team_level and league_year_id are required"), 400
+
+    try:
+        from db import get_engine
+        from services.default_gameplan import generate_default_gameplans
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = generate_default_gameplans(
+                conn,
+                team_level=int(team_level),
+                league_year_id=int(league_year_id),
+                overwrite=overwrite,
+            )
+
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_generate_default_gameplans failed")
+        return jsonify(ok=False, error="generation_failed", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
 # Weight Calibration
 # ---------------------------------------------------------------------------
 

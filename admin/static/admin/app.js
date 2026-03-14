@@ -127,6 +127,10 @@
     const btnFillLP = document.getElementById('btn-fill-listed-positions');
     if (btnFillLP) btnFillLP.addEventListener('click', fillListedPositions);
 
+    // Default Gameplans
+    const btnGenGP = document.getElementById('btn-generate-gameplans');
+    if (btnGenGP) btnGenGP.addEventListener('click', generateDefaultGameplans);
+
     // Weight Calibration
     const _calListeners = {
       'btn-cal-run': runCalibration,
@@ -1269,6 +1273,41 @@
         resultBox.textContent = data.ok
           ? `Done — ${data.total} players updated.`
           : `Error: ${data.message || 'unknown'}`;
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  // Default Gameplan Generation
+  function generateDefaultGameplans() {
+    const resultBox = document.getElementById('gameplan-gen-result');
+    const level = document.getElementById('gp-level').value;
+    const lyid = document.getElementById('gp-league-year').value;
+    const overwrite = document.getElementById('gp-overwrite').checked;
+
+    resultBox.textContent = `Generating default gameplans for level ${level}...`;
+
+    fetch(`${ADMIN_BASE}/generate-default-gameplans`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        team_level: parseInt(level),
+        league_year_id: parseInt(lyid),
+        overwrite,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          let msg = `Done — ${data.teams_processed} teams processed, ${data.teams_skipped} skipped.`;
+          if (data.errors && data.errors.length > 0) {
+            msg += `\n${data.errors.length} errors:\n` +
+              data.errors.map(e => `  Team ${e.team_id}: ${e.message}`).join('\n');
+          }
+          resultBox.textContent = msg;
+        } else {
+          resultBox.textContent = `Error: ${data.message || 'unknown'}`;
+        }
       })
       .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
   }
