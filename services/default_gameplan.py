@@ -171,10 +171,15 @@ def generate_default_gameplans(
 
 def _check_use_dh(conn, team_level: int) -> bool:
     """Check if this level uses the DH rule."""
-    row = conn.execute(text(
-        "SELECT dh_bool FROM level_rules WHERE league_level = :lvl LIMIT 1"
-    ), {"lvl": team_level}).first()
-    return bool(row[0]) if row else False
+    try:
+        row = conn.execute(text(
+            "SELECT dh_bool FROM level_rules WHERE league_level = :lvl LIMIT 1"
+        ), {"lvl": team_level}).first()
+        return bool(row[0]) if row else False
+    except Exception:
+        logger.warning("Could not check DH rule for level %d, defaulting to True",
+                       team_level, exc_info=True)
+        return True
 
 
 # ---------------------------------------------------------------------------
