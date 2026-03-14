@@ -51,7 +51,7 @@ def _t(conn) -> Dict[str, Table]:
 
 # Org ID boundaries (shared with recruiting)
 COLLEGE_ORG_MIN = 31
-COLLEGE_ORG_MAX = 338
+COLLEGE_ORG_MAX = 342
 INTAM_ORG_ID = 339
 USHS_ORG_ID = 340
 

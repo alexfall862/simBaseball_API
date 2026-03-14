@@ -46,7 +46,7 @@ scouting_bp = Blueprint("scouting", __name__)
 INTAM_ORG_ID = 339
 USHS_ORG_ID = 340
 COLLEGE_ORG_MIN = 31
-COLLEGE_ORG_MAX = 338
+COLLEGE_ORG_MAX = 342
 MLB_ORG_MIN = 1
 MLB_ORG_MAX = 30
 
@@ -339,12 +339,23 @@ def _parse_python_filters():
                 ) <= mv
             )
 
-    # Star rating range
+    # Star filters only make sense when league_year_id is provided,
+    # since star_rating data comes from recruiting_rankings which
+    # requires league_year_id.  Without it every player has
+    # star_rating=None and all filters would produce empty results.
+    has_league_year = request.args.get("league_year_id", type=int) is not None
+
+    # Exact star rating match: ?star_rating=3
+    sr_exact = request.args.get("star_rating", type=int)
+    if sr_exact is not None and has_league_year:
+        filters.append(lambda p, mv=sr_exact: (p.get("star_rating") or 0) == mv)
+
+    # Star rating range: ?filter_star_rating_min=3&filter_star_rating_max=5
     sr_min = request.args.get("filter_star_rating_min", type=float)
     sr_max = request.args.get("filter_star_rating_max", type=float)
-    if sr_min is not None:
+    if sr_min is not None and has_league_year:
         filters.append(lambda p, mv=sr_min: (p.get("star_rating") or 0) >= mv)
-    if sr_max is not None:
+    if sr_max is not None and has_league_year:
         filters.append(lambda p, mv=sr_max: (p.get("star_rating") or 0) <= mv)
 
     return filters
