@@ -34,9 +34,11 @@ from services.attribute_visibility import (
     get_visible_player,
     determine_player_context,
     fuzz_letter_grade,
+    fuzz_20_80,
     base_to_letter_grade as visibility_base_to_letter_grade,
     PITCH_COMPONENT_RE as VIS_PITCH_RE,
 )
+from services.rating_config import get_rating_config_by_level_name
 
 scouting_bp = Blueprint("scouting", __name__)
 
@@ -1194,11 +1196,71 @@ def api_scouted_player(player_id):
                     value = float(value)
                 player_dict[key] = value
 
+            # Load rating distributions for 20-80 conversion
+            dist_by_level = get_rating_config_by_level_name(conn) or {}
+
+            # Load contract data
+            contract_row = conn.execute(
+                sa_text("""
+                    SELECT c.id AS contract_id, c.years, c.current_year,
+                           c.leagueYearSigned, c.isActive, c.isBuyout,
+                           c.isExtension, c.isFinished, c.current_level, c.onIR,
+                           c.bonus,
+                           cd.id AS detail_id, cd.year AS year_index,
+                           cd.salary AS base_salary,
+                           cts.salary_share
+                    FROM contracts c
+                    JOIN contractDetails cd
+                         ON cd.contractID = c.id AND cd.year = c.current_year
+                    JOIN contractTeamShare cts
+                         ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                    WHERE c.playerID = :pid AND c.isActive = 1
+                    LIMIT 1
+                """),
+                {"pid": player_id},
+            ).first()
+
+            # Build contract dict while connection is open
+            contract = None
+            if contract_row:
+                cm = contract_row._mapping
+                player_dict["current_level"] = cm["current_level"]
+                base_salary = cm["base_salary"]
+                share = cm["salary_share"]
+                salary_for_org = None
+                if base_salary is not None and share is not None:
+                    try:
+                        salary_for_org = float(base_salary) * float(share)
+                    except (TypeError, ValueError):
+                        pass
+                contract = {
+                    "id": cm["contract_id"],
+                    "years": cm["years"],
+                    "current_year": cm["current_year"],
+                    "league_year_signed": cm["leagueYearSigned"],
+                    "is_active": bool(cm["isActive"] or 0),
+                    "is_buyout": bool(cm["isBuyout"] or 0),
+                    "is_extension": bool(cm["isExtension"] or 0),
+                    "is_finished": bool(cm["isFinished"] or 0),
+                    "on_ir": bool(cm["onIR"] or 0),
+                    "bonus": float(cm["bonus"] or 0),
+                    "current_level": cm["current_level"],
+                    "current_year_detail": {
+                        "id": cm["detail_id"],
+                        "year_index": cm["year_index"],
+                        "base_salary": float(base_salary) if base_salary is not None else None,
+                        "salary_share": float(share) if share is not None else None,
+                        "salary_for_org": salary_for_org,
+                    },
+                }
+
         # Pass org_id into visibility for fuzz functions
         visibility["_org_id"] = org_id
 
         # Build response based on visibility
-        response = _build_scouted_response(player_dict, visibility)
+        response = _build_scouted_response(player_dict, visibility, dist_by_level)
+        response["contract"] = contract
+
         # Remove internal field before returning
         del visibility["_org_id"]
         response["visibility"] = visibility
@@ -1213,14 +1275,79 @@ def api_scouted_player(player_id):
         return jsonify(error="server_error", message=str(e)), 500
 
 
-def _build_scouted_response(player, visibility):
+_LEVEL_MAP = {
+    9: "mlb", 8: "aaa", 7: "aa", 6: "higha", 5: "a", 4: "scraps",
+    3: "college", 2: "intam", 1: "hs",
+}
+
+_PITCH_COMP_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+
+
+def _to_20_80(raw_val, mean, std):
+    """Convert a raw _base value to 20-80 scale (same formula as bootstrap)."""
+    if raw_val is None or mean is None:
+        return None
+    try:
+        x = float(raw_val)
+    except (TypeError, ValueError):
+        return None
+    if std is None or std <= 0:
+        z = 0.0
+    else:
+        z = (x - mean) / std
+    z = max(-3.0, min(3.0, z))
+    raw_score = 50.0 + (z / 3.0) * 30.0
+    score = int(round(max(20.0, min(80.0, raw_score)) / 5.0) * 5)
+    return max(20, min(80, score))
+
+
+def _convert_attrs_to_20_80(player, dist_for_level, org_id, player_id, fuzzed):
+    """
+    Build an attributes dict with 20-80 scaled values.
+
+    Keys use _display suffix (matching bootstrap format).
+    If *fuzzed*, applies fuzz_20_80 after conversion.
+    """
+    attributes = {}
+    for k, v in player.items():
+        if not k.endswith("_base"):
+            continue
+        mp = _PITCH_COMP_RE.match(k)
+        dist_key = f"pitch_{mp.group(1)}" if mp else k
+        d = dist_for_level.get(dist_key)
+        if d and d.get("mean") is not None:
+            scaled = _to_20_80(v, d["mean"], d["std"])
+        else:
+            scaled = None
+        display_key = k.replace("_base", "_display")
+        if fuzzed and scaled is not None:
+            scaled = fuzz_20_80(scaled, org_id, player_id, k)
+        attributes[display_key] = scaled
+    # Pitch overalls (derived) — scale them too
+    for i in range(1, 6):
+        ovr_key = f"pitch{i}_ovr"
+        if ovr_key in player and player[ovr_key] is not None:
+            d = dist_for_level.get(ovr_key)
+            if d and d.get("mean") is not None:
+                scaled = _to_20_80(player[ovr_key], d["mean"], d["std"])
+            else:
+                scaled = None
+            if fuzzed and scaled is not None:
+                scaled = fuzz_20_80(scaled, org_id, player_id, ovr_key)
+            attributes[ovr_key] = scaled
+    return attributes
+
+
+def _build_scouted_response(player, visibility, dist_by_level=None):
     """
     Build the response dict with fog-of-war data masking.
 
     Applies org-specific fuzz based on pool and unlocked actions.
+    Attributes are returned as 20-80 scaled values (not raw _base).
     """
     pool = visibility["pool"]
     unlocked = set(visibility["unlocked"])
+    dist_by_level = dist_by_level or {}
 
     # Bio is always included
     bio = {k: player.get(k) for k in _BIO_FIELDS if k in player}
@@ -1229,6 +1356,13 @@ def _build_scouted_response(player, visibility):
     # Extract org_id from visibility context (set by the endpoint)
     org_id = visibility.get("_org_id", 0)
     player_id = player.get("id", 0)
+
+    # Resolve distribution for this player's ptype + level
+    ptype = (player.get("ptype") or "").strip()
+    current_level = player.get("current_level")
+    league_level = _LEVEL_MAP.get(current_level, "mlb")
+    ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
+    dist_for_level = ptype_dist.get(league_level, {})
 
     if pool == "hs":
         # Stats always visible for HS
@@ -1268,30 +1402,16 @@ def _build_scouted_response(player, visibility):
         if pool == "intam":
             response["counting_stats"] = generate_scouting_stats(player, level)
 
-        # Numeric attributes if unlocked (draft scouting)
+        # Numeric attributes if unlocked (draft scouting) — now 20-80 scaled
         if "draft_attrs_precise" in unlocked:
-            attributes = {}
-            for k, v in player.items():
-                if k.endswith("_base"):
-                    attributes[k] = v
-            for i in range(1, 6):
-                ovr_key = f"pitch{i}_ovr"
-                if ovr_key in player:
-                    attributes[ovr_key] = player[ovr_key]
-            response["attributes"] = attributes
+            response["attributes"] = _convert_attrs_to_20_80(
+                player, dist_for_level, org_id, player_id, fuzzed=False
+            )
             response["display_format"] = "20-80"
         elif "draft_attrs_fuzzed" in unlocked:
-            # Fuzzed 20-80 (raw values fuzzed — actual 20-80 conversion
-            # happens at the display layer with Level 5 distributions)
-            attributes = {}
-            for k, v in player.items():
-                if k.endswith("_base"):
-                    attributes[k] = v  # raw values; frontend converts with Level 5 dist
-            for i in range(1, 6):
-                ovr_key = f"pitch{i}_ovr"
-                if ovr_key in player:
-                    attributes[ovr_key] = player[ovr_key]
-            response["attributes"] = attributes
+            response["attributes"] = _convert_attrs_to_20_80(
+                player, dist_for_level, org_id, player_id, fuzzed=True
+            )
             response["display_format"] = "20-80-fuzzed"
 
         # Potentials
@@ -1305,18 +1425,13 @@ def _build_scouted_response(player, visibility):
         response["potentials"] = potentials
 
     elif pool == "pro":
-        # Pro roster: fuzzed 20-80 or precise
-        attributes = {}
-        for k, v in player.items():
-            if k.endswith("_base"):
-                attributes[k] = v
-        for i in range(1, 6):
-            ovr_key = f"pitch{i}_ovr"
-            if ovr_key in player:
-                attributes[ovr_key] = player[ovr_key]
-        response["attributes"] = attributes
+        # Pro roster: 20-80 scaled, precise or fuzzed
+        is_precise = "pro_attrs_precise" in unlocked or "draft_attrs_precise" in unlocked
+        response["attributes"] = _convert_attrs_to_20_80(
+            player, dist_for_level, org_id, player_id, fuzzed=not is_precise
+        )
 
-        if "pro_attrs_precise" in unlocked or "draft_attrs_precise" in unlocked:
+        if is_precise:
             response["display_format"] = "20-80"
         else:
             response["display_format"] = "20-80-fuzzed"
