@@ -1153,6 +1153,7 @@ _BIO_FIELDS = {
     "height", "weight", "bat_hand", "pitch_hand",
     "arm_angle", "durability", "injury_risk",
     "pitch1_name", "pitch2_name", "pitch3_name", "pitch4_name", "pitch5_name",
+    "org_id", "org_abbrev",
 }
 
 
@@ -1208,12 +1209,16 @@ def api_scouted_player(player_id):
                            c.bonus,
                            cd.id AS detail_id, cd.year AS year_index,
                            cd.salary AS base_salary,
-                           cts.salary_share
+                           cts.salary_share,
+                           cts.orgID AS org_id,
+                           o.org_abbrev
                     FROM contracts c
                     JOIN contractDetails cd
                          ON cd.contractID = c.id AND cd.year = c.current_year
                     JOIN contractTeamShare cts
                          ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                    JOIN organizations o
+                         ON o.id = cts.orgID
                     WHERE c.playerID = :pid AND c.isActive = 1
                     LIMIT 1
                 """),
@@ -1225,6 +1230,8 @@ def api_scouted_player(player_id):
             if contract_row:
                 cm = contract_row._mapping
                 player_dict["current_level"] = cm["current_level"]
+                player_dict["org_id"] = cm["org_id"]
+                player_dict["org_abbrev"] = cm["org_abbrev"]
                 base_salary = cm["base_salary"]
                 share = cm["salary_share"]
                 salary_for_org = None
