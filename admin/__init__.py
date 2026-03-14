@@ -1816,7 +1816,7 @@ def admin_generate_default_gameplans():
 
     try:
         from db import get_engine
-        from services.default_gameplan import generate_default_gameplans
+        from services.default_gameplan import generate_default_gameplans, _VERSION
 
         engine = get_engine()
         with engine.begin() as conn:
@@ -1827,11 +1827,12 @@ def admin_generate_default_gameplans():
                 overwrite=overwrite,
             )
 
-        return jsonify(ok=True, **result)
+        return jsonify(ok=True, _code_version=_VERSION, **result)
 
     except Exception as e:
         logging.exception("admin_generate_default_gameplans failed")
-        return jsonify(ok=False, error="generation_failed", message=str(e)), 500
+        return jsonify(ok=False, error="generation_failed",
+                       message=str(e), _code_version="unknown"), 500
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,8 @@ from sqlalchemy import MetaData, Table, and_, select, text
 
 logger = logging.getLogger("app")
 
+_VERSION = "2026-03-14a"  # diagnostic: confirm deployed code version
+
 # ---------------------------------------------------------------------------
 # Constants (mirrored from lineups.py)
 # ---------------------------------------------------------------------------
