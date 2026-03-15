@@ -1089,10 +1089,12 @@ def get_game_boxscore(game_id: int):
             bat_rows = conn.execute(sa_text("""
                 SELECT gbl.player_id, gbl.team_id,
                        p.firstName, p.lastName,
+                       gbl.position_code,
                        gbl.at_bats, gbl.runs, gbl.hits, gbl.doubles_hit,
                        gbl.triples, gbl.home_runs, gbl.inside_the_park_hr,
                        gbl.rbi, gbl.walks,
-                       gbl.strikeouts, gbl.stolen_bases, gbl.caught_stealing
+                       gbl.strikeouts, gbl.stolen_bases, gbl.caught_stealing,
+                       gbl.plate_appearances, gbl.hbp
                 FROM game_batting_lines gbl
                 JOIN simbbPlayers p ON p.id = gbl.player_id
                 WHERE gbl.game_id = :gid
@@ -1106,7 +1108,9 @@ def get_game_boxscore(game_id: int):
                        gpl.games_started, gpl.win, gpl.loss, gpl.save_recorded,
                        gpl.innings_pitched_outs, gpl.hits_allowed, gpl.runs_allowed,
                        gpl.earned_runs, gpl.walks, gpl.strikeouts,
-                       gpl.home_runs_allowed, gpl.inside_the_park_hr_allowed
+                       gpl.home_runs_allowed, gpl.inside_the_park_hr_allowed,
+                       gpl.pitches_thrown, gpl.balls, gpl.strikes,
+                       gpl.hbp, gpl.wildpitches
                 FROM game_pitching_lines gpl
                 JOIN simbbPlayers p ON p.id = gpl.player_id
                 WHERE gpl.game_id = :gid
@@ -1133,11 +1137,14 @@ def get_game_boxscore(game_id: int):
             return {
                 "player_id": int(r["player_id"]),
                 "name": f"{r['firstName']} {r['lastName']}",
+                "pos": r.get("position_code") or None,
+                "pa": int(r.get("plate_appearances") or 0),
                 "ab": int(r["at_bats"]), "r": int(r["runs"]),
                 "h": int(r["hits"]), "2b": int(r["doubles_hit"]),
                 "3b": int(r["triples"]), "hr": int(r["home_runs"]),
                 "itphr": int(r["inside_the_park_hr"]),
                 "rbi": int(r["rbi"]), "bb": int(r["walks"]),
+                "hbp": int(r.get("hbp") or 0),
                 "so": int(r["strikeouts"]), "sb": int(r["stolen_bases"]),
                 "cs": int(r["caught_stealing"]),
             }
@@ -1160,7 +1167,13 @@ def get_game_boxscore(game_id: int):
                 "r": int(r["runs_allowed"]), "er": int(r["earned_runs"]),
                 "bb": int(r["walks"]), "so": int(r["strikeouts"]),
                 "hr": int(r["home_runs_allowed"]),
-                "itphr": int(r["inside_the_park_hr_allowed"]), "dec": dec,
+                "itphr": int(r["inside_the_park_hr_allowed"]),
+                "pc": int(r.get("pitches_thrown") or 0),
+                "balls": int(r.get("balls") or 0),
+                "strikes": int(r.get("strikes") or 0),
+                "hbp": int(r.get("hbp") or 0),
+                "wp": int(r.get("wildpitches") or 0),
+                "dec": dec,
             }
 
         import json as _json

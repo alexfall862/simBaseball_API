@@ -67,7 +67,7 @@ def accumulate_game_stats(
 
     # Per-game lines for box score reconstruction
     if game_id is not None:
-        gbl_count = _insert_game_batting_lines(conn, int(game_id), batters, league_year_id)
+        gbl_count = _insert_game_batting_lines(conn, int(game_id), batters, league_year_id, fielders)
         gpl_count = _insert_game_pitching_lines(conn, int(game_id), pitchers, league_year_id)
         print(f"[stat_accumulator] game {game_id} per-game lines: {gbl_count} batting, {gpl_count} pitching")
 
@@ -454,16 +454,17 @@ def record_subweek_position_usage(
 
 _GAME_BATTING_INSERT = text("""
     INSERT INTO game_batting_lines
-        (game_id, player_id, team_id, league_year_id,
+        (game_id, player_id, team_id, league_year_id, position_code,
          at_bats, runs, hits, doubles_hit, triples,
          home_runs, inside_the_park_hr, rbi, walks, strikeouts,
-         stolen_bases, caught_stealing)
+         stolen_bases, caught_stealing, plate_appearances, hbp)
     VALUES
-        (:game_id, :player_id, :team_id, :league_year_id,
+        (:game_id, :player_id, :team_id, :league_year_id, :position_code,
          :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
-         :stolen_bases, :caught_stealing)
+         :stolen_bases, :caught_stealing, :plate_appearances, :hbp)
     ON DUPLICATE KEY UPDATE
+        position_code      = VALUES(position_code),
         at_bats            = VALUES(at_bats),
         runs               = VALUES(runs),
         hits               = VALUES(hits),
@@ -475,7 +476,9 @@ _GAME_BATTING_INSERT = text("""
         walks              = VALUES(walks),
         strikeouts         = VALUES(strikeouts),
         stolen_bases       = VALUES(stolen_bases),
-        caught_stealing    = VALUES(caught_stealing)
+        caught_stealing    = VALUES(caught_stealing),
+        plate_appearances  = VALUES(plate_appearances),
+        hbp                = VALUES(hbp)
 """)
 
 _GAME_PITCHING_INSERT = text("""
@@ -483,12 +486,14 @@ _GAME_PITCHING_INSERT = text("""
         (game_id, player_id, team_id, league_year_id,
          games_started, win, loss, save_recorded,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
-         walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed)
+         walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed,
+         pitches_thrown, balls, strikes, hbp, wildpitches)
     VALUES
         (:game_id, :player_id, :team_id, :league_year_id,
          :games_started, :win, :loss, :save,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
-         :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)
+         :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed,
+         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)
     ON DUPLICATE KEY UPDATE
         games_started               = VALUES(games_started),
         win                         = VALUES(win),
@@ -501,21 +506,42 @@ _GAME_PITCHING_INSERT = text("""
         walks                       = VALUES(walks),
         strikeouts                  = VALUES(strikeouts),
         home_runs_allowed           = VALUES(home_runs_allowed),
-        inside_the_park_hr_allowed  = VALUES(inside_the_park_hr_allowed)
+        inside_the_park_hr_allowed  = VALUES(inside_the_park_hr_allowed),
+        pitches_thrown              = VALUES(pitches_thrown),
+        balls                       = VALUES(balls),
+        strikes                     = VALUES(strikes),
+        hbp                         = VALUES(hbp),
+        wildpitches                 = VALUES(wildpitches)
 """)
 
 
 def _insert_game_batting_lines(
-    conn, game_id: int, batters: Dict[str, Any], league_year_id: int
+    conn, game_id: int, batters: Dict[str, Any], league_year_id: int,
+    fielders: Dict[str, Any] = None,
 ) -> int:
+    # Build player_id → position lookup from fielders dict
+    pos_map: Dict[int, str] = {}
+    if fielders:
+        for key in fielders:
+            if "_" in key:
+                pid_part, pos_part = key.rsplit("_", 1)
+                try:
+                    pos_map.setdefault(int(pid_part), pos_part)
+                except ValueError:
+                    pass
+
     count = 0
     for player_id_str, b in batters.items():
         try:
+            pid = int(player_id_str)
+            # Position from batter dict first, then fielders lookup
+            pos = b.get("position") or pos_map.get(pid)
             conn.execute(_GAME_BATTING_INSERT, {
                 "game_id":            game_id,
-                "player_id":          int(player_id_str),
+                "player_id":          pid,
                 "team_id":            int(b["team_id"]),
                 "league_year_id":     league_year_id,
+                "position_code":      pos,
                 "at_bats":            int(b.get("at_bats", 0)),
                 "runs":               int(b.get("runs", 0)),
                 "hits":               int(b.get("hits", 0)),
@@ -528,6 +554,8 @@ def _insert_game_batting_lines(
                 "strikeouts":         int(b.get("strikeouts", 0)),
                 "stolen_bases":       int(b.get("stolen_bases", 0)),
                 "caught_stealing":    int(b.get("caught_stealing", 0)),
+                "plate_appearances":  int(b.get("plate_appearances", 0)),
+                "hbp":                int(b.get("hbp", 0)),
             })
             count += 1
         except Exception as e:
@@ -562,6 +590,11 @@ def _insert_game_pitching_lines(
                 "strikeouts":                  int(p.get("strikeouts", 0)),
                 "home_runs_allowed":           int(p.get("home_runs_allowed", 0)),
                 "inside_the_park_hr_allowed":  int(p.get("inside_the_park_hr_allowed", 0)),
+                "pitches_thrown":              int(p.get("pitches_thrown", 0)),
+                "balls":                       int(p.get("balls", 0)),
+                "strikes":                     int(p.get("strikes", 0)),
+                "hbp":                         int(p.get("hbp", 0)),
+                "wildpitches":                 int(p.get("wildpitches", 0)),
             })
             count += 1
         except Exception as e:
@@ -656,11 +689,22 @@ def accumulate_subweek_stats_bulk(
         pitchers = stats.get("pitchers") or {}
         fielders = stats.get("fielders") or {}
 
+        # Build player_id → position lookup from fielders dict
+        pos_map: Dict[int, str] = {}
+        for fkey in fielders:
+            if "_" in fkey:
+                pid_part, pos_part = fkey.rsplit("_", 1)
+                try:
+                    pos_map.setdefault(int(pid_part), pos_part)
+                except ValueError:
+                    pass
+
         # Batting season stats + per-game lines
         for pid_str, b in batters.items():
             try:
+                pid = int(pid_str)
                 params = {
-                    "player_id":          int(pid_str),
+                    "player_id":          pid,
                     "league_year_id":     league_year_id,
                     "team_id":            int(b["team_id"]),
                     "at_bats":            int(b.get("at_bats", 0)),
@@ -680,8 +724,12 @@ def accumulate_subweek_stats_bulk(
                     batting_params.append(params)
 
                 if game_id is not None:
+                    pos = b.get("position") or pos_map.get(pid)
                     game_batting_params.append({
                         "game_id": int(game_id),
+                        "position_code": pos,
+                        "plate_appearances": int(b.get("plate_appearances", 0)),
+                        "hbp": int(b.get("hbp", 0)),
                         **params,
                     })
             except Exception:
@@ -715,6 +763,11 @@ def accumulate_subweek_stats_bulk(
                 if game_id is not None:
                     game_pitching_params.append({
                         "game_id": int(game_id),
+                        "pitches_thrown": int(p.get("pitches_thrown", 0)),
+                        "balls": int(p.get("balls", 0)),
+                        "strikes": int(p.get("strikes", 0)),
+                        "hbp": int(p.get("hbp", 0)),
+                        "wildpitches": int(p.get("wildpitches", 0)),
                         **params,
                     })
             except Exception:

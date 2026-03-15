@@ -532,3 +532,110 @@ def _get_usage_prefs_from_cache(cache, player_ids: List[int]) -> Dict[int, str]:
         else:
             result[pid] = "normal"
     return result
+
+
+# -------------------------------------------------------------------
+# Rotation state advancement (post-game)
+# -------------------------------------------------------------------
+
+def advance_rotation_states_bulk(conn, payloads: List[Dict[str, Any]]) -> int:
+    """
+    After a subweek's games are played, advance each team's rotation slot
+    based on which pitcher actually started.
+
+    For each team that has a configured rotation, finds the slot of the
+    pitcher who started and sets current_slot to that slot so the next
+    game starts from the following slot.
+
+    Args:
+        conn: Active SQLAlchemy connection (caller manages commit).
+        payloads: List of game payloads (each has home_side/away_side
+                  with team_id and starting_pitcher_id).
+
+    Returns:
+        Number of team rotation states advanced.
+    """
+    from sqlalchemy import text as sa_text
+
+    # Collect (team_id, starter_id, game_id) pairs from all games
+    team_starters: Dict[int, tuple] = {}  # team_id → (starter_id, game_id)
+    for payload in payloads:
+        game_id = payload.get("game_id")
+        for side_key in ("home_side", "away_side"):
+            side = payload.get(side_key) or {}
+            team_id = side.get("team_id")
+            starter_id = side.get("starting_pitcher_id")
+            if team_id and starter_id:
+                # Last game in subweek wins (teams play at most once per subweek)
+                team_starters[int(team_id)] = (int(starter_id), game_id)
+
+    if not team_starters:
+        return 0
+
+    # Load all rotation configs + slots for these teams in one pass
+    team_ids_ph = ", ".join(f":t{i}" for i in range(len(team_starters)))
+    team_params = {f"t{i}": tid for i, tid in enumerate(team_starters.keys())}
+
+    rot_rows = conn.execute(sa_text(
+        f"SELECT id, team_id, rotation_size FROM team_pitching_rotation "
+        f"WHERE team_id IN ({team_ids_ph})"
+    ), team_params).mappings().all()
+
+    if not rot_rows:
+        return 0
+
+    rotation_ids = [int(r["id"]) for r in rot_rows]
+    rot_ids_ph = ", ".join(f":r{i}" for i in range(len(rotation_ids)))
+    rot_params = {f"r{i}": rid for i, rid in enumerate(rotation_ids)}
+
+    slot_rows = conn.execute(sa_text(
+        f"SELECT rotation_id, slot, player_id FROM team_pitching_rotation_slots "
+        f"WHERE rotation_id IN ({rot_ids_ph})"
+    ), rot_params).mappings().all()
+
+    # Build lookup: rotation_id → {player_id → slot}
+    pid_to_slot: Dict[int, Dict[int, int]] = {}
+    for sr in slot_rows:
+        rid = int(sr["rotation_id"])
+        pid_to_slot.setdefault(rid, {})[int(sr["player_id"])] = int(sr["slot"])
+
+    # Build rotation_id → team_id mapping
+    rot_by_team = {int(r["team_id"]): (int(r["id"]), int(r["rotation_size"])) for r in rot_rows}
+
+    # Advance each team's rotation state
+    count = 0
+    update_sql = sa_text("""
+        INSERT INTO team_rotation_state (team_id, current_slot, last_game_id, last_updated_at)
+        VALUES (:team_id, :new_slot, :game_id, NOW())
+        ON DUPLICATE KEY UPDATE
+            current_slot = :new_slot,
+            last_game_id = :game_id,
+            last_updated_at = NOW()
+    """)
+
+    for team_id, (starter_id, game_id) in team_starters.items():
+        rot_info = rot_by_team.get(team_id)
+        if not rot_info:
+            continue  # Team has no configured rotation
+
+        rotation_id, rotation_size = rot_info
+        slot_map = pid_to_slot.get(rotation_id, {})
+        starter_slot = slot_map.get(starter_id)
+
+        if starter_slot is not None:
+            # Advance to this slot so next pick starts from slot+1
+            new_slot = starter_slot
+        else:
+            # Starter wasn't in the rotation (desperation/fallback pick)
+            # Don't advance — keep current position
+            continue
+
+        conn.execute(update_sql, {
+            "team_id": team_id,
+            "new_slot": new_slot,
+            "game_id": int(game_id) if game_id else None,
+        })
+        count += 1
+
+    logger.info("advance_rotation_states_bulk: advanced %d team rotations", count)
+    return count

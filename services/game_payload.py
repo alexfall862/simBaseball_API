@@ -44,6 +44,30 @@ class EnginePlayerView:
         return self.data
 
 
+# Fields to strip from play-by-play before storage.
+# These are engine-internal diagnostics that have no frontend display value
+# and account for ~40-60% of PBP storage size.
+_PBP_STRIP_KEYS = frozenset({
+    "At_Bat_Modifiers",
+    "Interaction_Data",
+    "Timing_Diagnostics",
+    "Catch_Probability",
+    "Pre_R1",
+    "Pre_R2",
+    "Pre_R3",
+})
+
+
+def _trim_play_by_play(pbp_raw):
+    """Strip bulky engine-internal fields from play-by-play before storage."""
+    if not isinstance(pbp_raw, list):
+        return pbp_raw
+    return [
+        {k: v for k, v in play.items() if k not in _PBP_STRIP_KEYS}
+        for play in pbp_raw
+    ]
+
+
 class _DummyRow:
     """
     Lightweight stand-in so _compute_derived_raw_ratings can work with a dict
@@ -2114,7 +2138,8 @@ def _store_game_results(
         boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
         pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
         boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
-        pbp_str = json.dumps(pbp_raw) if pbp_raw else None
+        pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
+        pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
 
         try:
             conn.execute(insert_sql, {
@@ -2279,7 +2304,8 @@ def _store_game_results_bulk(
         boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
         pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
         boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
-        pbp_str = json.dumps(pbp_raw) if pbp_raw else None
+        pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
+        pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
 
         all_params.append({
             "game_id": game_id,
@@ -2936,6 +2962,26 @@ def build_week_payloads(
                     logger.exception(
                         f"Player state update failed for subweek '{subweek}': "
                         f"{state_err}"
+                    )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+
+                # Advance pitching rotation states after games
+                try:
+                    from services.rotation import advance_rotation_states_bulk
+                    rot_count = advance_rotation_states_bulk(conn, payloads)
+                    conn.commit()
+                    if rot_count:
+                        logger.info(
+                            f"Rotation advancement for subweek '{subweek}': "
+                            f"{rot_count} teams advanced"
+                        )
+                except Exception as rot_err:
+                    logger.exception(
+                        f"Rotation advancement failed for subweek '{subweek}': "
+                        f"{rot_err}"
                     )
                     try:
                         conn.rollback()
