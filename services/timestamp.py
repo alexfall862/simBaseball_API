@@ -10,6 +10,7 @@ This state is broadcast to all connected WebSocket clients whenever it changes.
 """
 
 import logging
+import time as _time
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -125,12 +126,25 @@ def _format_timestamp_for_frontend(row: Dict[str, Any]) -> Dict[str, Any]:
 # Fallback if no schedule exists yet
 _DEFAULT_SEASON_WEEKS = 52
 
+# TTL caches for rarely-changing lookups
+_weeks_cache: Dict[int, tuple] = {}   # {season: (total, monotonic_ts)}
+_WEEKS_TTL = 600  # 10 minutes
+
+_ly_id_cache: Dict[int, tuple] = {}   # {season_year: (league_year_id, monotonic_ts)}
+_LY_ID_TTL = 600  # 10 minutes
+
 
 def _get_total_season_weeks(season: int) -> int:
     """
     Query the actual max scheduled week from gamelist for the given season.
     Falls back to _DEFAULT_SEASON_WEEKS if no games exist.
     """
+    now = _time.monotonic()
+    if season in _weeks_cache:
+        val, ts = _weeks_cache[season]
+        if (now - ts) < _WEEKS_TTL:
+            return val
+
     try:
         engine = get_engine()
         with engine.connect() as conn:
@@ -140,7 +154,9 @@ def _get_total_season_weeks(season: int) -> int:
                 {"s": season},
             ).first()
             if row and row[0]:
-                return int(row[0])
+                result = int(row[0])
+                _weeks_cache[season] = (result, now)
+                return result
     except Exception:
         logger.debug("Could not query max season_week, using default")
     return _DEFAULT_SEASON_WEEKS
@@ -255,16 +271,26 @@ def get_enhanced_timestamp() -> Optional[Dict[str, Any]]:
     ts["AvailableActions"] = actions
     ts["TotalWeeks"] = _get_total_season_weeks(ts.get("Season", 2026))
 
-    # Resolve LeagueYearID from Season (year number)
+    # Resolve LeagueYearID from Season (year number) — cached
+    season_yr = ts.get("Season", 2026)
+    now = _time.monotonic()
+    if season_yr in _ly_id_cache:
+        cached_id, cached_ts = _ly_id_cache[season_yr]
+        if (now - cached_ts) < _LY_ID_TTL:
+            ts["LeagueYearID"] = cached_id
+            return ts
+
     try:
         engine = get_engine()
         with engine.connect() as conn:
             from sqlalchemy import text
             row = conn.execute(
                 text("SELECT id FROM league_years WHERE league_year = :yr"),
-                {"yr": ts.get("Season", 2026)},
+                {"yr": season_yr},
             ).first()
-            ts["LeagueYearID"] = row[0] if row else 1
+            ly_id = row[0] if row else 1
+            _ly_id_cache[season_yr] = (ly_id, now)
+            ts["LeagueYearID"] = ly_id
     except Exception:
         ts["LeagueYearID"] = 1
 
@@ -725,6 +751,13 @@ def update_timestamp(updates: Dict[str, Any], broadcast: bool = True) -> bool:
 
             logger.info(f"Timestamp updated: {filtered_updates}")
 
+            # Invalidate bootstrap season context cache
+            try:
+                from bootstrap import invalidate_season_context
+                invalidate_season_context()
+            except Exception:
+                pass
+
             # Broadcast to WebSocket clients
             if broadcast:
                 from services.websocket_manager import ws_manager
@@ -821,6 +854,13 @@ def advance_week(broadcast: bool = True) -> bool:
             conn.commit()
 
             logger.info(f"Advanced from week {current_week} to week {new_week}")
+
+            # Invalidate bootstrap season context cache
+            try:
+                from bootstrap import invalidate_season_context
+                invalidate_season_context()
+            except Exception:
+                pass
 
             # Decrement injury weeks and clean up healed players
             try:

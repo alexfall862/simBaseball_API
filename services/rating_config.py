@@ -14,6 +14,7 @@ position player overalls via the `rating_overall_weights` table.
 import logging
 import math
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
@@ -112,6 +113,21 @@ def get_rating_config(
     return config
 
 
+# ---------------------------------------------------------------------------
+# In-memory TTL cache for full rating config (ptype=None)
+# ---------------------------------------------------------------------------
+_rc_cache: Optional[Dict] = None
+_rc_ts: float = 0.0
+_RC_TTL: float = 300  # seconds
+
+
+def invalidate_rating_config_cache() -> None:
+    """Clear the cached rating config (call after admin edits)."""
+    global _rc_cache, _rc_ts
+    _rc_cache = None
+    _rc_ts = 0.0
+
+
 def get_rating_config_by_level_name(conn, ptype: Optional[str] = None) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
     """
     Same as get_rating_config but keyed by league_level string
@@ -119,6 +135,13 @@ def get_rating_config_by_level_name(conn, ptype: Optional[str] = None) -> Dict[s
 
     Returns: { ptype: { league_level: { attribute_key: { "mean", "std" } } } }
     """
+    global _rc_cache, _rc_ts
+
+    # Serve from cache when fetching full config (ptype=None)
+    now = time.monotonic()
+    if ptype is None and _rc_cache is not None and (now - _rc_ts) < _RC_TTL:
+        return _rc_cache
+
     sql = """
         SELECT rc.level_id, rc.ptype, l.league_level, rc.attribute_key,
                rc.mean_value, rc.std_dev
@@ -141,6 +164,11 @@ def get_rating_config_by_level_name(conn, ptype: Optional[str] = None) -> Dict[s
             "mean": float(r[4]),
             "std": float(r[5]),
         }
+
+    if ptype is None:
+        _rc_cache = config
+        _rc_ts = now
+
     return config
 
 

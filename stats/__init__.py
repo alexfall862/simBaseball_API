@@ -37,6 +37,7 @@ def batting_leaderboard():
 
     league_level = request.args.get("league_level", type=int)
     team_id = request.args.get("team_id", type=int)
+    org_id = request.args.get("org_id", type=int)
     position = request.args.get("position")
     sort = request.args.get("sort", "avg")
     order = request.args.get("order", "").lower()
@@ -93,6 +94,9 @@ def batting_leaderboard():
     if team_id:
         where_parts.append("bs.team_id = :tid")
         params["tid"] = team_id
+    if org_id:
+        where_parts.append("tm.orgID = :org_id")
+        params["org_id"] = org_id
     if league_level:
         where_parts.append("tm.team_level = :ll")
         params["ll"] = league_level
@@ -246,6 +250,7 @@ def pitching_leaderboard():
 
     league_level = request.args.get("league_level", type=int)
     team_id = request.args.get("team_id", type=int)
+    org_id = request.args.get("org_id", type=int)
     role = request.args.get("role", "").lower()
     sort = request.args.get("sort", "era")
     order = request.args.get("order", "").lower()
@@ -301,6 +306,9 @@ def pitching_leaderboard():
     if team_id:
         where_parts.append("ps.team_id = :tid")
         params["tid"] = team_id
+    if org_id:
+        where_parts.append("tm.orgID = :org_id")
+        params["org_id"] = org_id
     if league_level:
         where_parts.append("tm.team_level = :ll")
         params["ll"] = league_level

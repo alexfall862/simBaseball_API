@@ -164,6 +164,13 @@ def get_team_jersey(team_id: int, config: Optional[Dict[str, Any]] = None) -> st
     return random.Random(team_id).choice(JERSEY_IDS)
 
 
+# ---------------------------------------------------------------------------
+# In-memory face cache — keyed by (player_id, jersey), invalidated on config change
+# ---------------------------------------------------------------------------
+_face_cache: Dict[tuple, Dict[str, Any]] = {}
+_face_config_id: int = -1  # sentinel — will never match id()
+
+
 def generate_face(
     player_id: int,
     config: Optional[Dict[str, Any]] = None,
@@ -183,6 +190,17 @@ def generate_face(
     Returns:
         Flat dict with PascalCase keys matching the frontend FaceDataResponse.
     """
+    global _face_cache, _face_config_id
+
+    cfg_id = id(config)
+    if cfg_id != _face_config_id:
+        _face_cache = {}
+        _face_config_id = cfg_id
+
+    cache_key = (player_id, jersey)
+    if cache_key in _face_cache:
+        return _face_cache[cache_key]
+
     rng = random.Random(player_id)
     freq = {**DEFAULT_FREQUENCIES, **(config or {})}
 
@@ -203,7 +221,7 @@ def generate_face(
     # but use the team-level jersey if provided.
     _rng_jersey = rng.choice(JERSEY_IDS)
 
-    return {
+    result = {
         # Structure (always present)
         "Head":     rng.choice(HEAD_IDS),
         "Body":     rng.choice(BODY_IDS),
@@ -250,6 +268,9 @@ def generate_face(
         "NoseFlip":  rng.choice([True, False]),
         "MouthFlip": rng.choice([True, False]),
     }
+
+    _face_cache[cache_key] = result
+    return result
 
 
 def generate_faces_for_roster(

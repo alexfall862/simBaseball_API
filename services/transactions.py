@@ -172,6 +172,18 @@ def _log_transaction(conn, *, transaction_type: str, league_year_id: int,
     return result.lastrowid
 
 
+def _get_player_summary(conn, player_id: int) -> Dict[str, Any]:
+    """Fetch minimal player bio for enriching transaction responses."""
+    row = conn.execute(
+        text("SELECT firstName, lastName, ptype FROM simbbPlayers WHERE id = :pid"),
+        {"pid": player_id},
+    ).first()
+    if not row:
+        return {}
+    m = row._mapping
+    return {"firstname": m["firstName"], "lastname": m["lastName"], "ptype": m["ptype"]}
+
+
 def _get_contract_or_raise(conn, contract_id: int) -> Dict[str, Any]:
     """Fetch a single contract row or raise ValueError."""
     t = _tables_from_conn(conn)
@@ -263,6 +275,11 @@ def promote_player(conn, contract_id: int, target_level_id: int,
         "from_level": current_level,
         "to_level": target_level_id,
         "roster_warning": roster if roster["over_limit"] else None,
+        "player": {
+            **_get_player_summary(conn, c["playerID"]),
+            "current_level": target_level_id,
+            "on_ir": bool(c.get("onIR") or 0),
+        },
     }
 
 
@@ -311,6 +328,11 @@ def demote_player(conn, contract_id: int, target_level_id: int,
         "player_id": c["playerID"],
         "from_level": current_level,
         "to_level": target_level_id,
+        "player": {
+            **_get_player_summary(conn, c["playerID"]),
+            "current_level": target_level_id,
+            "on_ir": bool(c.get("onIR") or 0),
+        },
     }
 
 
@@ -350,6 +372,11 @@ def place_on_ir(conn, contract_id: int, league_year_id: int,
         "transaction_id": tx_id,
         "contract_id": contract_id,
         "player_id": c["playerID"],
+        "player": {
+            **_get_player_summary(conn, c["playerID"]),
+            "current_level": c["current_level"],
+            "on_ir": True,
+        },
     }
 
 
@@ -390,6 +417,11 @@ def activate_from_ir(conn, contract_id: int, league_year_id: int,
         "contract_id": contract_id,
         "player_id": c["playerID"],
         "roster_warning": roster if roster["over_limit"] else None,
+        "player": {
+            **_get_player_summary(conn, c["playerID"]),
+            "current_level": c["current_level"],
+            "on_ir": False,
+        },
     }
 
 
@@ -454,6 +486,11 @@ def release_player(conn, contract_id: int, org_id: int,
         "contract_id": contract_id,
         "player_id": c["playerID"],
         "years_remaining_on_books": len(detail_ids),
+        "player": {
+            **_get_player_summary(conn, c["playerID"]),
+            "current_level": None,
+            "on_ir": False,
+        },
     }
 
 
@@ -567,6 +604,11 @@ def buyout_player(conn, contract_id: int, org_id: int,
         "buyout_contract_id": new_contract_id,
         "buyout_amount": float(buyout_amount),
         "player_id": c["playerID"],
+        "player": {
+            **_get_player_summary(conn, c["playerID"]),
+            "current_level": None,
+            "on_ir": False,
+        },
     }
 
 

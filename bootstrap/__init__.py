@@ -1,5 +1,6 @@
 # bootstrap/__init__.py
 import logging
+import time
 from flask import Blueprint, jsonify
 from sqlalchemy import MetaData, Table, select, and_, text, func, literal
 from sqlalchemy.exc import SQLAlchemyError
@@ -195,24 +196,65 @@ def get_landing_all():
             except Exception:
                 log.debug("bootstrap/all: face config unavailable")
 
-            # ── Per-org data ─────────────────────────────────────
+            # ── Batch-load per-org data (replaces N+1 loop) ──────
+            batch_orgs = _get_all_organizations(conn, tables, org_ids)
+            batch_rosters = _get_all_rosters(conn, tables, org_ids)
+
+            # Build flat list of all team_ids across orgs for notification/news queries
+            all_team_ids_flat = []
+            org_team_map = {}  # {org_id: [team_ids]}
+            for oid in org_ids:
+                org = batch_orgs.get(oid)
+                if org is None:
+                    continue
+                tids = _get_org_team_ids(org)
+                org_team_map[oid] = tids
+                all_team_ids_flat.extend(tids)
+
+            batch_notifs = _get_all_notifications(conn, tables, all_team_ids_flat)
+            batch_news = _get_all_news(conn, tables, all_team_ids_flat)
+            batch_injuries = _get_all_injury_reports(conn, tables, org_ids)
+
+            # Listed positions — single batch call for all teams
+            pos_by_team = {}
+            try:
+                from services.listed_position import get_listed_positions_for_teams
+                lyid = ctx["current_league_year_id"]
+                pos_by_team = get_listed_positions_for_teams(conn, all_team_ids_flat, lyid)
+            except Exception:
+                pass
+
+            # Visibility context for all orgs' rosters
+            for oid in org_ids:
+                roster_map = batch_rosters.get(oid, {})
+                if roster_map:
+                    _attach_visibility_context(conn, oid, roster_map)
+
+            # ── Assemble per-org output ──────────────────────────
             orgs_map = {}
             all_face_data = {}
 
             for oid in org_ids:
-                org = _get_organization(conn, tables, oid)
+                org = batch_orgs.get(oid)
                 if org is None:
                     continue
 
-                team_ids = _get_org_team_ids(org)
+                team_ids = org_team_map.get(oid, [])
+                roster_map = batch_rosters.get(oid, {})
 
-                roster_map    = _get_roster_map(conn, tables, oid)
-                notifications = _get_notifications(conn, tables, team_ids)
-                news          = _get_news(conn, tables, team_ids)
-                top_batter    = _get_top_batter(conn, tables, ctx, team_ids)
-                top_pitcher   = _get_top_pitcher(conn, tables, ctx, team_ids)
-                top_fielder   = _get_top_fielder(conn, tables, ctx, team_ids)
-                injury_report = _get_injury_report(conn, tables, oid)
+                # Collect notifications/news by team_id
+                org_notifs = []
+                org_news = []
+                for tid in team_ids:
+                    org_notifs.extend(batch_notifs.get(tid, []))
+                    org_news.extend(batch_news.get(tid, []))
+
+                # Top players — still per-org (complex aggregation with LIMIT)
+                top_batter = _get_top_batter(conn, tables, ctx, team_ids)
+                top_pitcher = _get_top_pitcher(conn, tables, ctx, team_ids)
+                top_fielder = _get_top_fielder(conn, tables, ctx, team_ids)
+
+                injury_report = batch_injuries.get(oid, [])
 
                 financials = None
                 try:
@@ -220,18 +262,11 @@ def get_landing_all():
                 except Exception:
                     pass
 
-                # Listed positions per org's roster
-                try:
-                    from services.listed_position import get_listed_positions_for_teams
-                    lyid = ctx["current_league_year_id"]
-                    tids = list(roster_map.keys())
-                    pos_by_team = get_listed_positions_for_teams(conn, tids, lyid)
-                    for tid, players in roster_map.items():
-                        pos_map = pos_by_team.get(tid, {})
-                        for p in players:
-                            p["listed_position"] = pos_map.get(p["id"])
-                except Exception:
-                    pass
+                # Attach listed positions
+                for tid, players in roster_map.items():
+                    pm = pos_by_team.get(tid, {})
+                    for p in players:
+                        p["listed_position"] = pm.get(p["id"])
 
                 # Face data per org's roster
                 if face_config is not None:
@@ -245,8 +280,8 @@ def get_landing_all():
                 orgs_map[str(oid)] = {
                     "Organization":  org,
                     "RosterMap":     roster_map,
-                    "Notifications": notifications,
-                    "News":          news,
+                    "Notifications": org_notifs,
+                    "News":          org_news,
                     "TopBatter":     top_batter,
                     "TopPitcher":    top_pitcher,
                     "TopFielder":    top_fielder,
@@ -274,8 +309,27 @@ def get_landing_all():
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Season context cache — changes only on admin sim-advance
+_ctx_cache = None
+_ctx_ts = 0.0
+_CTX_TTL = 60  # seconds
+
+
+def invalidate_season_context():
+    """Clear cached season context (call after week/phase changes)."""
+    global _ctx_cache, _ctx_ts
+    _ctx_cache = None
+    _ctx_ts = 0.0
+
+
 def _resolve_season_context(conn, tables):
     """Derive current league year, season id, and week from league_state."""
+    global _ctx_cache, _ctx_ts
+
+    now = time.monotonic()
+    if _ctx_cache is not None and (now - _ctx_ts) < _CTX_TTL:
+        return dict(_ctx_cache)
+
     ls = tables["league_state"]
     ly = tables["league_years"]
     gw = tables["game_weeks"]
@@ -303,13 +357,333 @@ def _resolve_season_context(conn, tables):
     ).first()
     season_id = _row_to_dict(season_row)["id"] if season_row else None
 
-    return {
+    result = {
         "current_league_year_id": ls_d["current_league_year_id"],
         "league_year": ly_d["league_year"],
         "current_season_id": season_id,
         "current_week_index": gw_d.get("week_index"),
     }
 
+    _ctx_cache = result
+    _ctx_ts = now
+    return dict(result)
+
+
+# ---------------------------------------------------------------------------
+# Batch helpers for /landing/all (reduce N+1 queries)
+# ---------------------------------------------------------------------------
+
+def _get_all_organizations(conn, tables, org_ids):
+    """Fetch all orgs + their teams in 2 queries instead of 2×N."""
+    orgs = tables["organizations"]
+    teams = tables["teams"]
+
+    org_rows = conn.execute(select(orgs).where(orgs.c.id.in_(org_ids))).all()
+    team_rows = conn.execute(select(teams).where(teams.c.orgID.in_(org_ids))).all()
+
+    # Group teams by orgID
+    teams_by_org = {}
+    for tr in team_rows:
+        td = _row_to_dict(tr)
+        teams_by_org.setdefault(td["orgID"], []).append(td)
+
+    result = {}
+    for org_row in org_rows:
+        org_d = _row_to_dict(org_row)
+        oid = org_d["id"]
+
+        teams_by_level = {}
+        for td in teams_by_org.get(oid, []):
+            teams_by_level[td["team_level"]] = td
+
+        shaped_teams = {}
+        for level_id, td in teams_by_level.items():
+            level_name = LEVEL_MAP.get(level_id, f"level_{level_id}")
+            shaped_teams[level_name] = {
+                "team_id": td.get("id"),
+                "team_abbrev": td.get("team_abbrev"),
+                "team_city": td.get("team_city"),
+                "team_nickname": td.get("team_nickname"),
+                "team_full_name": (
+                    f"{td.get('team_name', '')} {td.get('team_nickname', '')}".strip()
+                    or None
+                ),
+                "color_one": td.get("color_one"),
+                "color_two": td.get("color_two"),
+                "color_three": td.get("color_three"),
+                "conference": td.get("conference"),
+                "division": td.get("division"),
+                "stadium_lat": float(td["stadium_lat"]) if td.get("stadium_lat") is not None else None,
+                "stadium_long": float(td["stadium_long"]) if td.get("stadium_long") is not None else None,
+            }
+
+        org_out = {
+            "id": oid,
+            "org_abbrev": org_d.get("org_abbrev"),
+            "cash": float(org_d["cash"]) if org_d.get("cash") is not None else None,
+            "league": org_d.get("league", "mlb"),
+            "teams": shaped_teams,
+        }
+
+        league = org_d.get("league", "mlb")
+        if league == "mlb":
+            org_out["owner_name"] = org_d.get("owner_name", "")
+            org_out["gm_name"] = org_d.get("gm_name", "")
+            org_out["manager_name"] = org_d.get("manager_name", "")
+            org_out["scout_name"] = org_d.get("scout_name", "")
+        elif league == "college":
+            org_out["coach"] = org_d.get("coach", "AI")
+
+        result[oid] = org_out
+
+    return result
+
+
+def _get_all_rosters(conn, tables, org_ids):
+    """
+    Fetch rosters for all orgs in 1 query instead of N.
+    Returns {org_id: {team_id: [player_dicts]}}.
+    """
+    import re
+    from rosters import _compute_derived_raw_ratings, _load_position_weights
+
+    c = tables["contracts"]
+    cd = tables["contract_details"]
+    cts = tables["contract_team_share"]
+    p = tables["players"]
+    t = tables["teams"]
+    lvl = tables["levels"]
+
+    stmt = (
+        select(
+            p,
+            c.c.id.label("contract_id"),
+            c.c.years.label("contract_years"),
+            c.c.current_year.label("contract_current_year"),
+            c.c.leagueYearSigned,
+            c.c.isActive.label("contract_isActive"),
+            c.c.isBuyout.label("contract_isBuyout"),
+            c.c.isExtension.label("contract_isExtension"),
+            c.c.isFinished.label("contract_isFinished"),
+            c.c.bonus.label("contract_bonus"),
+            c.c.current_level,
+            c.c.onIR,
+            cd.c.id.label("detail_id"),
+            cd.c.year.label("year_index"),
+            cd.c.salary,
+            cts.c.salary_share,
+            cts.c.orgID.label("org_id"),
+            t.c.id.label("team_id"),
+            t.c.team_abbrev,
+            lvl.c.league_level,
+        )
+        .select_from(
+            c.join(cd, and_(cd.c.contractID == c.c.id,
+                            cd.c.year == c.c.current_year))
+             .join(cts, cts.c.contractDetailsID == cd.c.id)
+             .join(p, p.c.id == c.c.playerID)
+             .join(t, and_(t.c.orgID == cts.c.orgID,
+                           t.c.team_level == c.c.current_level))
+             .join(lvl, lvl.c.id == c.c.current_level)
+        )
+        .where(and_(c.c.isActive == 1, cts.c.isHolder == 1, cts.c.orgID.in_(org_ids)))
+    )
+
+    rows = conn.execute(stmt).all()
+    if not rows:
+        return {}
+
+    # Load shared lookups once
+    dist_by_level = {}
+    try:
+        from services.rating_config import get_rating_config_by_level_name
+        dist_by_level = get_rating_config_by_level_name(conn) or {}
+    except Exception:
+        pass
+
+    position_weights = _load_position_weights(conn)
+
+    pitch_comp_re = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+    col_names = [k for k in rows[0]._mapping.keys()]
+    base_cols = [n for n in col_names if n.endswith("_base")]
+    pot_cols = [n for n in col_names if n.endswith("_pot")]
+    derived_cols = [n for n in col_names
+                    if n.endswith("_rating") or re.match(r"^pitch\d+_ovr$", n)]
+    bio_skip = set(base_cols + pot_cols + derived_cols +
+                   ["team", "current_level", "onIR", "salary",
+                    "salary_share", "team_id", "team_abbrev", "league_level",
+                    "contract_id", "contract_years", "contract_current_year",
+                    "leagueYearSigned", "contract_isActive", "contract_isBuyout",
+                    "contract_isExtension", "contract_isFinished", "contract_bonus",
+                    "detail_id", "year_index", "org_id"])
+
+    def _to_20_80(raw_val, mean, std):
+        if raw_val is None or mean is None:
+            return None
+        try:
+            x = float(raw_val)
+        except (TypeError, ValueError):
+            return None
+        if std is None or std <= 0:
+            z = 0.0
+        else:
+            z = (x - mean) / std
+        z = max(-3.0, min(3.0, z))
+        raw_score = 50.0 + (z / 3.0) * 30.0
+        score = int(round(max(20.0, min(80.0, raw_score)) / 5.0) * 5)
+        return max(20, min(80, score))
+
+    # {org_id: {team_id: [player_dicts]}}
+    all_rosters = {}
+    seen = set()
+    for row in rows:
+        m = row._mapping
+        player_id = m["id"]
+        org_id = m["org_id"]
+        team_id = m["team_id"]
+        if player_id in seen:
+            continue
+        seen.add(player_id)
+
+        ptype = (m.get("ptype") or "").strip()
+        league_level = m.get("league_level")
+
+        ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
+        dist_for_level = ptype_dist.get(league_level, {})
+
+        bio = {}
+        for k in col_names:
+            if k not in bio_skip:
+                bio[k] = m.get(k)
+
+        ratings = {}
+        for col in base_cols:
+            val = m.get(col)
+            mp = pitch_comp_re.match(col)
+            dist_key = f"pitch_{mp.group(1)}" if mp else col
+            d = dist_for_level.get(dist_key)
+            if d and d.get("mean") is not None:
+                ratings[col.replace("_base", "_display")] = _to_20_80(val, d["mean"], d["std"])
+            else:
+                ratings[col.replace("_base", "_display")] = None
+
+        raw_derived = _compute_derived_raw_ratings(row, position_weights)
+        for attr_name, raw_val in raw_derived.items():
+            d = dist_for_level.get(attr_name)
+            if d and d.get("mean") is not None:
+                ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
+            else:
+                ratings[attr_name] = None
+
+        potentials = {}
+        for col in pot_cols:
+            potentials[col] = m.get(col)
+
+        base_salary = m.get("salary")
+        share = m.get("salary_share")
+        salary_for_org = None
+        if base_salary is not None and share is not None:
+            try:
+                salary_for_org = float(base_salary) * float(share)
+            except (TypeError, ValueError):
+                pass
+
+        contract = {
+            "id": m.get("contract_id"),
+            "years": m.get("contract_years"),
+            "current_year": m.get("contract_current_year"),
+            "league_year_signed": m.get("leagueYearSigned"),
+            "is_active": bool(m.get("contract_isActive") or 0),
+            "is_buyout": bool(m.get("contract_isBuyout") or 0),
+            "is_extension": bool(m.get("contract_isExtension") or 0),
+            "is_finished": bool(m.get("contract_isFinished") or 0),
+            "on_ir": bool(m.get("onIR") or 0),
+            "bonus": float(m.get("contract_bonus") or 0),
+            "current_year_detail": {
+                "id": m.get("detail_id"),
+                "year_index": m.get("year_index"),
+                "base_salary": float(base_salary) if base_salary is not None else None,
+                "salary_share": float(share) if share is not None else None,
+                "salary_for_org": salary_for_org,
+            },
+        }
+
+        player = {
+            **bio,
+            "current_level": m.get("current_level"),
+            "league_level": league_level,
+            "team_abbrev": m.get("team_abbrev"),
+            "contract": contract,
+            "ratings": ratings,
+            "potentials": potentials,
+        }
+        all_rosters.setdefault(org_id, {}).setdefault(team_id, []).append(player)
+
+    return all_rosters
+
+
+def _get_all_notifications(conn, tables, team_ids):
+    """Fetch notifications for all teams in 1 query. Returns {team_id: [notif_dicts]}."""
+    if not team_ids:
+        return {}
+    n = tables["notifications"]
+    rows = conn.execute(
+        select(n).where(n.c.team_id.in_(team_ids)).order_by(n.c.created_at.desc())
+    ).all()
+    result = {}
+    for r in rows:
+        d = _row_to_dict(r)
+        result.setdefault(d["team_id"], []).append(d)
+    return result
+
+
+def _get_all_news(conn, tables, team_ids):
+    """Fetch news for all teams in 1 query. Returns {team_id: [news_dicts]}."""
+    if not team_ids:
+        return {}
+    n = tables["news"]
+    rows = conn.execute(
+        select(n).where(n.c.team_id.in_(team_ids)).order_by(n.c.created_at.desc())
+    ).all()
+    result = {}
+    for r in rows:
+        d = _row_to_dict(r)
+        result.setdefault(d["team_id"], []).append(d)
+    return result
+
+
+def _get_all_injury_reports(conn, tables, org_ids):
+    """Fetch injury reports for all orgs in 1 query. Returns {org_id: [injury_dicts]}."""
+    if not org_ids:
+        return {}
+    placeholders = ", ".join(f":oid{i}" for i in range(len(org_ids)))
+    sql = text(f"""
+        SELECT p.id AS player_id, p.firstname, p.lastname, p.ptype AS position,
+               it.name AS injury_type, pis.weeks_remaining,
+               cts.orgID AS org_id
+        FROM player_injury_state pis
+        JOIN player_injury_events pie ON pie.id = pis.current_event_id
+        JOIN injury_types it ON it.id = pie.injury_type_id
+        JOIN simbbPlayers p ON p.id = pis.player_id
+        JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+             AND cts.isHolder = 1 AND cts.orgID IN ({placeholders})
+        WHERE pis.status = 'injured'
+    """)
+    params = {f"oid{i}": oid for i, oid in enumerate(org_ids)}
+    rows = conn.execute(sql, params).all()
+    result = {}
+    for r in rows:
+        d = _row_to_dict(r)
+        oid = d.pop("org_id")
+        result.setdefault(oid, []).append(d)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Single-org helpers (used by /landing/<org_id>)
+# ---------------------------------------------------------------------------
 
 def _get_organization(conn, tables, org_id):
     """Get organization with team structure and role fields."""

@@ -209,13 +209,14 @@ def admin_seed_rating_config():
 
     try:
         from db import get_engine
-        from services.rating_config import seed_rating_config
+        from services.rating_config import seed_rating_config, invalidate_rating_config_cache
 
         engine = get_engine()
         with engine.connect() as conn:
             result = seed_rating_config(conn)
             conn.commit()
 
+        invalidate_rating_config_cache()
         return jsonify(ok=True, **result)
 
     except Exception as e:

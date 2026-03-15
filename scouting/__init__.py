@@ -37,6 +37,7 @@ from services.attribute_visibility import (
     fuzz_20_80,
     base_to_letter_grade as visibility_base_to_letter_grade,
     PITCH_COMPONENT_RE as VIS_PITCH_RE,
+    _load_scouting_actions_batch,
 )
 from services.rating_config import get_rating_config_by_level_name
 
@@ -1310,6 +1311,246 @@ def api_scouted_player(player_id):
         return jsonify(error="db_error", message=str(e)), 500
     except Exception as e:
         log.exception("scouting error")
+        return jsonify(error="server_error", message=str(e)), 500
+
+
+# -------------------------------------------------------------------
+# Endpoint 5b: Batch Scouted Player Profiles
+# -------------------------------------------------------------------
+
+@scouting_bp.get("/scouting/players/batch")
+def api_scouted_players_batch():
+    """
+    Get scouting data for multiple players in a single request.
+
+    Query params:
+      org_id (required), league_year_id (required),
+      player_ids (required, comma-separated, max 200)
+
+    Returns: { players: { "id": {same shape as single-player}, ... },
+               not_found: [id, ...] }
+    """
+    org_id = request.args.get("org_id", type=int)
+    league_year_id = request.args.get("league_year_id", type=int)
+    player_ids_raw = request.args.get("player_ids", "")
+
+    if not org_id or not league_year_id or not player_ids_raw:
+        return jsonify(error="missing_fields",
+                       fields=["org_id", "league_year_id", "player_ids"]), 400
+
+    try:
+        player_ids = [int(x.strip()) for x in player_ids_raw.split(",") if x.strip()]
+    except ValueError:
+        return jsonify(error="validation",
+                       message="player_ids must be comma-separated integers"), 400
+
+    if not player_ids:
+        return jsonify(error="validation", message="player_ids is empty"), 400
+    if len(player_ids) > 200:
+        return jsonify(error="validation",
+                       message="Maximum 200 players per batch"), 400
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            # -- Query 1: batch visibility info (holding org + level per player)
+            ph = ", ".join(f":pid{i}" for i in range(len(player_ids)))
+            pid_params = {f"pid{i}": pid for i, pid in enumerate(player_ids)}
+
+            vis_rows = conn.execute(sa_text(f"""
+                SELECT p.id, cts.orgID AS holding_org, c.current_level
+                FROM simbbPlayers p
+                JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+                JOIN contractDetails cd ON cd.contractID = c.id
+                     AND cd.year = c.current_year
+                JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+                     AND cts.isHolder = 1
+                WHERE p.id IN ({ph})
+            """), pid_params).all()
+
+            vis_map = {}  # player_id -> {holding_org, current_level}
+            for r in vis_rows:
+                m = r._mapping
+                vis_map[m["id"]] = {
+                    "holding_org": m["holding_org"],
+                    "current_level": m["current_level"],
+                }
+
+            # -- Query 2: batch scouting actions
+            found_ids = list(vis_map.keys())
+            actions_map = _load_scouting_actions_batch(conn, org_id, found_ids) \
+                if found_ids else {}
+
+            # -- Query 3: batch player data
+            player_data = {}
+            if found_ids:
+                ph2 = ", ".join(f":fp{i}" for i in range(len(found_ids)))
+                fp_params = {f"fp{i}": pid for i, pid in enumerate(found_ids)}
+                p_rows = conn.execute(
+                    sa_text(f"SELECT * FROM simbbPlayers WHERE id IN ({ph2})"),
+                    fp_params,
+                ).all()
+                for r in p_rows:
+                    d = {}
+                    for key, value in r._mapping.items():
+                        if hasattr(value, "is_finite"):
+                            value = float(value)
+                        d[key] = value
+                    player_data[d["id"]] = d
+
+            # -- Query 4: batch contracts
+            contract_map = {}  # player_id -> contract dict
+            if found_ids:
+                ct_rows = conn.execute(sa_text(f"""
+                    SELECT c.playerID,
+                           c.id AS contract_id, c.years, c.current_year,
+                           c.leagueYearSigned, c.isActive, c.isBuyout,
+                           c.isExtension, c.isFinished, c.current_level, c.onIR,
+                           c.bonus,
+                           cd.id AS detail_id, cd.year AS year_index,
+                           cd.salary AS base_salary,
+                           cts.salary_share,
+                           cts.orgID AS org_id,
+                           o.org_abbrev
+                    FROM contracts c
+                    JOIN contractDetails cd
+                         ON cd.contractID = c.id AND cd.year = c.current_year
+                    JOIN contractTeamShare cts
+                         ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                    JOIN organizations o ON o.id = cts.orgID
+                    WHERE c.playerID IN ({ph2}) AND c.isActive = 1
+                """), fp_params).all()
+
+                for r in ct_rows:
+                    cm = r._mapping
+                    base_salary = cm["base_salary"]
+                    share = cm["salary_share"]
+                    salary_for_org = None
+                    if base_salary is not None and share is not None:
+                        try:
+                            salary_for_org = float(base_salary) * float(share)
+                        except (TypeError, ValueError):
+                            pass
+                    contract_map[cm["playerID"]] = {
+                        "id": cm["contract_id"],
+                        "years": cm["years"],
+                        "current_year": cm["current_year"],
+                        "league_year_signed": cm["leagueYearSigned"],
+                        "is_active": bool(cm["isActive"] or 0),
+                        "is_buyout": bool(cm["isBuyout"] or 0),
+                        "is_extension": bool(cm["isExtension"] or 0),
+                        "is_finished": bool(cm["isFinished"] or 0),
+                        "on_ir": bool(cm["onIR"] or 0),
+                        "bonus": float(cm["bonus"] or 0),
+                        "current_level": cm["current_level"],
+                        "current_year_detail": {
+                            "id": cm["detail_id"],
+                            "year_index": cm["year_index"],
+                            "base_salary": float(base_salary) if base_salary is not None else None,
+                            "salary_share": float(share) if share is not None else None,
+                            "salary_for_org": salary_for_org,
+                        },
+                        "_org_id": cm["org_id"],
+                        "_org_abbrev": cm["org_abbrev"],
+                    }
+
+            # -- Query 5: batch listed positions
+            pos_map = {}  # player_id -> display position
+            if found_ids:
+                from services.listed_position import POSITION_DISPLAY
+                lp_rows = conn.execute(sa_text(f"""
+                    SELECT player_id, position_code
+                    FROM player_listed_position
+                    WHERE player_id IN ({ph2})
+                """), fp_params).all()
+                for r in lp_rows:
+                    pos_map[int(r[0])] = POSITION_DISPLAY.get(r[1], r[1])
+
+            # -- Rating config (loaded once)
+            dist_by_level = get_rating_config_by_level_name(conn) or {}
+
+        # -- Assembly: build per-player responses outside the connection
+        players_result = {}
+        not_found = []
+
+        for pid in player_ids:
+            if pid not in vis_map or pid not in player_data:
+                not_found.append(pid)
+                continue
+
+            vi = vis_map[pid]
+            holding_org = vi["holding_org"]
+            unlocked = list(actions_map.get(pid, set()))
+            unlocked_set = actions_map.get(pid, set())
+
+            # Determine pool (same logic as scouting_service.py:318-326)
+            if holding_org == USHS_ORG_ID:
+                pool = "hs"
+            elif is_college_org(holding_org):
+                pool = "college"
+            elif holding_org == INTAM_ORG_ID:
+                pool = "intam"
+            else:
+                pool = "pro"
+
+            # Build available_actions (same logic as scouting_service.py:338-368)
+            available = []
+            if pool == "hs" and is_college_org(org_id):
+                if "hs_report" not in unlocked_set:
+                    available.append("hs_report")
+                if "hs_report" in unlocked_set and "recruit_potential_fuzzed" not in unlocked_set:
+                    available.append("recruit_potential_fuzzed")
+                if "recruit_potential_fuzzed" in unlocked_set and "recruit_potential_precise" not in unlocked_set:
+                    available.append("recruit_potential_precise")
+            elif pool in ("college", "intam"):
+                if "college_potential_precise" not in unlocked_set:
+                    available.append("college_potential_precise")
+                if MLB_ORG_MIN <= org_id <= MLB_ORG_MAX:
+                    if "draft_attrs_fuzzed" not in unlocked_set:
+                        available.append("draft_attrs_fuzzed")
+                    if "draft_attrs_fuzzed" in unlocked_set and "draft_attrs_precise" not in unlocked_set:
+                        available.append("draft_attrs_precise")
+                    if "draft_potential_precise" not in unlocked_set:
+                        available.append("draft_potential_precise")
+            elif pool == "pro":
+                if "pro_attrs_precise" not in unlocked_set:
+                    available.append("pro_attrs_precise")
+                if "pro_potential_precise" not in unlocked_set:
+                    available.append("pro_potential_precise")
+
+            visibility = {
+                "pool": pool,
+                "unlocked": unlocked,
+                "available_actions": available,
+                "_org_id": org_id,
+            }
+
+            # Enrich player_dict with contract org info
+            pdict = player_data[pid]
+            ct = contract_map.get(pid)
+            if ct:
+                pdict["current_level"] = ct["current_level"]
+                pdict["org_id"] = ct.pop("_org_id", None)
+                pdict["org_abbrev"] = ct.pop("_org_abbrev", None)
+
+            # Build response (pure computation)
+            response = _build_scouted_response(pdict, visibility, dist_by_level)
+            response["contract"] = ct
+            response["listed_position"] = pos_map.get(pid)
+
+            # Clean up internal field
+            del visibility["_org_id"]
+            response["visibility"] = visibility
+
+            players_result[str(pid)] = response
+
+        return jsonify(players=players_result, not_found=not_found), 200
+
+    except SQLAlchemyError as e:
+        log.exception("scouting batch db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting batch error")
         return jsonify(error="server_error", message=str(e)), 500
 
 
