@@ -86,7 +86,6 @@ def _format_strategy(d: dict) -> dict:
         "id": d.get("id"),
         "player_id": d.get("playerID"),
         "org_id": d.get("orgID"),
-        "user_id": d.get("userID"),
         "plate_approach": d.get("plate_approach") or DEFAULT_PLAYER_STRATEGY["plate_approach"],
         "pitching_approach": d.get("pitching_approach") or DEFAULT_PLAYER_STRATEGY["pitching_approach"],
         "baserunning_approach": d.get("baserunning_approach") or DEFAULT_PLAYER_STRATEGY["baserunning_approach"],
@@ -159,7 +158,6 @@ def get_player_strategy(org_id: int, player_id: int):
         defaults["player_id"] = player_id
         defaults["org_id"] = org_id
         defaults["id"] = None
-        defaults["user_id"] = None
         return jsonify(defaults), 200
     except SQLAlchemyError:
         log.exception("gameplanning: get player strategy db error")
@@ -170,9 +168,6 @@ def get_player_strategy(org_id: int, player_id: int):
 def put_player_strategy(org_id: int, player_id: int):
     """Upsert a player's strategy."""
     body = request.get_json(silent=True) or {}
-    user_id = body.get("user_id")
-    if not user_id:
-        return jsonify(error="validation_error", message="user_id is required"), 400
 
     # Validate optional fields
     errors = []
@@ -241,11 +236,11 @@ def put_player_strategy(org_id: int, player_id: int):
         pass
 
     set_clause = ", ".join(f"{k} = VALUES({k})" for k in values) if values else "id = id"
-    col_names = ["playerID", "orgID", "userID"] + list(values.keys())
+    col_names = ["playerID", "orgID"] + list(values.keys())
     placeholders = ", ".join(f":{c}" for c in col_names)
     col_list = ", ".join(col_names)
 
-    params = {"playerID": player_id, "orgID": org_id, "userID": user_id}
+    params = {"playerID": player_id, "orgID": org_id}
     params.update(values)
 
     sql = text(
@@ -262,7 +257,7 @@ def put_player_strategy(org_id: int, player_id: int):
             # Fetch updated row
             row = conn.execute(
                 select(tbl).where(
-                    and_(tbl.c.playerID == player_id, tbl.c.orgID == org_id, tbl.c.userID == user_id)
+                    and_(tbl.c.playerID == player_id, tbl.c.orgID == org_id)
                 ).limit(1)
             ).first()
         if row:

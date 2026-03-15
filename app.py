@@ -69,8 +69,8 @@ class Config:
     DB_CONNECT_TIMEOUT_S = int(os.getenv("DB_CONNECT_TIMEOUT_S", "5"))
 
     # SQLAlchemy pool settings
-    DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
-    DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+    DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "8"))
+    DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "8"))
     DB_POOL_RECYCLE_S = int(os.getenv("DB_POOL_RECYCLE_S", "300"))
     DB_POOL_PRE_PING = True  # important for long-lived connections
 
