@@ -2,7 +2,7 @@
 
 from typing import Dict
 from flask import Blueprint, jsonify, request, current_app
-from sqlalchemy import MetaData, Table, select, and_, literal, func
+from sqlalchemy import MetaData, Table, select, and_, literal, func, text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
 import re
 from db import get_engine
@@ -52,7 +52,11 @@ def _get_tables():
             "players": Table("simbbPlayers", md, autoload_with=engine),
             "levels": Table("levels", md, autoload_with=engine),
             "teams": Table("teams", md, autoload_with=engine),
-
+            "league_years": Table("league_years", md, autoload_with=engine),
+            "game_weeks": Table("game_weeks", md, autoload_with=engine),
+            "league_state": Table("league_state", md, autoload_with=engine),
+            "org_ledger_entries": Table("org_ledger_entries", md, autoload_with=engine),
+            "team_weekly_record": Table("team_weekly_record", md, autoload_with=engine),
         }
     return rosters_bp._tables
 
@@ -98,6 +102,57 @@ def _get_player_column_categories():
         "bio": bio_cols,
     }
     return rosters_bp._player_col_cats
+
+def _load_stamina_for_players(conn, player_ids):
+    """
+    Batch-load current stamina from player_fatigue_state for a list of player IDs.
+
+    Returns a dict: {player_id: {"stamina": int, "has_fatigue_data": bool}}
+    Players without a fatigue row get stamina=100, has_fatigue_data=False.
+    """
+    if not player_ids:
+        return {}
+
+    # Resolve current league_year_id from league_state
+    ly_row = conn.execute(sa_text(
+        "SELECT current_league_year_id FROM league_state LIMIT 1"
+    )).first()
+    if not ly_row or not ly_row[0]:
+        return {}
+    league_year_id = ly_row[0]
+
+    placeholders = ", ".join(f":p{i}" for i in range(len(player_ids)))
+    params = {f"p{i}": pid for i, pid in enumerate(player_ids)}
+    params["lyid"] = league_year_id
+
+    rows = conn.execute(sa_text(
+        f"SELECT player_id, stamina "
+        f"FROM player_fatigue_state "
+        f"WHERE league_year_id = :lyid AND player_id IN ({placeholders})"
+    ), params).all()
+
+    stamina_map = {}
+    for r in rows:
+        stamina_map[r[0]] = {"stamina": r[1], "has_fatigue_data": True}
+
+    return stamina_map
+
+
+def _attach_stamina_to_players(conn, players_out):
+    """Attach stamina and has_fatigue_data fields to a list of player dicts."""
+    pids = [p["id"] for p in players_out if p.get("id")]
+    if not pids:
+        return
+    stamina_map = _load_stamina_for_players(conn, pids)
+    for p in players_out:
+        pid = p.get("id")
+        if pid and pid in stamina_map:
+            p["stamina"] = stamina_map[pid]["stamina"]
+            p["has_fatigue_data"] = True
+        else:
+            p["stamina"] = 100
+            p["has_fatigue_data"] = False
+
 
 _DEFAULT_POSITION_WEIGHTS = {
     "c_rating": {
@@ -1145,8 +1200,7 @@ def get_org_roster(org_abbrev: str):
 
             # Attach listed positions
             try:
-                from services.listed_position import POSITION_DISPLAY
-                from sqlalchemy import text as sa_text
+                from services.listed_position import POSITION_DISPLAY  # noqa: F811
                 pids = [p["id"] for p in players_out if p.get("id")]
                 if pids:
                     ph = ", ".join(f":p{i}" for i in range(len(pids)))
@@ -1159,6 +1213,12 @@ def get_org_roster(org_abbrev: str):
                     lp_map = {r[0]: POSITION_DISPLAY.get(r[1], r[1]) for r in lp_rows}
                     for p in players_out:
                         p["listed_position"] = lp_map.get(p["id"])
+            except Exception:
+                pass
+
+            # Attach stamina data
+            try:
+                _attach_stamina_to_players(conn, players_out)
             except Exception:
                 pass
 
@@ -1299,6 +1359,43 @@ def get_all_rosters_grouped():
             if include_faces and rows:
                 face_data = _generate_faces_for_rows(conn, rows)
 
+            by_org = {}
+            seen_per_org = {}
+
+            for row in rows:
+                m = row._mapping
+                this_org_abbrev = m["org_abbrev"]
+                org_id = m["org_id"]
+
+                player = _build_player_with_ratings(
+                    row, dist_by_level, col_cats, position_weights
+                )
+                pid = player.get("id")
+
+                bucket = by_org.setdefault(
+                    this_org_abbrev,
+                    {
+                        "org_id": org_id,
+                        "org_abbrev": this_org_abbrev,
+                        "players": [],
+                    },
+                )
+
+                seen_ids = seen_per_org.setdefault(this_org_abbrev, set())
+                if pid is not None and pid in seen_ids:
+                    continue
+                if pid is not None:
+                    seen_ids.add(pid)
+
+                bucket["players"].append(player)
+
+            # Attach stamina to all players across all orgs
+            try:
+                all_players = [p for b in by_org.values() for p in b["players"]]
+                _attach_stamina_to_players(conn, all_players)
+            except Exception:
+                pass
+
     except SQLAlchemyError:
         return (
             jsonify(
@@ -1311,36 +1408,6 @@ def get_all_rosters_grouped():
             ),
             503,
         )
-
-    by_org = {}
-    seen_per_org = {}
-
-    for row in rows:
-        m = row._mapping
-        this_org_abbrev = m["org_abbrev"]
-        org_id = m["org_id"]
-
-        player = _build_player_with_ratings(
-            row, dist_by_level, col_cats, position_weights
-        )
-        pid = player.get("id")
-
-        bucket = by_org.setdefault(
-            this_org_abbrev,
-            {
-                "org_id": org_id,
-                "org_abbrev": this_org_abbrev,
-                "players": [],
-            },
-        )
-
-        seen_ids = seen_per_org.setdefault(this_org_abbrev, set())
-        if pid is not None and pid in seen_ids:
-            continue
-        if pid is not None:
-            seen_ids.add(pid)
-
-        bucket["players"].append(player)
 
     # If org query param was provided, return a single-org structure
     if org_abbrev:
@@ -2184,11 +2251,11 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
     - ending_balance: after this year's activity + interest
     """
     engine = get_engine()
-    md = MetaData()
-    orgs = Table("organizations", md, autoload_with=engine)
-    league_years = Table("league_years", md, autoload_with=engine)
-    game_weeks = Table("game_weeks", md, autoload_with=engine)
-    ledger = Table("org_ledger_entries", md, autoload_with=engine)
+    tables = _get_tables()
+    orgs = tables["organizations"]
+    league_years = tables["league_years"]
+    game_weeks = tables["game_weeks"]
+    ledger = tables["org_ledger_entries"]
 
     with engine.connect() as conn:
         # --- Resolve org ---
@@ -2388,9 +2455,9 @@ def get_league_financial_summary(league_year: int):
       }
     """
     engine = get_engine()
-    md = MetaData()
-    orgs = Table("organizations", md, autoload_with=engine)
-    league_years = Table("league_years", md, autoload_with=engine)
+    tables = _get_tables()
+    orgs = tables["organizations"]
+    league_years = tables["league_years"]
 
     with engine.connect() as conn:
         ly_row = conn.execute(
@@ -2486,11 +2553,11 @@ def get_org_ledger(org_abbrev: str):
     entry_type = request.args.get("entry_type")
 
     engine = get_engine()
-    md = MetaData()
-    orgs = Table("organizations", md, autoload_with=engine)
-    league_years = Table("league_years", md, autoload_with=engine)
-    game_weeks = Table("game_weeks", md, autoload_with=engine)
-    ledger = Table("org_ledger_entries", md, autoload_with=engine)
+    tables = _get_tables()
+    orgs = tables["organizations"]
+    league_years = tables["league_years"]
+    game_weeks = tables["game_weeks"]
+    ledger = tables["org_ledger_entries"]
 
     try:
         with engine.connect() as conn:
@@ -2596,11 +2663,11 @@ def get_org_weekly_record(org_abbrev: str):
         ), 400
 
     engine = get_engine()
-    md = MetaData()
-    orgs = Table("organizations", md, autoload_with=engine)
-    league_years = Table("league_years", md, autoload_with=engine)
-    game_weeks = Table("game_weeks", md, autoload_with=engine)
-    team_weekly = Table("team_weekly_record", md, autoload_with=engine)
+    tables = _get_tables()
+    orgs = tables["organizations"]
+    league_years = tables["league_years"]
+    game_weeks = tables["game_weeks"]
+    team_weekly = tables["team_weekly_record"]
 
     try:
         with engine.connect() as conn:
@@ -2701,10 +2768,10 @@ def get_league_state():
     Assumes a single row in league_state.
     """
     engine = get_engine()
-    md = MetaData()
-    league_state = Table("league_state", md, autoload_with=engine)
-    league_years = Table("league_years", md, autoload_with=engine)
-    game_weeks = Table("game_weeks", md, autoload_with=engine)
+    tables = _get_tables()
+    league_state = tables["league_state"]
+    league_years = tables["league_years"]
+    game_weeks = tables["game_weeks"]
 
     try:
         with engine.connect() as conn:

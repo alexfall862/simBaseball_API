@@ -69,8 +69,8 @@ class Config:
     DB_CONNECT_TIMEOUT_S = int(os.getenv("DB_CONNECT_TIMEOUT_S", "5"))
 
     # SQLAlchemy pool settings
-    DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
-    DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "5"))
+    DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
+    DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
     DB_POOL_RECYCLE_S = int(os.getenv("DB_POOL_RECYCLE_S", "300"))
     DB_POOL_PRE_PING = True  # important for long-lived connections
 
@@ -79,7 +79,7 @@ class Config:
     REQUEST_SOFT_TIMEOUT_S = int(os.getenv("REQUEST_SOFT_TIMEOUT_S", "12"))  # app-level guard
 
     # Rate limiting
-    RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))  # per window
+    RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "300"))  # per window
     RATE_LIMIT_WINDOW_S = int(os.getenv("RATE_LIMIT_WINDOW_S", "60"))   # seconds
 
     # Feature flags
@@ -391,6 +391,24 @@ def create_app(config_object=Config):
         if not limiter.is_allowed(key):
             return jsonify(error="rate_limited", message="Too many requests"), 429
 
+    @app.before_request
+    def warn_pool_pressure():
+        """Log a warning when the connection pool is >80% checked out."""
+        try:
+            eng = app.engine
+            if eng is None:
+                return
+            pool = eng.pool
+            max_conns = pool.size() + pool._max_overflow
+            checked_out = pool.checkedout()
+            if max_conns > 0 and checked_out / max_conns >= 0.8:
+                logging.getLogger("app.pool").warning(
+                    "Pool pressure: checked_out=%s/%s (overflow=%s checkedin=%s)",
+                    checked_out, max_conns, pool.overflow(), pool.checkedin(),
+                )
+        except Exception:
+            pass
+
     # Database engine (SQLAlchemy Core)
     if not app.config["DATABASE_URL"]:
         logging.getLogger("app").warning("DATABASE_URL not set. /readyz will fail.")
@@ -446,6 +464,15 @@ def create_app(config_object=Config):
 
     @app.errorhandler(SQLAlchemyError)
     def handle_db_ex(e):
+        # Log pool stats on DB errors to help diagnose exhaustion
+        try:
+            pool = app.engine.pool
+            logging.error(
+                "Database error — pool status: size=%s checked_out=%s overflow=%s checkedin=%s",
+                pool.size(), pool.checkedout(), pool.overflow(), pool.checkedin(),
+            )
+        except Exception:
+            pass
         logging.exception("Database error")
         return jsonify(error="database_error", message=str(getattr(e, "__cause__", e))), 500
 

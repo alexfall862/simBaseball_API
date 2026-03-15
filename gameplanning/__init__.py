@@ -171,7 +171,7 @@ def put_player_strategy(org_id: int, player_id: int):
     """Upsert a player's strategy."""
     body = request.get_json(silent=True) or {}
     user_id = body.get("user_id")
-    if user_id is None:
+    if not user_id:
         return jsonify(error="validation_error", message="user_id is required"), 400
 
     # Validate optional fields
