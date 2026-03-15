@@ -1240,14 +1240,37 @@ def admin_approve_trade(conn, proposal_id: int, league_year_id: int,
 # ---------------------------------------------------------------------------
 
 def get_transaction_log(conn, org_id: int = None, transaction_type: str = None,
-                        league_year_id: int = None,
+                        league_year_id: int = None, tx_id: int = None,
+                        player_id: int = None,
                         limit: int = 100) -> List[Dict[str, Any]]:
     """Query the transaction audit log with optional filters."""
     t = _tables_from_conn(conn)
     tx = t["tx_log"]
-    stmt = select(tx)
+    p = t["players"]
+    orgs = t["organizations"]
+    orgs2 = orgs.alias("orgs2")
+
+    stmt = (
+        select(
+            tx,
+            p.c.firstname.label("player_firstname"),
+            p.c.lastname.label("player_lastname"),
+            orgs.c.org_abbrev.label("primary_org_abbrev"),
+            orgs2.c.org_abbrev.label("secondary_org_abbrev"),
+        )
+        .select_from(
+            tx
+            .outerjoin(p, tx.c.player_id == p.c.id)
+            .outerjoin(orgs, tx.c.primary_org_id == orgs.c.id)
+            .outerjoin(orgs2, tx.c.secondary_org_id == orgs2.c.id)
+        )
+    )
 
     conditions = []
+    if tx_id is not None:
+        conditions.append(tx.c.id == tx_id)
+    if player_id is not None:
+        conditions.append(tx.c.player_id == player_id)
     if org_id is not None:
         conditions.append(
             (tx.c.primary_org_id == org_id) | (tx.c.secondary_org_id == org_id)
@@ -1266,6 +1289,10 @@ def get_transaction_log(conn, org_id: int = None, transaction_type: str = None,
         d = dict(r._mapping)
         if isinstance(d.get("details"), str):
             d["details"] = json.loads(d["details"])
+        # Build player_name from joined columns
+        fn = d.pop("player_firstname", None)
+        ln = d.pop("player_lastname", None)
+        d["player_name"] = f"{fn} {ln}" if fn and ln else None
         results.append(d)
     return results
 

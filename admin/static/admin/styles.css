@@ -672,6 +672,16 @@ textarea {
   color: var(--success);
 }
 
+.badge-primary {
+  background: rgba(59, 130, 246, 0.2);
+  color: var(--accent);
+}
+
+.badge-secondary {
+  background: rgba(107, 114, 128, 0.2);
+  color: var(--text-muted);
+}
+
 /* Inline code */
 .data-table code {
   font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;

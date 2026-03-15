@@ -3180,6 +3180,145 @@
   // Transactions — Transaction Log
   // -----------------------------------------------------------------------
 
+  // ── Transaction Log helpers ──────────────────────────────────────
+
+  const TX_TYPE_BADGES = {
+    promote: 'badge-info', demote: 'badge-info',
+    ir_place: 'badge-warning', ir_activate: 'badge-warning',
+    release: 'badge-danger', buyout: 'badge-danger',
+    signing: 'badge-success', extension: 'badge-success',
+    trade: 'badge-primary',
+  };
+
+  function _txSummary(e) {
+    const d = e.details || {};
+    const player = e.player_name || `#${e.player_id}`;
+    const org = e.primary_org_abbrev || `Org #${e.primary_org_id}`;
+    const org2 = e.secondary_org_abbrev || (e.secondary_org_id ? `Org #${e.secondary_org_id}` : null);
+    switch (e.transaction_type) {
+      case 'promote':
+        return `${player} promoted L${d.from_level} &rarr; L${d.to_level} (${org})`;
+      case 'demote':
+        return `${player} demoted L${d.from_level} &rarr; L${d.to_level} (${org})`;
+      case 'ir_place':
+        return `${player} placed on IR (${org})`;
+      case 'ir_activate':
+        return `${player} activated from IR (${org})`;
+      case 'release':
+        return `${player} released by ${org} (${d.years_remaining || '?'}yr remaining)`;
+      case 'buyout': {
+        const amt = d.buyout_amount != null ? `$${Number(d.buyout_amount).toLocaleString()}` : '?';
+        return `${player} bought out by ${org} for ${amt}`;
+      }
+      case 'signing': {
+        const yrs = d.years || '?';
+        const sal = d.salaries ? `$${Number(d.salaries[0]).toLocaleString()}` : '?';
+        return `${player} signed by ${org} (${yrs}yr, ${sal}/yr)`;
+      }
+      case 'extension': {
+        const yrs = d.years || '?';
+        return `${player} extended by ${org} (${yrs}yr)`;
+      }
+      case 'trade': {
+        const toB = (d.players_to_b || []).length;
+        const toA = (d.players_to_a || []).length;
+        const cash = d.cash_a_to_b ? `, $${Number(d.cash_a_to_b).toLocaleString()} cash` : '';
+        return `Trade: ${org} &harr; ${org2 || '?'} (${toB} &rarr; / ${toA} &larr;${cash})`;
+      }
+      default: {
+        const notes = e.notes || '';
+        return notes.length > 60 ? notes.substring(0, 60) + '...' : notes || '--';
+      }
+    }
+  }
+
+  function _txDetailHtml(e) {
+    const d = e.details || {};
+    const player = e.player_name || (e.player_id ? `Player #${e.player_id}` : 'N/A');
+    const org = e.primary_org_abbrev ? `${e.primary_org_abbrev} (#${e.primary_org_id})` : `Org #${e.primary_org_id || 'N/A'}`;
+    const ts = e.executed_at ? new Date(e.executed_at).toLocaleString() : (e.created_at ? new Date(e.created_at).toLocaleString() : '--');
+    const notes = e.notes || '';
+    const isRollback = notes.includes('ROLLBACK');
+
+    let html = `<div class="kv-table">
+      <div class="kv-row"><div class="kv-key">Transaction ID</div><div class="kv-val">${e.id}</div></div>
+      <div class="kv-row"><div class="kv-key">Type</div><div class="kv-val"><span class="badge ${TX_TYPE_BADGES[e.transaction_type] || ''}">${e.transaction_type}</span>${isRollback ? ' <span class="badge badge-secondary">ROLLED BACK</span>' : ''}</div></div>
+      <div class="kv-row"><div class="kv-key">Time</div><div class="kv-val">${ts}</div></div>
+      <div class="kv-row"><div class="kv-key">Player</div><div class="kv-val">${player}</div></div>
+      <div class="kv-row"><div class="kv-key">Primary Org</div><div class="kv-val">${org}</div></div>`;
+
+    if (e.secondary_org_id) {
+      const org2 = e.secondary_org_abbrev ? `${e.secondary_org_abbrev} (#${e.secondary_org_id})` : `Org #${e.secondary_org_id}`;
+      html += `<div class="kv-row"><div class="kv-key">Secondary Org</div><div class="kv-val">${org2}</div></div>`;
+    }
+    if (notes) {
+      html += `<div class="kv-row"><div class="kv-key">Notes</div><div class="kv-val">${notes}</div></div>`;
+    }
+
+    // Type-specific details
+    switch (e.transaction_type) {
+      case 'promote':
+      case 'demote':
+        html += `<div class="kv-row"><div class="kv-key">Level Change</div><div class="kv-val">Level ${d.from_level} &rarr; Level ${d.to_level}</div></div>`;
+        break;
+      case 'release':
+        html += `<div class="kv-row"><div class="kv-key">Years Remaining</div><div class="kv-val">${d.years_remaining || '--'}</div></div>`;
+        html += `<div class="kv-row"><div class="kv-key">Level at Release</div><div class="kv-val">${d.current_level || '--'}</div></div>`;
+        html += `<div class="kv-row"><div class="kv-key">Affected Detail IDs</div><div class="kv-val">${(d.affected_detail_ids || []).join(', ') || '--'}</div></div>`;
+        break;
+      case 'buyout':
+        html += `<div class="kv-row"><div class="kv-key">Buyout Amount</div><div class="kv-val">$${d.buyout_amount != null ? Number(d.buyout_amount).toLocaleString() : '--'}</div></div>`;
+        html += `<div class="kv-row"><div class="kv-key">Original Contract</div><div class="kv-val">#${d.original_contract_id || '--'}</div></div>`;
+        html += `<div class="kv-row"><div class="kv-key">Buyout Contract</div><div class="kv-val">#${d.buyout_contract_id || '--'}</div></div>`;
+        break;
+      case 'signing':
+        html += `<div class="kv-row"><div class="kv-key">Years</div><div class="kv-val">${d.years || '--'}</div></div>`;
+        if (d.salaries) {
+          html += `<div class="kv-row"><div class="kv-key">Salaries</div><div class="kv-val">${d.salaries.map(s => '$' + Number(s).toLocaleString()).join(' / ')}</div></div>`;
+        }
+        if (d.bonus) {
+          html += `<div class="kv-row"><div class="kv-key">Bonus</div><div class="kv-val">$${Number(d.bonus).toLocaleString()}</div></div>`;
+        }
+        html += `<div class="kv-row"><div class="kv-key">Level</div><div class="kv-val">${d.level_id || '--'}</div></div>`;
+        break;
+      case 'extension':
+        html += `<div class="kv-row"><div class="kv-key">Years</div><div class="kv-val">${d.years || '--'}</div></div>`;
+        if (d.salaries) {
+          html += `<div class="kv-row"><div class="kv-key">Salaries</div><div class="kv-val">${d.salaries.map(s => '$' + Number(s).toLocaleString()).join(' / ')}</div></div>`;
+        }
+        if (d.bonus) {
+          html += `<div class="kv-row"><div class="kv-key">Bonus</div><div class="kv-val">$${Number(d.bonus).toLocaleString()}</div></div>`;
+        }
+        html += `<div class="kv-row"><div class="kv-key">Original Contract</div><div class="kv-val">#${d.original_contract_id || '--'}</div></div>`;
+        html += `<div class="kv-row"><div class="kv-key">Extension Contract</div><div class="kv-val">#${d.extension_contract_id || '--'}</div></div>`;
+        html += `<div class="kv-row"><div class="kv-key">Starts League Year</div><div class="kv-val">${d.starts_league_year || '--'}</div></div>`;
+        break;
+      case 'trade': {
+        if (d.players_to_b && d.players_to_b.length) {
+          html += `<div class="kv-row"><div class="kv-key">Players to ${e.secondary_org_abbrev || 'Org B'}</div><div class="kv-val">${d.players_to_b.map(p => `#${p}`).join(', ')}</div></div>`;
+        }
+        if (d.players_to_a && d.players_to_a.length) {
+          html += `<div class="kv-row"><div class="kv-key">Players to ${e.primary_org_abbrev || 'Org A'}</div><div class="kv-val">${d.players_to_a.map(p => `#${p}`).join(', ')}</div></div>`;
+        }
+        if (d.cash_a_to_b) {
+          html += `<div class="kv-row"><div class="kv-key">Cash</div><div class="kv-val">$${Number(d.cash_a_to_b).toLocaleString()} (${e.primary_org_abbrev || 'A'} &rarr; ${e.secondary_org_abbrev || 'B'})</div></div>`;
+        }
+        if (d.salary_retention && Object.keys(d.salary_retention).length) {
+          const retRows = Object.entries(d.salary_retention).map(([pid, info]) =>
+            `Player #${pid}: ${(info.retention_pct * 100).toFixed(0)}% retained by Org #${info.retaining_org_id}`
+          ).join('<br>');
+          html += `<div class="kv-row"><div class="kv-key">Salary Retention</div><div class="kv-val">${retRows}</div></div>`;
+        }
+        if (d.share_mutations && d.share_mutations.length) {
+          html += `<div class="kv-row"><div class="kv-key">Share Mutations</div><div class="kv-val">${d.share_mutations.length} contract-year transfers</div></div>`;
+        }
+        break;
+      }
+    }
+    html += `</div>`;
+    return html;
+  }
+
   function loadTransactionLog() {
     fetchTxContext();
     const tbody = document.getElementById('tx-log-tbody');
@@ -3187,11 +3326,13 @@
 
     const typeFilter = document.getElementById('tx-log-type-filter').value;
     const orgFilter = document.getElementById('tx-log-org-filter').value;
+    const playerFilter = document.getElementById('tx-log-player-filter').value;
     const limit = document.getElementById('tx-log-limit').value || 50;
 
     let url = `${API_BASE}/transactions/log?limit=${limit}`;
     if (typeFilter) url += `&type=${typeFilter}`;
     if (orgFilter) url += `&org_id=${orgFilter}`;
+    if (playerFilter) url += `&player_id=${playerFilter}`;
 
     fetch(url)
       .then(r => r.json())
@@ -3200,29 +3341,30 @@
           tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No transactions found</td></tr>';
           return;
         }
-        tbody.innerHTML = entries.map(e => {
-          const ts = e.created_at ? new Date(e.created_at).toLocaleString() : '--';
-          const typeBadge = {
-            promote: 'badge-info', demote: 'badge-info',
-            ir_place: 'badge-warning', ir_activate: 'badge-warning',
-            release: 'badge-danger', buyout: 'badge-danger',
-            signing: 'badge-success', extension: 'badge-success',
-            trade: 'badge-primary',
-          }[e.transaction_type] || '';
+        // Cache entries for detail view without re-fetching
+        window._txLogCache = {};
+        entries.forEach(e => { window._txLogCache[e.id] = e; });
 
+        tbody.innerHTML = entries.map(e => {
+          const ts = e.executed_at ? new Date(e.executed_at).toLocaleString()
+                   : e.created_at ? new Date(e.created_at).toLocaleString() : '--';
+          const typeBadge = TX_TYPE_BADGES[e.transaction_type] || '';
           const notes = e.notes || '';
           const isRollback = notes.includes('ROLLBACK');
+          const orgLabel = e.primary_org_abbrev || (e.primary_org_id ? `#${e.primary_org_id}` : '--');
+          const playerLabel = e.player_name || (e.player_id ? `#${e.player_id}` : '--');
+          const summary = _txSummary(e);
 
-          return `<tr${isRollback ? ' style="opacity: 0.6"' : ''}>
+          return `<tr${isRollback ? ' style="opacity: 0.5"' : ''}>
             <td>${e.id}</td>
-            <td>${ts}</td>
+            <td style="white-space: nowrap">${ts}</td>
             <td><span class="badge ${typeBadge}">${e.transaction_type}</span></td>
-            <td>${e.primary_org_id || '--'}</td>
-            <td>${e.player_id || '--'}</td>
-            <td title="${notes}">${notes.length > 40 ? notes.substring(0, 40) + '...' : notes || '--'}</td>
-            <td>
+            <td>${orgLabel}</td>
+            <td>${playerLabel}</td>
+            <td>${summary}</td>
+            <td style="white-space: nowrap">
               <button class="btn btn-sm btn-secondary" onclick="App.viewTxDetail(${e.id})">Detail</button>
-              ${!isRollback ? `<button class="btn btn-sm btn-danger" onclick="App.rollbackTx(${e.id})">Rollback</button>` : ''}
+              ${!isRollback ? `<button class="btn btn-sm btn-danger" onclick="App.rollbackTx(${e.id})">Rollback</button>` : '<span class="text-muted" style="font-size: 0.8em">rolled back</span>'}
             </td>
           </tr>`;
         }).join('');
@@ -3233,32 +3375,65 @@
   }
 
   function viewTxDetail(txId) {
-    const detailBox = document.getElementById('tx-log-detail');
-    detailBox.style.display = 'block';
-    detailBox.textContent = 'Loading...';
+    const panel = document.getElementById('tx-log-detail-panel');
+    const titleEl = document.getElementById('tx-detail-title');
+    const summaryEl = document.getElementById('tx-detail-summary');
+    const rawEl = document.getElementById('tx-log-detail');
 
-    // The log entries already contain details — find it from the table or re-fetch
+    panel.style.display = 'block';
+    summaryEl.innerHTML = '<span class="text-muted">Loading...</span>';
+    rawEl.textContent = '';
+    titleEl.textContent = `Transaction #${txId}`;
+
+    // Try cache first, otherwise fetch
+    const cached = window._txLogCache && window._txLogCache[txId];
+    if (cached) {
+      _renderTxDetail(cached, summaryEl, rawEl);
+      return;
+    }
+
     fetch(`${API_BASE}/transactions/log?limit=1&tx_id=${txId}`)
       .then(r => r.json())
       .then(entries => {
-        // If single-fetch doesn't work, show what we have
         if (entries.length > 0) {
-          detailBox.textContent = JSON.stringify(entries[0], null, 2);
+          _renderTxDetail(entries[0], summaryEl, rawEl);
         } else {
-          detailBox.textContent = 'Transaction not found';
+          summaryEl.innerHTML = '<span class="text-danger">Transaction not found</span>';
         }
       })
       .catch(() => {
-        detailBox.textContent = 'Could not load detail';
+        summaryEl.innerHTML = '<span class="text-danger">Could not load detail</span>';
       });
   }
 
-  function rollbackTx(txId) {
-    if (!confirm(`Rollback transaction #${txId}? This will reverse the operation.`)) return;
+  function _renderTxDetail(entry, summaryEl, rawEl) {
+    summaryEl.innerHTML = _txDetailHtml(entry);
+    rawEl.textContent = JSON.stringify(entry, null, 2);
+  }
 
-    const detailBox = document.getElementById('tx-log-detail');
-    detailBox.style.display = 'block';
-    detailBox.textContent = 'Rolling back...';
+  function closeTxDetail() {
+    document.getElementById('tx-log-detail-panel').style.display = 'none';
+  }
+
+  function rollbackTx(txId) {
+    // Get info from cache for a better confirmation message
+    const cached = window._txLogCache && window._txLogCache[txId];
+    let msg = `Rollback transaction #${txId}?`;
+    if (cached) {
+      const player = cached.player_name || `Player #${cached.player_id}`;
+      msg = `Rollback ${cached.transaction_type} of ${player}?\n\nThis will reverse the operation.`;
+    }
+    if (!confirm(msg)) return;
+
+    const panel = document.getElementById('tx-log-detail-panel');
+    const summaryEl = document.getElementById('tx-detail-summary');
+    const rawEl = document.getElementById('tx-log-detail');
+    const titleEl = document.getElementById('tx-detail-title');
+
+    panel.style.display = 'block';
+    titleEl.textContent = `Rolling back #${txId}...`;
+    summaryEl.innerHTML = '<span class="text-warning">Processing rollback...</span>';
+    rawEl.textContent = '';
 
     fetch(`${API_BASE}/transactions/rollback`, {
       method: 'POST',
@@ -3269,14 +3444,18 @@
       .then(r => r.json())
       .then(data => {
         if (data.error) {
-          detailBox.textContent = `Error: ${data.message || data.error}`;
+          titleEl.textContent = `Rollback Failed`;
+          summaryEl.innerHTML = `<span class="text-danger">Error: ${data.message || data.error}</span>`;
         } else {
-          detailBox.textContent = JSON.stringify(data, null, 2);
+          titleEl.textContent = `Rollback Successful`;
+          summaryEl.innerHTML = `<span class="text-success">Transaction #${txId} has been rolled back.</span>`;
+          rawEl.textContent = JSON.stringify(data, null, 2);
           loadTransactionLog();
         }
       })
       .catch(err => {
-        detailBox.textContent = 'Error: ' + err.message;
+        titleEl.textContent = `Rollback Failed`;
+        summaryEl.innerHTML = `<span class="text-danger">Error: ${err.message}</span>`;
       });
   }
 
@@ -7908,6 +8087,7 @@
     adminApproveProposal,
     adminRejectProposal,
     viewTxDetail,
+    closeTxDetail,
     rollbackTx,
     editGame,
     drillCorrelation,

@@ -512,13 +512,16 @@ def api_transaction_log():
     org_id = request.args.get("org_id", type=int)
     tx_type = request.args.get("type")
     lyid = request.args.get("league_year_id", type=int)
+    tx_id = request.args.get("tx_id", type=int)
+    player_id = request.args.get("player_id", type=int)
     limit = request.args.get("limit", 100, type=int)
     try:
         engine = get_engine()
         with engine.connect() as conn:
             log = get_transaction_log(
                 conn, org_id=org_id, transaction_type=tx_type,
-                league_year_id=lyid, limit=limit,
+                league_year_id=lyid, tx_id=tx_id, player_id=player_id,
+                limit=limit,
             )
         return jsonify(log), 200
     except SQLAlchemyError:

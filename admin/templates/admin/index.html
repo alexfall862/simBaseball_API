@@ -1363,7 +1363,7 @@
       <section id="section-tx-log" class="section">
         <div class="card">
           <h3>Transaction Log</h3>
-          <div class="form-row" style="margin-bottom: 12px">
+          <div class="form-row" style="margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
             <label>Type:
               <select id="tx-log-type-filter">
                 <option value="">All Types</option>
@@ -1381,6 +1381,9 @@
             <label>Org ID:
               <input type="number" id="tx-log-org-filter" placeholder="Any" style="width: 80px" />
             </label>
+            <label>Player ID:
+              <input type="number" id="tx-log-player-filter" placeholder="Any" style="width: 80px" />
+            </label>
             <label>Limit:
               <input type="number" id="tx-log-limit" value="50" min="1" max="500" style="width: 80px" />
             </label>
@@ -1395,8 +1398,8 @@
                   <th>Type</th>
                   <th>Org</th>
                   <th>Player</th>
-                  <th>Notes</th>
-                  <th>Actions</th>
+                  <th>Summary</th>
+                  <th style="min-width: 150px">Actions</th>
                 </tr>
               </thead>
               <tbody id="tx-log-tbody">
@@ -1404,7 +1407,21 @@
               </tbody>
             </table>
           </div>
-          <pre id="tx-log-detail" class="result-box" style="margin-top: 12px; display:none"></pre>
+
+          <!-- Detail panel -->
+          <div id="tx-log-detail-panel" style="display:none; margin-top: 16px;">
+            <div class="card" style="border: 1px solid var(--border);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h3 style="margin: 0;" id="tx-detail-title">Transaction Detail</h3>
+                <button class="btn btn-sm btn-secondary" onclick="App.closeTxDetail()">Close</button>
+              </div>
+              <div id="tx-detail-summary" style="margin-bottom: 12px;"></div>
+              <details>
+                <summary style="cursor: pointer; color: var(--text-secondary); margin-bottom: 8px;">Raw JSON</summary>
+                <pre id="tx-log-detail" class="result-box" style="margin-top: 4px;"></pre>
+              </details>
+            </div>
+          </div>
         </div>
       </section>
 
