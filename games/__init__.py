@@ -497,7 +497,14 @@ def wipe_season():
             ), {"lyid": league_year_id})
             deleted["player_listed_position"] = r.rowcount
 
-            # 9. Reset timestamp
+            # 9. Reset rotation state (pointer only — rotation config preserved)
+            r = conn.execute(sa_text(
+                "UPDATE team_rotation_state SET current_slot = 0, "
+                "last_game_id = NULL, last_updated_at = NOW()"
+            ))
+            deleted["rotation_states_reset"] = r.rowcount
+
+            # 10. Reset timestamp
             conn.execute(sa_text(
                 "UPDATE timestamp_state SET "
                 "week = 1, games_a_ran = 0, games_b_ran = 0, "
