@@ -348,6 +348,211 @@ def reset_week_endpoint():
         ), 500
 
 
+@games_bp.post("/games/rollback-week")
+def rollback_week():
+    """
+    Roll back a specific week's simulation results.
+
+    Removes game results, per-game box score lines, substitutions,
+    injuries, and stamina changes for the given week. Decrements
+    season-accumulated stats by each game's per-game line values.
+    Resets the week's simulation flags so it can be re-run.
+
+    Does NOT touch gameplans, rotation config, or the schedule.
+
+    Request body:
+    {
+        "league_year_id": 1,
+        "season_week": 5
+    }
+    """
+    from sqlalchemy import text as sa_text
+
+    body = request.get_json(force=True, silent=True) or {}
+    league_year_id = body.get("league_year_id")
+    season_week = body.get("season_week")
+
+    if league_year_id is None or season_week is None:
+        return jsonify(error="missing_field",
+                       message="league_year_id and season_week are required"), 400
+
+    try:
+        league_year_id = int(league_year_id)
+        season_week = int(season_week)
+    except (TypeError, ValueError) as e:
+        return jsonify(error="invalid_type", message=str(e)), 400
+
+    engine = get_engine()
+
+    try:
+        with engine.begin() as conn:
+            deleted = {}
+
+            # Find all game_ids for this week
+            game_rows = conn.execute(sa_text(
+                "SELECT game_id FROM game_results "
+                "WHERE season = :lyid AND season_week = :sw"
+            ), {"lyid": league_year_id, "sw": season_week}).all()
+            game_ids = [int(r[0]) for r in game_rows]
+
+            if not game_ids:
+                return jsonify(
+                    ok=True, message="No games found for this week",
+                    deleted={}, games_found=0
+                ), 200
+
+            gid_ph = ", ".join(f":g{i}" for i in range(len(game_ids)))
+            gid_params = {f"g{i}": gid for i, gid in enumerate(game_ids)}
+            lyid_params = {"lyid": league_year_id}
+            all_params = {**gid_params, **lyid_params}
+
+            # 1. Subtract per-game batting lines from season accumulation
+            r = conn.execute(sa_text(f"""
+                UPDATE player_batting_stats pbs
+                JOIN (
+                    SELECT player_id, team_id,
+                        SUM(at_bats) AS at_bats, SUM(runs) AS runs,
+                        SUM(hits) AS hits, SUM(doubles_hit) AS doubles_hit,
+                        SUM(triples) AS triples, SUM(home_runs) AS home_runs,
+                        SUM(rbi) AS rbi, SUM(walks) AS walks,
+                        SUM(strikeouts) AS strikeouts,
+                        SUM(stolen_bases) AS stolen_bases,
+                        SUM(caught_stealing) AS caught_stealing
+                    FROM game_batting_lines
+                    WHERE game_id IN ({gid_ph}) AND league_year_id = :lyid
+                    GROUP BY player_id, team_id
+                ) gbl ON pbs.player_id = gbl.player_id
+                    AND pbs.team_id = gbl.team_id
+                    AND pbs.league_year_id = :lyid
+                SET pbs.at_bats = GREATEST(0, pbs.at_bats - gbl.at_bats),
+                    pbs.runs = GREATEST(0, pbs.runs - gbl.runs),
+                    pbs.hits = GREATEST(0, pbs.hits - gbl.hits),
+                    pbs.doubles_hit = GREATEST(0, pbs.doubles_hit - gbl.doubles_hit),
+                    pbs.triples = GREATEST(0, pbs.triples - gbl.triples),
+                    pbs.home_runs = GREATEST(0, pbs.home_runs - gbl.home_runs),
+                    pbs.rbi = GREATEST(0, pbs.rbi - gbl.rbi),
+                    pbs.walks = GREATEST(0, pbs.walks - gbl.walks),
+                    pbs.strikeouts = GREATEST(0, pbs.strikeouts - gbl.strikeouts),
+                    pbs.stolen_bases = GREATEST(0, pbs.stolen_bases - gbl.stolen_bases),
+                    pbs.caught_stealing = GREATEST(0, pbs.caught_stealing - gbl.caught_stealing)
+            """), all_params)
+            deleted["batting_stats_decremented"] = r.rowcount
+
+            # 2. Subtract per-game pitching lines from season accumulation
+            r = conn.execute(sa_text(f"""
+                UPDATE player_pitching_stats pps
+                JOIN (
+                    SELECT player_id, team_id,
+                        SUM(games_started) AS games_started,
+                        SUM(win) AS win, SUM(loss) AS loss,
+                        SUM(save_recorded) AS save_recorded,
+                        SUM(innings_pitched_outs) AS innings_pitched_outs,
+                        SUM(hits_allowed) AS hits_allowed,
+                        SUM(runs_allowed) AS runs_allowed,
+                        SUM(earned_runs) AS earned_runs,
+                        SUM(walks) AS walks, SUM(strikeouts) AS strikeouts,
+                        SUM(home_runs_allowed) AS home_runs_allowed
+                    FROM game_pitching_lines
+                    WHERE game_id IN ({gid_ph}) AND league_year_id = :lyid
+                    GROUP BY player_id, team_id
+                ) gpl ON pps.player_id = gpl.player_id
+                    AND pps.team_id = gpl.team_id
+                    AND pps.league_year_id = :lyid
+                SET pps.games = GREATEST(0, pps.games - 1),
+                    pps.games_started = GREATEST(0, pps.games_started - gpl.games_started),
+                    pps.wins = GREATEST(0, pps.wins - gpl.win),
+                    pps.losses = GREATEST(0, pps.losses - gpl.loss),
+                    pps.saves = GREATEST(0, pps.saves - gpl.save_recorded),
+                    pps.innings_pitched_outs = GREATEST(0, pps.innings_pitched_outs - gpl.innings_pitched_outs),
+                    pps.hits_allowed = GREATEST(0, pps.hits_allowed - gpl.hits_allowed),
+                    pps.runs_allowed = GREATEST(0, pps.runs_allowed - gpl.runs_allowed),
+                    pps.earned_runs = GREATEST(0, pps.earned_runs - gpl.earned_runs),
+                    pps.walks = GREATEST(0, pps.walks - gpl.walks),
+                    pps.strikeouts = GREATEST(0, pps.strikeouts - gpl.strikeouts),
+                    pps.home_runs_allowed = GREATEST(0, pps.home_runs_allowed - gpl.home_runs_allowed)
+            """), all_params)
+            deleted["pitching_stats_decremented"] = r.rowcount
+
+            # 3. Delete per-game lines
+            for tbl in ("game_batting_lines", "game_pitching_lines",
+                        "game_substitutions"):
+                r = conn.execute(sa_text(
+                    f"DELETE FROM {tbl} WHERE game_id IN ({gid_ph})"
+                ), gid_params)
+                deleted[tbl] = r.rowcount
+
+            # 4. Delete game results
+            r = conn.execute(sa_text(
+                f"DELETE FROM game_results WHERE game_id IN ({gid_ph})"
+            ), gid_params)
+            deleted["game_results"] = r.rowcount
+
+            # 5. Delete position usage for this week
+            r = conn.execute(sa_text(
+                "DELETE FROM player_position_usage_week "
+                "WHERE league_year_id = :lyid AND season_week = :sw"
+            ), {"lyid": league_year_id, "sw": season_week})
+            deleted["position_usage"] = r.rowcount
+
+            # 6. Delete injuries created during this week's games
+            r = conn.execute(sa_text(
+                f"DELETE FROM player_injury_events "
+                f"WHERE gamelist_id IN ({gid_ph})"
+            ), gid_params)
+            deleted["injury_events"] = r.rowcount
+
+            # Reset orphaned injury states
+            r = conn.execute(sa_text(
+                "UPDATE player_injury_state "
+                "SET status = 'healthy', weeks_remaining = 0 "
+                "WHERE current_event_id IS NULL AND status = 'injured'"
+            ))
+            deleted["injury_states_reset"] = r.rowcount
+
+            # 7. Reset fatigue to 100 for all players this season
+            # (stamina drain/recovery is cumulative and not easily reversible
+            # per-week, so reset to fresh state)
+            r = conn.execute(sa_text(
+                "DELETE FROM player_fatigue_state WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["fatigue_reset"] = r.rowcount
+
+            # 8. Reset rotation state pointers
+            conn.execute(sa_text(
+                "UPDATE team_rotation_state SET current_slot = 0, "
+                "last_game_id = NULL, last_updated_at = NOW()"
+            ))
+
+            # 9. Reset week simulation flags
+            conn.execute(sa_text(
+                "UPDATE timestamp_state SET "
+                "games_a_ran = 0, games_b_ran = 0, "
+                "games_c_ran = 0, games_d_ran = 0, run_games = 0 "
+                "WHERE id = 1"
+            ))
+
+        # Broadcast updated timestamp
+        from services.websocket_manager import ws_manager
+        ws_manager.broadcast_timestamp()
+
+        current_app.logger.info(
+            f"Rolled back week {season_week} for league_year_id={league_year_id}: {deleted}"
+        )
+
+        return jsonify(
+            ok=True,
+            deleted=deleted,
+            games_rolled_back=len(game_ids),
+        ), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("rollback_week: database error")
+        return jsonify(error="database_error", message=str(e)), 500
+    except Exception as e:
+        current_app.logger.exception("rollback_week: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
 @games_bp.post("/games/wipe-season")
 def wipe_season():
     """
