@@ -224,11 +224,12 @@ def get_landing_all():
             except Exception:
                 pass
 
-            # Visibility context for all orgs' rosters
+            # Visibility context + fog-of-war fuzzing for all orgs' rosters
             for oid in org_ids:
                 roster_map = batch_rosters.get(oid, {})
                 if roster_map:
                     _attach_visibility_context(conn, oid, roster_map)
+                    _apply_visibility_fuzz(roster_map, oid)
 
             # ── Assemble per-org output ──────────────────────────
             orgs_map = {}
@@ -827,6 +828,77 @@ def _attach_visibility_context(conn, org_id, roster_map):
             }
 
 
+def _apply_visibility_fuzz(roster_map, org_id):
+    """
+    Apply fog-of-war fuzzing to ratings/potentials based on each player's
+    ``visibility_context``.  Must be called AFTER ``_attach_visibility_context``.
+
+    Mutations are in-place:
+      - Pro (20-80): fuzz_20_80 on ratings if not precise; fuzz_letter_grade on
+        potentials if not precise.
+      - College (letter_grade): convert ratings to letter grades, then
+        fuzz_letter_grade if not precise; fuzz potentials if not precise.
+      - HS (hidden): null out ratings and potentials entirely.
+    """
+    from services.attribute_visibility import (
+        fuzz_20_80,
+        fuzz_letter_grade,
+        _score_to_letter,
+    )
+
+    for players in roster_map.values():
+        for p in players:
+            vis = p.get("visibility_context")
+            if not vis:
+                continue
+
+            pid = p["id"]
+            fmt = vis.get("display_format")
+            attrs_precise = vis.get("attributes_precise", False)
+            pots_precise = vis.get("potentials_precise", False)
+
+            if fmt == "hidden":
+                # HS — null out everything
+                p["ratings"] = {k: None for k in p.get("ratings", {})}
+                p["potentials"] = {k: None for k in p.get("potentials", {})}
+
+            elif fmt == "letter_grade":
+                # College — convert 20-80 ratings to letter grades, fuzz if not precise
+                ratings = p.get("ratings", {})
+                converted = {}
+                for attr, score in ratings.items():
+                    grade = _score_to_letter(score)
+                    if not attrs_precise:
+                        grade = fuzz_letter_grade(grade, org_id, pid, attr)
+                    converted[attr] = grade
+                p["ratings"] = converted
+
+                # Potentials are already letter grades
+                if not pots_precise:
+                    pots = p.get("potentials", {})
+                    p["potentials"] = {
+                        k: fuzz_letter_grade(v, org_id, pid, k) if v else v
+                        for k, v in pots.items()
+                    }
+
+            elif fmt == "20-80":
+                # Pro — fuzz 20-80 ratings if not precise
+                if not attrs_precise:
+                    ratings = p.get("ratings", {})
+                    p["ratings"] = {
+                        k: fuzz_20_80(v, org_id, pid, k)
+                        for k, v in ratings.items()
+                    }
+
+                # Potentials are letter grades — fuzz if not precise
+                if not pots_precise:
+                    pots = p.get("potentials", {})
+                    p["potentials"] = {
+                        k: fuzz_letter_grade(v, org_id, pid, k) if v else v
+                        for k, v in pots.items()
+                    }
+
+
 def _get_roster_map(conn, tables, org_id):
     """
     Players keyed by team_id, with 20-80 scaled ratings and position ratings.
@@ -1019,6 +1091,7 @@ def _get_roster_map(conn, tables, org_id):
 
     # --- Visibility context: bulk-load scouting unlocks for this org ---
     _attach_visibility_context(conn, org_id, roster_map)
+    _apply_visibility_fuzz(roster_map, org_id)
 
     return roster_map
 
