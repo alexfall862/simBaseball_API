@@ -172,10 +172,12 @@ def admin_clear_caches():
     try:
         from services.game_payload import clear_game_payload_caches
         from rosters import clear_rosters_caches
+        from gameplanning import clear_gameplanning_caches
 
         cleared = {
             "game_payload": clear_game_payload_caches(),
             "rosters": clear_rosters_caches(),
+            "gameplanning": clear_gameplanning_caches(),
         }
 
         logging.getLogger("app").info(
