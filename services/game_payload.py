@@ -2404,17 +2404,19 @@ def _update_player_state_bulk(
             logger.exception("update_player_state_bulk: stamina drain failed")
 
     # --- 2. REST RECOVERY for all fatigued players ---
+    # Load configurable recovery values (falls back to defaults)
+    rec_cfg = _load_stamina_recovery_config(conn)
     recovery_sql = sa_text("""
         UPDATE player_fatigue_state pfs
         JOIN simbbPlayers p ON p.id = pfs.player_id
         SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(:base_recovery *
             CASE p.durability
-                WHEN 'Iron Man'      THEN 1.5
-                WHEN 'Dependable'    THEN 1.25
-                WHEN 'Normal'        THEN 1.0
-                WHEN 'Undependable'  THEN 0.75
-                WHEN 'Tires Easily'  THEN 0.5
-                ELSE 1.0
+                WHEN 'Iron Man'      THEN :mult_iron_man
+                WHEN 'Dependable'    THEN :mult_dependable
+                WHEN 'Normal'        THEN :mult_normal
+                WHEN 'Undependable'  THEN :mult_undependable
+                WHEN 'Tires Easily'  THEN :mult_tires_easily
+                ELSE :mult_normal
             END)),
             pfs.last_updated_at = NOW()
         WHERE pfs.league_year_id = :league_year_id
@@ -2424,7 +2426,12 @@ def _update_player_state_bulk(
     recovery_count = 0
     try:
         rest_result = conn.execute(recovery_sql, {
-            "base_recovery": _REST_RECOVERY_PER_SUBWEEK,
+            "base_recovery": rec_cfg["base_recovery"],
+            "mult_iron_man": rec_cfg["Iron Man"],
+            "mult_dependable": rec_cfg["Dependable"],
+            "mult_normal": rec_cfg["Normal"],
+            "mult_undependable": rec_cfg["Undependable"],
+            "mult_tires_easily": rec_cfg["Tires Easily"],
             "league_year_id": league_year_id,
         })
         recovery_count = rest_result.rowcount
@@ -2494,10 +2501,8 @@ def _update_player_state_bulk(
             "injuries_persisted": injuries_persisted}
 
 
-# Stamina recovery constant — drain is handled entirely by the game engine
-_REST_RECOVERY_PER_SUBWEEK = 5 # stamina recovery per rest subweek (all players)
-
-# Durability tier → recovery multiplier (applied to _REST_RECOVERY_PER_SUBWEEK)
+# Stamina recovery defaults — used when level_game_config has no row
+_REST_RECOVERY_PER_SUBWEEK = 5
 _DURABILITY_RECOVERY_MULT = {
     "Iron Man":      1.5,
     "Dependable":    1.25,
@@ -2505,6 +2510,42 @@ _DURABILITY_RECOVERY_MULT = {
     "Undependable":  0.75,
     "Tires Easily":  0.5,
 }
+
+
+def _load_stamina_recovery_config(conn, league_level: int = None) -> dict:
+    """
+    Load stamina recovery config from level_game_config.
+
+    Returns dict with base_recovery and durability multipliers.
+    Falls back to hardcoded defaults if no config row exists.
+    """
+    from sqlalchemy import text as sa_text
+
+    if league_level is not None:
+        row = conn.execute(sa_text(
+            "SELECT stamina_recovery_per_subweek, "
+            "durability_mult_iron_man, durability_mult_dependable, "
+            "durability_mult_normal, durability_mult_undependable, "
+            "durability_mult_tires_easily "
+            "FROM level_game_config WHERE league_level = :ll"
+        ), {"ll": league_level}).mappings().first()
+    else:
+        row = None
+
+    if row and row.get("stamina_recovery_per_subweek") is not None:
+        return {
+            "base_recovery": float(row["stamina_recovery_per_subweek"]),
+            "Iron Man": float(row["durability_mult_iron_man"]),
+            "Dependable": float(row["durability_mult_dependable"]),
+            "Normal": float(row["durability_mult_normal"]),
+            "Undependable": float(row["durability_mult_undependable"]),
+            "Tires Easily": float(row["durability_mult_tires_easily"]),
+        }
+
+    return {
+        "base_recovery": _REST_RECOVERY_PER_SUBWEEK,
+        **_DURABILITY_RECOVERY_MULT,
+    }
 
 
 def _update_player_state_after_subweek(
@@ -2567,17 +2608,18 @@ def _update_player_state_after_subweek(
             logger.exception("update_player_state: stamina drain failed")
 
     # --- 2. Rest recovery for all fatigued players ---
+    rec_cfg = _load_stamina_recovery_config(conn)
     recovery_sql = sa_text("""
         UPDATE player_fatigue_state pfs
         JOIN simbbPlayers p ON p.id = pfs.player_id
         SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(:base_recovery *
             CASE p.durability
-                WHEN 'Iron Man'      THEN 1.5
-                WHEN 'Dependable'    THEN 1.25
-                WHEN 'Normal'        THEN 1.0
-                WHEN 'Undependable'  THEN 0.75
-                WHEN 'Tires Easily'  THEN 0.5
-                ELSE 1.0
+                WHEN 'Iron Man'      THEN :mult_iron_man
+                WHEN 'Dependable'    THEN :mult_dependable
+                WHEN 'Normal'        THEN :mult_normal
+                WHEN 'Undependable'  THEN :mult_undependable
+                WHEN 'Tires Easily'  THEN :mult_tires_easily
+                ELSE :mult_normal
             END)),
             pfs.last_updated_at = NOW()
         WHERE pfs.league_year_id = :league_year_id
@@ -2587,7 +2629,12 @@ def _update_player_state_after_subweek(
     recovery_count = 0
     try:
         rest_result = conn.execute(recovery_sql, {
-            "base_recovery": _REST_RECOVERY_PER_SUBWEEK,
+            "base_recovery": rec_cfg["base_recovery"],
+            "mult_iron_man": rec_cfg["Iron Man"],
+            "mult_dependable": rec_cfg["Dependable"],
+            "mult_normal": rec_cfg["Normal"],
+            "mult_undependable": rec_cfg["Undependable"],
+            "mult_tires_easily": rec_cfg["Tires Easily"],
             "league_year_id": league_year_id,
         })
         recovery_count = rest_result.rowcount
@@ -2881,6 +2928,42 @@ def build_week_payloads(
                     f"Received {len(results)} results from engine for subweek '{subweek}'"
                 )
 
+                # Log engine diagnostic
+                try:
+                    sent_ids = [p.get("game_id") for p in payloads]
+                    received_ids = set()
+                    for r in results:
+                        gid = r.get("game_id") or (r.get("result") or {}).get("game_id")
+                        if gid is not None:
+                            received_ids.add(int(gid))
+                    missing_ids = [gid for gid in sent_ids if gid and int(gid) not in received_ids]
+                    conn.execute(sa_text("""
+                        INSERT INTO engine_diagnostic_log
+                            (league_year_id, season_week, subweek, league_level,
+                             games_sent, results_received, missing_game_ids,
+                             error_message)
+                        VALUES
+                            (:lyid, :sw, :sub, :ll,
+                             :sent, :recv, :missing, :err)
+                    """), {
+                        "lyid": league_year_id,
+                        "sw": season_week,
+                        "sub": subweek,
+                        "ll": league_level,
+                        "sent": len(payloads),
+                        "recv": len(results),
+                        "missing": json.dumps(missing_ids) if missing_ids else None,
+                        "err": None,
+                    })
+                    conn.commit()
+                    if missing_ids:
+                        logger.warning(
+                            f"Engine diagnostic: {len(missing_ids)} missing game(s) "
+                            f"for subweek '{subweek}': {missing_ids}"
+                        )
+                except Exception:
+                    logger.debug("Engine diagnostic logging failed (non-critical)")
+
                 # Store game results in database (bulk)
                 try:
                     result_count = _store_game_results_bulk(
@@ -2890,6 +2973,23 @@ def build_week_payloads(
                     logger.info(
                         f"Stored {result_count} game results for subweek '{subweek}'"
                     )
+                    # Update diagnostic with stored count
+                    try:
+                        conn.execute(sa_text("""
+                            UPDATE engine_diagnostic_log
+                            SET results_stored = :stored
+                            WHERE league_year_id = :lyid AND season_week = :sw
+                              AND subweek = :sub
+                            ORDER BY id DESC LIMIT 1
+                        """), {
+                            "stored": result_count,
+                            "lyid": league_year_id,
+                            "sw": season_week,
+                            "sub": subweek,
+                        })
+                        conn.commit()
+                    except Exception:
+                        pass
                 except Exception as res_err:
                     logger.exception(
                         f"Game result storage failed for subweek '{subweek}': "

@@ -408,6 +408,213 @@ def admin_update_overall_weights():
 
 
 # ---------------------------------------------------------------------------
+# Engine diagnostics
+# ---------------------------------------------------------------------------
+
+@admin_bp.get("/engine-diagnostics")
+def admin_get_engine_diagnostics():
+    """
+    Return engine simulation diagnostic logs.
+
+    GET /admin/engine-diagnostics?league_year_id=1&season_week=5
+    GET /admin/engine-diagnostics?problems_only=1
+
+    Response: { ok: true, diagnostics: [...] }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from sqlalchemy import text as sa_text
+        engine = get_engine()
+
+        league_year_id = request.args.get("league_year_id", type=int)
+        season_week = request.args.get("season_week", type=int)
+        problems_only = request.args.get("problems_only", "0") == "1"
+        limit = min(request.args.get("limit", 100, type=int), 500)
+
+        where_clauses = []
+        params = {"lim": limit}
+
+        if league_year_id:
+            where_clauses.append("edl.league_year_id = :lyid")
+            params["lyid"] = league_year_id
+        if season_week:
+            where_clauses.append("edl.season_week = :sw")
+            params["sw"] = season_week
+        if problems_only:
+            where_clauses.append(
+                "(edl.games_sent != edl.results_received "
+                "OR edl.results_received != edl.results_stored "
+                "OR edl.missing_game_ids IS NOT NULL "
+                "OR edl.error_message IS NOT NULL)"
+            )
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        with engine.connect() as conn:
+            rows = conn.execute(sa_text(f"""
+                SELECT edl.id, edl.league_year_id, edl.season_week, edl.subweek,
+                       edl.league_level, edl.games_sent, edl.results_received,
+                       edl.results_stored, edl.missing_game_ids,
+                       edl.error_message, edl.engine_response_ms,
+                       edl.created_at
+                FROM engine_diagnostic_log edl
+                {where_sql}
+                ORDER BY edl.created_at DESC
+                LIMIT :lim
+            """), params).mappings().all()
+
+        import json as _json
+        diagnostics = []
+        for r in rows:
+            missing = r["missing_game_ids"]
+            if missing and isinstance(missing, str):
+                missing = _json.loads(missing)
+            diagnostics.append({
+                "id": int(r["id"]),
+                "league_year_id": int(r["league_year_id"]),
+                "season_week": int(r["season_week"]),
+                "subweek": r["subweek"],
+                "league_level": int(r["league_level"]) if r["league_level"] else None,
+                "games_sent": int(r["games_sent"]),
+                "results_received": int(r["results_received"]),
+                "results_stored": int(r["results_stored"]),
+                "missing_game_ids": missing,
+                "error_message": r["error_message"],
+                "engine_response_ms": int(r["engine_response_ms"]) if r["engine_response_ms"] else None,
+                "created_at": str(r["created_at"]) if r["created_at"] else None,
+                "has_problems": (
+                    int(r["games_sent"]) != int(r["results_received"])
+                    or int(r["results_received"]) != int(r["results_stored"])
+                    or missing is not None
+                    or r["error_message"] is not None
+                ),
+            })
+
+        return jsonify(ok=True, diagnostics=diagnostics)
+
+    except Exception as e:
+        logging.exception("admin_get_engine_diagnostics failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Stamina recovery configuration
+# ---------------------------------------------------------------------------
+
+@admin_bp.get("/stamina-config")
+def admin_get_stamina_config():
+    """
+    Return stamina recovery settings for all levels.
+
+    GET /admin/stamina-config
+
+    Response: { ok: true, levels: [ { league_level, stamina_recovery_per_subweek, ... } ] }
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from sqlalchemy import text as sa_text
+        engine = get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(sa_text(
+                "SELECT league_level, stamina_recovery_per_subweek, "
+                "durability_mult_iron_man, durability_mult_dependable, "
+                "durability_mult_normal, durability_mult_undependable, "
+                "durability_mult_tires_easily "
+                "FROM level_game_config ORDER BY league_level"
+            )).mappings().all()
+
+        levels = [{
+            "league_level": int(r["league_level"]),
+            "stamina_recovery_per_subweek": float(r["stamina_recovery_per_subweek"]),
+            "durability_mult_iron_man": float(r["durability_mult_iron_man"]),
+            "durability_mult_dependable": float(r["durability_mult_dependable"]),
+            "durability_mult_normal": float(r["durability_mult_normal"]),
+            "durability_mult_undependable": float(r["durability_mult_undependable"]),
+            "durability_mult_tires_easily": float(r["durability_mult_tires_easily"]),
+        } for r in rows]
+
+        return jsonify(ok=True, levels=levels)
+
+    except Exception as e:
+        logging.exception("admin_get_stamina_config failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
+@admin_bp.put("/stamina-config")
+def admin_update_stamina_config():
+    """
+    Update stamina recovery settings per level.
+
+    PUT /admin/stamina-config
+    Body: { "levels": [
+        {
+            "league_level": 9,
+            "stamina_recovery_per_subweek": 5.0,
+            "durability_mult_iron_man": 1.5,
+            "durability_mult_dependable": 1.25,
+            "durability_mult_normal": 1.0,
+            "durability_mult_undependable": 0.75,
+            "durability_mult_tires_easily": 0.5
+        }
+    ]}
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    levels = body.get("levels")
+    if not levels or not isinstance(levels, list):
+        return jsonify(ok=False, error="missing_levels",
+                       message="Body must contain 'levels' list"), 400
+
+    try:
+        from db import get_engine
+        from sqlalchemy import text as sa_text
+        engine = get_engine()
+        count = 0
+        with engine.connect() as conn:
+            for entry in levels:
+                ll = entry.get("league_level")
+                if ll is None:
+                    continue
+                conn.execute(sa_text("""
+                    UPDATE level_game_config SET
+                        stamina_recovery_per_subweek = :recovery,
+                        durability_mult_iron_man = :im,
+                        durability_mult_dependable = :dep,
+                        durability_mult_normal = :norm,
+                        durability_mult_undependable = :undep,
+                        durability_mult_tires_easily = :te
+                    WHERE league_level = :ll
+                """), {
+                    "ll": int(ll),
+                    "recovery": float(entry.get("stamina_recovery_per_subweek", 5.0)),
+                    "im": float(entry.get("durability_mult_iron_man", 1.5)),
+                    "dep": float(entry.get("durability_mult_dependable", 1.25)),
+                    "norm": float(entry.get("durability_mult_normal", 1.0)),
+                    "undep": float(entry.get("durability_mult_undependable", 0.75)),
+                    "te": float(entry.get("durability_mult_tires_easily", 0.5)),
+                })
+                count += 1
+            conn.commit()
+
+        return jsonify(ok=True, updated=count)
+
+    except Exception as e:
+        logging.exception("admin_update_stamina_config failed")
+        return jsonify(ok=False, error="update_failed", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
 # Growth curves management
 # ---------------------------------------------------------------------------
 
