@@ -925,43 +925,128 @@ def reset_week_games(broadcast: bool = True) -> bool:
     )
 
 
+_CAREER_MALUS_FRACTION = 0.2
+
+
 def _tick_injuries(engine) -> int:
     """
-    Decrement weeks_remaining on all injured players by 1.
-    Players who reach 0 are healed: their player_injury_state row is deleted
-    (historical data lives in player_injury_events).
+    Decrement weeks_remaining on **all** active injury events by 1.
 
-    Also decrements weeks_remaining on the corresponding player_injury_events row.
+    After decrementing, for each injured player we check whether ANY events
+    still have weeks_remaining > 0.  If so, we update ``player_injury_state``
+    to point at the longest-remaining event.  If none remain, the player is
+    healed and the state row is deleted.
+
+    For career-eligible injuries that just reached 0, a permanent
+    ``career_injuries`` record is created with a fractional malus.
 
     Returns:
-        Number of players healed this tick.
+        Number of players fully healed this tick.
     """
+    import json
     from sqlalchemy import text as sa_text
 
     with engine.begin() as conn:
-        # Decrement weeks on injury events that are still active
+        # 1) Decrement weeks on ALL active injury events for injured players
+        #    (not just the single current_event_id)
         conn.execute(sa_text("""
             UPDATE player_injury_events pie
-            JOIN player_injury_state pis ON pis.current_event_id = pie.id
+            JOIN player_injury_state pis ON pis.player_id = pie.player_id
             SET pie.weeks_remaining = GREATEST(pie.weeks_remaining - 1, 0)
             WHERE pis.status = 'injured' AND pie.weeks_remaining > 0
         """))
 
-        # Decrement weeks on injury state
+        # 1b) Create career injuries for career-eligible events that just
+        #     hit weeks_remaining = 0 (they were decremented from 1 → 0
+        #     in the UPDATE above).
+        just_healed_rows = conn.execute(sa_text("""
+            SELECT pie.id AS event_id,
+                   pie.player_id,
+                   pie.malus_json
+            FROM player_injury_events pie
+            JOIN injury_types it ON it.id = pie.injury_type_id
+            WHERE pie.weeks_remaining = 0
+              AND pie.weeks_assigned > 0
+              AND it.career_eligible = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM career_injuries ci
+                  WHERE ci.origin_event_id = pie.id
+              )
+        """)).mappings().all()
+
+        for row in just_healed_rows:
+            raw_malus = row["malus_json"]
+            try:
+                malus = raw_malus if isinstance(raw_malus, dict) else json.loads(raw_malus)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(malus, dict):
+                continue
+
+            # Compute permanent career malus as a fraction of the acute effect.
+            # Acute multiplier 0.7 (30% reduction) → career = 1 - (0.3 * 0.2) = 0.94.
+            # Exclude stamina_pct — stamina recovers fully.
+            career_malus = {}
+            for attr, factor in malus.items():
+                if attr == "stamina_pct":
+                    continue
+                try:
+                    f = float(factor)
+                except (TypeError, ValueError):
+                    continue
+                if f >= 1.0:
+                    continue  # no reduction to carry forward
+                reduction = 1.0 - f
+                career_factor = 1.0 - (reduction * _CAREER_MALUS_FRACTION)
+                career_malus[attr] = round(career_factor, 4)
+
+            if not career_malus:
+                continue
+
+            conn.execute(sa_text("""
+                INSERT INTO career_injuries
+                    (player_id, origin_event_id, career_malus_json, created_at)
+                VALUES
+                    (:player_id, :event_id, :career_malus_json, NOW())
+            """), {
+                "player_id": int(row["player_id"]),
+                "event_id": int(row["event_id"]),
+                "career_malus_json": json.dumps(career_malus),
+            })
+
+        # 2) For each injured player, find the event with the longest
+        #    remaining weeks.  If it's > 0, update state to track that event.
         conn.execute(sa_text("""
-            UPDATE player_injury_state
-            SET weeks_remaining = GREATEST(weeks_remaining - 1, 0)
-            WHERE status = 'injured' AND weeks_remaining > 0
+            UPDATE player_injury_state pis
+            JOIN (
+                SELECT pie.player_id,
+                       pie.id AS best_event_id,
+                       pie.weeks_remaining AS best_weeks
+                FROM player_injury_events pie
+                INNER JOIN (
+                    SELECT player_id, MAX(weeks_remaining) AS max_weeks
+                    FROM player_injury_events
+                    WHERE weeks_remaining > 0
+                    GROUP BY player_id
+                ) bw ON bw.player_id = pie.player_id
+                    AND pie.weeks_remaining = bw.max_weeks
+                GROUP BY pie.player_id
+            ) best ON best.player_id = pis.player_id
+            SET pis.current_event_id = best.best_event_id,
+                pis.weeks_remaining  = best.best_weeks
+            WHERE pis.status = 'injured'
         """))
 
-        # Delete healed players (weeks_remaining hit 0)
+        # 3) Delete state rows for players with NO remaining active events
         result = conn.execute(sa_text("""
-            DELETE FROM player_injury_state
-            WHERE status = 'injured' AND weeks_remaining <= 0
+            DELETE pis FROM player_injury_state pis
+            LEFT JOIN player_injury_events pie
+                ON pie.player_id = pis.player_id AND pie.weeks_remaining > 0
+            WHERE pis.status = 'injured' AND pie.id IS NULL
         """))
         healed = result.rowcount
 
-        # Also clean up any stale healthy rows (shouldn't exist, but belt-and-suspenders)
+        # 4) Clean up any stale healthy rows (shouldn't exist, but belt-and-suspenders)
         conn.execute(sa_text("""
             DELETE FROM player_injury_state
             WHERE status = 'healthy'

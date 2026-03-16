@@ -296,6 +296,11 @@
       });
     });
 
+    // Weight Calibration extras
+    document.getElementById('btn-cal-recompute-ovr').addEventListener('click', recomputeDisplayOvr);
+    document.getElementById('btn-cal-preview').addEventListener('click', loadPlayerPreview);
+    initPlayerPreviewCascade();
+
     // Gameplan Audit
     document.getElementById('btn-gpa-load').addEventListener('click', loadGameplanAudit);
 
@@ -7866,22 +7871,32 @@
       dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
     };
 
+    const confColors = { high: '#4caf50', moderate: '#ff9800', low: '#f44336' };
+
     for (const rt of posOrder) {
       const cal = positions[rt];
       if (!cal) continue;
       const tr = document.createElement('tr');
       const status = cal.skipped ? 'Skipped' : 'OK';
       const statusCls = cal.skipped ? 'color: var(--warning)' : 'color: var(--success, #4caf50)';
+      const conf = cal.confidence_level || '—';
+      const confClr = confColors[conf] || 'inherit';
       const offR2 = cal.offense_r2 != null ? cal.offense_r2.toFixed(3) : '—';
-      const defR2 = cal.defense_r2 != null ? cal.defense_r2.toFixed(3) : (cal.r2 != null ? cal.r2.toFixed(3) + ' (pit)' : '—');
-      const warns = (cal.warnings || []).length;
+      const offAdjR2 = cal.offense_adj_r2 != null ? cal.offense_adj_r2.toFixed(3) : '—';
+      const defR2 = cal.defense_r2 != null ? cal.defense_r2.toFixed(3) : (cal.r2 != null ? cal.r2.toFixed(3) : '—');
+      const defAdjR2 = cal.defense_adj_r2 != null ? cal.defense_adj_r2.toFixed(3) : (cal.adj_r2 != null ? cal.adj_r2.toFixed(3) : '—');
+      const warns = (cal.warnings || []);
+      const warnTip = warns.length > 0 ? warns.join('\n') : '';
       tr.innerHTML = `
         <td>${posLabels[rt] || rt}</td>
         <td>${cal.n || 0}</td>
+        <td style="color:${confClr}">${conf}</td>
         <td>${offR2}</td>
+        <td>${offAdjR2}</td>
         <td>${defR2}</td>
+        <td>${defAdjR2}</td>
         <td style="${statusCls}">${status}</td>
-        <td>${warns > 0 ? warns + ' warning(s)' : '—'}</td>
+        <td title="${warnTip.replace(/"/g, '&quot;')}">${warns.length > 0 ? warns.length + ' warning(s)' : '—'}</td>
       `;
       tbody.appendChild(tr);
     }
@@ -7944,12 +7959,16 @@
       .catch(() => {});
   }
 
+  let _calViewProfileId = null;
+  let _calOrigWeights = null;
+
   function viewCalProfile(profileId) {
     const card = document.getElementById('cal-detail-card');
     const title = document.getElementById('cal-detail-title');
     const content = document.getElementById('cal-detail-content');
     card.style.display = '';
     content.innerHTML = '<p class="text-muted">Loading...</p>';
+    _calViewProfileId = profileId;
 
     fetch(`${ADMIN_BASE}/calibration/profiles/${profileId}`, { credentials: 'include' })
       .then(r => r.json())
@@ -7959,9 +7978,9 @@
           return;
         }
         const p = data.profile;
-        title.textContent = `Profile: ${p.name}`;
+        title.textContent = `Profile: ${p.name} (${p.source})`;
+        _calOrigWeights = JSON.parse(JSON.stringify(p.weights || {}));
 
-        let html = '';
         const weights = p.weights || {};
         const posOrder = [
           'c_rating', 'fb_rating', 'sb_rating', 'tb_rating', 'ss_rating',
@@ -7972,49 +7991,116 @@
           ss_rating: 'SS', lf_rating: 'LF', cf_rating: 'CF', rf_rating: 'RF',
           dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
         };
+        const activePosTypes = posOrder.filter(rt => weights[rt]);
 
-        // Collect all attributes across all positions
         const allAttrs = new Set();
-        for (const rt of posOrder) {
-          for (const attr of Object.keys(weights[rt] || {})) {
-            allAttrs.add(attr);
-          }
+        for (const rt of activePosTypes) {
+          for (const attr of Object.keys(weights[rt] || {})) allAttrs.add(attr);
         }
         const attrList = [...allAttrs].sort();
 
-        // Build heatmap table
-        html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>Attribute</th>';
-        for (const rt of posOrder) {
-          if (weights[rt]) html += `<th>${posLabels[rt]}</th>`;
+        let html = '<div style="margin-bottom:8px">';
+        html += '<button class="btn btn-primary" id="btn-cal-save-weights">Save Changes</button> ';
+        html += '<button class="btn btn-secondary" id="btn-cal-normalize">Normalize Columns</button>';
+        html += ' <span id="cal-edit-status" style="color:var(--text-secondary);font-size:0.85em"></span>';
+        html += '</div>';
+
+        html += '<div class="table-wrap" style="max-height:500px;overflow:auto"><table class="data-table"><thead><tr><th>Attribute</th>';
+        for (const rt of activePosTypes) {
+          html += `<th>${posLabels[rt]}</th>`;
         }
         html += '</tr></thead><tbody>';
 
         for (const attr of attrList) {
-          html += `<tr><td style="font-size: 0.85em;">${attr.replace(/_base$/, '').replace(/_/g, ' ')}</td>`;
-          for (const rt of posOrder) {
-            if (!weights[rt]) continue;
+          html += `<tr><td style="font-size:0.85em">${attr.replace(/_base$/, '').replace(/_/g, ' ')}</td>`;
+          for (const rt of activePosTypes) {
             const w = weights[rt][attr] || 0;
-            const intensity = Math.min(w * 4, 1.0); // scale for visibility
+            const orig = (_calOrigWeights[rt] || {})[attr] || 0;
+            const changed = Math.abs(w - orig) > 0.0001;
+            const intensity = Math.min(w * 4, 1.0);
             const bg = w > 0 ? `rgba(76, 175, 80, ${intensity})` : '';
-            html += `<td style="text-align: center; background: ${bg};">${w > 0 ? w.toFixed(3) : ''}</td>`;
+            const border = changed ? 'border:1px solid #ff9800' : '';
+            html += `<td style="text-align:center;padding:2px;background:${bg};${border}">`;
+            html += `<input type="number" step="0.001" min="0" max="1" value="${w.toFixed(4)}" `;
+            html += `data-rt="${rt}" data-attr="${attr}" `;
+            html += `style="width:65px;text-align:center;background:transparent;color:inherit;border:none;font-size:0.85em">`;
+            html += '</td>';
           }
           html += '</tr>';
         }
-        html += '</tbody></table></div>';
 
-        // Show calibration metadata if available
+        // Sum row
+        html += '<tr style="font-weight:bold;border-top:2px solid var(--border)"><td>Sum</td>';
+        for (const rt of activePosTypes) {
+          const sum = Object.values(weights[rt] || {}).reduce((a, b) => a + b, 0);
+          html += `<td style="text-align:center" id="cal-sum-${rt}">${sum.toFixed(3)}</td>`;
+        }
+        html += '</tr></tbody></table></div>';
+
         if (p.calibration) {
-          html += '<h4 style="margin-top: 16px;">Calibration Details</h4>';
+          html += '<details style="margin-top:12px"><summary style="cursor:pointer;color:var(--text-secondary)">Calibration Details</summary>';
           html += `<pre class="result-box">${JSON.stringify(p.calibration.results, null, 2)}</pre>`;
+          html += '</details>';
         }
 
         content.innerHTML = html;
+
+        // Wire save button
+        document.getElementById('btn-cal-save-weights').addEventListener('click', () => {
+          const inputs = content.querySelectorAll('input[data-rt]');
+          const newWeights = {};
+          inputs.forEach(inp => {
+            const rt = inp.dataset.rt;
+            const attr = inp.dataset.attr;
+            newWeights[rt] = newWeights[rt] || {};
+            newWeights[rt][attr] = parseFloat(inp.value) || 0;
+          });
+
+          fetch(`${ADMIN_BASE}/calibration/profiles/${_calViewProfileId}/weights`, {
+            method: 'PUT', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ weights: newWeights }),
+          })
+            .then(r => r.json())
+            .then(res => {
+              const st = document.getElementById('cal-edit-status');
+              if (res.ok) {
+                st.textContent = `Saved ${res.updated} entries`;
+                st.style.color = '#4caf50';
+                _calOrigWeights = JSON.parse(JSON.stringify(newWeights));
+              } else {
+                st.textContent = `Error: ${res.message || 'unknown'}`;
+                st.style.color = '#f44336';
+              }
+            })
+            .catch(err => {
+              document.getElementById('cal-edit-status').textContent = 'Error: ' + err.message;
+            });
+        });
+
+        // Wire normalize button
+        document.getElementById('btn-cal-normalize').addEventListener('click', () => {
+          for (const rt of activePosTypes) {
+            const inputs = content.querySelectorAll(`input[data-rt="${rt}"]`);
+            let sum = 0;
+            inputs.forEach(inp => { sum += parseFloat(inp.value) || 0; });
+            if (sum > 0) {
+              inputs.forEach(inp => {
+                inp.value = ((parseFloat(inp.value) || 0) / sum).toFixed(4);
+              });
+            }
+            const sumCell = document.getElementById(`cal-sum-${rt}`);
+            if (sumCell) sumCell.textContent = '1.000';
+          }
+          document.getElementById('cal-edit-status').textContent = 'Normalized — remember to Save';
+          document.getElementById('cal-edit-status').style.color = '#ff9800';
+        });
       })
       .catch(err => { content.innerHTML = '<p class="text-muted">Error: ' + err.message + '</p>'; });
   }
 
   function activateCalProfile(profileId) {
-    if (!confirm('Activate this profile? This will update the live position rating weights.')) return;
+    if (!confirm('Activate this profile? This will update live rating weights and recompute displayovr for all players.')) return;
 
     fetch(`${ADMIN_BASE}/calibration/activate/${profileId}`, {
       method: 'POST',
@@ -8024,7 +8110,8 @@
       .then(r => r.json())
       .then(data => {
         if (data.ok) {
-          alert(`Activated — ${data.entries} weight entries applied.`);
+          const ovrMsg = data.displayovr_updated ? ` DisplayOVR updated for ${data.displayovr_updated} players.` : '';
+          alert(`Activated — ${data.entries} weight entries applied.${ovrMsg}`);
           loadCalibrationProfiles();
         } else {
           alert('Error: ' + (data.message || 'unknown'));
@@ -8101,6 +8188,189 @@
     viewCalProfile,
     activateCalProfile,
   };
+
+  // -----------------------------------------------------------------------
+  // Recompute DisplayOVR
+  // -----------------------------------------------------------------------
+
+  function recomputeDisplayOvr() {
+    const level = document.getElementById('cal-ovr-level').value;
+    const status = document.getElementById('cal-ovr-status');
+    status.textContent = 'Recomputing...';
+    status.style.color = 'var(--text-secondary)';
+
+    const body = level ? { level: parseInt(level) } : {};
+
+    fetch(`${ADMIN_BASE}/calibration/recompute-displayovr`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          const byLevel = data.by_level || {};
+          const detail = Object.entries(byLevel).map(([l, c]) => `L${l}: ${c}`).join(', ');
+          status.textContent = `Updated ${data.updated} players. ${detail}`;
+          status.style.color = '#4caf50';
+        } else {
+          status.textContent = `Error: ${data.error || data.message || 'unknown'}`;
+          status.style.color = '#f44336';
+        }
+      })
+      .catch(err => {
+        status.textContent = 'Error: ' + err.message;
+        status.style.color = '#f44336';
+      });
+  }
+
+  // -----------------------------------------------------------------------
+  // Player Preview
+  // -----------------------------------------------------------------------
+
+  function loadPlayerPreviewFilters(params) {
+    const qs = new URLSearchParams(params || {}).toString();
+    return fetch(`${ADMIN_BASE}/calibration/player-preview/filters?${qs}`, { credentials: 'include' })
+      .then(r => r.json());
+  }
+
+  function initPlayerPreviewCascade() {
+    const levelSel = document.getElementById('cal-prev-level');
+    const orgSel = document.getElementById('cal-prev-org');
+    const teamSel = document.getElementById('cal-prev-team');
+    const playerSel = document.getElementById('cal-prev-player');
+
+    levelSel.addEventListener('change', () => {
+      orgSel.innerHTML = '<option value="">--</option>';
+      teamSel.innerHTML = '<option value="">--</option>';
+      playerSel.innerHTML = '<option value="">--</option>';
+      if (!levelSel.value) return;
+      loadPlayerPreviewFilters({ level: levelSel.value }).then(data => {
+        if (!data.ok) return;
+        (data.orgs || []).forEach(o => {
+          orgSel.innerHTML += `<option value="${o.id}">${o.abbrev}</option>`;
+        });
+      });
+    });
+
+    orgSel.addEventListener('change', () => {
+      teamSel.innerHTML = '<option value="">--</option>';
+      playerSel.innerHTML = '<option value="">--</option>';
+      if (!orgSel.value) return;
+      const p = { org_id: orgSel.value };
+      if (levelSel.value) p.level = levelSel.value;
+      loadPlayerPreviewFilters(p).then(data => {
+        if (!data.ok) return;
+        (data.teams || []).forEach(t => {
+          teamSel.innerHTML += `<option value="${t.id}">${t.abbrev} (${t.level})</option>`;
+        });
+      });
+    });
+
+    teamSel.addEventListener('change', () => {
+      playerSel.innerHTML = '<option value="">--</option>';
+      if (!teamSel.value) return;
+      loadPlayerPreviewFilters({ team_id: teamSel.value }).then(data => {
+        if (!data.ok) return;
+        (data.players || []).forEach(p => {
+          const tag = p.ptype === 'Pitcher' ? ' (P)' : '';
+          playerSel.innerHTML += `<option value="${p.id}">${p.name}${tag}</option>`;
+        });
+      });
+    });
+  }
+
+  function loadPlayerPreview() {
+    const playerId = document.getElementById('cal-prev-player').value;
+    const status = document.getElementById('cal-prev-status');
+    const resultCard = document.getElementById('cal-prev-result');
+    resultCard.style.display = 'none';
+
+    if (!playerId) {
+      status.textContent = 'Select a player first';
+      return;
+    }
+    status.textContent = 'Loading...';
+
+    fetch(`${ADMIN_BASE}/calibration/player-preview?player_id=${playerId}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) {
+          status.textContent = `Error: ${data.message || 'unknown'}`;
+          return;
+        }
+        status.textContent = '';
+        renderPlayerPreview(data);
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function renderPlayerPreview(data) {
+    const card = document.getElementById('cal-prev-result');
+    const title = document.getElementById('cal-prev-title');
+    const content = document.getElementById('cal-prev-content');
+
+    const p = data.player;
+    title.textContent = `${p.name} — ${p.ptype} (Level ${p.level})`;
+
+    let html = '';
+
+    // Overall display
+    html += `<div style="display:flex;gap:24px;align-items:center;margin-bottom:16px;flex-wrap:wrap">`;
+    html += `<div style="text-align:center;padding:12px 24px;background:var(--bg-card);border-radius:8px;border:2px solid #2196f3">`;
+    html += `<div style="font-size:2em;font-weight:bold;color:#2196f3">${data.displayovr || '—'}</div>`;
+    html += `<div style="font-size:0.85em;color:var(--text-secondary)">Display OVR</div>`;
+    html += `</div>`;
+    html += `<div style="font-size:0.9em;color:var(--text-secondary)">`;
+    html += `Overall type: ${data.overall.type}<br>`;
+    html += `Raw: ${data.overall.raw} | 20-80: ${data.overall.scaled_20_80}<br>`;
+    html += `Current stored: ${p.current_displayovr || 'null'}`;
+    html += `</div></div>`;
+
+    // Position ratings table
+    html += '<h5>Position Ratings</h5>';
+    html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>Rating</th><th>Raw</th><th>20-80</th></tr></thead><tbody>';
+
+    const posLabels = {
+      c_rating: 'C', fb_rating: '1B', sb_rating: '2B', tb_rating: '3B',
+      ss_rating: 'SS', lf_rating: 'LF', cf_rating: 'CF', rf_rating: 'RF',
+      dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
+      pitch1_ovr: 'P1 OVR', pitch2_ovr: 'P2 OVR', pitch3_ovr: 'P3 OVR',
+      pitch4_ovr: 'P4 OVR', pitch5_ovr: 'P5 OVR',
+    };
+
+    const ratings = data.position_ratings || {};
+    const sorted = Object.entries(ratings).sort((a, b) => {
+      const sa = (a[1].scaled_20_80 || 0);
+      const sb = (b[1].scaled_20_80 || 0);
+      return sb - sa;
+    });
+
+    for (const [key, val] of sorted) {
+      const label = posLabels[key] || key;
+      const scaledColor = val.scaled_20_80 >= 60 ? '#4caf50' : val.scaled_20_80 >= 45 ? '#ff9800' : '#f44336';
+      html += `<tr>`;
+      html += `<td>${label}</td>`;
+      html += `<td>${val.raw}</td>`;
+      html += `<td style="color:${scaledColor};font-weight:bold">${val.scaled_20_80 != null ? val.scaled_20_80 : '—'}</td>`;
+      html += `</tr>`;
+    }
+    html += '</tbody></table></div>';
+
+    // Raw attributes (compact 3-col layout)
+    html += '<details style="margin-top:12px"><summary style="cursor:pointer;color:var(--text-secondary)">Raw Attributes</summary>';
+    html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px 16px;font-size:0.85em;margin-top:8px">';
+    const attrs = data.raw_attributes || {};
+    for (const [key, val] of Object.entries(attrs).sort()) {
+      const label = key.replace(/_base$/, '').replace(/_/g, ' ');
+      html += `<div><span style="color:var(--text-secondary)">${label}:</span> ${val}</div>`;
+    }
+    html += '</div></details>';
+
+    content.innerHTML = html;
+    card.style.display = '';
+    card.scrollIntoView({ behavior: 'smooth' });
+  }
 
   // -----------------------------------------------------------------------
   // Gameplan Audit

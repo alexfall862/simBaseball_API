@@ -2475,8 +2475,11 @@
                 <tr>
                   <th>Position</th>
                   <th>N</th>
-                  <th>Offense R²</th>
-                  <th>Defense R²</th>
+                  <th>Confidence</th>
+                  <th>Off R²</th>
+                  <th>Off Adj R²</th>
+                  <th>Def R²</th>
+                  <th>Def Adj R²</th>
                   <th>Status</th>
                   <th>Warnings</th>
                 </tr>
@@ -2533,6 +2536,66 @@
             </div>
           </div>
           <div id="cal-compare-content"></div>
+        </div>
+
+        <!-- Recompute Display OVR -->
+        <div class="card">
+          <h3>Recompute Display OVR</h3>
+          <p class="text-muted">Recompute the displayovr value for all players using the active weight profile. This runs automatically when a profile is activated.</p>
+          <div class="form-row" style="gap: 12px; align-items: end;">
+            <div class="form-group" style="min-width: 100px;">
+              <label>Level (optional)</label>
+              <select id="cal-ovr-level" class="form-control">
+                <option value="">All Levels</option>
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">A+ (6)</option>
+                <option value="5">A (5)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" id="btn-cal-recompute-ovr">Recompute</button>
+          </div>
+          <div id="cal-ovr-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Player Preview -->
+        <div class="card">
+          <h3>Player Preview</h3>
+          <p class="text-muted">Preview how the active weights compute ratings for a specific player.</p>
+          <div class="form-row" style="gap: 12px; flex-wrap: wrap; align-items: end;">
+            <div class="form-group" style="min-width: 100px;">
+              <label>Level</label>
+              <select id="cal-prev-level" class="form-control">
+                <option value="">Select...</option>
+                <option value="9">MLB</option>
+                <option value="8">AAA</option>
+                <option value="7">AA</option>
+                <option value="6">A+</option>
+                <option value="5">A</option>
+                <option value="3">College</option>
+              </select>
+            </div>
+            <div class="form-group" style="min-width: 100px;">
+              <label>Org</label>
+              <select id="cal-prev-org" class="form-control"><option value="">--</option></select>
+            </div>
+            <div class="form-group" style="min-width: 100px;">
+              <label>Team</label>
+              <select id="cal-prev-team" class="form-control"><option value="">--</option></select>
+            </div>
+            <div class="form-group" style="min-width: 160px;">
+              <label>Player</label>
+              <select id="cal-prev-player" class="form-control"><option value="">--</option></select>
+            </div>
+            <button class="btn btn-primary" id="btn-cal-preview">Preview</button>
+          </div>
+          <div id="cal-prev-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+        <div class="card" id="cal-prev-result" style="display:none">
+          <h4 id="cal-prev-title">Player Rating Preview</h4>
+          <div id="cal-prev-content"></div>
         </div>
       </section>
 

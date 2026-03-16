@@ -2656,24 +2656,280 @@ def admin_calibration_compare():
 
 @admin_bp.post("/calibration/activate/<int:profile_id>")
 def admin_calibration_activate(profile_id):
-    """Activate a weight profile — writes to rating_overall_weights."""
+    """Activate a weight profile — writes to rating_overall_weights, recomputes displayovr."""
     guard = _require_admin()
     if guard:
         return guard
 
     try:
         from db import get_engine
-        from services.weight_calibration import activate_profile
+        from services.weight_calibration import activate_profile, recompute_displayovr
+        from services.rating_config import invalidate_rating_config_cache
 
         engine = get_engine()
         with engine.begin() as conn:
             result = activate_profile(conn, profile_id)
+            ovr_result = recompute_displayovr(conn)
+            result["displayovr_updated"] = ovr_result.get("updated", 0)
 
+        invalidate_rating_config_cache()
         return jsonify(ok=True, **result)
 
     except Exception as e:
         logging.exception("admin_calibration_activate failed")
         return jsonify(ok=False, error="activate_failed", message=str(e)), 500
+
+
+@admin_bp.put("/calibration/profiles/<int:profile_id>/weights")
+def admin_calibration_update_weights(profile_id):
+    """Update weights in an existing profile."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    weights = body.get("weights")
+    if not weights or not isinstance(weights, dict):
+        return jsonify(ok=False, error="missing_params",
+                       message="weights dict required"), 400
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import update_profile_weights
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            count = update_profile_weights(conn, profile_id, weights)
+
+        return jsonify(ok=True, updated=count)
+
+    except ValueError as e:
+        return jsonify(ok=False, error="not_found", message=str(e)), 404
+    except Exception as e:
+        logging.exception("admin_calibration_update_weights failed")
+        return jsonify(ok=False, error="update_failed", message=str(e)), 500
+
+
+@admin_bp.post("/calibration/recompute-displayovr")
+def admin_recompute_displayovr():
+    """Batch recompute displayovr for all players using active weight profile."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    level = body.get("level")
+
+    try:
+        from db import get_engine
+        from services.weight_calibration import recompute_displayovr
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = recompute_displayovr(conn, level=int(level) if level else None)
+
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_recompute_displayovr failed")
+        return jsonify(ok=False, error="recompute_failed", message=str(e)), 500
+
+
+@admin_bp.get("/calibration/player-preview/filters")
+def admin_player_preview_filters():
+    """Cascading filter data for player preview."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    level = request.args.get("level", type=int)
+    org_id = request.args.get("org_id", type=int)
+    team_id = request.args.get("team_id", type=int)
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            result = {}
+
+            # Always return levels
+            result["levels"] = [
+                {"id": 9, "name": "MLB"}, {"id": 8, "name": "AAA"},
+                {"id": 7, "name": "AA"}, {"id": 6, "name": "High-A"},
+                {"id": 5, "name": "Low-A"}, {"id": 3, "name": "College"},
+            ]
+
+            # Orgs (filtered by level if provided)
+            if level:
+                orgs = conn.execute(sa_text("""
+                    SELECT DISTINCT o.id, o.org_abbrev
+                    FROM organizations o
+                    JOIN teams t ON t.orgID = o.id AND t.team_level = :level
+                    ORDER BY o.org_abbrev
+                """), {"level": level}).mappings().all()
+            else:
+                orgs = conn.execute(sa_text(
+                    "SELECT id, org_abbrev FROM organizations ORDER BY org_abbrev"
+                )).mappings().all()
+            result["orgs"] = [{"id": int(o["id"]), "abbrev": o["org_abbrev"]} for o in orgs]
+
+            # Teams (filtered by org and/or level)
+            if org_id:
+                team_where = "t.orgID = :org_id"
+                team_params = {"org_id": org_id}
+                if level:
+                    team_where += " AND t.team_level = :level"
+                    team_params["level"] = level
+                teams = conn.execute(sa_text(f"""
+                    SELECT t.id, t.team_abbrev, t.team_level
+                    FROM teams t WHERE {team_where}
+                    ORDER BY t.team_level DESC, t.team_abbrev
+                """), team_params).mappings().all()
+                result["teams"] = [{"id": int(t["id"]), "abbrev": t["team_abbrev"],
+                                    "level": int(t["team_level"])} for t in teams]
+
+            # Players (filtered by team)
+            if team_id:
+                players = conn.execute(sa_text("""
+                    SELECT p.id, p.firstName, p.lastName, p.ptype
+                    FROM simbbPlayers p
+                    JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+                    JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+                    JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                    JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+                    WHERE t.id = :tid
+                    ORDER BY p.ptype, p.lastName, p.firstName
+                """), {"tid": team_id}).mappings().all()
+                result["players"] = [{"id": int(p["id"]),
+                                      "name": f"{p['firstName']} {p['lastName']}",
+                                      "ptype": p["ptype"]} for p in players]
+
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_player_preview_filters failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
+@admin_bp.get("/calibration/player-preview")
+def admin_player_preview():
+    """
+    Preview a player's ratings computed with active weights.
+
+    GET /admin/calibration/player-preview?player_id=12345
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    player_id = request.args.get("player_id", type=int)
+    if not player_id:
+        return jsonify(ok=False, error="missing_param",
+                       message="player_id required"), 400
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            # Load player + level
+            row = conn.execute(sa_text("""
+                SELECT p.*, c.current_level
+                FROM simbbPlayers p
+                JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+                WHERE p.id = :pid
+                LIMIT 1
+            """), {"pid": player_id}).mappings().first()
+
+            if not row:
+                return jsonify(ok=False, error="not_found",
+                               message=f"Player {player_id} not found"), 404
+
+            from services.rating_config import get_overall_weights, to_20_80, get_rating_config
+            from rosters import _compute_derived_raw_ratings, _get_player_column_categories, _DummyRow
+
+            ptype = (row.get("ptype") or "").strip()
+            player_level = int(row["current_level"])
+
+            # Load active weights
+            all_weights = get_overall_weights(conn)
+
+            # Build a mock row for _compute_derived_raw_ratings
+            # It expects a row-like object with _mapping attribute
+            class _RowProxy:
+                def __init__(self, data):
+                    self._mapping = data
+            proxy = _RowProxy(dict(row))
+
+            # Position rating weights (exclude overalls)
+            pos_weights = {k: v for k, v in all_weights.items()
+                          if k not in ("pitcher_overall", "position_overall")}
+
+            raw_ratings = _compute_derived_raw_ratings(proxy, pos_weights or None)
+
+            # Load distributions for 20-80 scaling
+            dist_config = get_rating_config(conn)
+            ptype_key = ptype if ptype in ("Pitcher", "Position") else "Position"
+            level_dists = dist_config.get(ptype_key, {}).get(player_level, {})
+
+            # Scale each rating
+            position_ratings = {}
+            for rating_name, raw_val in raw_ratings.items():
+                d = level_dists.get(rating_name)
+                if d and d.get("mean") is not None and d.get("std"):
+                    scaled = to_20_80(raw_val, d["mean"], d["std"])
+                else:
+                    scaled = None
+                position_ratings[rating_name] = {
+                    "raw": round(raw_val, 2),
+                    "scaled_20_80": scaled,
+                }
+
+            # Compute overall
+            ovr_type = "pitcher_overall" if ptype == "Pitcher" else "position_overall"
+            ovr_weights = all_weights.get(ovr_type, {})
+            ovr_raw = 0.0
+            ovr_weight_sum = 0.0
+
+            for attr_key, weight in ovr_weights.items():
+                if attr_key.startswith("pitch") and attr_key.endswith("_ovr"):
+                    # Use the computed pitch ovr
+                    attr_val = raw_ratings.get(attr_key, 0.0)
+                else:
+                    attr_val = float(row.get(attr_key, 0) or 0)
+                ovr_raw += attr_val * weight
+                ovr_weight_sum += weight
+
+            ovr_raw = ovr_raw / ovr_weight_sum if ovr_weight_sum > 0 else 0.0
+
+            ovr_dist = level_dists.get(ovr_type)
+            if ovr_dist and ovr_dist.get("mean") is not None and ovr_dist.get("std"):
+                ovr_scaled = to_20_80(ovr_raw, ovr_dist["mean"], ovr_dist["std"])
+            else:
+                ovr_scaled = max(20, min(80, round(ovr_raw * 0.6 + 20)))
+
+            # Raw attributes
+            col_cats = _get_player_column_categories()
+            raw_attrs = {}
+            for col in col_cats["rating"]:
+                raw_attrs[col] = float(row.get(col, 0) or 0)
+
+            return jsonify(ok=True, player={
+                "id": int(row["id"]),
+                "name": f"{row['firstName']} {row['lastName']}",
+                "ptype": ptype,
+                "level": player_level,
+                "current_displayovr": row.get("displayovr"),
+            }, raw_attributes=raw_attrs, position_ratings=position_ratings,
+               overall={"type": ovr_type, "raw": round(ovr_raw, 2), "scaled_20_80": ovr_scaled},
+               displayovr=ovr_scaled)
+
+    except Exception as e:
+        logging.exception("admin_player_preview failed")
+        return jsonify(ok=False, error="preview_failed", message=str(e)), 500
 
 
 @admin_bp.post("/calibration/profiles")

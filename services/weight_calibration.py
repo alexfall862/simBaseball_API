@@ -69,6 +69,26 @@ DEFAULT_BLEND: Dict[str, Tuple[float, float]] = {
 }
 
 
+def _confidence_level(n: int, p: int) -> str:
+    """Sample size confidence: high (n>=10p), moderate (n>=3p), low (n>=p+2)."""
+    if n >= 10 * p:
+        return "high"
+    elif n >= 3 * p:
+        return "moderate"
+    return "low"
+
+
+def _vif_warnings(vif: List[float], attr_names: List[str]) -> List[str]:
+    """Generate warnings for high VIF (multicollinearity)."""
+    warnings = []
+    for i, v in enumerate(vif):
+        if v > 10.0:
+            warnings.append(f"{attr_names[i]}: VIF={v:.1f} — severe multicollinearity")
+        elif v > 5.0:
+            warnings.append(f"{attr_names[i]}: VIF={v:.1f} — moderate multicollinearity")
+    return warnings
+
+
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
@@ -306,39 +326,55 @@ def _calibrate_position(
         min_innings, lg_err_rate,
     )
 
+    n = len(records)
+    p_max = max(len(OFFENSE_ATTRS), len(defense_attrs))
+
     result = {
         "rating_type": rating_type,
         "position_code": position_code,
-        "n": len(records),
+        "n": n,
+        "confidence_level": _confidence_level(n, p_max),
         "offense_r2": None,
+        "offense_adj_r2": None,
         "defense_r2": None,
+        "defense_adj_r2": None,
         "weights": {},
         "warnings": [],
     }
 
-    if len(records) < max(len(OFFENSE_ATTRS), len(defense_attrs)) + 2:
+    if n < p_max + 2:
         result["warnings"].append(
-            f"Insufficient data: {len(records)} players "
-            f"(need {max(len(OFFENSE_ATTRS), len(defense_attrs)) + 2})"
+            f"Insufficient data: {n} players "
+            f"(need {p_max + 2})"
         )
         result["skipped"] = True
         return result
 
+    # Ridge fallback for small samples
+    off_ridge = 0.1 if n < 5 * len(OFFENSE_ATTRS) else 0.0
+    def_ridge = 0.1 if n < 5 * len(defense_attrs) else 0.0
+
     # Offensive regression: attrs -> OPS
     offense_X = [r["offense_attrs"] for r in records]
     offense_y = [r["ops"] for r in records]
-    off_result = _ols_regression(offense_X, offense_y)
+    off_result = _ols_regression(offense_X, offense_y, ridge_lambda=off_ridge)
 
     if "error" in off_result:
         result["warnings"].append(f"Offense regression failed: {off_result['error']}")
         offense_weights = {a: 1.0 / len(OFFENSE_ATTRS) for a in OFFENSE_ATTRS}
         result["offense_r2"] = 0.0
+        result["offense_adj_r2"] = 0.0
     else:
         offense_weights, off_warns = _normalize_betas(
             off_result["std_betas"], OFFENSE_ATTRS
         )
         result["offense_r2"] = off_result["r_squared"]
+        result["offense_adj_r2"] = off_result["adj_r_squared"]
         result["warnings"].extend(off_warns)
+        if off_result.get("vif"):
+            result["warnings"].extend(_vif_warnings(off_result["vif"], OFFENSE_ATTRS))
+        if off_ridge > 0:
+            result["warnings"].append(f"Offense: Ridge regression used (lambda={off_ridge}, small sample)")
 
     # DH: offense only
     if position_code == "dh" or defense_pct <= 0:
@@ -348,18 +384,24 @@ def _calibrate_position(
     # Defensive regression: attrs -> fielding runs
     defense_X = [r["defense_attrs"] for r in records]
     defense_y = [r["fld_runs"] for r in records]
-    def_result = _ols_regression(defense_X, defense_y)
+    def_result = _ols_regression(defense_X, defense_y, ridge_lambda=def_ridge)
 
     if "error" in def_result:
         result["warnings"].append(f"Defense regression failed: {def_result['error']}")
         defense_weights = {a: 1.0 / len(defense_attrs) for a in defense_attrs}
         result["defense_r2"] = 0.0
+        result["defense_adj_r2"] = 0.0
     else:
         defense_weights, def_warns = _normalize_betas(
             def_result["std_betas"], defense_attrs
         )
         result["defense_r2"] = def_result["r_squared"]
+        result["defense_adj_r2"] = def_result["adj_r_squared"]
         result["warnings"].extend(def_warns)
+        if def_result.get("vif"):
+            result["warnings"].extend(_vif_warnings(def_result["vif"], defense_attrs))
+        if def_ridge > 0:
+            result["warnings"].append(f"Defense: Ridge regression used (lambda={def_ridge}, small sample)")
 
     # Blend
     result["weights"] = _blend_weights(
@@ -383,39 +425,53 @@ def _calibrate_pitcher(
         conn, pitcher_type, league_year_id, league_level, min_ipo,
     )
 
+    n = len(records)
+    p = len(attr_keys)
+
     result = {
         "rating_type": rating_type,
         "position_code": pitcher_type.lower(),
-        "n": len(records),
+        "n": n,
+        "confidence_level": _confidence_level(n, p),
         "r2": None,
+        "adj_r2": None,
         "weights": {},
         "warnings": [],
     }
 
-    if len(records) < len(attr_keys) + 2:
+    if n < p + 2:
         result["warnings"].append(
-            f"Insufficient data: {len(records)} pitchers "
-            f"(need {len(attr_keys) + 2})"
+            f"Insufficient data: {n} pitchers "
+            f"(need {p + 2})"
         )
         result["skipped"] = True
         return result
 
+    # Ridge fallback for small samples
+    ridge = 0.1 if n < 5 * p else 0.0
+
     # Regression: attrs -> ERA (negate betas since lower ERA = better)
     X = [r["attr_values"] for r in records]
     y = [r["era"] for r in records]
-    reg_result = _ols_regression(X, y)
+    reg_result = _ols_regression(X, y, ridge_lambda=ridge)
 
     if "error" in reg_result:
         result["warnings"].append(f"Regression failed: {reg_result['error']}")
         result["r2"] = 0.0
-        result["weights"] = {a: round(1.0 / len(attr_keys), 6) for a in attr_keys}
+        result["adj_r2"] = 0.0
+        result["weights"] = {a: round(1.0 / p, 6) for a in attr_keys}
     else:
         weights, warns = _normalize_betas(
             reg_result["std_betas"], attr_keys, negate=True
         )
         result["r2"] = reg_result["r_squared"]
+        result["adj_r2"] = reg_result["adj_r_squared"]
         result["weights"] = weights
         result["warnings"].extend(warns)
+        if reg_result.get("vif"):
+            result["warnings"].extend(_vif_warnings(reg_result["vif"], attr_keys))
+        if ridge > 0:
+            result["warnings"].append(f"Ridge regression used (lambda={ridge}, small sample)")
 
     return result
 
@@ -713,3 +769,157 @@ def create_manual_profile(
             })
 
     return int(profile_id)
+
+
+def update_profile_weights(
+    conn, profile_id: int, weights: Dict[str, Dict[str, float]],
+) -> int:
+    """
+    Replace all weight entries for an existing profile.
+    Marks the profile source as 'manual' if it was 'calibrated'.
+    """
+    # Verify profile exists
+    row = conn.execute(text(
+        "SELECT id, source FROM weight_profiles WHERE id = :pid"
+    ), {"pid": profile_id}).first()
+    if not row:
+        raise ValueError(f"Profile {profile_id} not found")
+
+    # Update source to manual if was calibrated
+    if row[1] == "calibrated":
+        conn.execute(text(
+            "UPDATE weight_profiles SET source = 'manual' WHERE id = :pid"
+        ), {"pid": profile_id})
+
+    # Delete existing entries and re-insert
+    conn.execute(text(
+        "DELETE FROM weight_profile_entries WHERE profile_id = :pid"
+    ), {"pid": profile_id})
+
+    count = 0
+    for rating_type, attr_weights in weights.items():
+        for attr_key, weight in attr_weights.items():
+            conn.execute(text("""
+                INSERT INTO weight_profile_entries
+                    (profile_id, rating_type, attribute_key, weight)
+                VALUES (:pid, :rt, :ak, :w)
+            """), {
+                "pid": profile_id,
+                "rt": rating_type,
+                "ak": attr_key,
+                "w": float(weight),
+            })
+            count += 1
+
+    return count
+
+
+def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Batch recompute displayovr for all active players using the active
+    weight profile's pitcher_overall and position_overall weights.
+
+    Returns: {updated: total_count, by_level: {level_id: count}}
+    """
+    from services.rating_config import get_overall_weights, to_20_80, get_rating_config
+
+    # Load active weights
+    all_weights = get_overall_weights(conn)
+    pitcher_ovr_weights = all_weights.get("pitcher_overall", {})
+    position_ovr_weights = all_weights.get("position_overall", {})
+
+    if not pitcher_ovr_weights and not position_ovr_weights:
+        return {"updated": 0, "by_level": {}, "error": "no_overall_weights_configured"}
+
+    # Load rating scale distributions: { ptype: { level_id: { attr: {mean, std} } } }
+    try:
+        dist_config = get_rating_config(conn)
+    except Exception:
+        dist_config = {}
+
+    # Load all active players with their attributes and level
+    level_filter = "AND c.current_level = :level" if level else ""
+    params = {}
+    if level:
+        params["level"] = level
+
+    rows = conn.execute(text(f"""
+        SELECT p.*, c.current_level
+        FROM simbbPlayers p
+        JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+        WHERE 1=1 {level_filter}
+    """), params).mappings().all()
+
+    if not rows:
+        return {"updated": 0, "by_level": {}}
+
+    # Compute displayovr for each player
+    updates = []  # (player_id, displayovr_value)
+    by_level = {}
+
+    for row in rows:
+        pid = int(row["id"])
+        ptype = (row.get("ptype") or "").strip()
+        player_level = int(row["current_level"])
+
+        # Select appropriate overall weights
+        if ptype == "Pitcher":
+            ovr_weights = pitcher_ovr_weights
+            ovr_type = "pitcher_overall"
+        else:
+            ovr_weights = position_ovr_weights
+            ovr_type = "position_overall"
+
+        if not ovr_weights:
+            continue
+
+        # Compute weighted average of raw attributes
+        raw_sum = 0.0
+        weight_sum = 0.0
+
+        for attr_key, weight in ovr_weights.items():
+            # For pitch_ovr attributes, compute them from components
+            if attr_key.startswith("pitch") and attr_key.endswith("_ovr"):
+                pitch_num = attr_key.replace("pitch", "").replace("_ovr", "")
+                consist = float(row.get(f"pitch{pitch_num}_consist_base", 0) or 0)
+                pacc = float(row.get(f"pitch{pitch_num}_pacc_base", 0) or 0)
+                pbrk = float(row.get(f"pitch{pitch_num}_pbrk_base", 0) or 0)
+                pcntrl = float(row.get(f"pitch{pitch_num}_pcntrl_base", 0) or 0)
+                attr_val = (consist + pacc + pbrk + pcntrl) / 4.0
+            else:
+                attr_val = float(row.get(attr_key, 0) or 0)
+
+            raw_sum += attr_val * weight
+            weight_sum += weight
+
+        if weight_sum <= 0:
+            continue
+
+        raw_ovr = raw_sum / weight_sum
+
+        # Scale to 20-80 using level+ptype distributions
+        ptype_key = ptype if ptype in ("Pitcher", "Position") else "Position"
+        level_dist = dist_config.get(ptype_key, {}).get(player_level, {}).get(ovr_type)
+
+        if level_dist and level_dist.get("mean") is not None and level_dist.get("std"):
+            scaled = to_20_80(raw_ovr, level_dist["mean"], level_dist["std"])
+        else:
+            # Fallback: simple linear map (raw 0-100 → 20-80)
+            scaled = max(20, min(80, round(raw_ovr * 0.6 + 20)))
+
+        updates.append((pid, str(scaled)))
+        by_level[player_level] = by_level.get(player_level, 0) + 1
+
+    # Batch update using CASE statement to minimize lock time
+    # Process in chunks of 500 to avoid oversized queries
+    CHUNK = 500
+    for i in range(0, len(updates), CHUNK):
+        chunk = updates[i:i + CHUNK]
+        cases = " ".join(f"WHEN {pid} THEN '{ovr}'" for pid, ovr in chunk)
+        ids = ", ".join(str(pid) for pid, _ in chunk)
+        conn.execute(text(
+            f"UPDATE simbbPlayers SET displayovr = CASE id {cases} END "
+            f"WHERE id IN ({ids})"
+        ))
+
+    return {"updated": len(updates), "by_level": by_level}

@@ -218,6 +218,8 @@ def _generate_effects_for_injury_type(
     injury_type_row: Dict[str, Any],
 ) -> Dict[str, float]:
     """
+    Roll concrete multiplicative effects from an injury type's template.
+
     impact_template_json is expected like:
 
       {
@@ -225,7 +227,12 @@ def _generate_effects_for_injury_type(
         "stamina_pct": {"min_pct": 1.0, "max_pct": 1.0}
       }
 
-    We sample a multiplier for each key between [min_pct, max_pct].
+    Each pct value represents the **severity** of the effect.  The resulting
+    multiplier stored in the effects dict is ``1.0 - rolled_pct``:
+
+      - pct 0.5 → multiplier 0.5  (attribute reduced to 50%)
+      - pct 0.8 → multiplier 0.2  (attribute reduced to 20%)
+      - pct 1.0 → multiplier 0.0  (attribute zeroed — e.g. stamina)
     """
     raw = injury_type_row.get("impact_template_json")
     if not raw:
@@ -250,8 +257,8 @@ def _generate_effects_for_injury_type(
         if max_pct < min_pct:
             min_pct, max_pct = max_pct, min_pct
 
-        val = rng.uniform(min_pct, max_pct)
-        effects[attr_name] = val
+        rolled_pct = rng.uniform(min_pct, max_pct)
+        effects[attr_name] = max(0.0, 1.0 - rolled_pct)
 
     return effects
 

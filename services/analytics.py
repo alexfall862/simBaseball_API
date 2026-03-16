@@ -808,20 +808,23 @@ def _mat_inverse(A):
     return [row[n:] for row in aug]
 
 
-def _ols_regression(X_raw: List[List[float]], y: List[float]) -> Dict[str, Any]:
+def _ols_regression(
+    X_raw: List[List[float]], y: List[float],
+    ridge_lambda: float = 0.0,
+) -> Dict[str, Any]:
     """
-    OLS multiple regression.
+    OLS (or Ridge) multiple regression.
 
     X_raw: n×p matrix of predictor values (no intercept column — we add it).
     y: n-vector of response values.
+    ridge_lambda: L2 penalty. 0 = standard OLS; >0 = Ridge regression.
 
     Returns dict with:
-      betas: list of p coefficients (excluding intercept)
-      intercept: float
-      r_squared: float
-      std_betas: list of p standardized coefficients (beta weights)
-      predictions: list of n predicted values
-      residuals: list of n residuals
+      betas, intercept, r_squared, adj_r_squared, std_betas,
+      predictions, residuals,
+      beta_se, beta_ci_lo, beta_ci_hi (95% CIs),
+      vif (variance inflation factors per predictor),
+      ridge_lambda (echo back for diagnostics)
     """
     n = len(y)
     p = len(X_raw[0]) if X_raw else 0
@@ -834,11 +837,17 @@ def _ols_regression(X_raw: List[List[float]], y: List[float]) -> Dict[str, Any]:
 
     Xt = _mat_transpose(X)
     XtX = _mat_mul(Xt, [[X[i][j] for j in range(k)] for i in range(n)])
+
+    # Apply Ridge penalty to diagonal (skip intercept at index 0)
+    if ridge_lambda > 0:
+        for j in range(1, k):
+            XtX[j][j] += ridge_lambda
+
     XtX_inv = _mat_inverse(XtX)
     if XtX_inv is None:
         return {"error": "singular_matrix", "n": n, "p": p}
 
-    # β = (X'X)⁻¹ X'y
+    # beta = (X'X + lambda*I)^-1 X'y
     Xty = [sum(X[i][j] * y[i] for i in range(n)) for j in range(k)]
     betas_full = [sum(XtX_inv[j][m] * Xty[m] for m in range(k)) for j in range(k)]
 
@@ -849,31 +858,66 @@ def _ols_regression(X_raw: List[List[float]], y: List[float]) -> Dict[str, Any]:
     predictions = [sum(X[i][j] * betas_full[j] for j in range(k)) for i in range(n)]
     residuals = [y[i] - predictions[i] for i in range(n)]
 
-    # R²
+    # R² and adjusted R²
     y_mean = sum(y) / n
     ss_tot = sum((yi - y_mean) ** 2 for yi in y)
     ss_res = sum(r ** 2 for r in residuals)
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    adj_r_squared = 1.0 - (1.0 - r_squared) * (n - 1) / (n - p - 1) if n > p + 1 else 0.0
 
     # Standardized betas
     x_stds = []
+    x_vars = []
     for j in range(p):
         col = [X_raw[i][j] for i in range(n)]
         col_mean = sum(col) / n
-        col_std = math.sqrt(sum((v - col_mean) ** 2 for v in col) / n) if n > 0 else 1.0
-        x_stds.append(col_std if col_std > 0 else 1.0)
+        col_var = sum((v - col_mean) ** 2 for v in col) / n if n > 0 else 1.0
+        col_std = math.sqrt(col_var) if col_var > 0 else 1.0
+        x_stds.append(col_std)
+        x_vars.append(col_var if col_var > 0 else 1.0)
     y_std = math.sqrt(sum((yi - y_mean) ** 2 for yi in y) / n) if n > 0 else 1.0
     y_std = y_std if y_std > 0 else 1.0
 
     std_betas = [betas[j] * x_stds[j] / y_std for j in range(p)]
 
+    # MSE and beta standard errors / CIs
+    dof = n - p - 1
+    mse = ss_res / dof if dof > 0 else 0.0
+    beta_se = []
+    beta_ci_lo = []
+    beta_ci_hi = []
+    t_crit = 1.96  # ~95% CI for large samples
+    for j in range(p):
+        # XtX_inv indices: +1 offset because intercept is column 0
+        se = math.sqrt(mse * XtX_inv[j + 1][j + 1]) if mse > 0 and XtX_inv[j + 1][j + 1] > 0 else 0.0
+        beta_se.append(round(se, 6))
+        beta_ci_lo.append(round(betas[j] - t_crit * se, 6))
+        beta_ci_hi.append(round(betas[j] + t_crit * se, 6))
+
+    # Variance Inflation Factors (VIF)
+    # VIF_j = diag_j((X'X)^-1) * (n * var(x_j))
+    # For standardized: VIF_j = diag_j(R^-1) where R is correlation matrix
+    # Simpler: VIF_j = (X'X)^-1_jj * sum((x_j - mean)^2)
+    vif = []
+    for j in range(p):
+        # XtX_inv[j+1][j+1] is the diagonal for predictor j (offset by intercept)
+        ssj = sum((X_raw[i][j] - sum(X_raw[r][j] for r in range(n)) / n) ** 2 for i in range(n))
+        vif_j = XtX_inv[j + 1][j + 1] * ssj if ssj > 0 else 0.0
+        vif.append(round(vif_j, 2))
+
     return {
         "betas": [round(b, 6) for b in betas],
         "intercept": round(intercept, 6),
         "r_squared": round(r_squared, 4),
+        "adj_r_squared": round(adj_r_squared, 4),
         "std_betas": [round(sb, 4) for sb in std_betas],
         "predictions": predictions,
         "residuals": residuals,
+        "beta_se": beta_se,
+        "beta_ci_lo": beta_ci_lo,
+        "beta_ci_hi": beta_ci_hi,
+        "vif": vif,
+        "ridge_lambda": ridge_lambda,
     }
 
 

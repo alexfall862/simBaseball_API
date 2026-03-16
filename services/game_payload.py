@@ -1272,11 +1272,11 @@ def build_engine_player_view(conn, player_id: int) -> EnginePlayerView:
 
     raw_mapping = dict(row._mapping)
 
-    # Apply injury maluses to *_base attributes
+    # Apply injury maluses to *_base attributes (multiplicative)
     malus = get_active_injury_malus(conn, player_id)
     adjusted_mapping = dict(raw_mapping)
 
-    for attr, delta in malus.items():
+    for attr, factor in malus.items():
         if attr.endswith("_base") and attr in adjusted_mapping:
             base_val = adjusted_mapping.get(attr)
             try:
@@ -1284,14 +1284,22 @@ def build_engine_player_view(conn, player_id: int) -> EnginePlayerView:
             except (TypeError, ValueError):
                 base_num = 0.0
             try:
-                delta_num = float(delta)
+                factor_num = float(factor)
             except (TypeError, ValueError):
-                delta_num = 0.0
-            adjusted_mapping[attr] = base_num + delta_num
+                factor_num = 1.0
+            adjusted_mapping[attr] = base_num * factor_num
 
     # Load position weights from DB
     pos_weights = _load_position_weights(conn)
     engine_player = _build_engine_player_view_from_mapping(adjusted_mapping, pos_weights)
+
+    # Carry stamina_pct through for persisted injuries that bench a player
+    if "stamina_pct" in malus:
+        try:
+            engine_player["_injury_stamina_pct"] = float(malus["stamina_pct"])
+        except (TypeError, ValueError):
+            pass
+
     return EnginePlayerView(engine_player)
 
 def build_engine_player_views_bulk(
@@ -1348,7 +1356,7 @@ def build_engine_player_views_bulk(
         adjusted_mapping = dict(raw_mapping)
         malus = malus_by_player.get(pid) or {}
 
-        for attr, delta in malus.items():
+        for attr, factor in malus.items():
             if attr.endswith("_base") and attr in adjusted_mapping:
                 base_val = adjusted_mapping.get(attr)
                 try:
@@ -1356,12 +1364,22 @@ def build_engine_player_views_bulk(
                 except (TypeError, ValueError):
                     base_num = 0.0
                 try:
-                    delta_num = float(delta)
+                    factor_num = float(factor)
                 except (TypeError, ValueError):
-                    delta_num = 0.0
-                adjusted_mapping[attr] = base_num + delta_num
+                    factor_num = 1.0
+                adjusted_mapping[attr] = base_num * factor_num
 
         engine_player = _build_engine_player_view_from_mapping(adjusted_mapping, pos_weights)
+
+        # Carry stamina_pct through so it can be applied when stamina is
+        # attached later (persisted injuries that should bench a player use
+        # stamina_pct: 0.0 to force stamina to 0).
+        if "stamina_pct" in malus:
+            try:
+                engine_player["_injury_stamina_pct"] = float(malus["stamina_pct"])
+            except (TypeError, ValueError):
+                pass
+
         results[pid] = engine_player
 
     return results
@@ -1490,8 +1508,12 @@ def build_team_game_side(
 
         ep = dict(base_view)
 
-        # Stamina
-        ep["stamina"] = int(stamina_by_player.get(pid, 100))
+        # Stamina — apply persisted injury stamina_pct if present
+        raw_stamina = int(stamina_by_player.get(pid, 100))
+        injury_stam_pct = ep.pop("_injury_stamina_pct", None)
+        if injury_stam_pct is not None:
+            raw_stamina = int(max(0.0, raw_stamina * injury_stam_pct))
+        ep["stamina"] = raw_stamina
 
         # Strategy
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
@@ -2373,6 +2395,35 @@ def _store_game_results_bulk(
         return 0
 
 
+def _normalize_engine_effects(effects: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Flatten engine injury effects into a simple {attr: multiplier} dict.
+
+    The engine returns effects in nested format:
+        {"speed": {"original": 75, "modified": 52.5, "multiplier": 0.7}}
+
+    We extract just the multiplier for storage in malus_json:
+        {"speed": 0.7}
+
+    If a value is already a plain number (backwards compat), keep it as-is.
+    """
+    out: Dict[str, float] = {}
+    for attr, val in effects.items():
+        if isinstance(val, dict):
+            m = val.get("multiplier")
+            if m is not None:
+                try:
+                    out[attr] = float(m)
+                except (TypeError, ValueError):
+                    continue
+        else:
+            try:
+                out[attr] = float(val)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 def _update_player_state_bulk(
     conn,
     results: List[Dict[str, Any]],
@@ -2493,6 +2544,9 @@ def _update_player_state_bulk(
              :weeks_remaining, :malus_json)
     """)
 
+    # UPSERT: only overwrite current_event_id / weeks_remaining when the
+    # new injury is longer than the one already tracked.  This ensures
+    # state always points at the worst-case (longest) active event.
     injury_state_upsert = sa_text("""
         INSERT INTO player_injury_state
             (player_id, status, current_event_id, weeks_remaining, last_updated_at)
@@ -2500,8 +2554,9 @@ def _update_player_state_bulk(
             (:player_id, 'injured', :event_id, :weeks_remaining, NOW())
         ON DUPLICATE KEY UPDATE
             status           = 'injured',
-            current_event_id = :event_id,
-            weeks_remaining  = :weeks_remaining,
+            current_event_id = IF(:weeks_remaining > weeks_remaining,
+                                  :event_id, current_event_id),
+            weeks_remaining  = GREATEST(weeks_remaining, :weeks_remaining),
             last_updated_at  = NOW()
     """)
 
@@ -2514,7 +2569,7 @@ def _update_player_state_bulk(
             pid = int(pid)
             injury_type_id = int(inj.get("injury_type_id", 0))
             duration_weeks = int(inj.get("duration_weeks", 1))
-            effects = inj.get("effects") or {}
+            effects = _normalize_engine_effects(inj.get("effects") or {})
 
             try:
                 ev_result = conn.execute(injury_insert, {
@@ -2723,8 +2778,9 @@ def _update_player_state_after_subweek(
             (:player_id, 'injured', :event_id, :weeks_remaining, NOW())
         ON DUPLICATE KEY UPDATE
             status           = 'injured',
-            current_event_id = :event_id,
-            weeks_remaining  = :weeks_remaining,
+            current_event_id = IF(:weeks_remaining > weeks_remaining,
+                                  :event_id, current_event_id),
+            weeks_remaining  = GREATEST(weeks_remaining, :weeks_remaining),
             last_updated_at  = NOW()
     """)
 
@@ -2738,7 +2794,7 @@ def _update_player_state_after_subweek(
 
             injury_type_id = int(inj.get("injury_type_id", 0))
             duration_weeks = int(inj.get("duration_weeks", 1))
-            effects = inj.get("effects") or {}
+            effects = _normalize_engine_effects(inj.get("effects") or {})
 
             try:
                 ev_result = conn.execute(injury_insert, {

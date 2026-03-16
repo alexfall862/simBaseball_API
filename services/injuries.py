@@ -75,14 +75,13 @@ def _get_tables():
 
 def _parse_malus_json(raw) -> Dict[str, float]:
     """
-    Parse a malus JSON blob into {attr_name: delta_float, ...}.
+    Parse a malus JSON blob into {attr_name: multiplier, ...}.
 
-    We assume malus_json/career_malus_json are already realized *additive* deltas
-    keyed by simbbPlayers column names, e.g.:
+    All values are **multiplicative** factors (0.7 = keep 70%, 0.0 = zeroed).
 
-      {"contact_base": -5.0, "power_base": -2.5}
-
-    If your malus_json uses a slightly different shape, adapt this function.
+    Handles two formats:
+      - Flat (normalized):  {"speed": 0.7, "stamina_pct": 0.0}
+      - Nested (engine):    {"speed": {"original": 75, "modified": 52.5, "multiplier": 0.7}}
     """
     if not raw:
         return {}
@@ -94,12 +93,20 @@ def _parse_malus_json(raw) -> Dict[str, float]:
 
     out: Dict[str, float] = {}
     if isinstance(data, dict):
-        for attr, delta in data.items():
-            try:
-                d = float(delta)
-            except (TypeError, ValueError):
-                continue
-            out[attr] = out.get(attr, 0.0) + d
+        for attr, val in data.items():
+            if isinstance(val, dict):
+                # Nested engine format — extract multiplier
+                m = val.get("multiplier")
+                if m is not None:
+                    try:
+                        out[attr] = float(m)
+                    except (TypeError, ValueError):
+                        continue
+            else:
+                try:
+                    out[attr] = float(val)
+                except (TypeError, ValueError):
+                    continue
     return out
 
 
@@ -116,18 +123,25 @@ def get_active_injury_malus_bulk(
 
     For each player_id, we combine:
 
-      - Their *current* injury event malus (if status='injured' and weeks_remaining > 0)
+      - ALL active injury events (weeks_remaining > 0)
       - All career_injuries.career_malus_json rows
+
+    All values are **multiplicative** factors.  Multiple injuries are combined
+    by multiplying their factors together (e.g. two injuries each with
+    speed=0.7 → combined speed=0.49).
 
     Returns:
       {
         player_id: {
-          "contact_base": -5.0,
-          "power_base": -2.0,
+          "speed": 0.49,
+          "contact": 0.7,
+          "stamina_pct": 0.0,
           ...
         },
         ...
       }
+
+    Only attributes with a factor != 1.0 are included.
     """
     ids = [int(pid) for pid in player_ids]
     if not ids:
@@ -138,59 +152,45 @@ def get_active_injury_malus_bulk(
     events = tables["player_injury_events"]
     career = tables["career_injuries"]
 
-    # 1) Current state rows for injured players
+    # 1) Find which players are currently injured
     state_rows = (
         conn.execute(
             select(
                 state.c.player_id,
                 state.c.status,
-                state.c.current_event_id,
-                state.c.weeks_remaining,
-            ).where(state.c.player_id.in_(ids))
+            ).where(
+                state.c.player_id.in_(ids),
+                state.c.status == "injured",
+            )
         )
         .mappings()
         .all()
     )
 
-    # Map player_id -> current_event_id for active injuries
-    active_event_by_player: Dict[int, int] = {}
-    active_event_ids: set[int] = set()
+    injured_pids = [int(row["player_id"]) for row in state_rows]
 
-    for row in state_rows:
-        if row["status"] != "injured":
-            continue
-        # Defensive: also check weeks_remaining > 0
-        try:
-            w = int(row["weeks_remaining"])
-        except (TypeError, ValueError):
-            w = 0
-        if w <= 0:
-            continue
-
-        ev_id = row["current_event_id"]
-        if ev_id is None:
-            continue
-
-        pid = int(row["player_id"])
-        ev_id = int(ev_id)
-        active_event_by_player[pid] = ev_id
-        active_event_ids.add(ev_id)
-
-    # 2) Load malus_json for those events
-    event_malus_by_id: Dict[int, Dict[str, float]] = {}
-    if active_event_ids:
+    # 2) Load malus_json for ALL active injury events (weeks_remaining > 0)
+    #    for those injured players — not just the single current_event_id.
+    event_malus_by_player: Dict[int, list] = {}
+    if injured_pids:
         event_rows = (
             conn.execute(
-                select(events.c.id, events.c.malus_json).where(
-                    events.c.id.in_(list(active_event_ids))
+                select(
+                    events.c.player_id,
+                    events.c.malus_json,
+                ).where(
+                    events.c.player_id.in_(injured_pids),
+                    events.c.weeks_remaining > 0,
                 )
             )
             .mappings()
             .all()
         )
         for row in event_rows:
-            ev_id = int(row["id"])
-            event_malus_by_id[ev_id] = _parse_malus_json(row["malus_json"])
+            pid = int(row["player_id"])
+            parsed = _parse_malus_json(row["malus_json"])
+            if parsed:
+                event_malus_by_player.setdefault(pid, []).append(parsed)
 
     # 3) Load career injuries (always apply)
     career_rows = (
@@ -205,24 +205,28 @@ def get_active_injury_malus_bulk(
 
     out: Dict[int, Dict[str, float]] = {pid: {} for pid in ids}
 
-    # Apply current event malus
-    for pid, ev_id in active_event_by_player.items():
-        effects = event_malus_by_id.get(ev_id) or {}
-        if not effects:
-            continue
+    # Apply ALL active event maluses — multiplicative combination.
+    # Each malus value is a factor (0.7 = keep 70%).  Multiple injuries
+    # stack by multiplication: two 0.7 factors → 0.49.
+    for pid, malus_list in event_malus_by_player.items():
         dst = out.setdefault(pid, {})
-        for attr, delta in effects.items():
-            dst[attr] = dst.get(attr, 0.0) + delta
+        for effects in malus_list:
+            for attr, factor in effects.items():
+                dst[attr] = dst.get(attr, 1.0) * factor
 
-    # Apply career malus
+    # Apply career malus (also multiplicative)
     for row in career_rows:
         pid = int(row["player_id"])
         effects = _parse_malus_json(row["career_malus_json"])
         if not effects:
             continue
         dst = out.setdefault(pid, {})
-        for attr, delta in effects.items():
-            dst[attr] = dst.get(attr, 0.0) + delta
+        for attr, factor in effects.items():
+            dst[attr] = dst.get(attr, 1.0) * factor
+
+    # Strip out no-op entries (factor == 1.0) to keep return value clean
+    for pid in list(out):
+        out[pid] = {k: v for k, v in out[pid].items() if v != 1.0}
 
     return out
 
