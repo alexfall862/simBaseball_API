@@ -1020,8 +1020,8 @@ def _tick_injuries(engine) -> int:
             UPDATE player_injury_state pis
             JOIN (
                 SELECT pie.player_id,
-                       pie.id AS best_event_id,
-                       pie.weeks_remaining AS best_weeks
+                       MAX(pie.id) AS best_event_id,
+                       bw.max_weeks AS best_weeks
                 FROM player_injury_events pie
                 INNER JOIN (
                     SELECT player_id, MAX(weeks_remaining) AS max_weeks
@@ -1030,7 +1030,7 @@ def _tick_injuries(engine) -> int:
                     GROUP BY player_id
                 ) bw ON bw.player_id = pie.player_id
                     AND pie.weeks_remaining = bw.max_weeks
-                GROUP BY pie.player_id
+                GROUP BY pie.player_id, bw.max_weeks
             ) best ON best.player_id = pis.player_id
             SET pis.current_event_id = best.best_event_id,
                 pis.weeks_remaining  = best.best_weeks
