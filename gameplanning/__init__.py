@@ -23,6 +23,16 @@ def _reflect_table(name: str):
     return getattr(gameplanning_bp, cache_key)
 
 
+def clear_gameplanning_caches():
+    """Clear all cached table reflections in gameplanning module."""
+    cleared = {}
+    for attr in list(vars(gameplanning_bp)):
+        if attr.startswith("_") and not attr.startswith("__"):
+            cleared[attr] = True
+            delattr(gameplanning_bp, attr)
+    return cleared
+
+
 def _row_to_dict(row):
     return dict(row._mapping)
 
