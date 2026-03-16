@@ -2851,7 +2851,7 @@ def admin_player_preview():
                                message=f"Player {player_id} not found"), 404
 
             from services.rating_config import get_overall_weights, to_20_80, get_rating_config
-            from rosters import _compute_derived_raw_ratings, _get_player_column_categories, _DummyRow
+            from rosters import _compute_derived_raw_ratings, _get_player_column_categories
 
             ptype = (row.get("ptype") or "").strip()
             player_level = int(row["current_level"])
