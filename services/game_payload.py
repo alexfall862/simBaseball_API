@@ -1517,7 +1517,24 @@ def build_team_game_side(
             rng=rng,
         )
 
-    # 2) We are given the starting pitcher for this team
+    # 2) Validate starter is on the roster; fallback to best available if not
+    if starter_id not in players_by_id:
+        roster_pitchers = [
+            pid for pid, pdata in players_by_id.items()
+            if (pdata.get("ptype") or "").lower() == "pitcher"
+        ]
+        if roster_pitchers:
+            # Pick highest-stamina pitcher on the actual roster
+            starter_id = max(roster_pitchers, key=lambda pid: players_by_id[pid].get("stamina", 100))
+            logger.warning(
+                "build_team_game_side: starter_id not on roster for team %s, "
+                "falling back to player %s", team_id, starter_id,
+            )
+        else:
+            logger.error(
+                "build_team_game_side: no pitchers on roster for team %s", team_id,
+            )
+
     # 3) Available pitchers: all pitchers except starter
     #    Respect bullpen ordering if configured, append any unordered pitchers after
     all_pitcher_ids = {
@@ -1649,6 +1666,23 @@ def build_team_game_side_from_cache(
             players_by_id=players_by_id,
             rng=rng,
         )
+
+    # Validate starter is on the roster; fallback to best available if not
+    if starter_id not in players_by_id:
+        roster_pitchers = [
+            pid for pid, pdata in players_by_id.items()
+            if (pdata.get("ptype") or "").lower() == "pitcher"
+        ]
+        if roster_pitchers:
+            starter_id = max(roster_pitchers, key=lambda pid: players_by_id[pid].get("stamina", 100))
+            logger.warning(
+                "build_team_game_side_from_cache: starter_id not on roster for team %s, "
+                "falling back to player %s", team_id, starter_id,
+            )
+        else:
+            logger.error(
+                "build_team_game_side_from_cache: no pitchers on roster for team %s", team_id,
+            )
 
     # Available pitchers (all pitchers except starter, respect bullpen order)
     all_pitcher_ids = {
@@ -2343,6 +2377,7 @@ def _update_player_state_bulk(
     conn,
     results: List[Dict[str, Any]],
     league_year_id: int,
+    league_level: int | None = None,
 ) -> Dict[str, int]:
     """
     Post-subweek state updates (bulk version).
@@ -2405,11 +2440,19 @@ def _update_player_state_bulk(
 
     # --- 2. REST RECOVERY for all fatigued players ---
     # Load configurable recovery values (falls back to defaults)
-    rec_cfg = _load_stamina_recovery_config(conn)
+    # Uses separate base rates for pitchers vs position players
+    rec_cfg = _load_stamina_recovery_config(conn, league_level)
+    logger.info(
+        "update_player_state_bulk: recovery config level=%s base=%.1f pitcher=%.1f",
+        league_level, rec_cfg["base_recovery"], rec_cfg["base_recovery_pitcher"],
+    )
     recovery_sql = sa_text("""
         UPDATE player_fatigue_state pfs
         JOIN simbbPlayers p ON p.id = pfs.player_id
-        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(:base_recovery *
+        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(
+            CASE WHEN p.ptype = 'Pitcher' THEN :base_recovery_pitcher
+                 ELSE :base_recovery
+            END *
             CASE p.durability
                 WHEN 'Iron Man'      THEN :mult_iron_man
                 WHEN 'Dependable'    THEN :mult_dependable
@@ -2427,6 +2470,7 @@ def _update_player_state_bulk(
     try:
         rest_result = conn.execute(recovery_sql, {
             "base_recovery": rec_cfg["base_recovery"],
+            "base_recovery_pitcher": rec_cfg["base_recovery_pitcher"],
             "mult_iron_man": rec_cfg["Iron Man"],
             "mult_dependable": rec_cfg["Dependable"],
             "mult_normal": rec_cfg["Normal"],
@@ -2516,25 +2560,39 @@ def _load_stamina_recovery_config(conn, league_level: int = None) -> dict:
     """
     Load stamina recovery config from level_game_config.
 
-    Returns dict with base_recovery and durability multipliers.
-    Falls back to hardcoded defaults if no config row exists.
+    Returns dict with base_recovery (position players), base_recovery_pitcher,
+    and durability multipliers. Falls back to hardcoded defaults if no config
+    row exists.
     """
     from sqlalchemy import text as sa_text
 
     if league_level is not None:
         row = conn.execute(sa_text(
             "SELECT stamina_recovery_per_subweek, "
+            "stamina_recovery_pitcher_per_subweek, "
             "durability_mult_iron_man, durability_mult_dependable, "
             "durability_mult_normal, durability_mult_undependable, "
             "durability_mult_tires_easily "
             "FROM level_game_config WHERE league_level = :ll"
         ), {"ll": league_level}).mappings().first()
     else:
-        row = None
+        # No specific level — try highest level config, fall back to defaults
+        try:
+            row = conn.execute(sa_text(
+                "SELECT stamina_recovery_per_subweek, "
+                "stamina_recovery_pitcher_per_subweek, "
+                "durability_mult_iron_man, durability_mult_dependable, "
+                "durability_mult_normal, durability_mult_undependable, "
+                "durability_mult_tires_easily "
+                "FROM level_game_config ORDER BY league_level DESC LIMIT 1"
+            )).mappings().first()
+        except Exception:
+            row = None
 
     if row and row.get("stamina_recovery_per_subweek") is not None:
         return {
             "base_recovery": float(row["stamina_recovery_per_subweek"]),
+            "base_recovery_pitcher": float(row.get("stamina_recovery_pitcher_per_subweek") or row["stamina_recovery_per_subweek"]),
             "Iron Man": float(row["durability_mult_iron_man"]),
             "Dependable": float(row["durability_mult_dependable"]),
             "Normal": float(row["durability_mult_normal"]),
@@ -2544,6 +2602,7 @@ def _load_stamina_recovery_config(conn, league_level: int = None) -> dict:
 
     return {
         "base_recovery": _REST_RECOVERY_PER_SUBWEEK,
+        "base_recovery_pitcher": _REST_RECOVERY_PER_SUBWEEK,
         **_DURABILITY_RECOVERY_MULT,
     }
 
@@ -2552,6 +2611,7 @@ def _update_player_state_after_subweek(
     conn,
     results: List[Dict[str, Any]],
     league_year_id: int,
+    league_level: int | None = None,
 ) -> Dict[str, int]:
     """
     Post-subweek state updates (single-game version).
@@ -2608,11 +2668,14 @@ def _update_player_state_after_subweek(
             logger.exception("update_player_state: stamina drain failed")
 
     # --- 2. Rest recovery for all fatigued players ---
-    rec_cfg = _load_stamina_recovery_config(conn)
+    rec_cfg = _load_stamina_recovery_config(conn, league_level)
     recovery_sql = sa_text("""
         UPDATE player_fatigue_state pfs
         JOIN simbbPlayers p ON p.id = pfs.player_id
-        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(:base_recovery *
+        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(
+            CASE WHEN p.ptype = 'Pitcher' THEN :base_recovery_pitcher
+                 ELSE :base_recovery
+            END *
             CASE p.durability
                 WHEN 'Iron Man'      THEN :mult_iron_man
                 WHEN 'Dependable'    THEN :mult_dependable
@@ -2630,6 +2693,7 @@ def _update_player_state_after_subweek(
     try:
         rest_result = conn.execute(recovery_sql, {
             "base_recovery": rec_cfg["base_recovery"],
+            "base_recovery_pitcher": rec_cfg["base_recovery_pitcher"],
             "mult_iron_man": rec_cfg["Iron Man"],
             "mult_dependable": rec_cfg["Dependable"],
             "mult_normal": rec_cfg["Normal"],
@@ -3051,7 +3115,8 @@ def build_week_payloads(
                 # Update player state for next subweek (bulk stamina)
                 try:
                     state_counts = _update_player_state_bulk(
-                        conn, results, league_year_id
+                        conn, results, league_year_id,
+                        league_level=league_level,
                     )
                     conn.commit()
                     logger.info(

@@ -296,6 +296,9 @@
       });
     });
 
+    // Gameplan Audit
+    document.getElementById('btn-gpa-load').addEventListener('click', loadGameplanAudit);
+
     // Stamina
     document.getElementById('btn-stam-ov-load').addEventListener('click', loadStaminaOverview);
     document.getElementById('btn-stam-tm-load').addEventListener('click', loadStaminaTeamDetail);
@@ -415,6 +418,7 @@
       'db-storage': 'DB Storage',
       'batting-lab': 'Batting Lab',
       'recruiting-admin': 'Recruiting Admin',
+      'gameplan-audit': 'Gameplan Audit',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -518,6 +522,8 @@
         break;
       case 'batting-lab':
         loadBlabHistory();
+        break;
+      case 'gameplan-audit':
         break;
     }
 
@@ -8094,6 +8100,175 @@
     loadBlabResults,
     viewCalProfile,
     activateCalProfile,
+  };
+
+  // -----------------------------------------------------------------------
+  // Gameplan Audit
+  // -----------------------------------------------------------------------
+
+  let _gpaData = null;
+
+  function loadGameplanAudit() {
+    const level = document.getElementById('gpa-level').value;
+    const status = document.getElementById('gpa-status');
+    status.textContent = 'Loading...';
+    document.getElementById('gpa-overview').style.display = 'none';
+    document.getElementById('gpa-detail').style.display = 'none';
+
+    let url = `${ADMIN_BASE}/gameplan-audit`;
+    if (level) url += `?level=${level}`;
+
+    fetch(url, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) {
+          status.textContent = `Error: ${data.error || 'unknown'}`;
+          return;
+        }
+        _gpaData = {};
+        (data.teams || []).forEach(t => { _gpaData[t.team_id] = t; });
+        status.textContent = `${data.count} teams loaded`;
+        renderGameplanOverview(data.teams || []);
+      })
+      .catch(err => { status.textContent = `Fetch error: ${err}`; });
+  }
+
+  function renderGameplanOverview(teams) {
+    const tbody = document.querySelector('#gpa-overview-table tbody');
+    const check = v => v ? '<span style="color:#4caf50">Y</span>' : '<span style="color:#f44336">N</span>';
+
+    tbody.innerHTML = teams.map(t => {
+      const c = t.completeness || {};
+      const ts = t.most_recent_update ? new Date(t.most_recent_update).toLocaleDateString() : '-';
+      return `<tr>
+        <td><strong>${t.org_abbrev}</strong></td>
+        <td>${t.team_abbrev}</td>
+        <td>${t.level_name} (${t.team_level})</td>
+        <td style="text-align:center">${check(c.defense)}</td>
+        <td style="text-align:center">${check(c.rotation)}</td>
+        <td style="text-align:center">${check(c.bullpen)}</td>
+        <td style="text-align:center">${check(c.team_strategy)}</td>
+        <td style="text-align:center">${check(c.lineup_roles)}</td>
+        <td style="text-align:center">${check(c.player_strategies)}</td>
+        <td>${ts}</td>
+        <td><button class="btn btn-secondary" style="padding:2px 8px;font-size:0.8em" onclick="window._gpaViewTeam(${t.team_id})">View</button></td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('gpa-overview').style.display = '';
+  }
+
+  window._gpaViewTeam = function(teamId) {
+    const t = _gpaData && _gpaData[teamId];
+    if (!t) return;
+
+    document.getElementById('gpa-detail-title').textContent =
+      `${t.org_abbrev} ${t.team_abbrev} (${t.level_name}) - Gameplan Detail`;
+
+    // Defense table
+    const dBody = document.querySelector('#gpa-defense-table tbody');
+    const posOrder = ['c','fb','sb','tb','ss','lf','cf','rf','dh'];
+    const posLabel = {c:'C',fb:'1B',sb:'2B',tb:'3B',ss:'SS',lf:'LF',cf:'CF',rf:'RF',dh:'DH',p:'P'};
+    const dRows = (t.defense && t.defense.assignments) || [];
+    const sortedD = [...dRows].sort((a, b) => {
+      const ai = posOrder.indexOf(a.position_code);
+      const bi = posOrder.indexOf(b.position_code);
+      if (ai !== bi) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      return a.priority - b.priority;
+    });
+    dBody.innerHTML = sortedD.length ? sortedD.map(d => {
+      const order = (d.min_order || d.max_order)
+        ? `${d.min_order || '?'}-${d.max_order || '?'}`
+        : '-';
+      return `<tr>
+        <td><strong>${posLabel[d.position_code] || d.position_code}</strong></td>
+        <td>${d.vs_hand === 'both' ? 'All' : 'vs ' + d.vs_hand + 'HP'}</td>
+        <td>${d.player_name} <span style="color:var(--text-secondary);font-size:0.8em">(${d.player_id})</span></td>
+        <td>${d.target_weight}</td>
+        <td>${d.priority}</td>
+        <td>${d.locked ? '<span style="color:#4caf50">Y</span>' : '-'}</td>
+        <td>${d.lineup_role || 'balanced'}</td>
+        <td>${order}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="8" style="color:var(--text-secondary)">No defense plan configured</td></tr>';
+
+    // Rotation table
+    const rBody = document.querySelector('#gpa-rotation-table tbody');
+    const rot = t.rotation || {};
+    const slots = rot.slots || [];
+    rBody.innerHTML = slots.length ? slots.map(s =>
+      `<tr>
+        <td>${s.slot}${s.slot === rot.current_slot ? ' <span style="color:#2196f3">(next)</span>' : ''}</td>
+        <td>${s.player_name} <span style="color:var(--text-secondary);font-size:0.8em">(${s.player_id})</span></td>
+      </tr>`
+    ).join('') : '<tr><td colspan="2" style="color:var(--text-secondary)">No rotation configured</td></tr>';
+
+    const rMeta = document.getElementById('gpa-rotation-meta');
+    if (slots.length) {
+      rMeta.textContent = `Size: ${rot.rotation_size} | Current slot: ${rot.current_slot} | Updated: ${rot.rotation_updated || '-'} | State: ${rot.state_updated || '-'}`;
+    } else {
+      rMeta.textContent = '';
+    }
+
+    // Bullpen table
+    const bBody = document.querySelector('#gpa-bullpen-table tbody');
+    const bps = (t.bullpen && t.bullpen.pitchers) || [];
+    const roleColors = {closer:'#f44336',setup:'#ff9800',middle:'#2196f3',long:'#4caf50',mop_up:'#9e9e9e'};
+    bBody.innerHTML = bps.length ? bps.map(b =>
+      `<tr>
+        <td>${b.slot}</td>
+        <td>${b.player_name} <span style="color:var(--text-secondary);font-size:0.8em">(${b.player_id})</span></td>
+        <td><span style="color:${roleColors[b.role] || 'inherit'}">${b.role}</span></td>
+      </tr>`
+    ).join('') : '<tr><td colspan="3" style="color:var(--text-secondary)">No bullpen configured</td></tr>';
+
+    // Team strategy
+    const sDiv = document.getElementById('gpa-strategy-detail');
+    const s = t.team_strategy;
+    if (s) {
+      sDiv.innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
+          <div><strong>OF Spacing:</strong> ${s.outfield_spacing}</div>
+          <div><strong>IF Spacing:</strong> ${s.infield_spacing}</div>
+          <div><strong>BP Cutoff:</strong> ${s.bullpen_cutoff} pitches</div>
+          <div><strong>BP Priority:</strong> ${s.bullpen_priority}</div>
+          <div><strong>Emergency P:</strong> ${s.emergency_pitcher_name || 'None'}</div>
+          <div><strong>IBB List:</strong> ${(s.intentional_walk_list || []).length ? s.intentional_walk_list.join(', ') : 'None'}</div>
+          <div><strong>Updated:</strong> ${s.updated_at || '-'}</div>
+        </div>`;
+    } else {
+      sDiv.innerHTML = '<span style="color:var(--text-secondary)">No team strategy configured</span>';
+    }
+
+    // Lineup roles
+    const lBody = document.querySelector('#gpa-lineup-table tbody');
+    const lSlots = (t.lineup_roles && t.lineup_roles.slots) || [];
+    lBody.innerHTML = lSlots.length ? lSlots.map(l =>
+      `<tr>
+        <td>${l.slot}</td>
+        <td>${l.role}</td>
+        <td>${l.locked_player_name || '-'}</td>
+      </tr>`
+    ).join('') : '<tr><td colspan="3" style="color:var(--text-secondary)">No lineup roles configured</td></tr>';
+
+    // Player strategies summary
+    const psDiv = document.getElementById('gpa-playerstrat-detail');
+    const ps = t.player_strategies || {};
+    if (ps.total_strategies > 0) {
+      psDiv.innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
+          <div><strong>Total:</strong> ${ps.total_strategies} players</div>
+          <div><strong>Custom Usage:</strong> ${ps.custom_usage_preference}</div>
+          <div><strong>Custom Plate:</strong> ${ps.custom_plate_approach}</div>
+          <div><strong>Custom Pitching:</strong> ${ps.custom_pitching_approach}</div>
+          <div><strong>Custom Baserunning:</strong> ${ps.custom_baserunning_approach}</div>
+        </div>`;
+    } else {
+      psDiv.innerHTML = '<span style="color:var(--text-secondary)">No player strategies set</span>';
+    }
+
+    document.getElementById('gpa-detail').style.display = '';
+    document.getElementById('gpa-detail').scrollIntoView({ behavior: 'smooth' });
   };
 
   // Initialize on DOM ready

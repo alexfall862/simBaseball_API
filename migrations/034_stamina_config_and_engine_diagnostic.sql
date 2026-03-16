@@ -8,8 +8,10 @@
 --    to help diagnose missing game results.
 
 -- 1. Stamina recovery columns on level_game_config
+--    Separate base rates for pitchers vs position players.
 ALTER TABLE level_game_config
   ADD COLUMN stamina_recovery_per_subweek DECIMAL(5,2) NOT NULL DEFAULT 5.0,
+  ADD COLUMN stamina_recovery_pitcher_per_subweek DECIMAL(5,2) NOT NULL DEFAULT 5.0,
   ADD COLUMN durability_mult_iron_man DECIMAL(4,2) NOT NULL DEFAULT 1.50,
   ADD COLUMN durability_mult_dependable DECIMAL(4,2) NOT NULL DEFAULT 1.25,
   ADD COLUMN durability_mult_normal DECIMAL(4,2) NOT NULL DEFAULT 1.00,

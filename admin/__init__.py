@@ -525,6 +525,7 @@ def admin_get_stamina_config():
         with engine.connect() as conn:
             rows = conn.execute(sa_text(
                 "SELECT league_level, stamina_recovery_per_subweek, "
+                "stamina_recovery_pitcher_per_subweek, "
                 "durability_mult_iron_man, durability_mult_dependable, "
                 "durability_mult_normal, durability_mult_undependable, "
                 "durability_mult_tires_easily "
@@ -534,6 +535,7 @@ def admin_get_stamina_config():
         levels = [{
             "league_level": int(r["league_level"]),
             "stamina_recovery_per_subweek": float(r["stamina_recovery_per_subweek"]),
+            "stamina_recovery_pitcher_per_subweek": float(r["stamina_recovery_pitcher_per_subweek"]),
             "durability_mult_iron_man": float(r["durability_mult_iron_man"]),
             "durability_mult_dependable": float(r["durability_mult_dependable"]),
             "durability_mult_normal": float(r["durability_mult_normal"]),
@@ -589,6 +591,7 @@ def admin_update_stamina_config():
                 conn.execute(sa_text("""
                     UPDATE level_game_config SET
                         stamina_recovery_per_subweek = :recovery,
+                        stamina_recovery_pitcher_per_subweek = :recovery_pitcher,
                         durability_mult_iron_man = :im,
                         durability_mult_dependable = :dep,
                         durability_mult_normal = :norm,
@@ -598,6 +601,7 @@ def admin_update_stamina_config():
                 """), {
                     "ll": int(ll),
                     "recovery": float(entry.get("stamina_recovery_per_subweek", 5.0)),
+                    "recovery_pitcher": float(entry.get("stamina_recovery_pitcher_per_subweek", 5.0)),
                     "im": float(entry.get("durability_mult_iron_man", 1.5)),
                     "dep": float(entry.get("durability_mult_dependable", 1.25)),
                     "norm": float(entry.get("durability_mult_normal", 1.0)),
@@ -612,6 +616,394 @@ def admin_update_stamina_config():
     except Exception as e:
         logging.exception("admin_update_stamina_config failed")
         return jsonify(ok=False, error="update_failed", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Gameplan audit
+# ---------------------------------------------------------------------------
+
+@admin_bp.get("/gameplan-audit")
+def admin_gameplan_audit():
+    """
+    Audit all teams' gameplan configurations.
+
+    GET /admin/gameplan-audit
+    GET /admin/gameplan-audit?org_id=1
+    GET /admin/gameplan-audit?level=9
+    GET /admin/gameplan-audit?team_id=6
+
+    Returns per-team summary of all gameplan areas with last-updated timestamps
+    and configuration details.
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    org_id = request.args.get("org_id", type=int)
+    level = request.args.get("level", type=int)
+    team_id = request.args.get("team_id", type=int)
+
+    engine = get_engine()
+
+    try:
+        with engine.connect() as conn:
+            # 1. Get all teams with org/level context
+            team_where = []
+            team_params = {}
+            if org_id:
+                team_where.append("t.orgID = :org_id")
+                team_params["org_id"] = org_id
+            if level:
+                team_where.append("t.team_level = :level")
+                team_params["level"] = level
+            if team_id:
+                team_where.append("t.id = :team_id")
+                team_params["team_id"] = team_id
+
+            team_filter = (" WHERE " + " AND ".join(team_where)) if team_where else ""
+
+            teams = conn.execute(sa_text(f"""
+                SELECT t.id AS team_id, t.team_abbrev, t.team_level,
+                       o.id AS org_id, o.org_abbrev,
+                       l.league_level AS level_name
+                FROM teams t
+                JOIN organizations o ON o.id = t.orgID
+                JOIN levels l ON l.id = t.team_level
+                {team_filter}
+                ORDER BY t.team_level DESC, o.org_abbrev
+            """), team_params).mappings().all()
+
+            if not teams:
+                return jsonify(ok=True, teams=[]), 200
+
+            all_team_ids = [int(t["team_id"]) for t in teams]
+            tid_ph = ", ".join(f":t{i}" for i in range(len(all_team_ids)))
+            tid_params = {f"t{i}": tid for i, tid in enumerate(all_team_ids)}
+
+            # 2. Defense / position plan (with player names)
+            defense_rows = conn.execute(sa_text(f"""
+                SELECT tpp.team_id, tpp.position_code, tpp.vs_hand,
+                       tpp.player_id, p.firstName, p.lastName,
+                       tpp.target_weight, tpp.priority, tpp.locked,
+                       tpp.lineup_role, tpp.min_order, tpp.max_order,
+                       tpp.updated_at
+                FROM team_position_plan tpp
+                JOIN simbbPlayers p ON p.id = tpp.player_id
+                WHERE tpp.team_id IN ({tid_ph})
+                ORDER BY tpp.team_id, tpp.position_code, tpp.priority
+            """), tid_params).mappings().all()
+
+            defense_by_team = {}
+            defense_updated_by_team = {}
+            for r in defense_rows:
+                tid = int(r["team_id"])
+                defense_by_team.setdefault(tid, []).append({
+                    "position_code": r["position_code"],
+                    "vs_hand": r["vs_hand"],
+                    "player_id": int(r["player_id"]),
+                    "player_name": f"{r['firstName']} {r['lastName']}",
+                    "target_weight": float(r["target_weight"]),
+                    "priority": int(r["priority"]),
+                    "locked": bool(r["locked"]),
+                    "lineup_role": r.get("lineup_role"),
+                    "min_order": r.get("min_order"),
+                    "max_order": r.get("max_order"),
+                })
+                if r["updated_at"]:
+                    prev = defense_updated_by_team.get(tid)
+                    if not prev or str(r["updated_at"]) > prev:
+                        defense_updated_by_team[tid] = str(r["updated_at"])
+
+            # 3. Pitching rotation (with player names)
+            rotation_rows = conn.execute(sa_text(f"""
+                SELECT tpr.team_id, tpr.rotation_size, tpr.updated_at AS rotation_updated,
+                       tprs.slot, tprs.player_id,
+                       p.firstName, p.lastName,
+                       trs.current_slot, trs.last_game_id, trs.last_updated_at AS state_updated
+                FROM team_pitching_rotation tpr
+                LEFT JOIN team_pitching_rotation_slots tprs ON tprs.rotation_id = tpr.id
+                LEFT JOIN simbbPlayers p ON p.id = tprs.player_id
+                LEFT JOIN team_rotation_state trs ON trs.team_id = tpr.team_id
+                WHERE tpr.team_id IN ({tid_ph})
+                ORDER BY tpr.team_id, tprs.slot
+            """), tid_params).mappings().all()
+
+            rotation_by_team = {}
+            for r in rotation_rows:
+                tid = int(r["team_id"])
+                if tid not in rotation_by_team:
+                    rotation_by_team[tid] = {
+                        "rotation_size": int(r["rotation_size"]),
+                        "current_slot": int(r["current_slot"]) if r["current_slot"] is not None else 0,
+                        "last_game_id": int(r["last_game_id"]) if r["last_game_id"] else None,
+                        "rotation_updated": str(r["rotation_updated"]) if r["rotation_updated"] else None,
+                        "state_updated": str(r["state_updated"]) if r["state_updated"] else None,
+                        "slots": [],
+                    }
+                if r["slot"] is not None:
+                    rotation_by_team[tid]["slots"].append({
+                        "slot": int(r["slot"]),
+                        "player_id": int(r["player_id"]),
+                        "player_name": f"{r['firstName']} {r['lastName']}",
+                    })
+
+            # 4. Bullpen order (with player names)
+            bullpen_rows = conn.execute(sa_text(f"""
+                SELECT tbo.team_id, tbo.slot, tbo.player_id, tbo.role,
+                       p.firstName, p.lastName
+                FROM team_bullpen_order tbo
+                JOIN simbbPlayers p ON p.id = tbo.player_id
+                WHERE tbo.team_id IN ({tid_ph})
+                ORDER BY tbo.team_id, tbo.slot
+            """), tid_params).mappings().all()
+
+            bullpen_by_team = {}
+            for r in bullpen_rows:
+                tid = int(r["team_id"])
+                bullpen_by_team.setdefault(tid, []).append({
+                    "slot": int(r["slot"]),
+                    "player_id": int(r["player_id"]),
+                    "player_name": f"{r['firstName']} {r['lastName']}",
+                    "role": r["role"],
+                })
+
+            # 5. Team strategy
+            strategy_rows = conn.execute(sa_text(f"""
+                SELECT ts.team_id, ts.outfield_spacing, ts.infield_spacing,
+                       ts.bullpen_cutoff, ts.bullpen_priority,
+                       ts.emergency_pitcher_id, ts.intentional_walk_list,
+                       ts.updated_at,
+                       ep.firstName AS ep_first, ep.lastName AS ep_last
+                FROM team_strategy ts
+                LEFT JOIN simbbPlayers ep ON ep.id = ts.emergency_pitcher_id
+                WHERE ts.team_id IN ({tid_ph})
+            """), tid_params).mappings().all()
+
+            strategy_by_team = {}
+            for r in strategy_rows:
+                import json as _json
+                tid = int(r["team_id"])
+                iwl = r["intentional_walk_list"]
+                if iwl and isinstance(iwl, str):
+                    try:
+                        iwl = _json.loads(iwl)
+                    except Exception:
+                        iwl = []
+                strategy_by_team[tid] = {
+                    "outfield_spacing": r["outfield_spacing"],
+                    "infield_spacing": r["infield_spacing"],
+                    "bullpen_cutoff": int(r["bullpen_cutoff"]) if r["bullpen_cutoff"] else 100,
+                    "bullpen_priority": r["bullpen_priority"],
+                    "emergency_pitcher_id": int(r["emergency_pitcher_id"]) if r["emergency_pitcher_id"] else None,
+                    "emergency_pitcher_name": f"{r['ep_first']} {r['ep_last']}" if r["ep_first"] else None,
+                    "intentional_walk_list": iwl or [],
+                    "updated_at": str(r["updated_at"]) if r["updated_at"] else None,
+                }
+
+            # 6. Lineup roles
+            lineup_rows = conn.execute(sa_text(f"""
+                SELECT tlr.team_id, tlr.slot, tlr.role,
+                       tlr.locked_player_id, tlr.updated_at,
+                       p.firstName, p.lastName
+                FROM team_lineup_roles tlr
+                LEFT JOIN simbbPlayers p ON p.id = tlr.locked_player_id
+                WHERE tlr.team_id IN ({tid_ph})
+                ORDER BY tlr.team_id, tlr.slot
+            """), tid_params).mappings().all()
+
+            lineup_by_team = {}
+            lineup_updated_by_team = {}
+            for r in lineup_rows:
+                tid = int(r["team_id"])
+                lineup_by_team.setdefault(tid, []).append({
+                    "slot": int(r["slot"]),
+                    "role": r["role"],
+                    "locked_player_id": int(r["locked_player_id"]) if r["locked_player_id"] else None,
+                    "locked_player_name": f"{r['firstName']} {r['lastName']}" if r["firstName"] else None,
+                })
+                if r["updated_at"]:
+                    prev = lineup_updated_by_team.get(tid)
+                    if not prev or str(r["updated_at"]) > prev:
+                        lineup_updated_by_team[tid] = str(r["updated_at"])
+
+            # 7. Player strategy counts per team (summary, not full dump)
+            strat_rows = conn.execute(sa_text(f"""
+                SELECT c.current_level, t.id AS team_id,
+                       COUNT(*) AS strategy_count,
+                       SUM(CASE WHEN ps.usage_preference != 'normal' THEN 1 ELSE 0 END) AS custom_usage,
+                       SUM(CASE WHEN ps.plate_approach != 'normal' THEN 1 ELSE 0 END) AS custom_plate,
+                       SUM(CASE WHEN ps.pitching_approach != 'normal' THEN 1 ELSE 0 END) AS custom_pitching,
+                       SUM(CASE WHEN ps.baserunning_approach != 'normal' THEN 1 ELSE 0 END) AS custom_baserunning
+                FROM playerStrategies ps
+                JOIN contracts c ON c.playerID = ps.playerID AND c.isActive = 1
+                JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+                JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+                WHERE t.id IN ({tid_ph})
+                GROUP BY t.id
+            """), tid_params).mappings().all()
+
+            strat_summary_by_team = {}
+            for r in strat_rows:
+                strat_summary_by_team[int(r["team_id"])] = {
+                    "total_strategies": int(r["strategy_count"]),
+                    "custom_usage_preference": int(r["custom_usage"]),
+                    "custom_plate_approach": int(r["custom_plate"]),
+                    "custom_pitching_approach": int(r["custom_pitching"]),
+                    "custom_baserunning_approach": int(r["custom_baserunning"]),
+                }
+
+        # Assemble per-team response
+        result = []
+        for t in teams:
+            tid = int(t["team_id"])
+            defense = defense_by_team.get(tid, [])
+            rotation = rotation_by_team.get(tid)
+            bullpen = bullpen_by_team.get(tid, [])
+            strategy = strategy_by_team.get(tid)
+            lineup = lineup_by_team.get(tid, [])
+            strat_summary = strat_summary_by_team.get(tid)
+
+            # Compute completeness flags
+            has_defense = len(defense) > 0
+            has_rotation = rotation is not None and len(rotation.get("slots", [])) > 0
+            has_bullpen = len(bullpen) > 0
+            has_strategy = strategy is not None
+            has_lineup_roles = len(lineup) > 0
+            has_player_strategies = strat_summary is not None and strat_summary["total_strategies"] > 0
+
+            # Most recent update across all gameplan areas
+            timestamps = [
+                defense_updated_by_team.get(tid),
+                rotation["rotation_updated"] if rotation else None,
+                strategy["updated_at"] if strategy else None,
+                lineup_updated_by_team.get(tid),
+            ]
+            valid_ts = [ts for ts in timestamps if ts]
+            most_recent_update = max(valid_ts) if valid_ts else None
+
+            result.append({
+                "team_id": tid,
+                "team_abbrev": t["team_abbrev"],
+                "team_level": int(t["team_level"]),
+                "level_name": t["level_name"],
+                "org_id": int(t["org_id"]),
+                "org_abbrev": t["org_abbrev"],
+                "most_recent_update": most_recent_update,
+                "completeness": {
+                    "defense": has_defense,
+                    "rotation": has_rotation,
+                    "bullpen": has_bullpen,
+                    "team_strategy": has_strategy,
+                    "lineup_roles": has_lineup_roles,
+                    "player_strategies": has_player_strategies,
+                },
+                "defense": {
+                    "assignments": defense,
+                    "position_count": len(set(d["position_code"] for d in defense)),
+                    "last_updated": defense_updated_by_team.get(tid),
+                },
+                "rotation": rotation or {"rotation_size": 0, "slots": [], "current_slot": 0},
+                "bullpen": {
+                    "pitchers": bullpen,
+                    "pitcher_count": len(bullpen),
+                },
+                "team_strategy": strategy,
+                "lineup_roles": {
+                    "slots": lineup,
+                    "last_updated": lineup_updated_by_team.get(tid),
+                },
+                "player_strategies": strat_summary or {
+                    "total_strategies": 0,
+                    "custom_usage_preference": 0,
+                    "custom_plate_approach": 0,
+                    "custom_pitching_approach": 0,
+                    "custom_baserunning_approach": 0,
+                },
+            })
+
+        return jsonify(ok=True, teams=result, count=len(result)), 200
+
+    except Exception as e:
+        logging.exception("admin_gameplan_audit failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
+@admin_bp.get("/gameplan-audit/player-strategies")
+def admin_gameplan_player_strategies():
+    """
+    Return full player strategy details for a specific team.
+
+    GET /admin/gameplan-audit/player-strategies?team_id=6
+
+    This is a separate endpoint to avoid bloating the main audit response
+    with per-player detail for every team.
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    team_id = request.args.get("team_id", type=int)
+    if not team_id:
+        return jsonify(ok=False, error="missing_param",
+                       message="team_id is required"), 400
+
+    engine = get_engine()
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sa_text("""
+                SELECT ps.playerID, ps.orgID,
+                       p.firstName, p.lastName, p.ptype,
+                       ps.plate_approach, ps.pitching_approach,
+                       ps.baserunning_approach, ps.usage_preference,
+                       ps.stealfreq, ps.pickofffreq,
+                       ps.pitchchoices, ps.pitchpull, ps.pulltend
+                FROM playerStrategies ps
+                JOIN simbbPlayers p ON p.id = ps.playerID
+                JOIN contracts c ON c.playerID = ps.playerID AND c.isActive = 1
+                JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+                JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+                WHERE t.id = :tid
+                ORDER BY p.ptype, p.lastName, p.firstName
+            """), {"tid": team_id}).mappings().all()
+
+        import json as _json
+        strategies = []
+        for r in rows:
+            pc = r["pitchchoices"]
+            if pc and isinstance(pc, str):
+                try:
+                    pc = _json.loads(pc)
+                except Exception:
+                    pc = None
+            strategies.append({
+                "player_id": int(r["playerID"]),
+                "player_name": f"{r['firstName']} {r['lastName']}",
+                "ptype": r["ptype"],
+                "plate_approach": r["plate_approach"] or "normal",
+                "pitching_approach": r["pitching_approach"] or "normal",
+                "baserunning_approach": r["baserunning_approach"] or "normal",
+                "usage_preference": r["usage_preference"] or "normal",
+                "stealfreq": float(r["stealfreq"]) if r["stealfreq"] is not None else 1.87,
+                "pickofffreq": float(r["pickofffreq"]) if r["pickofffreq"] is not None else 1.0,
+                "pitchchoices": pc,
+                "pitchpull": int(r["pitchpull"]) if r["pitchpull"] is not None else None,
+                "pulltend": r["pulltend"] or None,
+            })
+
+        return jsonify(ok=True, team_id=team_id, strategies=strategies, count=len(strategies)), 200
+
+    except Exception as e:
+        logging.exception("admin_gameplan_player_strategies failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
 
 
 # ---------------------------------------------------------------------------

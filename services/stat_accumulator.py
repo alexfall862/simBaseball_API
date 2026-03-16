@@ -275,6 +275,20 @@ def _upsert_pitching(
     return count
 
 
+_FIELDING_POS_NORMALIZE = {
+    "startingpitcher": "p",
+    "pitcher": "p",
+    "catcher": "c",
+    "first base": "fb",
+    "second base": "sb",
+    "third base": "tb",
+    "shortstop": "ss",
+    "left field": "lf",
+    "center field": "cf",
+    "right field": "rf",
+}
+
+
 def _upsert_fielding(
     conn, fielders: Dict[str, Any], league_year_id: int
 ) -> int:
@@ -286,16 +300,17 @@ def _upsert_fielding(
             if "_" in player_id_str:
                 pid_part, pos_part = player_id_str.rsplit("_", 1)
                 player_id = int(pid_part)
-                position_code = pos_part
+                position_code = _FIELDING_POS_NORMALIZE.get(pos_part.lower(), pos_part)
             else:
                 player_id = int(player_id_str)
-                position_code = str(f.get("position_code", ""))
+                raw_pos = str(f.get("position_code", ""))
+                position_code = _FIELDING_POS_NORMALIZE.get(raw_pos.lower(), raw_pos)
 
             conn.execute(_FIELDING_UPSERT, {
                 "player_id":      player_id,
                 "league_year_id": league_year_id,
                 "team_id":        int(f["team_id"]),
-                "position_code":  str(f.get("position_code", position_code)),
+                "position_code":  position_code[:16],
                 "innings":        int(f.get("innings", 0)),
                 "putouts":        int(f.get("putouts", 0)),
                 "assists":        int(f.get("assists", 0)),
@@ -818,16 +833,17 @@ def accumulate_subweek_stats_bulk(
                     if "_" in pid_str:
                         pid_part, pos_part = pid_str.rsplit("_", 1)
                         player_id = int(pid_part)
-                        position_code = pos_part
+                        position_code = _FIELDING_POS_NORMALIZE.get(pos_part.lower(), pos_part)
                     else:
                         player_id = int(pid_str)
-                        position_code = str(f.get("position_code", ""))
+                        raw_pos = str(f.get("position_code", ""))
+                        position_code = _FIELDING_POS_NORMALIZE.get(raw_pos.lower(), raw_pos)
 
                     fielding_params.append({
                         "player_id":      player_id,
                         "league_year_id": league_year_id,
                         "team_id":        int(f["team_id"]),
-                        "position_code":  str(f.get("position_code", position_code)),
+                        "position_code":  position_code[:16],
                         "innings":        int(f.get("innings", 0)),
                         "putouts":        int(f.get("putouts", 0)),
                         "assists":        int(f.get("assists", 0)),

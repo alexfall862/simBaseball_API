@@ -145,6 +145,13 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Gameplans</div>
+      <a href="#" class="nav-item" data-section="gameplan-audit">
+        <span class="nav-icon">&#128203;</span> Gameplan Audit
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Stamina</div>
       <a href="#" class="nav-item" data-section="stamina-overview">
         <span class="nav-icon">&#9889;</span> League Overview
@@ -2827,6 +2834,119 @@
       <!-- ============================================================ -->
 
       <!-- Stamina Overview -->
+      <!-- Gameplan Audit -->
+      <section id="section-gameplan-audit" class="section">
+        <div class="card">
+          <h3>Gameplan Audit</h3>
+          <p style="color:var(--text-secondary);margin-bottom:12px">
+            Inspect gameplan submissions across all organizations and levels. Shows defensive depth charts, pitching rotations, bullpen order, team strategy, and lineup roles.
+          </p>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>Level</label>
+              <select id="gpa-level">
+                <option value="">All Levels</option>
+                <option value="9">9 - MLB</option>
+                <option value="8">8 - AAA</option>
+                <option value="7">7 - AA</option>
+                <option value="6">6 - High-A</option>
+                <option value="5">5 - Low-A</option>
+                <option value="3">3 - College</option>
+              </select>
+            </div>
+            <button id="btn-gpa-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="gpa-status" class="status-msg"></div>
+        </div>
+
+        <!-- Overview cards grid -->
+        <div id="gpa-overview" style="display:none">
+          <div class="card">
+            <h4>Team Overview</h4>
+            <div style="overflow-x:auto">
+              <table class="data-table" id="gpa-overview-table">
+                <thead>
+                  <tr>
+                    <th>Org</th><th>Team</th><th>Level</th>
+                    <th>Defense</th><th>Rotation</th><th>Bullpen</th>
+                    <th>Strategy</th><th>Lineup</th><th>Player Strats</th>
+                    <th>Last Updated</th><th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Team detail (shown when a team row is expanded) -->
+        <div id="gpa-detail" style="display:none">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+              <h4 id="gpa-detail-title">Team Detail</h4>
+              <button class="btn btn-secondary" onclick="document.getElementById('gpa-detail').style.display='none'">Close</button>
+            </div>
+
+            <!-- Defense tab -->
+            <h5 style="margin-top:16px">Defensive Depth Chart</h5>
+            <div style="overflow-x:auto">
+              <table class="data-table" id="gpa-defense-table">
+                <thead>
+                  <tr>
+                    <th>Pos</th><th>vs Hand</th><th>Player</th>
+                    <th>Weight</th><th>Priority</th><th>Locked</th>
+                    <th>Role</th><th>Order</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
+            <!-- Rotation tab -->
+            <h5 style="margin-top:16px">Pitching Rotation</h5>
+            <div style="overflow-x:auto">
+              <table class="data-table" id="gpa-rotation-table">
+                <thead>
+                  <tr><th>Slot</th><th>Pitcher</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="gpa-rotation-meta" style="color:var(--text-secondary);font-size:0.85em;margin-top:4px"></div>
+
+            <!-- Bullpen tab -->
+            <h5 style="margin-top:16px">Bullpen Order</h5>
+            <div style="overflow-x:auto">
+              <table class="data-table" id="gpa-bullpen-table">
+                <thead>
+                  <tr><th>Slot</th><th>Pitcher</th><th>Role</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
+            <!-- Team Strategy tab -->
+            <h5 style="margin-top:16px">Team Strategy</h5>
+            <div id="gpa-strategy-detail" style="font-size:0.9em"></div>
+
+            <!-- Lineup Roles tab -->
+            <h5 style="margin-top:16px">Lineup Roles</h5>
+            <div style="overflow-x:auto">
+              <table class="data-table" id="gpa-lineup-table">
+                <thead>
+                  <tr><th>#</th><th>Role</th><th>Locked Player</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
+            <!-- Player Strategies summary -->
+            <h5 style="margin-top:16px">Player Strategy Summary</h5>
+            <div id="gpa-playerstrat-detail" style="font-size:0.9em"></div>
+          </div>
+        </div>
+      </section>
+
       <section id="section-stamina-overview" class="section">
         <div class="card">
           <h3>Stamina Overview</h3>
