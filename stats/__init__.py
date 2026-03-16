@@ -335,6 +335,7 @@ def pitching_leaderboard():
             rows = conn.execute(sa_text(f"""
                 SELECT ps.player_id, ps.team_id, ps.games, ps.games_started,
                        ps.wins, ps.losses, ps.saves,
+                       ps.holds, ps.blown_saves, ps.quality_starts,
                        ps.innings_pitched_outs, ps.hits_allowed,
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
@@ -358,6 +359,9 @@ def pitching_leaderboard():
             w = int(r["wins"])
             l = int(r["losses"])
             sv = int(r["saves"])
+            hld = int(r.get("holds") or 0)
+            bs = int(r.get("blown_saves") or 0)
+            qs = int(r.get("quality_starts") or 0)
             h = int(r["hits_allowed"])
             ra = int(r["runs_allowed"])
             er = int(r["earned_runs"])
@@ -392,6 +396,7 @@ def pitching_leaderboard():
                 "team_level": int(r["team_level"]),
                 "g": g, "gs": gs,
                 "w": w, "l": l, "sv": sv,
+                "hld": hld, "bs": bs, "qs": qs,
                 "ip": f"{ipo // 3}.{ipo % 3}",
                 "h": h, "r": ra, "er": er,
                 "bb": bb, "so": so, "hr": hra, "itphr": itphra,
@@ -611,6 +616,9 @@ def team_stats():
                        SUM(ps.innings_pitched_outs) AS ipo,
                        SUM(ps.wins) AS w, SUM(ps.losses) AS l,
                        SUM(ps.saves) AS sv,
+                       SUM(ps.holds) AS hld,
+                       SUM(ps.blown_saves) AS bs,
+                       SUM(ps.quality_starts) AS qs,
                        SUM(ps.hits_allowed) AS ha,
                        SUM(ps.runs_allowed) AS ra,
                        SUM(ps.earned_runs) AS er,
@@ -684,6 +692,9 @@ def team_stats():
                 "team_level": int(r["team_level"]),
                 "g": int(r["g"]),
                 "w": w, "l": l, "sv": int(r["sv"]),
+                "hld": int(r.get("hld") or 0),
+                "bs": int(r.get("bs") or 0),
+                "qs": int(r.get("qs") or 0),
                 "ip": f"{ipo // 3}.{ipo % 3}",
                 "h": h, "r": int(r["ra"]),
                 "er": er, "bb": bb, "so": so, "hr": hra, "itphr": itphra,
@@ -758,6 +769,7 @@ def player_stats(player_id: int):
             pitching = conn.execute(sa_text(f"""
                 SELECT ps.league_year_id, ps.team_id, ps.games, ps.games_started,
                        ps.wins, ps.losses, ps.saves,
+                       ps.holds, ps.blown_saves, ps.quality_starts,
                        ps.innings_pitched_outs, ps.hits_allowed,
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
@@ -901,6 +913,9 @@ def player_stats(player_id: int):
                 "g": int(r["games"]), "gs": int(r["games_started"]),
                 "w": int(r["wins"]), "l": int(r["losses"]),
                 "sv": int(r["saves"]),
+                "hld": int(r.get("holds") or 0),
+                "bs": int(r.get("blown_saves") or 0),
+                "qs": int(r.get("quality_starts") or 0),
                 "ip": f"{ipo // 3}.{ipo % 3}",
                 "h": int(r["hits_allowed"]), "r": int(r["runs_allowed"]),
                 "er": er, "bb": int(r["walks"]),

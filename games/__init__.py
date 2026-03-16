@@ -1301,7 +1301,7 @@ def get_game_boxscore(game_id: int):
             bat_rows = conn.execute(sa_text("""
                 SELECT gbl.player_id, gbl.team_id,
                        p.firstName, p.lastName,
-                       gbl.position_code,
+                       gbl.position_code, gbl.batting_order,
                        gbl.at_bats, gbl.runs, gbl.hits, gbl.doubles_hit,
                        gbl.triples, gbl.home_runs, gbl.inside_the_park_hr,
                        gbl.rbi, gbl.walks,
@@ -1310,14 +1310,16 @@ def get_game_boxscore(game_id: int):
                 FROM game_batting_lines gbl
                 JOIN simbbPlayers p ON p.id = gbl.player_id
                 WHERE gbl.game_id = :gid
-                ORDER BY gbl.team_id, gbl.id
+                ORDER BY gbl.team_id, gbl.batting_order, gbl.id
             """), {"gid": game_id}).mappings().all()
 
             # 3. Pitching lines
             pit_rows = conn.execute(sa_text("""
                 SELECT gpl.player_id, gpl.team_id,
                        p.firstName, p.lastName,
+                       gpl.pitch_appearance_order,
                        gpl.games_started, gpl.win, gpl.loss, gpl.save_recorded,
+                       gpl.hold, gpl.blown_save, gpl.quality_start,
                        gpl.innings_pitched_outs, gpl.hits_allowed, gpl.runs_allowed,
                        gpl.earned_runs, gpl.walks, gpl.strikeouts,
                        gpl.home_runs_allowed, gpl.inside_the_park_hr_allowed,
@@ -1326,7 +1328,7 @@ def get_game_boxscore(game_id: int):
                 FROM game_pitching_lines gpl
                 JOIN simbbPlayers p ON p.id = gpl.player_id
                 WHERE gpl.game_id = :gid
-                ORDER BY gpl.team_id, gpl.id
+                ORDER BY gpl.team_id, gpl.pitch_appearance_order, gpl.id
             """), {"gid": game_id}).mappings().all()
 
             # 4. Substitutions
@@ -1334,7 +1336,10 @@ def get_game_boxscore(game_id: int):
                 SELECT gs.inning, gs.half, gs.sub_type,
                        gs.player_in_id, pin.firstName AS in_first, pin.lastName AS in_last,
                        gs.player_out_id, pout.firstName AS out_first, pout.lastName AS out_last,
-                       gs.new_position
+                       gs.new_position,
+                       gs.entry_score_diff, gs.entry_runners_on,
+                       gs.entry_inning, gs.entry_outs,
+                       gs.entry_is_save_situation
                 FROM game_substitutions gs
                 JOIN simbbPlayers pin ON pin.id = gs.player_in_id
                 JOIN simbbPlayers pout ON pout.id = gs.player_out_id
@@ -1350,6 +1355,7 @@ def get_game_boxscore(game_id: int):
                 "player_id": int(r["player_id"]),
                 "name": f"{r['firstName']} {r['lastName']}",
                 "pos": r.get("position_code") or None,
+                "batting_order": int(r.get("batting_order") or 0),
                 "pa": int(r.get("plate_appearances") or 0),
                 "ab": int(r["at_bats"]), "r": int(r["runs"]),
                 "h": int(r["hits"]), "2b": int(r["doubles_hit"]),
@@ -1374,6 +1380,7 @@ def get_game_boxscore(game_id: int):
             return {
                 "player_id": int(r["player_id"]),
                 "name": f"{r['firstName']} {r['lastName']}",
+                "appearance_order": int(r.get("pitch_appearance_order") or 0),
                 "gs": int(r["games_started"]),
                 "ip": ip, "h": int(r["hits_allowed"]),
                 "r": int(r["runs_allowed"]), "er": int(r["earned_runs"]),
@@ -1386,6 +1393,9 @@ def get_game_boxscore(game_id: int):
                 "hbp": int(r.get("hbp") or 0),
                 "wp": int(r.get("wildpitches") or 0),
                 "dec": dec,
+                "hold": int(r.get("hold") or 0),
+                "blown_save": int(r.get("blown_save") or 0),
+                "quality_start": int(r.get("quality_start") or 0),
             }
 
         import json as _json
@@ -1436,8 +1446,9 @@ def get_game_boxscore(game_id: int):
             linescore["away"]["H"] = away_hits
             linescore["away"]["E"] = away_errors
 
-        substitutions = [
-            {
+        substitutions = []
+        for s in sub_rows:
+            sub_obj = {
                 "inning": int(s["inning"]),
                 "half": s["half"],
                 "type": s["sub_type"],
@@ -1447,8 +1458,14 @@ def get_game_boxscore(game_id: int):
                                 "name": f"{s['out_first']} {s['out_last']}"},
                 "new_position": s["new_position"],
             }
-            for s in sub_rows
-        ]
+            # Entry-state context (present on pitching changes)
+            if s.get("entry_score_diff") is not None:
+                sub_obj["entry_score_diff"] = int(s["entry_score_diff"])
+                sub_obj["entry_runners_on"] = int(s.get("entry_runners_on") or 0)
+                sub_obj["entry_inning"] = int(s.get("entry_inning") or 0)
+                sub_obj["entry_outs"] = int(s.get("entry_outs") or 0)
+                sub_obj["entry_is_save_situation"] = bool(s.get("entry_is_save_situation"))
+            substitutions.append(sub_obj)
 
         result = {
             "game_id": game_id,

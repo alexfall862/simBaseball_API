@@ -164,11 +164,13 @@ _PITCHING_UPSERT = text("""
     INSERT INTO player_pitching_stats
         (player_id, league_year_id, team_id,
          games, games_started, wins, losses, saves,
+         holds, blown_saves, quality_starts,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
          walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed)
     VALUES
         (:player_id, :league_year_id, :team_id,
          1, :games_started, :win, :loss, :save,
+         :hold, :blown_save, :quality_start,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)
     ON DUPLICATE KEY UPDATE
@@ -177,6 +179,9 @@ _PITCHING_UPSERT = text("""
         wins                        = wins + VALUES(wins),
         losses                      = losses + VALUES(losses),
         saves                       = saves + VALUES(saves),
+        holds                       = holds + VALUES(holds),
+        blown_saves                 = blown_saves + VALUES(blown_saves),
+        quality_starts              = quality_starts + VALUES(quality_starts),
         innings_pitched_outs        = innings_pitched_outs + VALUES(innings_pitched_outs),
         hits_allowed                = hits_allowed + VALUES(hits_allowed),
         runs_allowed                = runs_allowed + VALUES(runs_allowed),
@@ -249,6 +254,9 @@ def _upsert_pitching(
                 "win":                         int(p.get("win", 0)),
                 "loss":                        int(p.get("loss", 0)),
                 "save":                        int(p.get("save", 0)),
+                "hold":                        int(p.get("hold", 0)),
+                "blown_save":                  int(p.get("blown_save", 0)),
+                "quality_start":               int(p.get("quality_start", 0)),
                 "innings_pitched_outs":        int(p.get("innings_pitched_outs", 0)),
                 "hits_allowed":                int(p.get("hits_allowed", 0)),
                 "runs_allowed":                int(p.get("runs_allowed", 0)),
@@ -455,16 +463,17 @@ def record_subweek_position_usage(
 _GAME_BATTING_INSERT = text("""
     INSERT INTO game_batting_lines
         (game_id, player_id, team_id, league_year_id, position_code,
-         at_bats, runs, hits, doubles_hit, triples,
+         batting_order, at_bats, runs, hits, doubles_hit, triples,
          home_runs, inside_the_park_hr, rbi, walks, strikeouts,
          stolen_bases, caught_stealing, plate_appearances, hbp)
     VALUES
         (:game_id, :player_id, :team_id, :league_year_id, :position_code,
-         :at_bats, :runs, :hits, :doubles, :triples,
+         :batting_order, :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
          :stolen_bases, :caught_stealing, :plate_appearances, :hbp)
     ON DUPLICATE KEY UPDATE
         position_code      = VALUES(position_code),
+        batting_order      = VALUES(batting_order),
         at_bats            = VALUES(at_bats),
         runs               = VALUES(runs),
         hits               = VALUES(hits),
@@ -484,21 +493,29 @@ _GAME_BATTING_INSERT = text("""
 _GAME_PITCHING_INSERT = text("""
     INSERT INTO game_pitching_lines
         (game_id, player_id, team_id, league_year_id,
+         pitch_appearance_order,
          games_started, win, loss, save_recorded,
+         hold, blown_save, quality_start,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
          walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed,
          pitches_thrown, balls, strikes, hbp, wildpitches)
     VALUES
         (:game_id, :player_id, :team_id, :league_year_id,
+         :pitch_appearance_order,
          :games_started, :win, :loss, :save,
+         :hold, :blown_save, :quality_start,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed,
          :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)
     ON DUPLICATE KEY UPDATE
+        pitch_appearance_order      = VALUES(pitch_appearance_order),
         games_started               = VALUES(games_started),
         win                         = VALUES(win),
         loss                        = VALUES(loss),
         save_recorded               = VALUES(save_recorded),
+        hold                        = VALUES(hold),
+        blown_save                  = VALUES(blown_save),
+        quality_start               = VALUES(quality_start),
         innings_pitched_outs        = VALUES(innings_pitched_outs),
         hits_allowed                = VALUES(hits_allowed),
         runs_allowed                = VALUES(runs_allowed),
@@ -542,6 +559,7 @@ def _insert_game_batting_lines(
                 "team_id":            int(b["team_id"]),
                 "league_year_id":     league_year_id,
                 "position_code":      pos,
+                "batting_order":      int(b.get("batting_order", 0)),
                 "at_bats":            int(b.get("at_bats", 0)),
                 "runs":               int(b.get("runs", 0)),
                 "hits":               int(b.get("hits", 0)),
@@ -578,10 +596,14 @@ def _insert_game_pitching_lines(
                 "player_id":                   int(player_id_str),
                 "team_id":                     int(p["team_id"]),
                 "league_year_id":              league_year_id,
+                "pitch_appearance_order":      int(p.get("pitch_appearance_order", 0)),
                 "games_started":               int(p.get("games_started", 0)),
                 "win":                         int(p.get("win", 0)),
                 "loss":                        int(p.get("loss", 0)),
                 "save":                        int(p.get("save", 0)),
+                "hold":                        int(p.get("hold", 0)),
+                "blown_save":                  int(p.get("blown_save", 0)),
+                "quality_start":               int(p.get("quality_start", 0)),
                 "innings_pitched_outs":        int(p.get("innings_pitched_outs", 0)),
                 "hits_allowed":                int(p.get("hits_allowed", 0)),
                 "runs_allowed":                int(p.get("runs_allowed", 0)),
@@ -609,10 +631,14 @@ def _insert_game_pitching_lines(
 _GAME_SUBSTITUTION_INSERT = text("""
     INSERT INTO game_substitutions
         (game_id, league_year_id, inning, half, sub_type,
-         player_in_id, player_out_id, new_position)
+         player_in_id, player_out_id, new_position,
+         entry_score_diff, entry_runners_on, entry_inning,
+         entry_outs, entry_is_save_situation)
     VALUES
         (:game_id, :league_year_id, :inning, :half, :sub_type,
-         :player_in_id, :player_out_id, :new_position)
+         :player_in_id, :player_out_id, :new_position,
+         :entry_score_diff, :entry_runners_on, :entry_inning,
+         :entry_outs, :entry_is_save_situation)
 """)
 
 
@@ -631,6 +657,11 @@ def _insert_game_substitutions(
                 "player_in_id":   int(sub["player_in_id"]),
                 "player_out_id":  int(sub["player_out_id"]),
                 "new_position":   str(sub.get("new_position", "")),
+                "entry_score_diff":       sub.get("entry_score_diff"),
+                "entry_runners_on":       sub.get("entry_runners_on"),
+                "entry_inning":           sub.get("entry_inning"),
+                "entry_outs":             sub.get("entry_outs"),
+                "entry_is_save_situation": 1 if sub.get("entry_is_save_situation") else (0 if "entry_is_save_situation" in sub else None),
             })
             count += 1
         except Exception as e:
@@ -728,6 +759,7 @@ def accumulate_subweek_stats_bulk(
                     game_batting_params.append({
                         "game_id": int(game_id),
                         "position_code": pos,
+                        "batting_order": int(b.get("batting_order", 0)),
                         "plate_appearances": int(b.get("plate_appearances", 0)),
                         "hbp": int(b.get("hbp", 0)),
                         **params,
@@ -748,6 +780,9 @@ def accumulate_subweek_stats_bulk(
                     "win":                         int(p.get("win", 0)),
                     "loss":                        int(p.get("loss", 0)),
                     "save":                        int(p.get("save", 0)),
+                    "hold":                        int(p.get("hold", 0)),
+                    "blown_save":                  int(p.get("blown_save", 0)),
+                    "quality_start":               int(p.get("quality_start", 0)),
                     "innings_pitched_outs":        int(p.get("innings_pitched_outs", 0)),
                     "hits_allowed":                int(p.get("hits_allowed", 0)),
                     "runs_allowed":                int(p.get("runs_allowed", 0)),
@@ -763,6 +798,7 @@ def accumulate_subweek_stats_bulk(
                 if game_id is not None:
                     game_pitching_params.append({
                         "game_id": int(game_id),
+                        "pitch_appearance_order": int(p.get("pitch_appearance_order", 0)),
                         "pitches_thrown": int(p.get("pitches_thrown", 0)),
                         "balls": int(p.get("balls", 0)),
                         "strikes": int(p.get("strikes", 0)),
@@ -816,6 +852,11 @@ def accumulate_subweek_stats_bulk(
                         "player_in_id":   int(sub["player_in_id"]),
                         "player_out_id":  int(sub["player_out_id"]),
                         "new_position":   str(sub.get("new_position", "")),
+                        "entry_score_diff":       sub.get("entry_score_diff"),
+                        "entry_runners_on":       sub.get("entry_runners_on"),
+                        "entry_inning":           sub.get("entry_inning"),
+                        "entry_outs":             sub.get("entry_outs"),
+                        "entry_is_save_situation": 1 if sub.get("entry_is_save_situation") else (0 if "entry_is_save_situation" in sub else None),
                     })
                 except Exception:
                     logger.exception(
