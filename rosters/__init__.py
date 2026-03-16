@@ -686,11 +686,17 @@ def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=No
         ratings[out_name] = scaled
 
     # --- Derived 20–80 ratings (position ratings & pitch overalls) ---
+    # Use percentile-based scaling when available (full 20-80 spread);
+    # fall back to z-score for base attributes or missing percentile data.
+    from services.rating_config import is_derived_rating, to_20_80_percentile
+
     raw_derived = _compute_derived_raw_ratings(row, position_weights)
     for attr_name, raw_val in raw_derived.items():
         d = dist_for_level.get(attr_name)
-        if not d or d["mean"] is None:
+        if not d or d.get("mean") is None:
             scaled = None
+        elif is_derived_rating(attr_name) and d.get("percentiles"):
+            scaled = to_20_80_percentile(raw_val, d["percentiles"])
         else:
             scaled = _to_20_80(raw_val, d["mean"], d["std"])
 

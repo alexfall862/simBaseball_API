@@ -11,10 +11,12 @@ Also manages configurable overall rating weights for pitcher and
 position player overalls via the `rating_overall_weights` table.
 """
 
+import json as _json
 import logging
 import math
 import re
 import time
+from bisect import bisect_left
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
@@ -72,6 +74,75 @@ def to_20_80(raw_val, mean, std) -> Optional[int]:
     return max(20, min(80, score))
 
 
+# Attribute keys that should use percentile-based scaling
+_DERIVED_RATING_SUFFIXES = ("_rating", "_ovr", "_overall")
+
+
+def is_derived_rating(attr_key: str) -> bool:
+    """Check if an attribute key is a derived rating (uses percentile scaling)."""
+    return any(attr_key.endswith(s) for s in _DERIVED_RATING_SUFFIXES)
+
+
+def to_20_80_percentile(raw_val, percentiles: Dict[str, float]) -> Optional[int]:
+    """
+    Map a raw value to 20-80 using stored percentile breakpoints.
+
+    percentiles: dict with keys "p5", "p10", "p15", ..., "p95"
+    Maps: p5→25, p10→26.7, ..., p50→50, ..., p95→75
+    Extrapolates linearly below p5 (→20) and above p95 (→80).
+    """
+    if raw_val is None or not percentiles:
+        return None
+
+    try:
+        x = float(raw_val)
+    except (TypeError, ValueError):
+        return None
+
+    # Build sorted breakpoint pairs: (percentile_rank, raw_value)
+    breakpoints = []
+    for key, val in sorted(percentiles.items(), key=lambda kv: int(kv[0][1:])):
+        pct_rank = int(key[1:]) / 100.0  # "p5" → 0.05
+        breakpoints.append((pct_rank, float(val)))
+
+    if not breakpoints:
+        return None
+
+    # Find where x falls in the breakpoints
+    # Interpolate percentile rank
+    if x <= breakpoints[0][1]:
+        # Below lowest breakpoint — extrapolate down
+        pctile = breakpoints[0][0] * (x / breakpoints[0][1]) if breakpoints[0][1] > 0 else 0.0
+        pctile = max(0.0, pctile)
+    elif x >= breakpoints[-1][1]:
+        # Above highest breakpoint — extrapolate up
+        gap = 1.0 - breakpoints[-1][0]
+        if breakpoints[-1][1] > breakpoints[-2][1]:
+            extra = (x - breakpoints[-1][1]) / (breakpoints[-1][1] - breakpoints[-2][1])
+            step = breakpoints[-1][0] - breakpoints[-2][0]
+            pctile = min(1.0, breakpoints[-1][0] + extra * step)
+        else:
+            pctile = 1.0
+    else:
+        # Interpolate between two breakpoints
+        pctile = 0.5
+        for i in range(len(breakpoints) - 1):
+            lo_pct, lo_val = breakpoints[i]
+            hi_pct, hi_val = breakpoints[i + 1]
+            if lo_val <= x <= hi_val:
+                if hi_val > lo_val:
+                    frac = (x - lo_val) / (hi_val - lo_val)
+                else:
+                    frac = 0.5
+                pctile = lo_pct + frac * (hi_pct - lo_pct)
+                break
+
+    # Map percentile (0-1) to 20-80 scale
+    raw_score = 20.0 + pctile * 60.0
+    score = int(round(raw_score / 5.0) * 5)
+    return max(20, min(80, score))
+
+
 # ------------------------------------------------------------------
 # Read scale config
 # ------------------------------------------------------------------
@@ -87,7 +158,7 @@ def get_rating_config(
 
     Optional filters narrow the result set.
     """
-    sql = "SELECT level_id, ptype, attribute_key, mean_value, std_dev, p25, median, p75 FROM rating_scale_config WHERE 1=1"
+    sql = "SELECT level_id, ptype, attribute_key, mean_value, std_dev, p25, median, p75, percentiles_json FROM rating_scale_config WHERE 1=1"
     params: dict = {}
     if level_id is not None:
         sql += " AND level_id = :level_id"
@@ -103,13 +174,21 @@ def get_rating_config(
         lvl = int(r[0])
         pt = str(r[1])
         attr = str(r[2])
-        config.setdefault(pt, {}).setdefault(lvl, {})[attr] = {
+        entry = {
             "mean": float(r[3]),
             "std": float(r[4]),
             "p25": float(r[5]) if r[5] is not None else None,
             "median": float(r[6]) if r[6] is not None else None,
             "p75": float(r[7]) if r[7] is not None else None,
         }
+        # Parse percentiles_json if present
+        pct_raw = r[8] if len(r) > 8 else None
+        if pct_raw:
+            try:
+                entry["percentiles"] = _json.loads(pct_raw) if isinstance(pct_raw, str) else pct_raw
+            except Exception:
+                pass
+        config.setdefault(pt, {}).setdefault(lvl, {})[attr] = entry
     return config
 
 
@@ -144,7 +223,7 @@ def get_rating_config_by_level_name(conn, ptype: Optional[str] = None) -> Dict[s
 
     sql = """
         SELECT rc.level_id, rc.ptype, l.league_level, rc.attribute_key,
-               rc.mean_value, rc.std_dev
+               rc.mean_value, rc.std_dev, rc.percentiles_json
         FROM rating_scale_config rc
         JOIN levels l ON l.id = rc.level_id
     """
@@ -160,10 +239,17 @@ def get_rating_config_by_level_name(conn, ptype: Optional[str] = None) -> Dict[s
         pt = str(r[1])
         level_name = str(r[2])
         attr = str(r[3])
-        config.setdefault(pt, {}).setdefault(level_name, {})[attr] = {
+        entry = {
             "mean": float(r[4]),
             "std": float(r[5]),
         }
+        pct_raw = r[6] if len(r) > 6 else None
+        if pct_raw:
+            try:
+                entry["percentiles"] = _json.loads(pct_raw) if isinstance(pct_raw, str) else pct_raw
+            except Exception:
+                pass
+        config.setdefault(pt, {}).setdefault(level_name, {})[attr] = entry
 
     if ptype is None:
         _rc_cache = config
@@ -357,9 +443,11 @@ def seed_rating_config(conn) -> Dict[str, Any]:
 
     insert_sql = text("""
         INSERT INTO rating_scale_config
-            (level_id, ptype, attribute_key, mean_value, std_dev, p25, median, p75)
+            (level_id, ptype, attribute_key, mean_value, std_dev, p25, median, p75,
+             percentiles_json)
         VALUES
-            (:level_id, :ptype, :attribute_key, :mean_value, :std_dev, :p25, :median, :p75)
+            (:level_id, :ptype, :attribute_key, :mean_value, :std_dev, :p25, :median, :p75,
+             :percentiles_json)
     """)
 
     total_rows = 0
@@ -384,6 +472,14 @@ def seed_rating_config(conn) -> Dict[str, Any]:
             median = _percentile(sorted_vals, 50)
             p75 = _percentile(sorted_vals, 75)
 
+            # Percentile breakpoints for derived ratings (full 20-80 spread)
+            pct_json = None
+            if is_derived_rating(attr_key) and len(sorted_vals) >= 5:
+                pct_data = {}
+                for p_val in range(5, 100, 5):  # p5, p10, p15, ..., p95
+                    pct_data[f"p{p_val}"] = round(_percentile(sorted_vals, p_val), 4)
+                pct_json = _json.dumps(pct_data)
+
             conn.execute(insert_sql, {
                 "level_id": level_id,
                 "ptype": ptype,
@@ -393,6 +489,7 @@ def seed_rating_config(conn) -> Dict[str, Any]:
                 "p25": round(p25, 4),
                 "median": round(median, 4),
                 "p75": round(p75, 4),
+                "percentiles_json": pct_json,
             })
             attr_count += 1
 

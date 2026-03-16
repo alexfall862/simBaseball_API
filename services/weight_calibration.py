@@ -897,11 +897,14 @@ def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
 
         raw_ovr = raw_sum / weight_sum
 
-        # Scale to 20-80 using level+ptype distributions
+        # Scale to 20-80 using percentile breakpoints when available
+        from services.rating_config import to_20_80_percentile
         ptype_key = ptype if ptype in ("Pitcher", "Position") else "Position"
         level_dist = dist_config.get(ptype_key, {}).get(player_level, {}).get(ovr_type)
 
-        if level_dist and level_dist.get("mean") is not None and level_dist.get("std"):
+        if level_dist and level_dist.get("percentiles"):
+            scaled = to_20_80_percentile(raw_ovr, level_dist["percentiles"])
+        elif level_dist and level_dist.get("mean") is not None and level_dist.get("std"):
             scaled = to_20_80(raw_ovr, level_dist["mean"], level_dist["std"])
         else:
             # Fallback: simple linear map (raw 0-100 → 20-80)

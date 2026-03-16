@@ -2877,11 +2877,15 @@ def admin_player_preview():
             ptype_key = ptype if ptype in ("Pitcher", "Position") else "Position"
             level_dists = dist_config.get(ptype_key, {}).get(player_level, {})
 
-            # Scale each rating
+            # Scale each rating — use percentile scaling for derived ratings
+            from services.rating_config import is_derived_rating, to_20_80_percentile
+
             position_ratings = {}
             for rating_name, raw_val in raw_ratings.items():
                 d = level_dists.get(rating_name)
-                if d and d.get("mean") is not None and d.get("std"):
+                if d and is_derived_rating(rating_name) and d.get("percentiles"):
+                    scaled = to_20_80_percentile(raw_val, d["percentiles"])
+                elif d and d.get("mean") is not None and d.get("std"):
                     scaled = to_20_80(raw_val, d["mean"], d["std"])
                 else:
                     scaled = None
@@ -2908,7 +2912,9 @@ def admin_player_preview():
             ovr_raw = ovr_raw / ovr_weight_sum if ovr_weight_sum > 0 else 0.0
 
             ovr_dist = level_dists.get(ovr_type)
-            if ovr_dist and ovr_dist.get("mean") is not None and ovr_dist.get("std"):
+            if ovr_dist and ovr_dist.get("percentiles"):
+                ovr_scaled = to_20_80_percentile(ovr_raw, ovr_dist["percentiles"])
+            elif ovr_dist and ovr_dist.get("mean") is not None and ovr_dist.get("std"):
                 ovr_scaled = to_20_80(ovr_raw, ovr_dist["mean"], ovr_dist["std"])
             else:
                 ovr_scaled = max(20, min(80, round(ovr_raw * 0.6 + 20)))
