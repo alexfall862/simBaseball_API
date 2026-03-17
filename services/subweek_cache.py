@@ -1,11 +1,17 @@
 # services/subweek_cache.py
 """
-Pre-loads ALL data needed for a subweek's games in ~12-14 bulk queries,
+Pre-loads ALL data needed for a subweek's games in bulk queries,
 replacing thousands of per-game/per-team queries.
 
+Architecture: WeekCache (static, loaded once) + SubweekState (mutable, reloaded
+per subweek).  SubweekCache is the combined view used by payload builders.
+
 Usage:
-    cache = load_subweek_cache(conn, team_ids, league_year_id, season_week, league_level_id)
-    # Then assemble payloads from cache without touching the DB.
+    week_cache = load_week_cache(conn, team_ids, league_year_id, season_week, league_level_id)
+    # Then for each subweek:
+    state = load_subweek_state(conn, week_cache, league_year_id)
+    cache = SubweekCache.from_week_and_state(week_cache, state)
+    # Assemble payloads from cache without touching the DB.
 """
 
 import json
@@ -18,105 +24,150 @@ from sqlalchemy import select, and_
 logger = logging.getLogger("app")
 
 
+# -------------------------------------------------------------------
+# WeekCache: static data loaded once per week (~10 queries)
+# -------------------------------------------------------------------
+
+@dataclass
+class WeekCache:
+    """Data that does not change between subweeks within a single week."""
+
+    # --- Team-level ---
+    team_meta: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    roster_by_team: Dict[int, List[int]] = field(default_factory=dict)
+    org_by_team: Dict[int, int] = field(default_factory=dict)
+    team_strategy_by_team: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    bullpen_order_by_team: Dict[int, List[Dict[str, Any]]] = field(default_factory=dict)
+
+    # --- Rotation (config + slots are static; state is mutable) ---
+    rotation_by_team: Dict[int, Any] = field(default_factory=dict)
+    rotation_slots_by_rotation: Dict[int, List[Dict[str, Any]]] = field(default_factory=dict)
+
+    # --- Lineup / Defense (plans + roles are static; usage is mutable) ---
+    position_plans_by_team: Dict[int, Dict[str, List[Dict]]] = field(default_factory=dict)
+    lineup_roles_by_team: Dict[int, Dict[int, Dict]] = field(default_factory=dict)
+
+    # --- Player-level (static attributes) ---
+    player_rows: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    strategy_rows_by_player: Dict[int, List[Dict[str, Any]]] = field(default_factory=dict)
+    xp_mods: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    pitch_hands: Dict[int, str] = field(default_factory=dict)
+    position_weights: Any = None
+
+    # --- Roster identity ---
+    all_player_ids: Set[int] = field(default_factory=set)
+    pitcher_ids_by_team: Dict[int, List[int]] = field(default_factory=dict)
+
+
+# -------------------------------------------------------------------
+# SubweekState: mutable data reloaded before each subweek (~4 queries)
+# -------------------------------------------------------------------
+
+@dataclass
+class SubweekState:
+    """Data that changes between subweeks due to post-game updates."""
+
+    stamina: Dict[int, int] = field(default_factory=dict)
+    injury_malus: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    engine_views: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    rotation_state_by_team: Dict[int, Any] = field(default_factory=dict)
+    weekly_usage_by_team: Dict[int, Dict[str, Tuple]] = field(default_factory=dict)
+
+
+# -------------------------------------------------------------------
+# SubweekCache: combined view used by payload builders
+# -------------------------------------------------------------------
+
 @dataclass
 class SubweekCache:
     """In-memory snapshot of everything needed to build game payloads."""
 
     # --- Team-level ---
-    # team_id -> {orgID, team_abbrev, team_name, team_nickname,
-    #             ballpark_name, pitch_break_mod, power_mod}
     team_meta: Dict[int, Dict[str, Any]] = field(default_factory=dict)
-
-    # team_id -> [player_id, ...]
     roster_by_team: Dict[int, List[int]] = field(default_factory=dict)
-
-    # team_id -> org_id
     org_by_team: Dict[int, int] = field(default_factory=dict)
-
-    # team_id -> strategy dict (or defaults)
     team_strategy_by_team: Dict[int, Dict[str, Any]] = field(default_factory=dict)
-
-    # team_id -> [{slot, player_id, role}, ...]
     bullpen_order_by_team: Dict[int, List[Dict[str, Any]]] = field(default_factory=dict)
 
     # --- Rotation ---
-    # team_id -> rotation row dict or None
     rotation_by_team: Dict[int, Any] = field(default_factory=dict)
-
-    # rotation_id -> [slot row dicts]
     rotation_slots_by_rotation: Dict[int, List[Dict[str, Any]]] = field(default_factory=dict)
-
-    # team_id -> state row dict or None
     rotation_state_by_team: Dict[int, Any] = field(default_factory=dict)
 
     # --- Lineup / Defense ---
-    # team_id -> {position_code: [plan row dicts]}
     position_plans_by_team: Dict[int, Dict[str, List[Dict]]] = field(default_factory=dict)
-
-    # team_id -> {position_code: ({player_id: starts}, total_starts)}
     weekly_usage_by_team: Dict[int, Dict[str, Tuple]] = field(default_factory=dict)
-
-    # team_id -> {slot: role_row}
     lineup_roles_by_team: Dict[int, Dict[int, Dict]] = field(default_factory=dict)
 
-    # --- Player-level (all players across all teams) ---
-    # player_id -> raw simbbPlayers row dict
+    # --- Player-level ---
     player_rows: Dict[int, Dict[str, Any]] = field(default_factory=dict)
-
-    # player_id -> {attr: delta} from injury malus
     injury_malus: Dict[int, Dict[str, float]] = field(default_factory=dict)
-
-    # player_id -> engine player view (with injuries applied, derived ratings computed)
     engine_views: Dict[int, Dict[str, Any]] = field(default_factory=dict)
-
-    # player_id -> stamina int (0-100)
     stamina: Dict[int, int] = field(default_factory=dict)
-
-    # Raw strategy rows from playerStrategies for all players
     strategy_rows_by_player: Dict[int, List[Dict[str, Any]]] = field(default_factory=dict)
-
-    # player_id -> {position_code: xp_mod float}
     xp_mods: Dict[int, Dict[str, float]] = field(default_factory=dict)
-
-    # player_id -> pitch_hand ('L', 'R', or None)
     pitch_hands: Dict[int, str] = field(default_factory=dict)
-
-    # Position weights from rating_config (or None)
     position_weights: Any = None
-
-    # All player IDs across all teams
     all_player_ids: Set[int] = field(default_factory=set)
-
-    # pitcher IDs per team (for fallback rotation)
     pitcher_ids_by_team: Dict[int, List[int]] = field(default_factory=dict)
 
+    @classmethod
+    def from_week_and_state(cls, wc: WeekCache, st: SubweekState) -> "SubweekCache":
+        """Assemble a full SubweekCache from static WeekCache + mutable SubweekState."""
+        return cls(
+            # Static from WeekCache
+            team_meta=wc.team_meta,
+            roster_by_team=wc.roster_by_team,
+            org_by_team=wc.org_by_team,
+            team_strategy_by_team=wc.team_strategy_by_team,
+            bullpen_order_by_team=wc.bullpen_order_by_team,
+            rotation_by_team=wc.rotation_by_team,
+            rotation_slots_by_rotation=wc.rotation_slots_by_rotation,
+            position_plans_by_team=wc.position_plans_by_team,
+            lineup_roles_by_team=wc.lineup_roles_by_team,
+            player_rows=wc.player_rows,
+            strategy_rows_by_player=wc.strategy_rows_by_player,
+            xp_mods=wc.xp_mods,
+            pitch_hands=wc.pitch_hands,
+            position_weights=wc.position_weights,
+            all_player_ids=wc.all_player_ids,
+            pitcher_ids_by_team=wc.pitcher_ids_by_team,
+            # Mutable from SubweekState
+            stamina=st.stamina,
+            injury_malus=st.injury_malus,
+            engine_views=st.engine_views,
+            rotation_state_by_team=st.rotation_state_by_team,
+            weekly_usage_by_team=st.weekly_usage_by_team,
+        )
 
-def load_subweek_cache(
+
+# ===================================================================
+# load_week_cache: static data, called once per week (~10 queries)
+# ===================================================================
+
+def load_week_cache(
     conn,
     team_ids: List[int],
     league_year_id: int,
     season_week: int,
     league_level_id: int,
-) -> SubweekCache:
+) -> WeekCache:
     """
-    Execute ~12-14 bulk queries and return a fully populated SubweekCache.
+    Load all static (within-a-week) data for the given teams.
+    ~10 bulk queries.  Safe to share across subweeks and threads (read-only).
     """
     from services.game_payload import (
         _get_core_tables,
         _get_roster_tables,
-        _build_engine_player_view_from_mapping,
-        _load_position_weights,
         DEFAULT_PLAYER_STRATEGY,
     )
-    from services.injuries import get_active_injury_malus_bulk
-    from services.stamina import get_effective_stamina_bulk
     from services.defense_xp import compute_defensive_xp_mod_for_players
 
-    cache = SubweekCache()
+    wc = WeekCache()
     unique_team_ids = list(set(int(t) for t in team_ids))
 
     if not unique_team_ids:
-        return cache
+        return wc
 
     r_tables = _get_roster_tables()
     c_tables = _get_core_tables()
@@ -146,8 +197,8 @@ def load_subweek_cache(
 
     for row in team_rows:
         tid = int(row["id"])
-        cache.team_meta[tid] = dict(row)
-        cache.org_by_team[tid] = int(row["orgID"])
+        wc.team_meta[tid] = dict(row)
+        wc.org_by_team[tid] = int(row["orgID"])
 
     # ---------------------------------------------------------------
     # 2) Rosters: all player IDs per team (single bulk query)
@@ -187,18 +238,18 @@ def load_subweek_cache(
         pid = int(row["player_id"])
         ptype = (row.get("ptype") or "").lower()
 
-        cache.roster_by_team.setdefault(tid, []).append(pid)
-        cache.all_player_ids.add(pid)
+        wc.roster_by_team.setdefault(tid, []).append(pid)
+        wc.all_player_ids.add(pid)
 
         if ptype == "pitcher":
-            cache.pitcher_ids_by_team.setdefault(tid, []).append(pid)
+            wc.pitcher_ids_by_team.setdefault(tid, []).append(pid)
 
-    all_pids = list(cache.all_player_ids)
+    all_pids = list(wc.all_player_ids)
     if not all_pids:
-        return cache
+        return wc
 
     logger.info(
-        "subweek_cache: %d teams, %d players — loading bulk data",
+        "week_cache: %d teams, %d players — loading static bulk data",
         len(unique_team_ids), len(all_pids),
     )
 
@@ -211,32 +262,116 @@ def load_subweek_cache(
 
     for row in player_rows:
         pid = int(row["id"])
-        cache.player_rows[pid] = dict(row)
+        wc.player_rows[pid] = dict(row)
 
-        # Extract pitch hand while we have the data
         raw_hand = row.get("pitch_hand")
         if raw_hand:
             s = str(raw_hand).strip().upper()
             if s and s[0] in ("L", "R"):
-                cache.pitch_hands[pid] = s[0]
+                wc.pitch_hands[pid] = s[0]
 
     # ---------------------------------------------------------------
-    # 4) Injury maluses (bulk — internally queries 3 tables)
+    # 4) Position weights (static config)
     # ---------------------------------------------------------------
-    cache.injury_malus = get_active_injury_malus_bulk(conn, all_pids)
+    from services.game_payload import _load_position_weights
+    wc.position_weights = _load_position_weights(conn)
 
     # ---------------------------------------------------------------
-    # 5) Position weights + engine player views (with injuries applied)
+    # 5) Defensive XP mods (bulk — 2 queries)
     # ---------------------------------------------------------------
-    cache.position_weights = _load_position_weights(conn)
+    wc.xp_mods = compute_defensive_xp_mod_for_players(
+        conn, all_pids, league_level_id
+    )
 
+    # ---------------------------------------------------------------
+    # 6) Player strategies (bulk — single query)
+    # ---------------------------------------------------------------
+    strategies_table = c_tables["playerStrategies"]
+    strat_rows = list(
+        conn.execute(
+            select(strategies_table).where(
+                strategies_table.c.playerID.in_(all_pids)
+            )
+        ).mappings()
+    )
+
+    for row in strat_rows:
+        pid = int(row["playerID"])
+        wc.strategy_rows_by_player.setdefault(pid, []).append(dict(row))
+
+    # ---------------------------------------------------------------
+    # 7) Team strategies (bulk — single query)
+    # ---------------------------------------------------------------
+    _load_team_strategies_bulk(conn, c_tables, unique_team_ids, wc)
+
+    # ---------------------------------------------------------------
+    # 8) Bullpen orders (bulk — single query)
+    # ---------------------------------------------------------------
+    _load_bullpen_orders_bulk(conn, c_tables, unique_team_ids, wc)
+
+    # ---------------------------------------------------------------
+    # 9) Rotation config + slots (2-3 queries, NOT state)
+    # ---------------------------------------------------------------
+    _load_rotation_config_bulk(conn, unique_team_ids, wc)
+
+    # ---------------------------------------------------------------
+    # 10) Position plans (bulk — single query)
+    # ---------------------------------------------------------------
+    _load_position_plans_bulk(conn, c_tables, unique_team_ids, wc)
+
+    # ---------------------------------------------------------------
+    # 11) Lineup roles (bulk — single query)
+    # ---------------------------------------------------------------
+    _load_lineup_roles_bulk(conn, c_tables, unique_team_ids, wc)
+
+    logger.info("week_cache: fully loaded (%d teams, %d players)", len(unique_team_ids), len(all_pids))
+    return wc
+
+
+# ===================================================================
+# load_subweek_state: mutable data, called once per subweek (~4 queries)
+# ===================================================================
+
+def load_subweek_state(
+    conn,
+    week_cache: WeekCache,
+    league_year_id: int,
+    season_week: int,
+) -> SubweekState:
+    """
+    Load only the mutable state that changes between subweeks.
+    ~4 queries.  Called before each subweek's payload build.
+    """
+    from services.game_payload import (
+        _get_core_tables,
+        _build_engine_player_view_from_mapping,
+    )
+    from services.injuries import get_active_injury_malus_bulk
+    from services.stamina import get_effective_stamina_bulk
+    from services.rotation import _get_rotation_tables
+
+    st = SubweekState()
+    all_pids = list(week_cache.all_player_ids)
+    unique_team_ids = list(week_cache.team_meta.keys())
+
+    if not all_pids:
+        return st
+
+    # ---------------------------------------------------------------
+    # 1) Injury maluses (bulk)
+    # ---------------------------------------------------------------
+    st.injury_malus = get_active_injury_malus_bulk(conn, all_pids)
+
+    # ---------------------------------------------------------------
+    # 2) Engine views (derived from static player_rows + mutable injury_malus)
+    # ---------------------------------------------------------------
     for pid in all_pids:
-        raw_mapping = cache.player_rows.get(pid)
+        raw_mapping = week_cache.player_rows.get(pid)
         if raw_mapping is None:
             continue
 
         adjusted = dict(raw_mapping)
-        malus = cache.injury_malus.get(pid) or {}
+        malus = st.injury_malus.get(pid) or {}
         for attr, delta in malus.items():
             if attr.endswith("_base") and attr in adjusted:
                 base_val = adjusted.get(attr)
@@ -250,77 +385,67 @@ def load_subweek_cache(
                     delta_num = 0.0
                 adjusted[attr] = base_num + delta_num
 
-        cache.engine_views[pid] = _build_engine_player_view_from_mapping(
-            adjusted, cache.position_weights
+        st.engine_views[pid] = _build_engine_player_view_from_mapping(
+            adjusted, week_cache.position_weights
         )
 
     # ---------------------------------------------------------------
-    # 6) Stamina (bulk — single query)
+    # 3) Stamina (bulk — single query)
     # ---------------------------------------------------------------
-    cache.stamina = get_effective_stamina_bulk(conn, all_pids, league_year_id)
+    st.stamina = get_effective_stamina_bulk(conn, all_pids, league_year_id)
 
     # ---------------------------------------------------------------
-    # 7) Defensive XP mods (bulk — 2 queries)
+    # 4) Rotation state (single query)
     # ---------------------------------------------------------------
-    cache.xp_mods = compute_defensive_xp_mod_for_players(
-        conn, all_pids, league_level_id
+    r_tables = _get_rotation_tables()
+    state_table = r_tables["state"]
+    if unique_team_ids:
+        state_rows = conn.execute(
+            select(state_table).where(state_table.c.team_id.in_(unique_team_ids))
+        ).mappings().all()
+
+        for row in state_rows:
+            tid = int(row["team_id"])
+            st.rotation_state_by_team[tid] = dict(row)
+
+    # ---------------------------------------------------------------
+    # 5) Weekly usage (single query)
+    # ---------------------------------------------------------------
+    c_tables = _get_core_tables()
+    _load_weekly_usage_bulk(conn, c_tables, unique_team_ids, league_year_id, season_week, st)
+
+    logger.info(
+        "subweek_state: refreshed mutable data (%d injuries, %d stamina rows, %d rotation states)",
+        len(st.injury_malus), len(st.stamina), len(st.rotation_state_by_team),
     )
+    return st
 
-    # ---------------------------------------------------------------
-    # 8) Player strategies (bulk — single query, org filtering at assembly)
-    # ---------------------------------------------------------------
-    strategies_table = c_tables["playerStrategies"]
-    strat_rows = list(
-        conn.execute(
-            select(strategies_table).where(
-                strategies_table.c.playerID.in_(all_pids)
-            )
-        ).mappings()
-    )
 
-    for row in strat_rows:
-        pid = int(row["playerID"])
-        cache.strategy_rows_by_player.setdefault(pid, []).append(dict(row))
+# ===================================================================
+# Legacy: load_subweek_cache (full load, kept for backward compat)
+# ===================================================================
 
-    # ---------------------------------------------------------------
-    # 9) Team strategies (bulk — single query)
-    # ---------------------------------------------------------------
-    _load_team_strategies_bulk(conn, c_tables, unique_team_ids, cache)
-
-    # ---------------------------------------------------------------
-    # 10) Bullpen orders (bulk — single query)
-    # ---------------------------------------------------------------
-    _load_bullpen_orders_bulk(conn, c_tables, unique_team_ids, cache)
-
-    # ---------------------------------------------------------------
-    # 11) Rotation data (3 queries)
-    # ---------------------------------------------------------------
-    _load_rotations_bulk(conn, unique_team_ids, cache)
-
-    # ---------------------------------------------------------------
-    # 12) Position plans (bulk — single query)
-    # ---------------------------------------------------------------
-    _load_position_plans_bulk(conn, c_tables, unique_team_ids, cache)
-
-    # ---------------------------------------------------------------
-    # 13) Weekly usage (bulk — single query)
-    # ---------------------------------------------------------------
-    _load_weekly_usage_bulk(conn, c_tables, unique_team_ids, league_year_id, season_week, cache)
-
-    # ---------------------------------------------------------------
-    # 14) Lineup roles (bulk — single query)
-    # ---------------------------------------------------------------
-    _load_lineup_roles_bulk(conn, c_tables, unique_team_ids, cache)
-
-    logger.info("subweek_cache: fully loaded")
-    return cache
+def load_subweek_cache(
+    conn,
+    team_ids: List[int],
+    league_year_id: int,
+    season_week: int,
+    league_level_id: int,
+) -> SubweekCache:
+    """
+    Full load — equivalent to load_week_cache + load_subweek_state combined.
+    Kept for backward compatibility with single-game payload endpoint.
+    """
+    wc = load_week_cache(conn, team_ids, league_year_id, season_week, league_level_id)
+    st = load_subweek_state(conn, wc, league_year_id, season_week)
+    return SubweekCache.from_week_and_state(wc, st)
 
 
 # -------------------------------------------------------------------
-# Internal bulk loaders
+# Internal bulk loaders (static — write to WeekCache)
 # -------------------------------------------------------------------
 
-def _load_team_strategies_bulk(conn, tables, team_ids, cache: SubweekCache):
+def _load_team_strategies_bulk(conn, tables, team_ids, wc: WeekCache):
     """Bulk load team_strategy for all teams."""
     from services.game_payload import _DEFAULT_TEAM_STRATEGY
 
@@ -332,7 +457,7 @@ def _load_team_strategies_bulk(conn, tables, team_ids, cache: SubweekCache):
         ts = meta.tables.get("team_strategy")
         if ts is None:
             for tid in team_ids:
-                cache.team_strategy_by_team[tid] = {
+                wc.team_strategy_by_team[tid] = {
                     **_DEFAULT_TEAM_STRATEGY, "team_id": tid
                 }
             return
@@ -346,7 +471,6 @@ def _load_team_strategies_bulk(conn, tables, team_ids, cache: SubweekCache):
         tid = int(row["team_id"])
         found.add(tid)
         strat = dict(row)
-        # Parse intentional_walk_list from JSON if needed
         iwl = strat.get("intentional_walk_list")
         if isinstance(iwl, str):
             try:
@@ -355,16 +479,16 @@ def _load_team_strategies_bulk(conn, tables, team_ids, cache: SubweekCache):
                 strat["intentional_walk_list"] = []
         elif iwl is None:
             strat["intentional_walk_list"] = []
-        cache.team_strategy_by_team[tid] = strat
+        wc.team_strategy_by_team[tid] = strat
 
     for tid in team_ids:
         if tid not in found:
-            cache.team_strategy_by_team[tid] = {
+            wc.team_strategy_by_team[tid] = {
                 **_DEFAULT_TEAM_STRATEGY, "team_id": tid
             }
 
 
-def _load_bullpen_orders_bulk(conn, tables, team_ids, cache: SubweekCache):
+def _load_bullpen_orders_bulk(conn, tables, team_ids, wc: WeekCache):
     """Bulk load team_bullpen_order for all teams."""
     tbo = tables.get("team_bullpen_order")
     if tbo is None:
@@ -374,7 +498,7 @@ def _load_bullpen_orders_bulk(conn, tables, team_ids, cache: SubweekCache):
         tbo = meta.tables.get("team_bullpen_order")
         if tbo is None:
             for tid in team_ids:
-                cache.bullpen_order_by_team[tid] = []
+                wc.bullpen_order_by_team[tid] = []
             return
 
     rows = conn.execute(
@@ -384,25 +508,24 @@ def _load_bullpen_orders_bulk(conn, tables, team_ids, cache: SubweekCache):
     ).mappings().all()
 
     for tid in team_ids:
-        cache.bullpen_order_by_team[tid] = []
+        wc.bullpen_order_by_team[tid] = []
 
     for row in rows:
         tid = int(row["team_id"])
-        cache.bullpen_order_by_team.setdefault(tid, []).append({
+        wc.bullpen_order_by_team.setdefault(tid, []).append({
             "slot": int(row["slot"]),
             "player_id": int(row["player_id"]),
             "role": row.get("role"),
         })
 
 
-def _load_rotations_bulk(conn, team_ids, cache: SubweekCache):
-    """Bulk load rotation config, slots, and state for all teams."""
+def _load_rotation_config_bulk(conn, team_ids, wc: WeekCache):
+    """Bulk load rotation config and slots (NOT state) for all teams."""
     from services.rotation import _get_rotation_tables
 
     r_tables = _get_rotation_tables()
     rotation = r_tables["rotation"]
     slots = r_tables["slots"]
-    state = r_tables["state"]
 
     # Rotation config
     rot_rows = conn.execute(
@@ -412,7 +535,7 @@ def _load_rotations_bulk(conn, team_ids, cache: SubweekCache):
     rotation_ids = []
     for row in rot_rows:
         tid = int(row["team_id"])
-        cache.rotation_by_team[tid] = dict(row)
+        wc.rotation_by_team[tid] = dict(row)
         rotation_ids.append(int(row["id"]))
 
     # Rotation slots
@@ -425,19 +548,10 @@ def _load_rotations_bulk(conn, team_ids, cache: SubweekCache):
 
         for row in slot_rows:
             rid = int(row["rotation_id"])
-            cache.rotation_slots_by_rotation.setdefault(rid, []).append(dict(row))
-
-    # Rotation state
-    state_rows = conn.execute(
-        select(state).where(state.c.team_id.in_(team_ids))
-    ).mappings().all()
-
-    for row in state_rows:
-        tid = int(row["team_id"])
-        cache.rotation_state_by_team[tid] = dict(row)
+            wc.rotation_slots_by_rotation.setdefault(rid, []).append(dict(row))
 
 
-def _load_position_plans_bulk(conn, tables, team_ids, cache: SubweekCache):
+def _load_position_plans_bulk(conn, tables, team_ids, wc: WeekCache):
     """Bulk load team_position_plan for all teams."""
     tpp = tables.get("team_position_plan")
     if tpp is None:
@@ -457,15 +571,45 @@ def _load_position_plans_bulk(conn, tables, team_ids, cache: SubweekCache):
     ).mappings().all()
 
     for tid in team_ids:
-        cache.position_plans_by_team[tid] = {}
+        wc.position_plans_by_team[tid] = {}
 
     for row in rows:
         tid = int(row["team_id"])
         pos = row["position_code"]
-        cache.position_plans_by_team.setdefault(tid, {}).setdefault(pos, []).append(dict(row))
+        wc.position_plans_by_team.setdefault(tid, {}).setdefault(pos, []).append(dict(row))
 
 
-def _load_weekly_usage_bulk(conn, tables, team_ids, league_year_id, season_week, cache: SubweekCache):
+def _load_lineup_roles_bulk(conn, tables, team_ids, wc: WeekCache):
+    """Bulk load team_lineup_roles for all teams."""
+    tlr = tables.get("team_lineup_roles")
+    if tlr is None:
+        from sqlalchemy import Table, MetaData
+        meta = MetaData()
+        meta.reflect(bind=conn, only=["team_lineup_roles"])
+        tlr = meta.tables.get("team_lineup_roles")
+        if tlr is None:
+            return
+
+    rows = conn.execute(
+        select(tlr).where(tlr.c.team_id.in_(team_ids)).order_by(
+            tlr.c.team_id.asc(), tlr.c.slot.asc()
+        )
+    ).mappings().all()
+
+    for tid in team_ids:
+        wc.lineup_roles_by_team[tid] = {}
+
+    for row in rows:
+        tid = int(row["team_id"])
+        slot = int(row["slot"])
+        wc.lineup_roles_by_team.setdefault(tid, {})[slot] = dict(row)
+
+
+# -------------------------------------------------------------------
+# Internal bulk loaders (mutable — write to SubweekState)
+# -------------------------------------------------------------------
+
+def _load_weekly_usage_bulk(conn, tables, team_ids, league_year_id, season_week, st: SubweekState):
     """Bulk load player_position_usage_week for all teams."""
     ppuw = tables.get("player_position_usage_week")
     if ppuw is None:
@@ -487,7 +631,7 @@ def _load_weekly_usage_bulk(conn, tables, team_ids, league_year_id, season_week,
     ).mappings().all()
 
     for tid in team_ids:
-        cache.weekly_usage_by_team[tid] = {}
+        st.weekly_usage_by_team[tid] = {}
 
     for row in rows:
         tid = int(row["team_id"])
@@ -495,39 +639,13 @@ def _load_weekly_usage_bulk(conn, tables, team_ids, league_year_id, season_week,
         pid = int(row["player_id"])
         starts = int(row.get("starts_this_week") or row.get("starts", 0))
 
-        team_usage = cache.weekly_usage_by_team.setdefault(tid, {})
+        team_usage = st.weekly_usage_by_team.setdefault(tid, {})
         if pos not in team_usage:
             team_usage[pos] = ({}, 0)
 
         usage_map, total = team_usage[pos]
         usage_map[pid] = usage_map.get(pid, 0) + starts
         team_usage[pos] = (usage_map, total + starts)
-
-
-def _load_lineup_roles_bulk(conn, tables, team_ids, cache: SubweekCache):
-    """Bulk load team_lineup_roles for all teams."""
-    tlr = tables.get("team_lineup_roles")
-    if tlr is None:
-        from sqlalchemy import Table, MetaData
-        meta = MetaData()
-        meta.reflect(bind=conn, only=["team_lineup_roles"])
-        tlr = meta.tables.get("team_lineup_roles")
-        if tlr is None:
-            return
-
-    rows = conn.execute(
-        select(tlr).where(tlr.c.team_id.in_(team_ids)).order_by(
-            tlr.c.team_id.asc(), tlr.c.slot.asc()
-        )
-    ).mappings().all()
-
-    for tid in team_ids:
-        cache.lineup_roles_by_team[tid] = {}
-
-    for row in rows:
-        tid = int(row["team_id"])
-        slot = int(row["slot"])
-        cache.lineup_roles_by_team.setdefault(tid, {})[slot] = dict(row)
 
 
 # -------------------------------------------------------------------

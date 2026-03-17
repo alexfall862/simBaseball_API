@@ -18,6 +18,20 @@ from sqlalchemy import text
 
 logger = logging.getLogger("app")
 
+# Chunk size for executemany batching — keeps SQL statement size reasonable
+# and reduces lock hold time on InnoDB.
+_BULK_CHUNK_SIZE = 100
+
+
+def _chunked_execute(conn, stmt, params: list, chunk_size: int = _BULK_CHUNK_SIZE) -> int:
+    """Execute a statement in chunks to avoid oversized SQL and long lock holds."""
+    total = 0
+    for i in range(0, len(params), chunk_size):
+        chunk = params[i:i + chunk_size]
+        conn.execute(stmt, chunk)
+        total += len(chunk)
+    return total
+
 
 def accumulate_game_stats(
     conn,
@@ -475,17 +489,27 @@ def record_subweek_position_usage(
 # Per-game line inserts (for box score reconstruction)
 # ---------------------------------------------------------------------------
 
-_GAME_BATTING_INSERT = text("""
-    INSERT INTO game_batting_lines
-        (game_id, player_id, team_id, league_year_id, position_code,
+# Per-game line columns shared by both fresh and upsert variants
+_GAME_BATTING_COLS = """(game_id, player_id, team_id, league_year_id, position_code,
          batting_order, at_bats, runs, hits, doubles_hit, triples,
          home_runs, inside_the_park_hr, rbi, walks, strikeouts,
-         stolen_bases, caught_stealing, plate_appearances, hbp)
-    VALUES
-        (:game_id, :player_id, :team_id, :league_year_id, :position_code,
+         stolen_bases, caught_stealing, plate_appearances, hbp)"""
+
+_GAME_BATTING_VALS = """(:game_id, :player_id, :team_id, :league_year_id, :position_code,
          :batting_order, :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
-         :stolen_bases, :caught_stealing, :plate_appearances, :hbp)
+         :stolen_bases, :caught_stealing, :plate_appearances, :hbp)"""
+
+# Fresh insert — no ON DUPLICATE KEY overhead (used for first-time simulation)
+_GAME_BATTING_INSERT_FRESH = text(f"""
+    INSERT INTO game_batting_lines {_GAME_BATTING_COLS}
+    VALUES {_GAME_BATTING_VALS}
+""")
+
+# Upsert variant — used when re-simulating (rollback + replay)
+_GAME_BATTING_INSERT = text(f"""
+    INSERT INTO game_batting_lines {_GAME_BATTING_COLS}
+    VALUES {_GAME_BATTING_VALS}
     AS new_row ON DUPLICATE KEY UPDATE
         position_code      = new_row.position_code,
         batting_order      = new_row.batting_order,
@@ -505,23 +529,32 @@ _GAME_BATTING_INSERT = text("""
         hbp                = new_row.hbp
 """)
 
-_GAME_PITCHING_INSERT = text("""
-    INSERT INTO game_pitching_lines
-        (game_id, player_id, team_id, league_year_id,
+_GAME_PITCHING_COLS = """(game_id, player_id, team_id, league_year_id,
          pitch_appearance_order,
          games_started, win, loss, save_recorded,
          hold, blown_save, quality_start,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
          walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed,
-         pitches_thrown, balls, strikes, hbp, wildpitches)
-    VALUES
-        (:game_id, :player_id, :team_id, :league_year_id,
+         pitches_thrown, balls, strikes, hbp, wildpitches)"""
+
+_GAME_PITCHING_VALS = """(:game_id, :player_id, :team_id, :league_year_id,
          :pitch_appearance_order,
          :games_started, :win, :loss, :save,
          :hold, :blown_save, :quality_start,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed,
-         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)
+         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)"""
+
+# Fresh insert — no ON DUPLICATE KEY overhead (used for first-time simulation)
+_GAME_PITCHING_INSERT_FRESH = text(f"""
+    INSERT INTO game_pitching_lines {_GAME_PITCHING_COLS}
+    VALUES {_GAME_PITCHING_VALS}
+""")
+
+# Upsert variant — used when re-simulating (rollback + replay)
+_GAME_PITCHING_INSERT = text(f"""
+    INSERT INTO game_pitching_lines {_GAME_PITCHING_COLS}
+    VALUES {_GAME_PITCHING_VALS}
     AS new_row ON DUPLICATE KEY UPDATE
         pitch_appearance_order      = new_row.pitch_appearance_order,
         games_started               = new_row.games_started,
@@ -697,6 +730,7 @@ def accumulate_subweek_stats_bulk(
     results: List[Dict[str, Any]],
     league_year_id: int,
     game_type_by_id: Dict[int, str] = None,
+    is_resim: bool = False,
 ) -> Dict[str, int]:
     """
     Bulk version of accumulate_subweek_stats.
@@ -706,6 +740,11 @@ def accumulate_subweek_stats_bulk(
     When game_type_by_id is provided, games with type 'allstar' or 'wbc'
     will only get per-game lines (box scores) but NOT season accumulation
     UPSERTs.
+
+    Args:
+        is_resim: If True, use ON DUPLICATE KEY UPDATE for per-game lines
+                  (needed after rollback + replay).  If False, use plain
+                  INSERT for per-game lines (faster for fresh simulation).
     """
     if game_type_by_id is None:
         game_type_by_id = {}
@@ -880,54 +919,83 @@ def accumulate_subweek_stats_bulk(
                         game_id,
                     )
 
-    # Execute each statement once with full param lists
+    # Execute all bulk writes with FK checks disabled (data is pre-validated
+    # from cache/engine results, so referential integrity is guaranteed).
     totals = {"batters": 0, "pitchers": 0, "fielders": 0}
 
-    if batting_params:
-        try:
-            conn.execute(_BATTING_UPSERT, batting_params)
-            totals["batters"] = len(batting_params)
-        except Exception:
-            logger.exception("stat_accumulator bulk: batting upsert failed (%d rows)", len(batting_params))
+    try:
+        conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
 
-    if pitching_params:
-        try:
-            conn.execute(_PITCHING_UPSERT, pitching_params)
-            totals["pitchers"] = len(pitching_params)
-        except Exception:
-            logger.exception("stat_accumulator bulk: pitching upsert failed (%d rows)", len(pitching_params))
+        # --- Season accumulation UPSERTs (chunked) ---
+        if batting_params:
+            try:
+                totals["batters"] = _chunked_execute(conn, _BATTING_UPSERT, batting_params)
+            except Exception:
+                logger.exception("stat_accumulator bulk: batting upsert failed (%d rows)", len(batting_params))
 
-    if fielding_params:
-        try:
-            conn.execute(_FIELDING_UPSERT, fielding_params)
-            totals["fielders"] = len(fielding_params)
-        except Exception:
-            logger.exception("stat_accumulator bulk: fielding upsert failed (%d rows)", len(fielding_params))
+        if pitching_params:
+            try:
+                totals["pitchers"] = _chunked_execute(conn, _PITCHING_UPSERT, pitching_params)
+            except Exception:
+                logger.exception("stat_accumulator bulk: pitching upsert failed (%d rows)", len(pitching_params))
 
-    if game_batting_params:
-        try:
-            conn.execute(_GAME_BATTING_INSERT, game_batting_params)
-        except Exception:
-            logger.exception("stat_accumulator bulk: game batting insert failed (%d rows)", len(game_batting_params))
+        if fielding_params:
+            try:
+                totals["fielders"] = _chunked_execute(conn, _FIELDING_UPSERT, fielding_params)
+            except Exception:
+                logger.exception("stat_accumulator bulk: fielding upsert failed (%d rows)", len(fielding_params))
 
-    if game_pitching_params:
-        try:
-            conn.execute(_GAME_PITCHING_INSERT, game_pitching_params)
-        except Exception:
-            logger.exception("stat_accumulator bulk: game pitching insert failed (%d rows)", len(game_pitching_params))
+        # --- Per-game lines: use fresh INSERT when possible, UPSERT for re-sims ---
+        game_bat_stmt = _GAME_BATTING_INSERT if is_resim else _GAME_BATTING_INSERT_FRESH
+        game_pitch_stmt = _GAME_PITCHING_INSERT if is_resim else _GAME_PITCHING_INSERT_FRESH
 
-    if substitution_params:
+        if game_batting_params:
+            try:
+                _chunked_execute(conn, game_bat_stmt, game_batting_params)
+            except Exception:
+                if not is_resim:
+                    # Fresh insert failed (likely duplicate from partial re-sim) — retry with upsert
+                    logger.warning("stat_accumulator bulk: fresh batting insert failed, retrying with upsert")
+                    try:
+                        _chunked_execute(conn, _GAME_BATTING_INSERT, game_batting_params)
+                    except Exception:
+                        logger.exception("stat_accumulator bulk: game batting upsert also failed (%d rows)", len(game_batting_params))
+                else:
+                    logger.exception("stat_accumulator bulk: game batting insert failed (%d rows)", len(game_batting_params))
+
+        if game_pitching_params:
+            try:
+                _chunked_execute(conn, game_pitch_stmt, game_pitching_params)
+            except Exception:
+                if not is_resim:
+                    logger.warning("stat_accumulator bulk: fresh pitching insert failed, retrying with upsert")
+                    try:
+                        _chunked_execute(conn, _GAME_PITCHING_INSERT, game_pitching_params)
+                    except Exception:
+                        logger.exception("stat_accumulator bulk: game pitching upsert also failed (%d rows)", len(game_pitching_params))
+                else:
+                    logger.exception("stat_accumulator bulk: game pitching insert failed (%d rows)", len(game_pitching_params))
+
+        if substitution_params:
+            try:
+                _chunked_execute(conn, _GAME_SUBSTITUTION_INSERT, substitution_params)
+            except Exception:
+                logger.exception("stat_accumulator bulk: substitution insert failed (%d rows)", len(substitution_params))
+
+    finally:
+        # Always re-enable FK checks, even if an exception occurred
         try:
-            conn.execute(_GAME_SUBSTITUTION_INSERT, substitution_params)
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
         except Exception:
-            logger.exception("stat_accumulator bulk: substitution insert failed (%d rows)", len(substitution_params))
+            logger.exception("stat_accumulator bulk: failed to re-enable FK checks")
 
     logger.info(
         "stat_accumulator bulk: %d batters, %d pitchers, %d fielders, "
-        "%d game batting lines, %d game pitching lines, %d substitutions",
+        "%d game batting lines, %d game pitching lines, %d substitutions%s",
         totals["batters"], totals["pitchers"], totals["fielders"],
         len(game_batting_params), len(game_pitching_params),
         len(substitution_params),
+        " (resim mode)" if is_resim else "",
     )
     return totals
 
@@ -973,9 +1041,10 @@ def record_subweek_position_usage_bulk(
         return 0
 
     try:
-        conn.execute(_USAGE_UPSERT, usage_params)
-        logger.info("stat_accumulator bulk: %d position usage rows upserted", len(usage_params))
-        return len(usage_params)
+        conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        total = _chunked_execute(conn, _USAGE_UPSERT, usage_params)
+        logger.info("stat_accumulator bulk: %d position usage rows upserted", total)
+        return total
     except Exception:
         logger.exception(
             "stat_accumulator bulk: position usage upsert failed (%d rows)",
@@ -986,3 +1055,8 @@ def record_subweek_position_usage_bulk(
         except Exception:
             pass
         return 0
+    finally:
+        try:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        except Exception:
+            pass

@@ -2424,18 +2424,19 @@ def _normalize_engine_effects(effects: Dict[str, Any]) -> Dict[str, float]:
     return out
 
 
-def _update_player_state_bulk(
+def _drain_stamina_and_persist_injuries(
     conn,
     results: List[Dict[str, Any]],
     league_year_id: int,
-    league_level: int | None = None,
 ) -> Dict[str, int]:
     """
-    Post-subweek state updates (bulk version).
-    This function handles:
-      1. Apply stamina drain from engine stamina_cost values.
-      2. Stamina recovery for all fatigued players (modified by durability).
-      3. Injury persistence.
+    Per-level safe post-subweek updates: stamina drain + injury persistence.
+
+    Stamina drain only touches players who actually played (from engine results).
+    Injuries are player-scoped and level-isolated via roster constraints.
+
+    Recovery is NOT done here — call _apply_global_stamina_recovery() once
+    after all levels have finished their drain phase.
     """
     from sqlalchemy import text as sa_text
 
@@ -2443,20 +2444,17 @@ def _update_player_state_bulk(
     drain_count = 0
 
     # --- 1. STAMINA DRAIN from engine stamina_cost ---
-    # Collect stamina_cost per player from engine results.
     # A player in both batters and pitchers has the same cost — use either, not sum.
-    player_costs = {}  # player_id -> stamina_cost
+    player_costs = {}
     for result in results:
         nested = result.get("result") or {}
         stats = result.get("stats") or nested.get("stats")
         if not stats:
             continue
-        # Pitchers first (typically higher cost)
         for pid_str, p in (stats.get("pitchers") or {}).items():
             cost = p.get("stamina_cost")
             if cost is not None and int(cost) > 0:
                 player_costs[int(pid_str)] = int(cost)
-        # Batters — only add if not already seen (edge case: pitcher who batted)
         for pid_str, b in (stats.get("batters") or {}).items():
             pid = int(pid_str)
             if pid not in player_costs:
@@ -2465,7 +2463,6 @@ def _update_player_state_bulk(
                     player_costs[pid] = int(cost)
 
     if player_costs:
-        # Upsert fatigue state: create row if missing (default 100), then subtract cost
         drain_upsert = sa_text("""
             INSERT INTO player_fatigue_state
                 (player_id, league_year_id, stamina, last_updated_at)
@@ -2483,58 +2480,13 @@ def _update_player_state_bulk(
             conn.execute(drain_upsert, drain_params)
             drain_count = len(drain_params)
             logger.info(
-                "update_player_state_bulk: applied stamina drain to %d players "
+                "drain_stamina: applied stamina drain to %d players "
                 "(total cost: %d)", drain_count, sum(player_costs.values())
             )
         except Exception:
-            logger.exception("update_player_state_bulk: stamina drain failed")
+            logger.exception("drain_stamina: stamina drain failed")
 
-    # --- 2. REST RECOVERY for all fatigued players ---
-    # Load configurable recovery values (falls back to defaults)
-    # Uses separate base rates for pitchers vs position players
-    rec_cfg = _load_stamina_recovery_config(conn, league_level)
-    logger.info(
-        "update_player_state_bulk: recovery config level=%s base=%.1f pitcher=%.1f",
-        league_level, rec_cfg["base_recovery"], rec_cfg["base_recovery_pitcher"],
-    )
-    recovery_sql = sa_text("""
-        UPDATE player_fatigue_state pfs
-        JOIN simbbPlayers p ON p.id = pfs.player_id
-        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(
-            CASE WHEN p.ptype = 'Pitcher' THEN :base_recovery_pitcher
-                 ELSE :base_recovery
-            END *
-            CASE p.durability
-                WHEN 'Iron Man'      THEN :mult_iron_man
-                WHEN 'Dependable'    THEN :mult_dependable
-                WHEN 'Normal'        THEN :mult_normal
-                WHEN 'Undependable'  THEN :mult_undependable
-                WHEN 'Tires Easily'  THEN :mult_tires_easily
-                ELSE :mult_normal
-            END)),
-            pfs.last_updated_at = NOW()
-        WHERE pfs.league_year_id = :league_year_id
-          AND pfs.stamina < 100
-    """)
-
-    recovery_count = 0
-    try:
-        rest_result = conn.execute(recovery_sql, {
-            "base_recovery": rec_cfg["base_recovery"],
-            "base_recovery_pitcher": rec_cfg["base_recovery_pitcher"],
-            "mult_iron_man": rec_cfg["Iron Man"],
-            "mult_dependable": rec_cfg["Dependable"],
-            "mult_normal": rec_cfg["Normal"],
-            "mult_undependable": rec_cfg["Undependable"],
-            "mult_tires_easily": rec_cfg["Tires Easily"],
-            "league_year_id": league_year_id,
-        })
-        recovery_count = rest_result.rowcount
-        logger.info("update_player_state_bulk: %d players recovered stamina", recovery_count)
-    except Exception:
-        logger.exception("update_player_state_bulk: rest recovery failed")
-
-    # Injuries stay individual (need lastrowid for state update)
+    # --- 2. INJURY PERSISTENCE ---
     injury_insert = sa_text("""
         INSERT INTO player_injury_events
             (player_id, injury_type_id, league_year_id, weeks_assigned,
@@ -2544,9 +2496,6 @@ def _update_player_state_bulk(
              :weeks_remaining, :malus_json)
     """)
 
-    # UPSERT: only overwrite current_event_id / weeks_remaining when the
-    # new injury is longer than the one already tracked.  This ensures
-    # state always points at the worst-case (longest) active event.
     injury_state_upsert = sa_text("""
         INSERT INTO player_injury_state
             (player_id, status, current_event_id, weeks_remaining, last_updated_at)
@@ -2589,15 +2538,91 @@ def _update_player_state_bulk(
                 injuries_persisted += 1
             except Exception:
                 logger.exception(
-                    "update_player_state_bulk: injury persistence failed for player %d", pid
+                    "drain_stamina: injury persistence failed for player %d", pid
                 )
 
     logger.info(
-        "update_player_state_bulk: %d drained, %d recovered, %d injuries persisted",
-        drain_count, recovery_count, injuries_persisted,
+        "drain_stamina: %d drained, %d injuries persisted",
+        drain_count, injuries_persisted,
     )
-    return {"drain_count": drain_count, "recovery_count": recovery_count,
-            "injuries_persisted": injuries_persisted}
+    return {"drain_count": drain_count, "injuries_persisted": injuries_persisted}
+
+
+def _apply_global_stamina_recovery(
+    conn,
+    league_year_id: int,
+    league_level: int | None = None,
+) -> int:
+    """
+    Apply stamina recovery for ALL fatigued players in the league year.
+
+    This must be called ONCE per subweek AFTER all levels have drained.
+    Running it per-level would cause double-recovery.
+    """
+    from sqlalchemy import text as sa_text
+
+    rec_cfg = _load_stamina_recovery_config(conn, league_level)
+    logger.info(
+        "global_recovery: config level=%s base=%.1f pitcher=%.1f",
+        league_level, rec_cfg["base_recovery"], rec_cfg["base_recovery_pitcher"],
+    )
+
+    recovery_sql = sa_text("""
+        UPDATE player_fatigue_state pfs
+        JOIN simbbPlayers p ON p.id = pfs.player_id
+        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(
+            CASE WHEN p.ptype = 'Pitcher' THEN :base_recovery_pitcher
+                 ELSE :base_recovery
+            END *
+            CASE p.durability
+                WHEN 'Iron Man'      THEN :mult_iron_man
+                WHEN 'Dependable'    THEN :mult_dependable
+                WHEN 'Normal'        THEN :mult_normal
+                WHEN 'Undependable'  THEN :mult_undependable
+                WHEN 'Tires Easily'  THEN :mult_tires_easily
+                ELSE :mult_normal
+            END)),
+            pfs.last_updated_at = NOW()
+        WHERE pfs.league_year_id = :league_year_id
+          AND pfs.stamina < 100
+    """)
+
+    recovery_count = 0
+    try:
+        rest_result = conn.execute(recovery_sql, {
+            "base_recovery": rec_cfg["base_recovery"],
+            "base_recovery_pitcher": rec_cfg["base_recovery_pitcher"],
+            "mult_iron_man": rec_cfg["Iron Man"],
+            "mult_dependable": rec_cfg["Dependable"],
+            "mult_normal": rec_cfg["Normal"],
+            "mult_undependable": rec_cfg["Undependable"],
+            "mult_tires_easily": rec_cfg["Tires Easily"],
+            "league_year_id": league_year_id,
+        })
+        recovery_count = rest_result.rowcount
+        logger.info("global_recovery: %d players recovered stamina", recovery_count)
+    except Exception:
+        logger.exception("global_recovery: rest recovery failed")
+
+    return recovery_count
+
+
+# Legacy wrapper — kept for _update_player_state_after_subweek compatibility
+def _update_player_state_bulk(
+    conn,
+    results: List[Dict[str, Any]],
+    league_year_id: int,
+    league_level: int | None = None,
+) -> Dict[str, int]:
+    """
+    Combined drain + recovery + injuries.  Used by legacy single-level code path.
+    For parallel processing, use _drain_stamina_and_persist_injuries() +
+    _apply_global_stamina_recovery() separately.
+    """
+    counts = _drain_stamina_and_persist_injuries(conn, results, league_year_id)
+    recovery_count = _apply_global_stamina_recovery(conn, league_year_id, league_level)
+    counts["recovery_count"] = recovery_count
+    return counts
 
 
 # Stamina recovery defaults — used when level_game_config has no row
@@ -2830,6 +2855,175 @@ def _update_player_state_after_subweek(
 # Public: weekly batch processing
 # -------------------------------------------------------------------
 
+def _process_level_subweek(
+    level: int,
+    games: List[Any],
+    week_cache,
+    subweek: str,
+    league_year_id: int,
+    season_week: int,
+    game_constants: Dict[str, Any],
+    level_configs: Dict[str, Any],
+    rules_by_level: Dict[str, Dict[str, Any]],
+    injury_types: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Process a single league level within a subweek.
+    Runs in its own thread with its own DB connection.
+
+    Returns dict with payloads, results, games, and counts.
+    """
+    from sqlalchemy import text as sa_text
+    from services.game_engine_client import simulate_games_batch
+    from services.stat_accumulator import (
+        accumulate_subweek_stats_bulk,
+        record_subweek_position_usage_bulk,
+    )
+    from services.rotation import advance_rotation_states_bulk
+    from services.subweek_cache import load_subweek_state, SubweekCache
+
+    engine = get_engine()
+
+    with engine.connect() as level_conn:
+        # Load mutable state for this subweek (uses shared week_cache)
+        state = load_subweek_state(level_conn, week_cache, league_year_id, season_week)
+        cache = SubweekCache.from_week_and_state(week_cache, state)
+
+        # Build payloads from cache (zero DB per game)
+        payloads = []
+        for game_row in games:
+            game_id = int(game_row["id"])
+            try:
+                payload = build_game_payload_core_from_cache(
+                    level_conn, cache, game_row, league_year_id, rules_by_level,
+                )
+                payloads.append(payload)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to build game {game_id} (level {level}, subweek '{subweek}'): {e}"
+                ) from e
+
+        # Send to engine
+        logger.info(
+            "Sending %d games to engine for level %d, subweek '%s'",
+            len(payloads), level, subweek,
+        )
+        results = simulate_games_batch(
+            payloads, subweek,
+            game_constants=game_constants,
+            level_configs=level_configs,
+            rules=rules_by_level,
+            injury_types=injury_types,
+            league_year_id=league_year_id,
+            season_week=season_week,
+            league_level=level,
+        )
+        logger.info(
+            "Received %d results from engine for level %d, subweek '%s'",
+            len(results), level, subweek,
+        )
+
+        # --- All post-engine writes in a single transaction ---
+
+        # Engine diagnostic
+        try:
+            sent_ids = [p.get("game_id") for p in payloads]
+            received_ids = set()
+            for r in results:
+                gid = r.get("game_id") or (r.get("result") or {}).get("game_id")
+                if gid is not None:
+                    received_ids.add(int(gid))
+            missing_ids = [gid for gid in sent_ids if gid and int(gid) not in received_ids]
+            level_conn.execute(sa_text("""
+                INSERT INTO engine_diagnostic_log
+                    (league_year_id, season_week, subweek, league_level,
+                     games_sent, results_received, missing_game_ids,
+                     error_message)
+                VALUES
+                    (:lyid, :sw, :sub, :ll,
+                     :sent, :recv, :missing, :err)
+            """), {
+                "lyid": league_year_id,
+                "sw": season_week,
+                "sub": subweek,
+                "ll": level,
+                "sent": len(payloads),
+                "recv": len(results),
+                "missing": json.dumps(missing_ids) if missing_ids else None,
+                "err": None,
+            })
+            if missing_ids:
+                logger.warning(
+                    "Engine diagnostic: %d missing game(s) for level %d, subweek '%s': %s",
+                    len(missing_ids), level, subweek, missing_ids,
+                )
+        except Exception:
+            logger.debug("Engine diagnostic logging failed (non-critical)")
+
+        # Store game results
+        result_count = _store_game_results_bulk(level_conn, results, payloads, games)
+
+        # Update diagnostic with stored count
+        try:
+            level_conn.execute(sa_text("""
+                UPDATE engine_diagnostic_log
+                SET results_stored = :stored
+                WHERE league_year_id = :lyid AND season_week = :sw
+                  AND subweek = :sub AND league_level = :ll
+                ORDER BY id DESC LIMIT 1
+            """), {
+                "stored": result_count,
+                "lyid": league_year_id,
+                "sw": season_week,
+                "sub": subweek,
+                "ll": level,
+            })
+        except Exception:
+            pass
+
+        # Accumulate stats
+        game_type_by_id = {}
+        for g in games:
+            gid = int(g["id"])
+            gt = str((g.get("game_type") if isinstance(g, dict) else g["game_type"]) or "regular")
+            game_type_by_id[gid] = gt
+
+        stat_counts = accumulate_subweek_stats_bulk(
+            level_conn, results, league_year_id,
+            game_type_by_id=game_type_by_id,
+        )
+
+        # Position usage
+        usage_count = record_subweek_position_usage_bulk(
+            level_conn, payloads, league_year_id
+        )
+
+        # Stamina drain + injuries (NO recovery — that's global)
+        drain_counts = _drain_stamina_and_persist_injuries(
+            level_conn, results, league_year_id,
+        )
+
+        # Rotation advancement
+        rot_count = advance_rotation_states_bulk(level_conn, payloads)
+
+        # Single commit for all writes
+        level_conn.commit()
+
+        logger.info(
+            "Level %d subweek '%s' complete: %d results, stats=%s, "
+            "usage=%d, drain=%s, rotations=%d",
+            level, subweek, result_count, stat_counts,
+            usage_count, drain_counts, rot_count,
+        )
+
+        return {
+            "payloads": payloads,
+            "results": results,
+            "result_count": result_count,
+            "stat_counts": stat_counts,
+        }
+
+
 def build_week_payloads(
     conn,
     league_year_id: int,
@@ -2840,11 +3034,15 @@ def build_week_payloads(
     """
     Build game payloads for all games in a given season_week.
 
-    Processes games sequentially by subweek (a → b → c → d) to allow
-    for state updates (stamina, rotation, injuries) between subweeks.
+    Processes games sequentially by subweek (a -> b -> c -> d) to support
+    state updates between subweeks.  Within each subweek, different league
+    levels are processed in PARALLEL using ThreadPoolExecutor.
+
+    After all levels complete for a subweek, global stamina recovery runs
+    once (Option B — avoids double-recovery across levels).
 
     Args:
-        conn: Database connection
+        conn: Database connection (used for initial queries and global recovery)
         league_year_id: The league year to filter games
         season_week: The week number to process
         league_level: Optional league level filter (e.g., 9 for MLB)
@@ -2868,21 +3066,18 @@ def build_week_payloads(
             }
         }
 
-    Note:
-        Individual game payloads in subweeks contain only game-specific data
-        (game_id, ballpark, home_side, away_side). Metadata like game_constants,
-        level_configs, rules, and injury_types are at the root level only.
-
     Raises:
         ValueError: If no games found or if any game fails to build
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from services.subweek_cache import load_week_cache, load_subweek_state, SubweekCache
+
     tables = _get_core_tables()
     gamelist = tables["gamelist"]
     seasons = tables["seasons"]
     league_years = tables["league_years"]
 
     # Resolve which season(s) map to this league_year_id
-    # league_years.id -> league_years.league_year (year) -> seasons.year -> seasons.id
     ly_row = conn.execute(
         select(league_years.c.league_year).where(league_years.c.id == league_year_id)
     ).first()
@@ -2892,7 +3087,6 @@ def build_week_payloads(
 
     year = int(ly_row[0])
 
-    # Find season(s) for this year
     season_rows = conn.execute(
         select(seasons.c.id).where(seasons.c.year == year)
     ).all()
@@ -2902,7 +3096,6 @@ def build_week_payloads(
 
     season_ids = [int(row[0]) for row in season_rows]
 
-    # Build query conditions (gamelist.season column contains season_id)
     conditions = [
         gamelist.c.season.in_(season_ids),
         gamelist.c.season_week == season_week,
@@ -2911,7 +3104,6 @@ def build_week_payloads(
     if league_level is not None:
         conditions.append(gamelist.c.league_level == league_level)
 
-    # Load all games for this week
     stmt = (
         select(gamelist)
         .where(and_(*conditions))
@@ -2926,304 +3118,177 @@ def build_week_payloads(
             f"season_week={season_week}, league_level={league_level}"
         )
 
-    # Load static game constants (cached, same for all games)
+    # Load shared metadata (same for all subweeks and levels)
     game_constants = get_game_constants(conn)
-
-    # Collect unique league levels and load their configs from normalized tables
     unique_levels = list(set(int(g["league_level"]) for g in all_games))
     level_configs_raw = get_level_configs_normalized_bulk(conn, unique_levels)
-    # Convert to string keys for JSON compatibility
     level_configs = {str(k): v for k, v in level_configs_raw.items()}
-
-    # Load rules for all unique levels
     rules_by_level = {
         str(level): _get_level_rules_for_league(conn, level)
         for level in unique_levels
     }
-
-    # Load injury type reference data (cached, so only one DB query)
     injury_types = get_all_injury_types(conn)
 
-    # Group games by subweek
-    games_by_subweek: Dict[str, List[Any]] = {"a": [], "b": [], "c": [], "d": []}
+    # Collect ALL team IDs across the entire week for the WeekCache
+    all_team_ids = set()
+    for g in all_games:
+        all_team_ids.add(int(g["home_team"]))
+        all_team_ids.add(int(g["away_team"]))
+
+    # Load WeekCache ONCE for the entire week (~10 queries)
+    primary_level = league_level or int(all_games[0]["league_level"])
+    week_cache = load_week_cache(
+        conn,
+        team_ids=list(all_team_ids),
+        league_year_id=league_year_id,
+        season_week=season_week,
+        league_level_id=primary_level,
+    )
+    logger.info(
+        "WeekCache loaded: %d teams, %d players",
+        len(all_team_ids), len(week_cache.all_player_ids),
+    )
+
+    # Group games by subweek, then by level within each subweek
+    games_by_subweek: Dict[str, Dict[int, List[Any]]] = {
+        "a": {}, "b": {}, "c": {}, "d": {},
+    }
 
     for game_row in all_games:
-        subweek = game_row.get("season_subweek") or "a"
-        subweek = str(subweek).lower()
-
+        subweek = str(game_row.get("season_subweek") or "a").lower()
         if subweek not in games_by_subweek:
             logger.warning(
                 f"Game {game_row['id']} has unexpected subweek '{subweek}', "
                 f"defaulting to 'a'"
             )
             subweek = "a"
+        level = int(game_row["league_level"])
+        games_by_subweek[subweek].setdefault(level, []).append(game_row)
 
-        games_by_subweek[subweek].append(game_row)
-
-    # Process each subweek in order
+    # Process each subweek in order (a -> b -> c -> d)
     subweek_payloads: Dict[str, List[Dict[str, Any]]] = {}
     total_games = 0
 
     for subweek in ["a", "b", "c", "d"]:
-        games = games_by_subweek[subweek]
+        levels_games = games_by_subweek[subweek]
 
-        if not games:
+        if not levels_games:
             subweek_payloads[subweek] = []
             continue
 
+        total_subweek_games = sum(len(g) for g in levels_games.values())
         logger.info(
-            f"Processing subweek '{subweek}': {len(games)} games "
-            f"(week {season_week}, league_year {league_year_id})"
+            "Processing subweek '%s': %d games across %d level(s) "
+            "(week %d, league_year %d)",
+            subweek, total_subweek_games, len(levels_games),
+            season_week, league_year_id,
         )
 
-        # --- Bulk-load all data for this subweek's teams ---
-        from services.subweek_cache import load_subweek_cache
+        sw_payloads = []
 
-        subweek_team_ids = set()
-        for g in games:
-            subweek_team_ids.add(int(g["home_team"]))
-            subweek_team_ids.add(int(g["away_team"]))
+        if not simulate:
+            # Non-simulation mode: just build payloads using main conn
+            state = load_subweek_state(conn, week_cache, league_year_id, season_week)
+            cache = SubweekCache.from_week_and_state(week_cache, state)
 
-        # Determine the primary league level for XP config
-        primary_level = league_level or int(games[0]["league_level"])
-
-        cache = load_subweek_cache(
-            conn,
-            team_ids=list(subweek_team_ids),
-            league_year_id=league_year_id,
-            season_week=season_week,
-            league_level_id=primary_level,
-        )
-
-        logger.info(
-            f"SubweekCache loaded for subweek '{subweek}': "
-            f"{len(subweek_team_ids)} teams, {len(cache.all_player_ids)} players"
-        )
-
-        # --- Assemble payloads from cache (zero DB per game) ---
-        payloads = []
-
-        for game_row in games:
-            game_id = int(game_row["id"])
-
-            try:
-                payload = build_game_payload_core_from_cache(
-                    conn, cache, game_row, league_year_id, rules_by_level,
-                )
-                payloads.append(payload)
-                total_games += 1
-
-            except Exception as e:
-                logger.error(
-                    f"Failed to build payload for game_id={game_id} "
-                    f"in subweek '{subweek}': {e}"
-                )
-                raise ValueError(
-                    f"Failed to build game {game_id} in subweek '{subweek}': {e}"
-                ) from e
-
-        subweek_payloads[subweek] = payloads
-
-        # Send payloads to game engine for simulation (if enabled)
-        if simulate:
-            try:
-                from services.game_engine_client import simulate_games_batch
-
-                logger.info(
-                    f"Sending {len(payloads)} games to engine for subweek '{subweek}'"
-                )
-
-                # Call game engine to simulate this subweek's games
-                results = simulate_games_batch(
-                    payloads, subweek,
-                    game_constants=game_constants,
-                    level_configs=level_configs,
-                    rules=rules_by_level,
-                    injury_types=injury_types,
-                    league_year_id=league_year_id,
-                    season_week=season_week,
-                )
-
-                logger.info(
-                    f"Received {len(results)} results from engine for subweek '{subweek}'"
-                )
-
-                # Log engine diagnostic
-                try:
-                    sent_ids = [p.get("game_id") for p in payloads]
-                    received_ids = set()
-                    for r in results:
-                        gid = r.get("game_id") or (r.get("result") or {}).get("game_id")
-                        if gid is not None:
-                            received_ids.add(int(gid))
-                    missing_ids = [gid for gid in sent_ids if gid and int(gid) not in received_ids]
-                    conn.execute(sa_text("""
-                        INSERT INTO engine_diagnostic_log
-                            (league_year_id, season_week, subweek, league_level,
-                             games_sent, results_received, missing_game_ids,
-                             error_message)
-                        VALUES
-                            (:lyid, :sw, :sub, :ll,
-                             :sent, :recv, :missing, :err)
-                    """), {
-                        "lyid": league_year_id,
-                        "sw": season_week,
-                        "sub": subweek,
-                        "ll": league_level,
-                        "sent": len(payloads),
-                        "recv": len(results),
-                        "missing": json.dumps(missing_ids) if missing_ids else None,
-                        "err": None,
-                    })
-                    conn.commit()
-                    if missing_ids:
-                        logger.warning(
-                            f"Engine diagnostic: {len(missing_ids)} missing game(s) "
-                            f"for subweek '{subweek}': {missing_ids}"
+            for level, games in levels_games.items():
+                for game_row in games:
+                    game_id = int(game_row["id"])
+                    try:
+                        payload = build_game_payload_core_from_cache(
+                            conn, cache, game_row, league_year_id, rules_by_level,
                         )
+                        sw_payloads.append(payload)
+                        total_games += 1
+                    except Exception as e:
+                        raise ValueError(
+                            f"Failed to build game {game_id} in subweek '{subweek}': {e}"
+                        ) from e
+
+        else:
+            # Simulation mode: parallel processing across levels
+            levels = sorted(levels_games.keys())
+
+            if len(levels) == 1:
+                # Single level — no threading overhead needed
+                level = levels[0]
+                try:
+                    level_result = _process_level_subweek(
+                        level=level,
+                        games=levels_games[level],
+                        week_cache=week_cache,
+                        subweek=subweek,
+                        league_year_id=league_year_id,
+                        season_week=season_week,
+                        game_constants=game_constants,
+                        level_configs=level_configs,
+                        rules_by_level=rules_by_level,
+                        injury_types=injury_types,
+                    )
+                    sw_payloads.extend(level_result["payloads"])
+                    total_games += len(level_result["payloads"])
+                except Exception as e:
+                    raise ValueError(
+                        f"Simulation failed for subweek '{subweek}': {e}"
+                    ) from e
+            else:
+                # Multiple levels — run in parallel
+                with ThreadPoolExecutor(
+                    max_workers=min(len(levels), 6),
+                    thread_name_prefix=f"sim-{subweek}",
+                ) as pool:
+                    futures = {}
+                    for level in levels:
+                        futures[pool.submit(
+                            _process_level_subweek,
+                            level=level,
+                            games=levels_games[level],
+                            week_cache=week_cache,
+                            subweek=subweek,
+                            league_year_id=league_year_id,
+                            season_week=season_week,
+                            game_constants=game_constants,
+                            level_configs=level_configs,
+                            rules_by_level=rules_by_level,
+                            injury_types=injury_types,
+                        )] = level
+
+                    for future in as_completed(futures):
+                        level = futures[future]
+                        try:
+                            level_result = future.result()
+                            sw_payloads.extend(level_result["payloads"])
+                            total_games += len(level_result["payloads"])
+                        except Exception as e:
+                            # Cancel remaining futures
+                            for f in futures:
+                                f.cancel()
+                            raise ValueError(
+                                f"Simulation failed for level {level}, "
+                                f"subweek '{subweek}': {e}"
+                            ) from e
+
+            # GLOBAL: Stamina recovery runs ONCE after all levels drain
+            try:
+                recovery_count = _apply_global_stamina_recovery(
+                    conn, league_year_id, league_level=league_level,
+                )
+                conn.commit()
+                logger.info(
+                    "Global stamina recovery for subweek '%s': %d players",
+                    subweek, recovery_count,
+                )
+            except Exception as rec_err:
+                logger.exception(
+                    "Global stamina recovery failed for subweek '%s': %s",
+                    subweek, rec_err,
+                )
+                try:
+                    conn.rollback()
                 except Exception:
-                    logger.debug("Engine diagnostic logging failed (non-critical)")
+                    pass
 
-                # Store game results in database (bulk)
-                try:
-                    result_count = _store_game_results_bulk(
-                        conn, results, payloads, games
-                    )
-                    conn.commit()
-                    logger.info(
-                        f"Stored {result_count} game results for subweek '{subweek}'"
-                    )
-                    # Update diagnostic with stored count
-                    try:
-                        conn.execute(sa_text("""
-                            UPDATE engine_diagnostic_log
-                            SET results_stored = :stored
-                            WHERE league_year_id = :lyid AND season_week = :sw
-                              AND subweek = :sub
-                            ORDER BY id DESC LIMIT 1
-                        """), {
-                            "stored": result_count,
-                            "lyid": league_year_id,
-                            "sw": season_week,
-                            "sub": subweek,
-                        })
-                        conn.commit()
-                    except Exception:
-                        pass
-                except Exception as res_err:
-                    logger.exception(
-                        f"Game result storage failed for subweek '{subweek}': "
-                        f"{res_err}"
-                    )
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-
-                # Accumulate player stats from engine box scores (bulk)
-                # Build game_type lookup from gamelist rows for this subweek
-                game_type_by_id = {}
-                for g in games:
-                    gid = int(g["id"])
-                    gt = str((g.get("game_type") if isinstance(g, dict) else g["game_type"]) or "regular")
-                    game_type_by_id[gid] = gt
-
-                try:
-                    from services.stat_accumulator import accumulate_subweek_stats_bulk
-                    stat_counts = accumulate_subweek_stats_bulk(
-                        conn, results, league_year_id,
-                        game_type_by_id=game_type_by_id,
-                    )
-                    conn.commit()
-                    logger.info(
-                        f"Stat accumulation for subweek '{subweek}': {stat_counts}"
-                    )
-                except Exception as stat_err:
-                    logger.exception(
-                        f"Stat accumulation failed for subweek '{subweek}': {stat_err}"
-                    )
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-
-                # Record defensive position usage (bulk)
-                try:
-                    from services.stat_accumulator import record_subweek_position_usage_bulk
-                    usage_count = record_subweek_position_usage_bulk(
-                        conn, payloads, league_year_id
-                    )
-                    conn.commit()
-                    logger.info(
-                        f"Position usage tracking for subweek '{subweek}': "
-                        f"{usage_count} rows upserted"
-                    )
-                except Exception as usage_err:
-                    logger.exception(
-                        f"Position usage tracking failed for subweek "
-                        f"'{subweek}': {usage_err}"
-                    )
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-
-                # Update player state for next subweek (bulk stamina)
-                try:
-                    state_counts = _update_player_state_bulk(
-                        conn, results, league_year_id,
-                        league_level=league_level,
-                    )
-                    conn.commit()
-                    logger.info(
-                        f"Player state updates for subweek '{subweek}': "
-                        f"{state_counts}"
-                    )
-                except Exception as state_err:
-                    logger.exception(
-                        f"Player state update failed for subweek '{subweek}': "
-                        f"{state_err}"
-                    )
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-
-                # Advance pitching rotation states after games
-                try:
-                    from services.rotation import advance_rotation_states_bulk
-                    rot_count = advance_rotation_states_bulk(conn, payloads)
-                    conn.commit()
-                    if rot_count:
-                        logger.info(
-                            f"Rotation advancement for subweek '{subweek}': "
-                            f"{rot_count} teams advanced"
-                        )
-                except Exception as rot_err:
-                    logger.exception(
-                        f"Rotation advancement failed for subweek '{subweek}': "
-                        f"{rot_err}"
-                    )
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-
-            except ImportError:
-                # Game engine client not available - skip simulation
-                logger.warning(
-                    f"Game engine client not available, skipping simulation "
-                    f"for subweek '{subweek}'"
-                )
-
-            except Exception as e:
-                logger.error(f"Failed to simulate subweek '{subweek}': {e}")
-                # Depending on your requirements, you can either:
-                # - Raise to abort the entire week
-                # - Continue to next subweek (comment out the raise below)
-                raise ValueError(
-                    f"Simulation failed for subweek '{subweek}': {e}"
-                ) from e
+        subweek_payloads[subweek] = sw_payloads
 
     # Determine league level from first game if not provided
     detected_league_level = None
