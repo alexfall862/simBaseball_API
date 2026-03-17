@@ -240,44 +240,48 @@ def put_player_strategy(org_id: int, player_id: int):
     if "pitchchoices" in body:
         values["pitchchoices"] = json.dumps(body["pitchchoices"]) if body["pitchchoices"] is not None else None
 
-    # Build UPDATE SET clause from provided fields
     if not values:
-        # Nothing to update, but still do upsert to ensure row exists
-        pass
-
-    # Use separate bind params for the UPDATE clause (prefixed with u_)
-    # to avoid any driver issues with reusing named params.  This avoids
-    # both VALUES() (removed in MySQL 9.0) and AS alias (unreliable with
-    # some driver/version combos).
-    set_parts = []
-    update_params = {}
-    for k in values:
-        u_key = f"u_{k}"
-        set_parts.append(f"{k} = :{u_key}")
-        update_params[u_key] = values[k]
-    set_clause = ", ".join(set_parts) if set_parts else "id = id"
-
-    col_names = ["playerID", "orgID"] + list(values.keys())
-    placeholders = ", ".join(f":{c}" for c in col_names)
-    col_list = ", ".join(col_names)
-
-    params = {"playerID": player_id, "orgID": org_id}
-    params.update(values)
-    params.update(update_params)
-
-    sql = text(
-        f"INSERT INTO playerStrategies ({col_list}) VALUES ({placeholders}) "
-        f"ON DUPLICATE KEY UPDATE {set_clause}"
-    )
+        # Nothing changed — just return current state
+        engine = get_engine()
+        tbl = _reflect_table("playerStrategies")
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(tbl).where(and_(tbl.c.playerID == player_id, tbl.c.orgID == org_id)).limit(1)
+            ).first()
+        if row:
+            return jsonify(_format_strategy(_row_to_dict(row))), 200
+        defaults = dict(DEFAULT_PLAYER_STRATEGY)
+        defaults["player_id"] = player_id
+        defaults["org_id"] = org_id
+        defaults["id"] = None
+        return jsonify(defaults), 200
 
     engine = get_engine()
     tbl = _reflect_table("playerStrategies")
     try:
-        # Write: commit and release locks immediately
         with engine.begin() as conn:
-            conn.execute(sql, params)
+            # Try UPDATE first
+            set_clause = ", ".join(f"{k} = :{k}" for k in values)
+            update_params = dict(values)
+            update_params["_pid"] = player_id
+            update_params["_oid"] = org_id
+            result = conn.execute(text(
+                f"UPDATE playerStrategies SET {set_clause} "
+                f"WHERE playerID = :_pid AND orgID = :_oid"
+            ), update_params)
 
-        # Read back the saved row on a separate connection
+            if result.rowcount == 0:
+                # No existing row — INSERT
+                col_names = ["playerID", "orgID"] + list(values.keys())
+                placeholders = ", ".join(f":{c}" for c in col_names)
+                col_list = ", ".join(col_names)
+                insert_params = {"playerID": player_id, "orgID": org_id}
+                insert_params.update(values)
+                conn.execute(text(
+                    f"INSERT INTO playerStrategies ({col_list}) VALUES ({placeholders})"
+                ), insert_params)
+
+        # Read back on separate connection
         with engine.connect() as conn:
             row = conn.execute(
                 select(tbl).where(
@@ -286,7 +290,7 @@ def put_player_strategy(org_id: int, player_id: int):
             ).first()
         if row:
             return jsonify(_format_strategy(_row_to_dict(row))), 200
-        return jsonify(error="unexpected", message="Row not found after upsert"), 500
+        return jsonify(error="unexpected", message="Row not found after save"), 500
     except SQLAlchemyError:
         log.exception("gameplanning: put player strategy db error")
         return jsonify(error="db_unavailable", message="Database temporarily unavailable"), 503
@@ -355,31 +359,28 @@ def put_team_strategy(team_id: int):
     if "intentional_walk_list" in body:
         values["intentional_walk_list"] = json.dumps(body["intentional_walk_list"]) if body["intentional_walk_list"] is not None else None
 
-    col_names = list(values.keys())
-    placeholders = ", ".join(f":{c}" for c in col_names)
-    col_list = ", ".join(col_names)
-
-    update_params = {}
-    set_parts = []
-    for c in col_names:
-        if c == "team_id":
-            continue
-        u_key = f"u_{c}"
-        set_parts.append(f"{c} = :{u_key}")
-        update_params[u_key] = values[c]
-    set_clause = ", ".join(set_parts) if set_parts else "id = id"
-    values.update(update_params)
-
-    sql = text(
-        f"INSERT INTO team_strategy ({col_list}) VALUES ({placeholders}) "
-        f"ON DUPLICATE KEY UPDATE {set_clause}"
-    )
+    # Separate update-able fields (everything except team_id)
+    update_fields = {k: v for k, v in values.items() if k != "team_id"}
 
     engine = get_engine()
     tbl = _reflect_table("team_strategy")
     try:
         with engine.begin() as conn:
-            conn.execute(sql, values)
+            if update_fields:
+                set_clause = ", ".join(f"{k} = :{k}" for k in update_fields)
+                update_params = dict(update_fields)
+                update_params["_tid"] = team_id
+                result = conn.execute(text(
+                    f"UPDATE team_strategy SET {set_clause} WHERE team_id = :_tid"
+                ), update_params)
+
+                if result.rowcount == 0:
+                    col_names = list(values.keys())
+                    placeholders = ", ".join(f":{c}" for c in col_names)
+                    col_list = ", ".join(col_names)
+                    conn.execute(text(
+                        f"INSERT INTO team_strategy ({col_list}) VALUES ({placeholders})"
+                    ), values)
 
         with engine.connect() as conn:
             row = conn.execute(
@@ -387,7 +388,7 @@ def put_team_strategy(team_id: int):
             ).first()
         if row:
             return jsonify(_format_team_strategy(_row_to_dict(row), team_id)), 200
-        return jsonify(error="unexpected", message="Row not found after upsert"), 500
+        return jsonify(error="unexpected", message="Row not found after save"), 500
     except SQLAlchemyError:
         log.exception("gameplanning: put team strategy db error")
         return jsonify(error="db_unavailable", message="Database temporarily unavailable"), 503
