@@ -1277,17 +1277,20 @@ def build_engine_player_view(conn, player_id: int) -> EnginePlayerView:
     adjusted_mapping = dict(raw_mapping)
 
     for attr, factor in malus.items():
-        if attr.endswith("_base") and attr in adjusted_mapping:
-            base_val = adjusted_mapping.get(attr)
-            try:
-                base_num = float(base_val) if base_val is not None else 0.0
-            except (TypeError, ValueError):
-                base_num = 0.0
-            try:
-                factor_num = float(factor)
-            except (TypeError, ValueError):
-                factor_num = 1.0
-            adjusted_mapping[attr] = base_num * factor_num
+        if attr == "stamina_pct":
+            continue  # handled via _injury_stamina_pct below
+        base_key = f"{attr}_base"
+        if base_key not in adjusted_mapping:
+            continue
+        try:
+            base_num = float(adjusted_mapping[base_key] or 0.0)
+        except (TypeError, ValueError):
+            base_num = 0.0
+        try:
+            factor_num = float(factor)
+        except (TypeError, ValueError):
+            factor_num = 1.0
+        adjusted_mapping[base_key] = base_num * factor_num
 
     # Load position weights from DB
     pos_weights = _load_position_weights(conn)
@@ -1357,17 +1360,20 @@ def build_engine_player_views_bulk(
         malus = malus_by_player.get(pid) or {}
 
         for attr, factor in malus.items():
-            if attr.endswith("_base") and attr in adjusted_mapping:
-                base_val = adjusted_mapping.get(attr)
-                try:
-                    base_num = float(base_val) if base_val is not None else 0.0
-                except (TypeError, ValueError):
-                    base_num = 0.0
-                try:
-                    factor_num = float(factor)
-                except (TypeError, ValueError):
-                    factor_num = 1.0
-                adjusted_mapping[attr] = base_num * factor_num
+            if attr == "stamina_pct":
+                continue  # handled via _injury_stamina_pct below
+            base_key = f"{attr}_base"
+            if base_key not in adjusted_mapping:
+                continue
+            try:
+                base_num = float(adjusted_mapping[base_key] or 0.0)
+            except (TypeError, ValueError):
+                base_num = 0.0
+            try:
+                factor_num = float(factor)
+            except (TypeError, ValueError):
+                factor_num = 1.0
+            adjusted_mapping[base_key] = base_num * factor_num
 
         engine_player = _build_engine_player_view_from_mapping(adjusted_mapping, pos_weights)
 

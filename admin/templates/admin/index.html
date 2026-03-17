@@ -2947,65 +2947,54 @@
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
               <h4 id="gpa-detail-title">Team Detail</h4>
-              <button class="btn btn-secondary" onclick="document.getElementById('gpa-detail').style.display='none'">Close</button>
+              <div>
+                <button class="btn btn-primary" id="btn-gpa-edit-toggle" style="margin-right:8px">Edit Mode</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('gpa-detail').style.display='none'">Close</button>
+              </div>
             </div>
+            <div id="gpa-edit-status" class="status-msg" style="margin-bottom:8px"></div>
 
-            <!-- Defense tab -->
-            <h5 style="margin-top:16px">Defensive Depth Chart</h5>
-            <div style="overflow-x:auto">
-              <table class="data-table" id="gpa-defense-table">
-                <thead>
-                  <tr>
-                    <th>Pos</th><th>vs Hand</th><th>Player</th>
-                    <th>Weight</th><th>Priority</th><th>Locked</th>
-                    <th>Role</th><th>Order</th>
-                  </tr>
-                </thead>
-                <tbody></tbody>
-              </table>
+            <!-- Defense -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+              <h5>Defensive Depth Chart</h5>
+              <button class="btn btn-primary gpa-save-btn" data-section="defense" style="display:none;padding:2px 10px;font-size:0.85em">Save Defense</button>
             </div>
+            <div id="gpa-defense-content"></div>
 
-            <!-- Rotation tab -->
-            <h5 style="margin-top:16px">Pitching Rotation</h5>
-            <div style="overflow-x:auto">
-              <table class="data-table" id="gpa-rotation-table">
-                <thead>
-                  <tr><th>Slot</th><th>Pitcher</th></tr>
-                </thead>
-                <tbody></tbody>
-              </table>
+            <!-- Rotation -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+              <h5>Pitching Rotation</h5>
+              <button class="btn btn-primary gpa-save-btn" data-section="rotation" style="display:none;padding:2px 10px;font-size:0.85em">Save Rotation</button>
             </div>
-            <div id="gpa-rotation-meta" style="color:var(--text-secondary);font-size:0.85em;margin-top:4px"></div>
+            <div id="gpa-rotation-content"></div>
 
-            <!-- Bullpen tab -->
-            <h5 style="margin-top:16px">Bullpen Order</h5>
-            <div style="overflow-x:auto">
-              <table class="data-table" id="gpa-bullpen-table">
-                <thead>
-                  <tr><th>Slot</th><th>Pitcher</th><th>Role</th></tr>
-                </thead>
-                <tbody></tbody>
-              </table>
+            <!-- Bullpen -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+              <h5>Bullpen Order</h5>
+              <button class="btn btn-primary gpa-save-btn" data-section="bullpen" style="display:none;padding:2px 10px;font-size:0.85em">Save Bullpen</button>
             </div>
+            <div id="gpa-bullpen-content"></div>
 
-            <!-- Team Strategy tab -->
-            <h5 style="margin-top:16px">Team Strategy</h5>
-            <div id="gpa-strategy-detail" style="font-size:0.9em"></div>
-
-            <!-- Lineup Roles tab -->
-            <h5 style="margin-top:16px">Lineup Roles</h5>
-            <div style="overflow-x:auto">
-              <table class="data-table" id="gpa-lineup-table">
-                <thead>
-                  <tr><th>#</th><th>Role</th><th>Locked Player</th></tr>
-                </thead>
-                <tbody></tbody>
-              </table>
+            <!-- Team Strategy -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+              <h5>Team Strategy</h5>
+              <button class="btn btn-primary gpa-save-btn" data-section="strategy" style="display:none;padding:2px 10px;font-size:0.85em">Save Strategy</button>
             </div>
+            <div id="gpa-strategy-content"></div>
 
-            <!-- Player Strategies summary -->
-            <h5 style="margin-top:16px">Player Strategy Summary</h5>
-            <div id="gpa-playerstrat-detail" style="font-size:0.9em"></div>
+            <!-- Lineup Roles -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+              <h5>Lineup Roles</h5>
+              <button class="btn btn-primary gpa-save-btn" data-section="lineup" style="display:none;padding:2px 10px;font-size:0.85em">Save Lineup</button>
+            </div>
+            <div id="gpa-lineup-content"></div>
+
+            <!-- Player Strategies -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+              <h5>Player Strategies</h5>
+              <button class="btn btn-primary gpa-save-btn" data-section="playerstrat" style="display:none;padding:2px 10px;font-size:0.85em">Save All Strategies</button>
+            </div>
+            <div id="gpa-playerstrat-content"></div>
           </div>
         </div>
       </section>

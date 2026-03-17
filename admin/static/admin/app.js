@@ -303,6 +303,18 @@
 
     // Gameplan Audit
     document.getElementById('btn-gpa-load').addEventListener('click', loadGameplanAudit);
+    document.getElementById('btn-gpa-edit-toggle').addEventListener('click', () => _gpaSetEditMode(!_gpaEditMode));
+    document.querySelectorAll('.gpa-save-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const section = btn.dataset.section;
+        if (section === 'defense') _gpaSaveDefense();
+        else if (section === 'rotation') _gpaSaveRotation();
+        else if (section === 'bullpen') _gpaSaveBullpen();
+        else if (section === 'strategy') _gpaSaveStrategy();
+        else if (section === 'lineup') _gpaSaveLineup();
+        else if (section === 'playerstrat') _gpaSaveAllPlayerStrats();
+      });
+    });
 
     // Stamina
     document.getElementById('btn-stam-ov-load').addEventListener('click', loadStaminaOverview);
@@ -8373,10 +8385,41 @@
   }
 
   // -----------------------------------------------------------------------
-  // Gameplan Audit
+  // Gameplan Audit & Editor
   // -----------------------------------------------------------------------
 
   let _gpaData = null;
+  let _gpaTeamId = null;
+  let _gpaOrgId = null;
+  let _gpaRoster = null;
+  let _gpaEditMode = false;
+
+  const _GPA_POS_ORDER = ['c','fb','sb','tb','ss','lf','cf','rf','dh'];
+  const _GPA_POS_LABEL = {c:'C',fb:'1B',sb:'2B',tb:'3B',ss:'SS',lf:'LF',cf:'CF',rf:'RF',dh:'DH',p:'P'};
+  const _GPA_ROLES = ['balanced','table_setter','on_base','slugger','speed','bottom'];
+  const _GPA_BP_ROLES = ['closer','setup','middle','long','mop_up'];
+  const _GPA_OF_SPACING = ['normal','deep','shallow','shift_pull','shift_oppo'];
+  const _GPA_IF_SPACING = ['normal','in','double_play','shift_pull','shift_oppo'];
+  const _GPA_BP_PRIORITY = ['rest','matchup','best_available'];
+  const _GPA_PLATE = ['normal','aggressive','patient','contact','power'];
+  const _GPA_PITCHING = ['normal','aggressive','finesse','power','location'];
+  const _GPA_BASERUN = ['normal','aggressive','cautious','conservative'];
+  const _GPA_USAGE = ['normal','only_fully_rested','play_tired','desperation'];
+  const _GPA_PULLTEND = ['normal','quick','long'];
+
+  function _gpaOpts(arr, selected) {
+    return arr.map(v => `<option value="${v}"${v === selected ? ' selected' : ''}>${v}</option>`).join('');
+  }
+  function _gpaPlayerOpts(players, selectedId, filterPtype) {
+    const filtered = filterPtype ? players.filter(p => p.ptype === filterPtype) : players;
+    return '<option value="">--</option>' +
+      filtered.map(p => `<option value="${p.id}"${p.id === selectedId ? ' selected' : ''}>${p.name} (${p.id})</option>`).join('');
+  }
+  function _gpaStatus(msg, color) {
+    const el = document.getElementById('gpa-edit-status');
+    el.textContent = msg;
+    el.style.color = color || 'var(--text-secondary)';
+  }
 
   function loadGameplanAudit() {
     const level = document.getElementById('gpa-level').value;
@@ -8391,10 +8434,7 @@
     fetch(url, { credentials: 'include' })
       .then(r => r.json())
       .then(data => {
-        if (!data.ok) {
-          status.textContent = `Error: ${data.error || 'unknown'}`;
-          return;
-        }
+        if (!data.ok) { status.textContent = `Error: ${data.error || 'unknown'}`; return; }
         _gpaData = {};
         (data.teams || []).forEach(t => { _gpaData[t.team_id] = t; });
         status.textContent = `${data.count} teams loaded`;
@@ -8406,13 +8446,11 @@
   function renderGameplanOverview(teams) {
     const tbody = document.querySelector('#gpa-overview-table tbody');
     const check = v => v ? '<span style="color:#4caf50">Y</span>' : '<span style="color:#f44336">N</span>';
-
     tbody.innerHTML = teams.map(t => {
       const c = t.completeness || {};
       const ts = t.most_recent_update ? new Date(t.most_recent_update).toLocaleDateString() : '-';
       return `<tr>
-        <td><strong>${t.org_abbrev}</strong></td>
-        <td>${t.team_abbrev}</td>
+        <td><strong>${t.org_abbrev}</strong></td><td>${t.team_abbrev}</td>
         <td>${t.level_name} (${t.team_level})</td>
         <td style="text-align:center">${check(c.defense)}</td>
         <td style="text-align:center">${check(c.rotation)}</td>
@@ -8424,122 +8462,413 @@
         <td><button class="btn btn-secondary" style="padding:2px 8px;font-size:0.8em" onclick="window._gpaViewTeam(${t.team_id})">View</button></td>
       </tr>`;
     }).join('');
-
     document.getElementById('gpa-overview').style.display = '';
+  }
+
+  function _gpaLoadRoster(teamId) {
+    return fetch(`${ADMIN_BASE}/gameplan-audit/roster?team_id=${teamId}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => { _gpaRoster = data.ok ? data.players : []; return _gpaRoster; });
+  }
+
+  function _gpaSetEditMode(on) {
+    _gpaEditMode = on;
+    const btn = document.getElementById('btn-gpa-edit-toggle');
+    btn.textContent = on ? 'View Mode' : 'Edit Mode';
+    btn.className = on ? 'btn btn-warning' : 'btn btn-primary';
+    document.querySelectorAll('.gpa-save-btn').forEach(b => { b.style.display = on ? '' : 'none'; });
+    if (_gpaTeamId) window._gpaViewTeam(_gpaTeamId);
   }
 
   window._gpaViewTeam = function(teamId) {
     const t = _gpaData && _gpaData[teamId];
     if (!t) return;
+    _gpaTeamId = teamId;
+    _gpaOrgId = t.org_id;
 
     document.getElementById('gpa-detail-title').textContent =
-      `${t.org_abbrev} ${t.team_abbrev} (${t.level_name}) - Gameplan Detail`;
+      `${t.org_abbrev} ${t.team_abbrev} (${t.level_name}) - Gameplan ${_gpaEditMode ? 'Editor' : 'Detail'}`;
+    _gpaStatus('');
 
-    // Defense table
-    const dBody = document.querySelector('#gpa-defense-table tbody');
-    const posOrder = ['c','fb','sb','tb','ss','lf','cf','rf','dh'];
-    const posLabel = {c:'C',fb:'1B',sb:'2B',tb:'3B',ss:'SS',lf:'LF',cf:'CF',rf:'RF',dh:'DH',p:'P'};
-    const dRows = (t.defense && t.defense.assignments) || [];
-    const sortedD = [...dRows].sort((a, b) => {
-      const ai = posOrder.indexOf(a.position_code);
-      const bi = posOrder.indexOf(b.position_code);
-      if (ai !== bi) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-      return a.priority - b.priority;
-    });
-    dBody.innerHTML = sortedD.length ? sortedD.map(d => {
-      const order = (d.min_order || d.max_order)
-        ? `${d.min_order || '?'}-${d.max_order || '?'}`
-        : '-';
-      return `<tr>
-        <td><strong>${posLabel[d.position_code] || d.position_code}</strong></td>
-        <td>${d.vs_hand === 'both' ? 'All' : 'vs ' + d.vs_hand + 'HP'}</td>
-        <td>${d.player_name} <span style="color:var(--text-secondary);font-size:0.8em">(${d.player_id})</span></td>
-        <td>${d.target_weight}</td>
-        <td>${d.priority}</td>
-        <td>${d.locked ? '<span style="color:#4caf50">Y</span>' : '-'}</td>
-        <td>${d.lineup_role || 'balanced'}</td>
-        <td>${order}</td>
-      </tr>`;
-    }).join('') : '<tr><td colspan="8" style="color:var(--text-secondary)">No defense plan configured</td></tr>';
-
-    // Rotation table
-    const rBody = document.querySelector('#gpa-rotation-table tbody');
-    const rot = t.rotation || {};
-    const slots = rot.slots || [];
-    rBody.innerHTML = slots.length ? slots.map(s =>
-      `<tr>
-        <td>${s.slot}${s.slot === rot.current_slot ? ' <span style="color:#2196f3">(next)</span>' : ''}</td>
-        <td>${s.player_name} <span style="color:var(--text-secondary);font-size:0.8em">(${s.player_id})</span></td>
-      </tr>`
-    ).join('') : '<tr><td colspan="2" style="color:var(--text-secondary)">No rotation configured</td></tr>';
-
-    const rMeta = document.getElementById('gpa-rotation-meta');
-    if (slots.length) {
-      rMeta.textContent = `Size: ${rot.rotation_size} | Current slot: ${rot.current_slot} | Updated: ${rot.rotation_updated || '-'} | State: ${rot.state_updated || '-'}`;
+    if (_gpaEditMode && !_gpaRoster) {
+      _gpaStatus('Loading roster...', 'var(--text-secondary)');
+      _gpaLoadRoster(teamId).then(() => { _gpaRenderAll(t); _gpaStatus(''); });
     } else {
-      rMeta.textContent = '';
-    }
-
-    // Bullpen table
-    const bBody = document.querySelector('#gpa-bullpen-table tbody');
-    const bps = (t.bullpen && t.bullpen.pitchers) || [];
-    const roleColors = {closer:'#f44336',setup:'#ff9800',middle:'#2196f3',long:'#4caf50',mop_up:'#9e9e9e'};
-    bBody.innerHTML = bps.length ? bps.map(b =>
-      `<tr>
-        <td>${b.slot}</td>
-        <td>${b.player_name} <span style="color:var(--text-secondary);font-size:0.8em">(${b.player_id})</span></td>
-        <td><span style="color:${roleColors[b.role] || 'inherit'}">${b.role}</span></td>
-      </tr>`
-    ).join('') : '<tr><td colspan="3" style="color:var(--text-secondary)">No bullpen configured</td></tr>';
-
-    // Team strategy
-    const sDiv = document.getElementById('gpa-strategy-detail');
-    const s = t.team_strategy;
-    if (s) {
-      sDiv.innerHTML = `
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
-          <div><strong>OF Spacing:</strong> ${s.outfield_spacing}</div>
-          <div><strong>IF Spacing:</strong> ${s.infield_spacing}</div>
-          <div><strong>BP Cutoff:</strong> ${s.bullpen_cutoff} pitches</div>
-          <div><strong>BP Priority:</strong> ${s.bullpen_priority}</div>
-          <div><strong>Emergency P:</strong> ${s.emergency_pitcher_name || 'None'}</div>
-          <div><strong>IBB List:</strong> ${(s.intentional_walk_list || []).length ? s.intentional_walk_list.join(', ') : 'None'}</div>
-          <div><strong>Updated:</strong> ${s.updated_at || '-'}</div>
-        </div>`;
-    } else {
-      sDiv.innerHTML = '<span style="color:var(--text-secondary)">No team strategy configured</span>';
-    }
-
-    // Lineup roles
-    const lBody = document.querySelector('#gpa-lineup-table tbody');
-    const lSlots = (t.lineup_roles && t.lineup_roles.slots) || [];
-    lBody.innerHTML = lSlots.length ? lSlots.map(l =>
-      `<tr>
-        <td>${l.slot}</td>
-        <td>${l.role}</td>
-        <td>${l.locked_player_name || '-'}</td>
-      </tr>`
-    ).join('') : '<tr><td colspan="3" style="color:var(--text-secondary)">No lineup roles configured</td></tr>';
-
-    // Player strategies summary
-    const psDiv = document.getElementById('gpa-playerstrat-detail');
-    const ps = t.player_strategies || {};
-    if (ps.total_strategies > 0) {
-      psDiv.innerHTML = `
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
-          <div><strong>Total:</strong> ${ps.total_strategies} players</div>
-          <div><strong>Custom Usage:</strong> ${ps.custom_usage_preference}</div>
-          <div><strong>Custom Plate:</strong> ${ps.custom_plate_approach}</div>
-          <div><strong>Custom Pitching:</strong> ${ps.custom_pitching_approach}</div>
-          <div><strong>Custom Baserunning:</strong> ${ps.custom_baserunning_approach}</div>
-        </div>`;
-    } else {
-      psDiv.innerHTML = '<span style="color:var(--text-secondary)">No player strategies set</span>';
+      _gpaRenderAll(t);
     }
 
     document.getElementById('gpa-detail').style.display = '';
     document.getElementById('gpa-detail').scrollIntoView({ behavior: 'smooth' });
   };
+
+  function _gpaRenderAll(t) {
+    _gpaRenderDefense(t);
+    _gpaRenderRotation(t);
+    _gpaRenderBullpen(t);
+    _gpaRenderStrategy(t);
+    _gpaRenderLineup(t);
+    _gpaRenderPlayerStrats(t);
+  }
+
+  // --- Defense ---
+  function _gpaRenderDefense(t) {
+    const el = document.getElementById('gpa-defense-content');
+    const rows = (t.defense && t.defense.assignments) || [];
+    const sorted = [...rows].sort((a, b) => {
+      const ai = _GPA_POS_ORDER.indexOf(a.position_code);
+      const bi = _GPA_POS_ORDER.indexOf(b.position_code);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi) || a.priority - b.priority;
+    });
+
+    if (!_gpaEditMode) {
+      el.innerHTML = sorted.length ? '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>Pos</th><th>vs Hand</th><th>Player</th><th>Wt</th><th>Pri</th><th>Lock</th><th>Role</th><th>Order</th></tr></thead><tbody>' +
+        sorted.map(d => {
+          const ord = (d.min_order||d.max_order) ? `${d.min_order||'?'}-${d.max_order||'?'}` : '-';
+          return `<tr><td><strong>${_GPA_POS_LABEL[d.position_code]||d.position_code}</strong></td><td>${d.vs_hand==='both'?'All':'vs '+d.vs_hand+'HP'}</td><td>${d.player_name} <span style="color:var(--text-secondary);font-size:0.8em">(${d.player_id})</span></td><td>${d.target_weight}</td><td>${d.priority}</td><td>${d.locked?'<span style="color:#4caf50">Y</span>':'-'}</td><td>${d.lineup_role||'balanced'}</td><td>${ord}</td></tr>`;
+        }).join('') + '</tbody></table></div>' : '<span style="color:var(--text-secondary)">No defense plan</span>';
+      return;
+    }
+    const roster = _gpaRoster || [];
+    let html = '<div style="overflow-x:auto;max-height:400px"><table class="data-table" id="gpa-def-edit"><thead><tr><th>Pos</th><th>vs Hand</th><th>Player</th><th>Wt</th><th>Pri</th><th>Lock</th><th>Role</th><th>Min</th><th>Max</th><th></th></tr></thead><tbody>';
+    sorted.forEach((d, i) => {
+      html += `<tr data-idx="${i}">
+        <td><select class="gpa-inp" data-f="position_code">${_gpaOpts([...new Set([..._GPA_POS_ORDER,'p'])], d.position_code)}</select></td>
+        <td><select class="gpa-inp" data-f="vs_hand">${_gpaOpts(['both','L','R'], d.vs_hand)}</select></td>
+        <td><select class="gpa-inp" data-f="player_id">${_gpaPlayerOpts(roster, d.player_id)}</select></td>
+        <td><input type="number" class="gpa-inp" data-f="target_weight" value="${d.target_weight}" step="0.1" min="0.1" max="10" style="width:50px"></td>
+        <td><input type="number" class="gpa-inp" data-f="priority" value="${d.priority}" min="1" max="9" style="width:40px"></td>
+        <td><input type="checkbox" class="gpa-inp" data-f="locked" ${d.locked?'checked':''}></td>
+        <td><select class="gpa-inp" data-f="lineup_role">${_gpaOpts(_GPA_ROLES, d.lineup_role||'balanced')}</select></td>
+        <td><input type="number" class="gpa-inp" data-f="min_order" value="${d.min_order||''}" min="1" max="9" style="width:40px"></td>
+        <td><input type="number" class="gpa-inp" data-f="max_order" value="${d.max_order||''}" min="1" max="9" style="width:40px"></td>
+        <td><button class="btn btn-danger" style="padding:1px 6px;font-size:0.8em" onclick="this.closest('tr').remove()">X</button></td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+    html += '<button class="btn btn-secondary" style="margin-top:6px;padding:2px 10px;font-size:0.85em" id="btn-gpa-def-add">+ Add Row</button>';
+    el.innerHTML = html;
+    document.getElementById('btn-gpa-def-add').addEventListener('click', () => {
+      const tbody = document.querySelector('#gpa-def-edit tbody');
+      const idx = tbody.rows.length;
+      const tr = document.createElement('tr'); tr.dataset.idx = idx;
+      tr.innerHTML = `<td><select class="gpa-inp" data-f="position_code">${_gpaOpts(_GPA_POS_ORDER,'c')}</select></td>
+        <td><select class="gpa-inp" data-f="vs_hand">${_gpaOpts(['both','L','R'],'both')}</select></td>
+        <td><select class="gpa-inp" data-f="player_id">${_gpaPlayerOpts(roster, null)}</select></td>
+        <td><input type="number" class="gpa-inp" data-f="target_weight" value="1.0" step="0.1" min="0.1" max="10" style="width:50px"></td>
+        <td><input type="number" class="gpa-inp" data-f="priority" value="1" min="1" max="9" style="width:40px"></td>
+        <td><input type="checkbox" class="gpa-inp" data-f="locked"></td>
+        <td><select class="gpa-inp" data-f="lineup_role">${_gpaOpts(_GPA_ROLES,'balanced')}</select></td>
+        <td><input type="number" class="gpa-inp" data-f="min_order" value="" min="1" max="9" style="width:40px"></td>
+        <td><input type="number" class="gpa-inp" data-f="max_order" value="" min="1" max="9" style="width:40px"></td>
+        <td><button class="btn btn-danger" style="padding:1px 6px;font-size:0.8em" onclick="this.closest('tr').remove()">X</button></td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function _gpaSaveDefense() {
+    const rows = document.querySelectorAll('#gpa-def-edit tbody tr');
+    const assignments = [];
+    rows.forEach(tr => {
+      const g = f => tr.querySelector(`[data-f="${f}"]`);
+      const pid = parseInt(g('player_id').value);
+      if (!pid) return;
+      assignments.push({
+        position_code: g('position_code').value,
+        vs_hand: g('vs_hand').value,
+        player_id: pid,
+        target_weight: parseFloat(g('target_weight').value) || 1.0,
+        priority: parseInt(g('priority').value) || 1,
+        locked: g('locked').checked,
+        lineup_role: g('lineup_role').value,
+        min_order: g('min_order').value ? parseInt(g('min_order').value) : null,
+        max_order: g('max_order').value ? parseInt(g('max_order').value) : null,
+      });
+    });
+    _gpaPut(`/gameplanning/team/${_gpaTeamId}/defense`, { assignments }, 'Defense');
+  }
+
+  // --- Rotation ---
+  function _gpaRenderRotation(t) {
+    const el = document.getElementById('gpa-rotation-content');
+    const rot = t.rotation || {};
+    const slots = rot.slots || [];
+
+    if (!_gpaEditMode) {
+      let html = slots.length ? '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>Slot</th><th>Pitcher</th></tr></thead><tbody>' +
+        slots.map(s => `<tr><td>${s.slot}${s.slot===rot.current_slot?' <span style="color:#2196f3">(next)</span>':''}</td><td>${s.player_name} (${s.player_id})</td></tr>`).join('') +
+        '</tbody></table></div>' : '<span style="color:var(--text-secondary)">No rotation</span>';
+      html += `<div style="color:var(--text-secondary);font-size:0.85em;margin-top:4px">Size: ${rot.rotation_size||0} | Slot: ${rot.current_slot||0} | Updated: ${rot.rotation_updated||'-'}</div>`;
+      el.innerHTML = html;
+      return;
+    }
+    const pitchers = (_gpaRoster||[]).filter(p => p.ptype === 'Pitcher');
+    const size = rot.rotation_size || 5;
+    let html = `<div style="margin-bottom:6px"><label>Rotation Size: </label><select id="gpa-rot-size">`;
+    for (let i = 1; i <= 7; i++) html += `<option value="${i}"${i===size?' selected':''}>${i}</option>`;
+    html += '</select></div>';
+    html += '<div id="gpa-rot-slots">';
+    for (let i = 0; i < size; i++) {
+      const s = slots[i];
+      html += `<div style="margin:4px 0"><strong>${i+1}.</strong> <select class="gpa-rot-pitcher">${_gpaPlayerOpts(pitchers, s?s.player_id:null, null)}</select></div>`;
+    }
+    html += '</div>';
+    el.innerHTML = html;
+    document.getElementById('gpa-rot-size').addEventListener('change', function() {
+      const newSize = parseInt(this.value);
+      const container = document.getElementById('gpa-rot-slots');
+      const current = container.querySelectorAll('.gpa-rot-pitcher').length;
+      if (newSize > current) {
+        for (let i = current; i < newSize; i++) {
+          const div = document.createElement('div'); div.style.margin = '4px 0';
+          div.innerHTML = `<strong>${i+1}.</strong> <select class="gpa-rot-pitcher">${_gpaPlayerOpts(pitchers, null, null)}</select>`;
+          container.appendChild(div);
+        }
+      } else {
+        const divs = container.querySelectorAll('div');
+        for (let i = divs.length - 1; i >= newSize; i--) divs[i].remove();
+      }
+    });
+  }
+
+  function _gpaSaveRotation() {
+    const size = parseInt(document.getElementById('gpa-rot-size').value);
+    const selects = document.querySelectorAll('.gpa-rot-pitcher');
+    const slots = [];
+    selects.forEach((sel, i) => {
+      if (i < size && sel.value) slots.push({ slot: i + 1, player_id: parseInt(sel.value) });
+    });
+    _gpaPut(`/gameplanning/team/${_gpaTeamId}/rotation`, { rotation_size: size, slots }, 'Rotation');
+  }
+
+  // --- Bullpen ---
+  function _gpaRenderBullpen(t) {
+    const el = document.getElementById('gpa-bullpen-content');
+    const bps = (t.bullpen && t.bullpen.pitchers) || [];
+    const roleColors = {closer:'#f44336',setup:'#ff9800',middle:'#2196f3',long:'#4caf50',mop_up:'#9e9e9e'};
+
+    if (!_gpaEditMode) {
+      el.innerHTML = bps.length ? '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>Slot</th><th>Pitcher</th><th>Role</th></tr></thead><tbody>' +
+        bps.map(b => `<tr><td>${b.slot}</td><td>${b.player_name} (${b.player_id})</td><td><span style="color:${roleColors[b.role]||'inherit'}">${b.role}</span></td></tr>`).join('') +
+        '</tbody></table></div>' : '<span style="color:var(--text-secondary)">No bullpen</span>';
+      return;
+    }
+    const pitchers = (_gpaRoster||[]).filter(p => p.ptype === 'Pitcher');
+    let html = '<div id="gpa-bp-rows">';
+    bps.forEach((b, i) => {
+      html += `<div style="margin:4px 0" class="gpa-bp-row"><strong>${i+1}.</strong> <select class="gpa-bp-pitcher">${_gpaPlayerOpts(pitchers, b.player_id, null)}</select> <select class="gpa-bp-role">${_gpaOpts(_GPA_BP_ROLES, b.role)}</select> <button class="btn btn-danger" style="padding:1px 6px;font-size:0.8em" onclick="this.parentElement.remove()">X</button></div>`;
+    });
+    html += '</div>';
+    html += '<button class="btn btn-secondary" style="margin-top:6px;padding:2px 10px;font-size:0.85em" id="btn-gpa-bp-add">+ Add Pitcher</button>';
+    el.innerHTML = html;
+    document.getElementById('btn-gpa-bp-add').addEventListener('click', () => {
+      const container = document.getElementById('gpa-bp-rows');
+      const idx = container.querySelectorAll('.gpa-bp-row').length;
+      const div = document.createElement('div'); div.className = 'gpa-bp-row'; div.style.margin = '4px 0';
+      div.innerHTML = `<strong>${idx+1}.</strong> <select class="gpa-bp-pitcher">${_gpaPlayerOpts(pitchers, null, null)}</select> <select class="gpa-bp-role">${_gpaOpts(_GPA_BP_ROLES, 'middle')}</select> <button class="btn btn-danger" style="padding:1px 6px;font-size:0.8em" onclick="this.parentElement.remove()">X</button>`;
+      container.appendChild(div);
+    });
+  }
+
+  function _gpaSaveBullpen() {
+    const rows = document.querySelectorAll('.gpa-bp-row');
+    const pitchers = [];
+    rows.forEach((row, i) => {
+      const pid = parseInt(row.querySelector('.gpa-bp-pitcher').value);
+      if (!pid) return;
+      pitchers.push({ slot: i + 1, player_id: pid, role: row.querySelector('.gpa-bp-role').value });
+    });
+    _gpaPut(`/gameplanning/team/${_gpaTeamId}/bullpen`, { pitchers }, 'Bullpen');
+  }
+
+  // --- Team Strategy ---
+  function _gpaRenderStrategy(t) {
+    const el = document.getElementById('gpa-strategy-content');
+    const s = t.team_strategy || {};
+
+    if (!_gpaEditMode) {
+      if (t.team_strategy) {
+        el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
+          <div><strong>OF Spacing:</strong> ${s.outfield_spacing}</div><div><strong>IF Spacing:</strong> ${s.infield_spacing}</div>
+          <div><strong>BP Cutoff:</strong> ${s.bullpen_cutoff} pitches</div><div><strong>BP Priority:</strong> ${s.bullpen_priority}</div>
+          <div><strong>Emergency P:</strong> ${s.emergency_pitcher_name||'None'}</div>
+          <div><strong>IBB List:</strong> ${(s.intentional_walk_list||[]).length?s.intentional_walk_list.join(', '):'None'}</div>
+          <div><strong>Updated:</strong> ${s.updated_at||'-'}</div></div>`;
+      } else {
+        el.innerHTML = '<span style="color:var(--text-secondary)">No strategy</span>';
+      }
+      return;
+    }
+    const roster = _gpaRoster || [];
+    el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;font-size:0.9em">
+      <div><label>OF Spacing</label><br><select id="gpa-strat-of">${_gpaOpts(_GPA_OF_SPACING, s.outfield_spacing||'normal')}</select></div>
+      <div><label>IF Spacing</label><br><select id="gpa-strat-if">${_gpaOpts(_GPA_IF_SPACING, s.infield_spacing||'normal')}</select></div>
+      <div><label>BP Cutoff</label><br><input type="number" id="gpa-strat-cutoff" value="${s.bullpen_cutoff||100}" min="50" max="150" style="width:70px"></div>
+      <div><label>BP Priority</label><br><select id="gpa-strat-bp">${_gpaOpts(_GPA_BP_PRIORITY, s.bullpen_priority||'rest')}</select></div>
+      <div><label>Emergency P</label><br><select id="gpa-strat-ep"><option value="">None</option>${roster.map(p=>`<option value="${p.id}"${p.id===s.emergency_pitcher_id?' selected':''}>${p.name}</option>`).join('')}</select></div>
+      <div><label>IBB List (IDs)</label><br><input type="text" id="gpa-strat-ibb" value="${(s.intentional_walk_list||[]).join(',')}" style="width:140px" placeholder="123,456"></div>
+    </div>`;
+  }
+
+  function _gpaSaveStrategy() {
+    const ibbRaw = document.getElementById('gpa-strat-ibb').value.trim();
+    const ibb = ibbRaw ? ibbRaw.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n)) : [];
+    const epVal = document.getElementById('gpa-strat-ep').value;
+    _gpaPut(`/gameplanning/team/${_gpaTeamId}/strategy`, {
+      outfield_spacing: document.getElementById('gpa-strat-of').value,
+      infield_spacing: document.getElementById('gpa-strat-if').value,
+      bullpen_cutoff: parseInt(document.getElementById('gpa-strat-cutoff').value),
+      bullpen_priority: document.getElementById('gpa-strat-bp').value,
+      emergency_pitcher_id: epVal ? parseInt(epVal) : null,
+      intentional_walk_list: ibb,
+    }, 'Strategy');
+  }
+
+  // --- Lineup Roles ---
+  function _gpaRenderLineup(t) {
+    const el = document.getElementById('gpa-lineup-content');
+    const slots = (t.lineup_roles && t.lineup_roles.slots) || [];
+
+    if (!_gpaEditMode) {
+      el.innerHTML = slots.length ? '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>#</th><th>Role</th><th>Locked</th></tr></thead><tbody>' +
+        slots.map(l => `<tr><td>${l.slot}</td><td>${l.role}</td><td>${l.locked_player_name||'-'}</td></tr>`).join('') +
+        '</tbody></table></div>' : '<span style="color:var(--text-secondary)">No lineup roles</span>';
+      return;
+    }
+    const roster = _gpaRoster || [];
+    let html = '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>#</th><th>Role</th><th>Locked Player</th></tr></thead><tbody>';
+    for (let i = 1; i <= 9; i++) {
+      const s = slots.find(x => x.slot === i) || { slot: i, role: 'balanced', locked_player_id: null };
+      html += `<tr><td>${i}</td><td><select class="gpa-lu-role" data-slot="${i}">${_gpaOpts(_GPA_ROLES, s.role)}</select></td>
+        <td><select class="gpa-lu-lock" data-slot="${i}"><option value="">None</option>${roster.map(p=>`<option value="${p.id}"${p.id===s.locked_player_id?' selected':''}>${p.name}</option>`).join('')}</select></td></tr>`;
+    }
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+  }
+
+  function _gpaSaveLineup() {
+    const slots = [];
+    for (let i = 1; i <= 9; i++) {
+      const role = document.querySelector(`.gpa-lu-role[data-slot="${i}"]`).value;
+      const lockVal = document.querySelector(`.gpa-lu-lock[data-slot="${i}"]`).value;
+      slots.push({ slot: i, role, locked_player_id: lockVal ? parseInt(lockVal) : null });
+    }
+    _gpaPut(`/gameplanning/team/${_gpaTeamId}/lineup`, { slots }, 'Lineup');
+  }
+
+  // --- Player Strategies ---
+  function _gpaRenderPlayerStrats(t) {
+    const el = document.getElementById('gpa-playerstrat-content');
+    const ps = t.player_strategies || {};
+
+    if (!_gpaEditMode) {
+      if (ps.total_strategies > 0) {
+        el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
+          <div><strong>Total:</strong> ${ps.total_strategies}</div><div><strong>Custom Usage:</strong> ${ps.custom_usage_preference}</div>
+          <div><strong>Custom Plate:</strong> ${ps.custom_plate_approach}</div><div><strong>Custom Pitching:</strong> ${ps.custom_pitching_approach}</div>
+          <div><strong>Custom Baserunning:</strong> ${ps.custom_baserunning_approach}</div></div>`;
+      } else {
+        el.innerHTML = '<span style="color:var(--text-secondary)">No player strategies</span>';
+      }
+      return;
+    }
+    el.innerHTML = '<button class="btn btn-secondary" id="btn-gpa-ps-load" style="padding:2px 10px;font-size:0.85em">Load Player Strategies</button><div id="gpa-ps-table" style="margin-top:8px"></div>';
+    document.getElementById('btn-gpa-ps-load').addEventListener('click', () => {
+      fetch(`${ADMIN_BASE}/gameplan-audit/player-strategies?team_id=${_gpaTeamId}`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => {
+          if (!data.ok) { _gpaStatus(`Error: ${data.message}`, '#f44336'); return; }
+          const strats = data.strategies || [];
+          let html = '<div style="overflow-x:auto;max-height:500px"><table class="data-table"><thead><tr><th>Player</th><th>Type</th><th>Plate</th><th>Pitching</th><th>Baserun</th><th>Usage</th><th>Steal%</th><th>Pick%</th><th>Pull#</th><th>Leash</th><th></th></tr></thead><tbody>';
+          strats.forEach(s => {
+            const isPit = s.ptype === 'Pitcher';
+            html += `<tr data-pid="${s.player_id}" data-ptype="${s.ptype}">
+              <td style="font-size:0.85em">${s.player_name}</td>
+              <td>${isPit?'P':'Pos'}</td>
+              <td><select class="gpa-ps" data-f="plate_approach">${_gpaOpts(_GPA_PLATE, s.plate_approach)}</select></td>
+              <td>${isPit?`<select class="gpa-ps" data-f="pitching_approach">${_gpaOpts(_GPA_PITCHING, s.pitching_approach)}</select>`:'-'}</td>
+              <td><select class="gpa-ps" data-f="baserunning_approach">${_gpaOpts(_GPA_BASERUN, s.baserunning_approach)}</select></td>
+              <td><select class="gpa-ps" data-f="usage_preference">${_gpaOpts(_GPA_USAGE, s.usage_preference)}</select></td>
+              <td><input type="number" class="gpa-ps" data-f="stealfreq" value="${s.stealfreq}" step="0.1" min="0" max="100" style="width:55px"></td>
+              <td>${isPit?`<input type="number" class="gpa-ps" data-f="pickofffreq" value="${s.pickofffreq}" step="0.1" min="0" max="100" style="width:55px">`:'-'}</td>
+              <td>${isPit?`<input type="number" class="gpa-ps" data-f="pitchpull" value="${s.pitchpull||''}" min="1" style="width:50px">`:'-'}</td>
+              <td>${isPit?`<select class="gpa-ps" data-f="pulltend"><option value="">default</option>${_gpaOpts(_GPA_PULLTEND, s.pulltend||'')}</select>`:'-'}</td>
+              <td><button class="btn btn-secondary" style="padding:1px 6px;font-size:0.8em" onclick="window._gpaSaveOnePlayer(this)">Save</button></td>
+            </tr>`;
+          });
+          html += '</tbody></table></div>';
+          document.getElementById('gpa-ps-table').innerHTML = html;
+        });
+    });
+  }
+
+  window._gpaSaveOnePlayer = function(btn) {
+    const tr = btn.closest('tr');
+    const pid = parseInt(tr.dataset.pid);
+    const body = {};
+    tr.querySelectorAll('.gpa-ps').forEach(inp => {
+      const f = inp.dataset.f;
+      if (inp.type === 'number') body[f] = inp.value ? parseFloat(inp.value) : null;
+      else body[f] = inp.value || null;
+    });
+    fetch(`/api/v1/gameplanning/org/${_gpaOrgId}/player/${pid}/strategy`, {
+      method: 'PUT', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(r => r.json()).then(data => {
+      if (data.error) _gpaStatus(`Player ${pid}: ${data.message}`, '#f44336');
+      else { btn.textContent = 'Saved'; setTimeout(() => { btn.textContent = 'Save'; }, 1500); }
+    }).catch(err => _gpaStatus(`Error: ${err}`, '#f44336'));
+  };
+
+  function _gpaSaveAllPlayerStrats() {
+    const rows = document.querySelectorAll('#gpa-ps-table tbody tr');
+    if (!rows.length) { _gpaStatus('Load player strategies first', '#ff9800'); return; }
+    let saved = 0, total = rows.length;
+    _gpaStatus(`Saving ${total} strategies...`, 'var(--text-secondary)');
+    rows.forEach(tr => {
+      const pid = parseInt(tr.dataset.pid);
+      const body = {};
+      tr.querySelectorAll('.gpa-ps').forEach(inp => {
+        const f = inp.dataset.f;
+        if (inp.type === 'number') body[f] = inp.value ? parseFloat(inp.value) : null;
+        else body[f] = inp.value || null;
+      });
+      fetch(`/api/v1/gameplanning/org/${_gpaOrgId}/player/${pid}/strategy`, {
+        method: 'PUT', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(r => r.json()).then(() => {
+        saved++;
+        if (saved >= total) _gpaStatus(`Saved ${saved}/${total} strategies`, '#4caf50');
+      }).catch(() => { saved++; });
+    });
+  }
+
+  // --- Generic PUT helper ---
+  function _gpaPut(path, body, label) {
+    _gpaStatus(`Saving ${label}...`, 'var(--text-secondary)');
+    fetch(`/api/v1${path}`, {
+      method: 'PUT', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          _gpaStatus(`${label} error: ${data.message || data.error}`, '#f44336');
+        } else {
+          _gpaStatus(`${label} saved`, '#4caf50');
+          // Refresh audit data for this team
+          fetch(`${ADMIN_BASE}/gameplan-audit?team_id=${_gpaTeamId}`, { credentials: 'include' })
+            .then(r => r.json()).then(d => {
+              if (d.ok && d.teams && d.teams[0]) {
+                _gpaData[_gpaTeamId] = d.teams[0];
+              }
+            });
+        }
+      })
+      .catch(err => _gpaStatus(`${label} error: ${err}`, '#f44336'));
+  }
 
   // Initialize on DOM ready
   if (document.readyState === 'loading') {

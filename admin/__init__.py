@@ -934,6 +934,43 @@ def admin_gameplan_audit():
         return jsonify(ok=False, error="read_failed", message=str(e)), 500
 
 
+@admin_bp.get("/gameplan-audit/roster")
+def admin_gameplan_roster():
+    """Return active roster for a team (for populating editor dropdowns)."""
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    team_id = request.args.get("team_id", type=int)
+    if not team_id:
+        return jsonify(ok=False, error="missing_param", message="team_id required"), 400
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sa_text("""
+                SELECT p.id, p.firstName, p.lastName, p.ptype
+                FROM simbbPlayers p
+                JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+                JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+                JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+                WHERE t.id = :tid
+                ORDER BY p.ptype, p.lastName, p.firstName
+            """), {"tid": team_id}).mappings().all()
+
+        players = [{"id": int(r["id"]), "name": f"{r['firstName']} {r['lastName']}",
+                     "ptype": r["ptype"]} for r in rows]
+        return jsonify(ok=True, team_id=team_id, players=players)
+
+    except Exception as e:
+        logging.exception("admin_gameplan_roster failed")
+        return jsonify(ok=False, error="read_failed", message=str(e)), 500
+
+
 @admin_bp.get("/gameplan-audit/player-strategies")
 def admin_gameplan_player_strategies():
     """
@@ -2897,29 +2934,40 @@ def admin_player_preview():
                 }
 
             # Compute overall
+            from services.weight_calibration import _compute_raw_ovr_for_row, _percentile_rank_to_20_80
+
             ovr_type = "pitcher_overall" if ptype == "Pitcher" else "position_overall"
             ovr_weights = all_weights.get(ovr_type, {})
-            ovr_raw = 0.0
-            ovr_weight_sum = 0.0
 
-            for attr_key, weight in ovr_weights.items():
-                if attr_key.startswith("pitch") and attr_key.endswith("_ovr"):
-                    # Use the computed pitch ovr
-                    attr_val = raw_ratings.get(attr_key, 0.0)
-                else:
-                    attr_val = float(row.get(attr_key, 0) or 0)
-                ovr_raw += attr_val * weight
-                ovr_weight_sum += weight
+            ovr_raw = _compute_raw_ovr_for_row(row, ovr_weights)
+            if ovr_raw is None:
+                ovr_raw = 0.0
 
-            ovr_raw = ovr_raw / ovr_weight_sum if ovr_weight_sum > 0 else 0.0
+            # Inline percentile rank: load all peers at same (level, ptype),
+            # compute their raw_ovr, find where this player ranks.
+            peer_rows = conn.execute(sa_text("""
+                SELECT p.* FROM simbbPlayers p
+                JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+                WHERE c.current_level = :lvl AND p.ptype = :pt
+            """), {"lvl": player_level, "pt": ptype}).mappings().all()
 
-            ovr_dist = level_dists.get(ovr_type)
-            if ovr_dist and ovr_dist.get("percentiles"):
-                ovr_scaled = to_20_80_percentile(ovr_raw, ovr_dist["percentiles"])
-            elif ovr_dist and ovr_dist.get("mean") is not None and ovr_dist.get("std"):
-                ovr_scaled = to_20_80(ovr_raw, ovr_dist["mean"], ovr_dist["std"])
+            peer_raws = []
+            for pr in peer_rows:
+                pr_ovr = _compute_raw_ovr_for_row(pr, ovr_weights)
+                if pr_ovr is not None:
+                    peer_raws.append(pr_ovr)
+
+            if len(peer_raws) > 1:
+                peer_raws_sorted = sorted(peer_raws)
+                # Count how many peers this player is better than
+                rank_below = sum(1 for v in peer_raws_sorted if v < ovr_raw)
+                rank_equal = sum(1 for v in peer_raws_sorted if v == ovr_raw)
+                # Average rank for ties
+                pct_rank = (rank_below + (rank_equal - 1) / 2.0) / (len(peer_raws) - 1)
+                pct_rank = max(0.0, min(1.0, pct_rank))
+                ovr_scaled = _percentile_rank_to_20_80(pct_rank)
             else:
-                ovr_scaled = max(20, min(80, round(ovr_raw * 0.6 + 20)))
+                ovr_scaled = 50
 
             # Raw attributes
             col_cats = _get_player_column_categories()
@@ -2934,7 +2982,8 @@ def admin_player_preview():
                 "level": player_level,
                 "current_displayovr": row.get("displayovr"),
             }, raw_attributes=raw_attrs, position_ratings=position_ratings,
-               overall={"type": ovr_type, "raw": round(ovr_raw, 2), "scaled_20_80": ovr_scaled},
+               overall={"type": ovr_type, "raw": round(ovr_raw, 2), "scaled_20_80": ovr_scaled,
+                        "peer_count": len(peer_raws)},
                displayovr=ovr_scaled)
 
     except Exception as e:

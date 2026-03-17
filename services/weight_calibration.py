@@ -814,14 +814,50 @@ def update_profile_weights(
     return count
 
 
+def _compute_raw_ovr_for_row(row, ovr_weights: Dict[str, float]) -> Optional[float]:
+    """Compute a single player's raw overall from their attributes and weights."""
+    raw_sum = 0.0
+    weight_sum = 0.0
+
+    for attr_key, weight in ovr_weights.items():
+        if attr_key.startswith("pitch") and attr_key.endswith("_ovr"):
+            pitch_num = attr_key.replace("pitch", "").replace("_ovr", "")
+            consist = float(row.get(f"pitch{pitch_num}_consist_base", 0) or 0)
+            pacc = float(row.get(f"pitch{pitch_num}_pacc_base", 0) or 0)
+            pbrk = float(row.get(f"pitch{pitch_num}_pbrk_base", 0) or 0)
+            pcntrl = float(row.get(f"pitch{pitch_num}_pcntrl_base", 0) or 0)
+            attr_val = (consist + pacc + pbrk + pcntrl) / 4.0
+        else:
+            attr_val = float(row.get(attr_key, 0) or 0)
+
+        raw_sum += attr_val * weight
+        weight_sum += weight
+
+    if weight_sum <= 0:
+        return None
+    return raw_sum / weight_sum
+
+
+def _percentile_rank_to_20_80(rank: float) -> int:
+    """Map a percentile rank (0.0-1.0) to 20-80 scale, rounded to nearest 5."""
+    raw_score = 20.0 + rank * 60.0
+    score = int(round(raw_score / 5.0) * 5)
+    return max(20, min(80, score))
+
+
 def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
     """
     Batch recompute displayovr for all active players using the active
     weight profile's pitcher_overall and position_overall weights.
 
+    Computes raw overalls for ALL players first, then assigns 20-80 grades
+    via inline percentile ranking within each (level, ptype) group.
+    This guarantees a proper distribution without depending on
+    pre-seeded rating_scale_config data.
+
     Returns: {updated: total_count, by_level: {level_id: count}}
     """
-    from services.rating_config import get_overall_weights, to_20_80, get_rating_config
+    from services.rating_config import get_overall_weights
 
     # Load active weights
     all_weights = get_overall_weights(conn)
@@ -830,12 +866,6 @@ def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
 
     if not pitcher_ovr_weights and not position_ovr_weights:
         return {"updated": 0, "by_level": {}, "error": "no_overall_weights_configured"}
-
-    # Load rating scale distributions: { ptype: { level_id: { attr: {mean, std} } } }
-    try:
-        dist_config = get_rating_config(conn)
-    except Exception:
-        dist_config = {}
 
     # Load all active players with their attributes and level
     level_filter = "AND c.current_level = :level" if level else ""
@@ -853,68 +883,57 @@ def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
     if not rows:
         return {"updated": 0, "by_level": {}}
 
-    # Compute displayovr for each player
-    updates = []  # (player_id, displayovr_value)
-    by_level = {}
+    # --- Pass 1: compute raw_ovr for every player ---
+    # Group by (level, ptype) for separate percentile ranking
+    # Each entry: (player_id, raw_ovr)
+    groups: Dict[tuple, List[tuple]] = {}  # (level, ptype) -> [(pid, raw_ovr), ...]
 
     for row in rows:
         pid = int(row["id"])
         ptype = (row.get("ptype") or "").strip()
         player_level = int(row["current_level"])
 
-        # Select appropriate overall weights
         if ptype == "Pitcher":
             ovr_weights = pitcher_ovr_weights
-            ovr_type = "pitcher_overall"
         else:
             ovr_weights = position_ovr_weights
-            ovr_type = "position_overall"
 
         if not ovr_weights:
             continue
 
-        # Compute weighted average of raw attributes
-        raw_sum = 0.0
-        weight_sum = 0.0
-
-        for attr_key, weight in ovr_weights.items():
-            # For pitch_ovr attributes, compute them from components
-            if attr_key.startswith("pitch") and attr_key.endswith("_ovr"):
-                pitch_num = attr_key.replace("pitch", "").replace("_ovr", "")
-                consist = float(row.get(f"pitch{pitch_num}_consist_base", 0) or 0)
-                pacc = float(row.get(f"pitch{pitch_num}_pacc_base", 0) or 0)
-                pbrk = float(row.get(f"pitch{pitch_num}_pbrk_base", 0) or 0)
-                pcntrl = float(row.get(f"pitch{pitch_num}_pcntrl_base", 0) or 0)
-                attr_val = (consist + pacc + pbrk + pcntrl) / 4.0
-            else:
-                attr_val = float(row.get(attr_key, 0) or 0)
-
-            raw_sum += attr_val * weight
-            weight_sum += weight
-
-        if weight_sum <= 0:
+        raw_ovr = _compute_raw_ovr_for_row(row, ovr_weights)
+        if raw_ovr is None:
             continue
 
-        raw_ovr = raw_sum / weight_sum
+        group_key = (player_level, ptype)
+        groups.setdefault(group_key, []).append((pid, raw_ovr))
 
-        # Scale to 20-80 using percentile breakpoints when available
-        from services.rating_config import to_20_80_percentile
-        ptype_key = ptype if ptype in ("Pitcher", "Position") else "Position"
-        level_dist = dist_config.get(ptype_key, {}).get(player_level, {}).get(ovr_type)
+    # --- Pass 2: percentile rank within each group, map to 20-80 ---
+    updates = []  # (player_id, displayovr_str)
+    by_level = {}
 
-        if level_dist and level_dist.get("percentiles"):
-            scaled = to_20_80_percentile(raw_ovr, level_dist["percentiles"])
-        elif level_dist and level_dist.get("mean") is not None and level_dist.get("std"):
-            scaled = to_20_80(raw_ovr, level_dist["mean"], level_dist["std"])
-        else:
-            # Fallback: simple linear map (raw 0-100 → 20-80)
-            scaled = max(20, min(80, round(raw_ovr * 0.6 + 20)))
+    for (player_level, ptype), members in groups.items():
+        n = len(members)
 
-        updates.append((pid, str(scaled)))
-        by_level[player_level] = by_level.get(player_level, 0) + 1
+        if n == 1:
+            # Single player in group — assign 50
+            pid, _ = members[0]
+            updates.append((pid, "50"))
+            by_level[player_level] = by_level.get(player_level, 0) + 1
+            continue
+
+        # Sort by raw_ovr to compute percentile ranks
+        sorted_members = sorted(members, key=lambda x: x[1])
+
+        for rank_idx, (pid, raw_ovr) in enumerate(sorted_members):
+            # Percentile rank: 0.0 for lowest, 1.0 for highest
+            pct_rank = rank_idx / (n - 1)
+            scaled = _percentile_rank_to_20_80(pct_rank)
+            updates.append((pid, str(scaled)))
+
+        by_level[player_level] = by_level.get(player_level, 0) + n
 
     # Batch update using CASE statement to minimize lock time
-    # Process in chunks of 500 to avoid oversized queries
     CHUNK = 500
     for i in range(0, len(updates), CHUNK):
         chunk = updates[i:i + CHUNK]
