@@ -2101,16 +2101,16 @@ def _store_game_results(
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
              :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
         ON DUPLICATE KEY UPDATE
-            home_score         = :u_home_score,
-            away_score         = :u_away_score,
-            winning_team_id    = :u_winning_team_id,
-            losing_team_id     = :u_losing_team_id,
-            winning_org_id     = :u_winning_org_id,
-            losing_org_id      = :u_losing_org_id,
-            game_outcome       = :u_game_outcome,
-            boxscore_json      = :u_boxscore_json,
-            play_by_play_json  = :u_play_by_play_json,
-            game_type          = :u_game_type,
+            home_score         = :home_score,
+            away_score         = :away_score,
+            winning_team_id    = :winning_team_id,
+            losing_team_id     = :losing_team_id,
+            winning_org_id     = :winning_org_id,
+            losing_org_id      = :losing_org_id,
+            game_outcome       = :game_outcome,
+            boxscore_json      = :boxscore_json,
+            play_by_play_json  = :play_by_play_json,
+            game_type          = :game_type,
             completed_at       = NOW()
     """)
 
@@ -2216,16 +2216,6 @@ def _store_game_results(
                 "boxscore_json": boxscore_str,
                 "play_by_play_json": pbp_str,
                 "game_type": game_type,
-                "u_home_score": home_score,
-                "u_away_score": away_score,
-                "u_winning_team_id": winning_team_id,
-                "u_losing_team_id": losing_team_id,
-                "u_winning_org_id": winning_org_id,
-                "u_losing_org_id": losing_org_id,
-                "u_game_outcome": game_outcome,
-                "u_boxscore_json": boxscore_str,
-                "u_play_by_play_json": pbp_str,
-                "u_game_type": game_type,
             })
             count += 1
         except Exception:
@@ -2303,16 +2293,16 @@ def _store_game_results_bulk(
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
              :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
         ON DUPLICATE KEY UPDATE
-            home_score         = :u_home_score,
-            away_score         = :u_away_score,
-            winning_team_id    = :u_winning_team_id,
-            losing_team_id     = :u_losing_team_id,
-            winning_org_id     = :u_winning_org_id,
-            losing_org_id      = :u_losing_org_id,
-            game_outcome       = :u_game_outcome,
-            boxscore_json      = :u_boxscore_json,
-            play_by_play_json  = :u_play_by_play_json,
-            game_type          = :u_game_type,
+            home_score         = :home_score,
+            away_score         = :away_score,
+            winning_team_id    = :winning_team_id,
+            losing_team_id     = :losing_team_id,
+            winning_org_id     = :winning_org_id,
+            losing_org_id      = :losing_org_id,
+            game_outcome       = :game_outcome,
+            boxscore_json      = :boxscore_json,
+            play_by_play_json  = :play_by_play_json,
+            game_type          = :game_type,
             completed_at       = NOW()
     """)
 
@@ -2391,16 +2381,6 @@ def _store_game_results_bulk(
             "boxscore_json": boxscore_str,
             "play_by_play_json": pbp_str,
             "game_type": game_type,
-            "u_home_score": home_score,
-            "u_away_score": away_score,
-            "u_winning_team_id": winning_team_id,
-            "u_losing_team_id": losing_team_id,
-            "u_winning_org_id": winning_org_id,
-            "u_losing_org_id": losing_org_id,
-            "u_game_outcome": game_outcome,
-            "u_boxscore_json": boxscore_str,
-            "u_play_by_play_json": pbp_str,
-            "u_game_type": game_type,
         })
 
     if not all_params:
