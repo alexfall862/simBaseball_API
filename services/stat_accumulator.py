@@ -145,19 +145,19 @@ _BATTING_UPSERT = text("""
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
          :stolen_bases, :caught_stealing)
     AS new_row ON DUPLICATE KEY UPDATE
-        games              = games + 1,
-        at_bats            = at_bats + new_row.at_bats,
-        runs               = runs + new_row.runs,
-        hits               = hits + new_row.hits,
-        doubles_hit        = doubles_hit + new_row.doubles_hit,
-        triples            = triples + new_row.triples,
-        home_runs          = home_runs + new_row.home_runs,
-        inside_the_park_hr = inside_the_park_hr + new_row.inside_the_park_hr,
-        rbi                = rbi + new_row.rbi,
-        walks              = walks + new_row.walks,
-        strikeouts         = strikeouts + new_row.strikeouts,
-        stolen_bases       = stolen_bases + new_row.stolen_bases,
-        caught_stealing    = caught_stealing + new_row.caught_stealing
+        games              = player_batting_stats.games + 1,
+        at_bats            = player_batting_stats.at_bats + new_row.at_bats,
+        runs               = player_batting_stats.runs + new_row.runs,
+        hits               = player_batting_stats.hits + new_row.hits,
+        doubles_hit        = player_batting_stats.doubles_hit + new_row.doubles_hit,
+        triples            = player_batting_stats.triples + new_row.triples,
+        home_runs          = player_batting_stats.home_runs + new_row.home_runs,
+        inside_the_park_hr = player_batting_stats.inside_the_park_hr + new_row.inside_the_park_hr,
+        rbi                = player_batting_stats.rbi + new_row.rbi,
+        walks              = player_batting_stats.walks + new_row.walks,
+        strikeouts         = player_batting_stats.strikeouts + new_row.strikeouts,
+        stolen_bases       = player_batting_stats.stolen_bases + new_row.stolen_bases,
+        caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing
 """)
 
 _PITCHING_UPSERT = text("""
@@ -174,22 +174,22 @@ _PITCHING_UPSERT = text("""
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)
     AS new_row ON DUPLICATE KEY UPDATE
-        games                       = games + 1,
-        games_started               = games_started + new_row.games_started,
-        wins                        = wins + new_row.wins,
-        losses                      = losses + new_row.losses,
-        saves                       = saves + new_row.saves,
-        holds                       = holds + new_row.holds,
-        blown_saves                 = blown_saves + new_row.blown_saves,
-        quality_starts              = quality_starts + new_row.quality_starts,
-        innings_pitched_outs        = innings_pitched_outs + new_row.innings_pitched_outs,
-        hits_allowed                = hits_allowed + new_row.hits_allowed,
-        runs_allowed                = runs_allowed + new_row.runs_allowed,
-        earned_runs                 = earned_runs + new_row.earned_runs,
-        walks                       = walks + new_row.walks,
-        strikeouts                  = strikeouts + new_row.strikeouts,
-        home_runs_allowed           = home_runs_allowed + new_row.home_runs_allowed,
-        inside_the_park_hr_allowed  = inside_the_park_hr_allowed + new_row.inside_the_park_hr_allowed
+        games                       = player_pitching_stats.games + 1,
+        games_started               = player_pitching_stats.games_started + new_row.games_started,
+        wins                        = player_pitching_stats.wins + new_row.wins,
+        losses                      = player_pitching_stats.losses + new_row.losses,
+        saves                       = player_pitching_stats.saves + new_row.saves,
+        holds                       = player_pitching_stats.holds + new_row.holds,
+        blown_saves                 = player_pitching_stats.blown_saves + new_row.blown_saves,
+        quality_starts              = player_pitching_stats.quality_starts + new_row.quality_starts,
+        innings_pitched_outs        = player_pitching_stats.innings_pitched_outs + new_row.innings_pitched_outs,
+        hits_allowed                = player_pitching_stats.hits_allowed + new_row.hits_allowed,
+        runs_allowed                = player_pitching_stats.runs_allowed + new_row.runs_allowed,
+        earned_runs                 = player_pitching_stats.earned_runs + new_row.earned_runs,
+        walks                       = player_pitching_stats.walks + new_row.walks,
+        strikeouts                  = player_pitching_stats.strikeouts + new_row.strikeouts,
+        home_runs_allowed           = player_pitching_stats.home_runs_allowed + new_row.home_runs_allowed,
+        inside_the_park_hr_allowed  = player_pitching_stats.inside_the_park_hr_allowed + new_row.inside_the_park_hr_allowed
 """)
 
 _FIELDING_UPSERT = text("""
@@ -200,11 +200,11 @@ _FIELDING_UPSERT = text("""
         (:player_id, :league_year_id, :team_id, :position_code,
          1, :innings, :putouts, :assists, :errors)
     AS new_row ON DUPLICATE KEY UPDATE
-        games   = games + 1,
-        innings = innings + new_row.innings,
-        putouts = putouts + new_row.putouts,
-        assists = assists + new_row.assists,
-        errors  = errors + new_row.errors
+        games   = player_fielding_stats.games + 1,
+        innings = player_fielding_stats.innings + new_row.innings,
+        putouts = player_fielding_stats.putouts + new_row.putouts,
+        assists = player_fielding_stats.assists + new_row.assists,
+        errors  = player_fielding_stats.errors + new_row.errors
 """)
 
 

@@ -277,8 +277,8 @@ def bulk_upsert_positions(conn, positions: List[dict], league_year_id: int):
                 (player_id, team_id, league_year_id, position_code, source)
             VALUES {', '.join(value_clauses)}
             AS new_row ON DUPLICATE KEY UPDATE
-                position_code = IF(source = 'override', position_code, new_row.position_code),
-                source = IF(source = 'override', source, new_row.source),
+                position_code = IF(player_listed_position.source = 'override', player_listed_position.position_code, new_row.position_code),
+                source = IF(player_listed_position.source = 'override', player_listed_position.source, new_row.source),
                 updated_at = CURRENT_TIMESTAMP
         """
         conn.execute(text(sql), params)
