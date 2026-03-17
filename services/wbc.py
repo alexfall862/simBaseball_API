@@ -291,7 +291,7 @@ def generate_wbc_rosters(conn, event_id: int) -> Dict[str, Any]:
                      is_starter, source)
                 VALUES
                     (:eid, :label, :pid, :pos, 0, 'auto')
-                ON DUPLICATE KEY UPDATE team_label = :label
+                AS new_row ON DUPLICATE KEY UPDATE team_label = new_row.team_label
             """), {
                 "eid": event_id, "label": code,
                 "pid": pid, "pos": pos,

@@ -316,7 +316,7 @@ def _assign_rotation(conn, team_id: int,
     result = conn.execute(text("""
         INSERT INTO team_pitching_rotation (team_id, rotation_size)
         VALUES (:tid, :size)
-        ON DUPLICATE KEY UPDATE rotation_size = :size
+        AS new_row ON DUPLICATE KEY UPDATE rotation_size = new_row.rotation_size
     """), {"tid": team_id, "size": rotation_size})
 
     # Get rotation_id (handle both insert and update cases)
@@ -370,8 +370,8 @@ def _assign_bullpen(conn, team_id: int,
         conn.execute(text("""
             INSERT INTO team_bullpen_order (team_id, slot, player_id, role)
             VALUES (:tid, :slot, :pid, :role)
-            ON DUPLICATE KEY UPDATE player_id = :pid,
-                                     role = :role
+            AS new_row ON DUPLICATE KEY UPDATE player_id = new_row.player_id,
+                                     role = new_row.role
         """), {"tid": team_id, "slot": slot, "pid": pid, "role": role})
 
 
@@ -446,5 +446,5 @@ def _assign_emergency_pitcher(conn, team_id: int,
     conn.execute(text("""
         INSERT INTO team_strategy (team_id, emergency_pitcher_id)
         VALUES (:tid, :pid)
-        ON DUPLICATE KEY UPDATE emergency_pitcher_id = :pid
+        AS new_row ON DUPLICATE KEY UPDATE emergency_pitcher_id = new_row.emergency_pitcher_id
     """), {"tid": team_id, "pid": best_pid})
