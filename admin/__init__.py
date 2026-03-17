@@ -2838,12 +2838,14 @@ def admin_player_preview():
     try:
         with engine.connect() as conn:
             # Load player + level
+            # Use subquery to avoid column name collisions between p.* and contracts
             row = conn.execute(sa_text("""
-                SELECT p.*, c.current_level
+                SELECT p.*,
+                       (SELECT c.current_level FROM contracts c
+                        WHERE c.playerID = p.id AND c.isActive = 1 LIMIT 1
+                       ) AS current_level
                 FROM simbbPlayers p
-                JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
                 WHERE p.id = :pid
-                LIMIT 1
             """), {"pid": player_id}).mappings().first()
 
             if not row:
