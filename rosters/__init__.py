@@ -744,6 +744,7 @@ def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=No
         "ratings": ratings,
         "potentials": potentials,
         "contract": contract,
+        "displayovr": m.get("displayovr"),
     }
 
 # -------------------------------------------------------------------
