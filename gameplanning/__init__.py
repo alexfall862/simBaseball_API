@@ -245,7 +245,10 @@ def put_player_strategy(org_id: int, player_id: int):
         # Nothing to update, but still do upsert to ensure row exists
         pass
 
-    set_clause = ", ".join(f"{k} = VALUES({k})" for k in values) if values else "id = id"
+    # Use row alias syntax (MySQL 8.0.19+) instead of VALUES() which was
+    # removed in MySQL 9.0.  The alias "new_row" lets us reference the
+    # incoming values in the ON DUPLICATE KEY UPDATE clause.
+    set_clause = ", ".join(f"{k} = new_row.{k}" for k in values) if values else "id = id"
     col_names = ["playerID", "orgID"] + list(values.keys())
     placeholders = ", ".join(f":{c}" for c in col_names)
     col_list = ", ".join(col_names)
@@ -254,7 +257,7 @@ def put_player_strategy(org_id: int, player_id: int):
     params.update(values)
 
     sql = text(
-        f"INSERT INTO playerStrategies ({col_list}) VALUES ({placeholders}) "
+        f"INSERT INTO playerStrategies ({col_list}) VALUES ({placeholders}) AS new_row "
         f"ON DUPLICATE KEY UPDATE {set_clause}"
     )
 
@@ -344,11 +347,11 @@ def put_team_strategy(team_id: int):
     col_names = list(values.keys())
     placeholders = ", ".join(f":{c}" for c in col_names)
     col_list = ", ".join(col_names)
-    set_parts = [f"{c} = VALUES({c})" for c in col_names if c != "team_id"]
+    set_parts = [f"{c} = new_row.{c}" for c in col_names if c != "team_id"]
     set_clause = ", ".join(set_parts) if set_parts else "id = id"
 
     sql = text(
-        f"INSERT INTO team_strategy ({col_list}) VALUES ({placeholders}) "
+        f"INSERT INTO team_strategy ({col_list}) VALUES ({placeholders}) AS new_row "
         f"ON DUPLICATE KEY UPDATE {set_clause}"
     )
 

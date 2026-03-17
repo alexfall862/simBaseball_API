@@ -2100,18 +2100,19 @@ def _store_game_results(
              :home_team_id, :away_team_id, :home_score, :away_score,
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
              :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
+        AS new_row
         ON DUPLICATE KEY UPDATE
-            home_score         = VALUES(home_score),
-            away_score         = VALUES(away_score),
-            winning_team_id    = VALUES(winning_team_id),
-            losing_team_id     = VALUES(losing_team_id),
-            winning_org_id     = VALUES(winning_org_id),
-            losing_org_id      = VALUES(losing_org_id),
-            game_outcome       = VALUES(game_outcome),
-            boxscore_json      = VALUES(boxscore_json),
-            play_by_play_json  = VALUES(play_by_play_json),
-            game_type          = VALUES(game_type),
-            completed_at       = VALUES(completed_at)
+            home_score         = new_row.home_score,
+            away_score         = new_row.away_score,
+            winning_team_id    = new_row.winning_team_id,
+            losing_team_id     = new_row.losing_team_id,
+            winning_org_id     = new_row.winning_org_id,
+            losing_org_id      = new_row.losing_org_id,
+            game_outcome       = new_row.game_outcome,
+            boxscore_json      = new_row.boxscore_json,
+            play_by_play_json  = new_row.play_by_play_json,
+            game_type          = new_row.game_type,
+            completed_at       = new_row.completed_at
     """)
 
     count = 0
@@ -2292,18 +2293,19 @@ def _store_game_results_bulk(
              :home_team_id, :away_team_id, :home_score, :away_score,
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
              :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
+        AS new_row
         ON DUPLICATE KEY UPDATE
-            home_score         = VALUES(home_score),
-            away_score         = VALUES(away_score),
-            winning_team_id    = VALUES(winning_team_id),
-            losing_team_id     = VALUES(losing_team_id),
-            winning_org_id     = VALUES(winning_org_id),
-            losing_org_id      = VALUES(losing_org_id),
-            game_outcome       = VALUES(game_outcome),
-            boxscore_json      = VALUES(boxscore_json),
-            play_by_play_json  = VALUES(play_by_play_json),
-            game_type          = VALUES(game_type),
-            completed_at       = VALUES(completed_at)
+            home_score         = new_row.home_score,
+            away_score         = new_row.away_score,
+            winning_team_id    = new_row.winning_team_id,
+            losing_team_id     = new_row.losing_team_id,
+            winning_org_id     = new_row.winning_org_id,
+            losing_org_id      = new_row.losing_org_id,
+            game_outcome       = new_row.game_outcome,
+            boxscore_json      = new_row.boxscore_json,
+            play_by_play_json  = new_row.play_by_play_json,
+            game_type          = new_row.game_type,
+            completed_at       = new_row.completed_at
     """)
 
     all_params = []

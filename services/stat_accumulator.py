@@ -486,23 +486,24 @@ _GAME_BATTING_INSERT = text("""
          :batting_order, :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
          :stolen_bases, :caught_stealing, :plate_appearances, :hbp)
+    AS new_row
     ON DUPLICATE KEY UPDATE
-        position_code      = VALUES(position_code),
-        batting_order      = VALUES(batting_order),
-        at_bats            = VALUES(at_bats),
-        runs               = VALUES(runs),
-        hits               = VALUES(hits),
-        doubles_hit        = VALUES(doubles_hit),
-        triples            = VALUES(triples),
-        home_runs          = VALUES(home_runs),
-        inside_the_park_hr = VALUES(inside_the_park_hr),
-        rbi                = VALUES(rbi),
-        walks              = VALUES(walks),
-        strikeouts         = VALUES(strikeouts),
-        stolen_bases       = VALUES(stolen_bases),
-        caught_stealing    = VALUES(caught_stealing),
-        plate_appearances  = VALUES(plate_appearances),
-        hbp                = VALUES(hbp)
+        position_code      = new_row.position_code,
+        batting_order      = new_row.batting_order,
+        at_bats            = new_row.at_bats,
+        runs               = new_row.runs,
+        hits               = new_row.hits,
+        doubles_hit        = new_row.doubles_hit,
+        triples            = new_row.triples,
+        home_runs          = new_row.home_runs,
+        inside_the_park_hr = new_row.inside_the_park_hr,
+        rbi                = new_row.rbi,
+        walks              = new_row.walks,
+        strikeouts         = new_row.strikeouts,
+        stolen_bases       = new_row.stolen_bases,
+        caught_stealing    = new_row.caught_stealing,
+        plate_appearances  = new_row.plate_appearances,
+        hbp                = new_row.hbp
 """)
 
 _GAME_PITCHING_INSERT = text("""
@@ -522,28 +523,29 @@ _GAME_PITCHING_INSERT = text("""
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed,
          :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)
+    AS new_row
     ON DUPLICATE KEY UPDATE
-        pitch_appearance_order      = VALUES(pitch_appearance_order),
-        games_started               = VALUES(games_started),
-        win                         = VALUES(win),
-        loss                        = VALUES(loss),
-        save_recorded               = VALUES(save_recorded),
-        hold                        = VALUES(hold),
-        blown_save                  = VALUES(blown_save),
-        quality_start               = VALUES(quality_start),
-        innings_pitched_outs        = VALUES(innings_pitched_outs),
-        hits_allowed                = VALUES(hits_allowed),
-        runs_allowed                = VALUES(runs_allowed),
-        earned_runs                 = VALUES(earned_runs),
-        walks                       = VALUES(walks),
-        strikeouts                  = VALUES(strikeouts),
-        home_runs_allowed           = VALUES(home_runs_allowed),
-        inside_the_park_hr_allowed  = VALUES(inside_the_park_hr_allowed),
-        pitches_thrown              = VALUES(pitches_thrown),
-        balls                       = VALUES(balls),
-        strikes                     = VALUES(strikes),
-        hbp                         = VALUES(hbp),
-        wildpitches                 = VALUES(wildpitches)
+        pitch_appearance_order      = new_row.pitch_appearance_order,
+        games_started               = new_row.games_started,
+        win                         = new_row.win,
+        loss                        = new_row.loss,
+        save_recorded               = new_row.save_recorded,
+        hold                        = new_row.hold,
+        blown_save                  = new_row.blown_save,
+        quality_start               = new_row.quality_start,
+        innings_pitched_outs        = new_row.innings_pitched_outs,
+        hits_allowed                = new_row.hits_allowed,
+        runs_allowed                = new_row.runs_allowed,
+        earned_runs                 = new_row.earned_runs,
+        walks                       = new_row.walks,
+        strikeouts                  = new_row.strikeouts,
+        home_runs_allowed           = new_row.home_runs_allowed,
+        inside_the_park_hr_allowed  = new_row.inside_the_park_hr_allowed,
+        pitches_thrown              = new_row.pitches_thrown,
+        balls                       = new_row.balls,
+        strikes                     = new_row.strikes,
+        hbp                         = new_row.hbp,
+        wildpitches                 = new_row.wildpitches
 """)
 
 

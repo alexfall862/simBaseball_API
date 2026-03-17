@@ -332,7 +332,8 @@ def _create_signing_rows(conn, league_year_id: int):
         LEFT JOIN draft_slot_values dsv_round
             ON dsv_round.round = dp.round AND dsv_round.pick_in_round IS NULL
         WHERE dp.league_year_id = :lyid
-        ON DUPLICATE KEY UPDATE slot_value = VALUES(slot_value)
+        AS new_row
+        ON DUPLICATE KEY UPDATE slot_value = new_row.slot_value
     """), {"lyid": league_year_id})
 
 
