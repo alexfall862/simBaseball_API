@@ -118,7 +118,15 @@ def _is_player_available_for_lineup(p: Dict[str, Any]) -> bool:
       - 'normal':            require stamina >= 70
       - 'play_tired':        require stamina >= 40
       - 'desperation':       no stamina requirement (0+)
+
+    Exception: benched_by_injury always returns False regardless of preference.
+    A player whose stamina was forced to 0 by an injury malus (stamina_pct=0.0)
+    cannot play — this overrides even 'desperation' usage preference.
     """
+    # Injury bench overrides all usage preferences
+    if p.get("benched_by_injury"):
+        return False
+
     stamina = p.get("stamina")
     try:
         stamina_val = int(stamina)
@@ -126,11 +134,11 @@ def _is_player_available_for_lineup(p: Dict[str, Any]) -> bool:
         stamina_val = 0
 
     usage_pref = (p.get("usage_preference") or "normal").lower()
-    threshold = _get_usage_threshold(usage_pref)
 
     if usage_pref == "desperation":
         return True
 
+    threshold = _get_usage_threshold(usage_pref)
     return stamina_val >= threshold
 
 
@@ -795,9 +803,14 @@ def _choose_player_for_position(
 
     # Desperation pass: if every remaining field player failed stamina,
     # pick the best one anyway so the position is never sent as None
-    # (which crashes the engine).
+    # (which crashes the engine). Exclude stamina=0 (fully benched by injury)
+    # unless literally no one else is available.
     if best_pid is None and remaining_field_ids:
-        for pid in remaining_field_ids:
+        desperate_pool = [pid for pid in remaining_field_ids
+                          if not players_by_id[pid].get("benched_by_injury")]
+        if not desperate_pool:
+            desperate_pool = remaining_field_ids  # true last resort
+        for pid in desperate_pool:
             p = players_by_id[pid]
             base_pos_rating = _get_rating(p, rating_key) if rating_key else 0.0
             off_score = _compute_offense_score(p)
@@ -907,12 +920,17 @@ def build_defense_and_lineup(
                 best_score = score
 
         # Fallback: if no remaining player passed availability, pick the
-        # best remaining player regardless of stamina so the DH slot is
-        # never left empty in a DH league (avoids pitcher batting).
+        # best remaining player so the DH slot is never left empty in a DH
+        # league (avoids pitcher batting). Exclude stamina=0 (benched by
+        # injury) unless no one else is available.
         if best_pid is None and remaining_ids:
+            fallback_pool = [pid for pid in remaining_ids
+                             if not players_by_id[pid].get("benched_by_injury")]
+            if not fallback_pool:
+                fallback_pool = remaining_ids  # true last resort
             fallback_pid = None
             fallback_score = None
-            for pid in remaining_ids:
+            for pid in fallback_pool:
                 p = players_by_id[pid]
                 base_pos_rating = _get_rating(p, "dh_rating")
                 off_score = _compute_offense_score(p)
@@ -1020,12 +1038,17 @@ def build_defense_and_lineup_from_cache(
                 best_pid = pid
                 best_score = score
 
-        # Fallback: pick best remaining player regardless of stamina
-        # so the DH slot is never empty in a DH league.
+        # Fallback: pick best remaining player so the DH slot is never empty
+        # in a DH league. Exclude stamina=0 (benched by injury) unless no
+        # one else is available.
         if best_pid is None and remaining_ids:
+            fallback_pool = [pid for pid in remaining_ids
+                             if not players_by_id[pid].get("benched_by_injury")]
+            if not fallback_pool:
+                fallback_pool = remaining_ids  # true last resort
             fallback_pid = None
             fallback_score = None
-            for pid in remaining_ids:
+            for pid in fallback_pool:
                 p = players_by_id[pid]
                 base_pos_rating = _get_rating(p, "dh_rating")
                 off_score = _compute_offense_score(p)

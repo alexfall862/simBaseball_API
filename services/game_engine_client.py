@@ -56,6 +56,26 @@ def simulate_games_batch(
         logger.warning("simulate_games_batch called with empty games list")
         return []
 
+    # Fast health check before committing to a 300s wait — fails immediately
+    # if the engine is down or stuck from a previous request.
+    try:
+        health = requests.get(f"{GAME_ENGINE_URL}/health", timeout=5)
+        if not health.ok:
+            raise ValueError(
+                f"Game engine health check failed (HTTP {health.status_code}) "
+                f"before subweek '{subweek}'. Is the engine running?"
+            )
+    except requests.exceptions.ConnectionError as e:
+        raise ValueError(
+            f"Game engine is not reachable at {GAME_ENGINE_URL} before subweek '{subweek}'. "
+            f"Is the engine process running? Error: {e}"
+        ) from e
+    except requests.exceptions.Timeout:
+        raise ValueError(
+            f"Game engine health check timed out before subweek '{subweek}'. "
+            f"The engine may be stuck — restart it and try again."
+        )
+
     url = f"{GAME_ENGINE_URL}/simulate/batch"
 
     # Build the payload the engine expects:

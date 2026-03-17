@@ -4,9 +4,12 @@ from typing import Dict
 from flask import Blueprint, jsonify, request, current_app
 from sqlalchemy import MetaData, Table, select, and_, literal, func, text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
+import logging
 import re
 from db import get_engine
 from services.attribute_visibility import get_visible_players_batch
+
+logger = logging.getLogger(__name__)
 
 rosters_bp = Blueprint("rosters", __name__)
 PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
@@ -249,17 +252,21 @@ def _attach_injury_and_stamina_to_players(conn, players_out):
             stamina_val = int(max(0, stamina_val * float(stam_pct)))
         p["stamina"] = stamina_val
 
-        # --- attribute maluses on *_base columns ---
-        for attr, factor in malus.items():
-            if attr == "stamina_pct":
-                continue
-            base_key = f"{attr}_base"
-            if base_key not in p:
-                continue
-            try:
-                p[base_key] = float(p[base_key] or 0.0) * float(factor)
-            except (TypeError, ValueError):
-                pass
+        # --- attribute maluses ---
+        # _build_player_with_ratings stores scaled 20-80 values under
+        # p["ratings"]["contact_display"], not at the top level.
+        # Apply malus factor proportionally to each *_display entry.
+        ratings = p.get("ratings")
+        if isinstance(ratings, dict):
+            for attr, factor in malus.items():
+                if attr == "stamina_pct":
+                    continue
+                display_key = f"{attr}_display"
+                if display_key in ratings and ratings[display_key] is not None:
+                    try:
+                        ratings[display_key] = float(ratings[display_key]) * float(factor)
+                    except (TypeError, ValueError):
+                        pass
 
         # --- injury fields ---
         p["is_injured"] = inj.get("is_injured", False)
@@ -1338,8 +1345,8 @@ def get_org_roster(org_abbrev: str):
             # Attach stamina data
             try:
                 _attach_injury_and_stamina_to_players(conn, players_out)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("_attach_injury_and_stamina_to_players failed: %s", exc, exc_info=True)
 
     except SQLAlchemyError:
         return (
@@ -1512,8 +1519,8 @@ def get_all_rosters_grouped():
             try:
                 all_players = [p for b in by_org.values() for p in b["players"]]
                 _attach_injury_and_stamina_to_players(conn, all_players)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("_attach_injury_and_stamina_to_players failed: %s", exc, exc_info=True)
 
     except SQLAlchemyError:
         return (

@@ -372,18 +372,21 @@ def load_subweek_state(
 
         adjusted = dict(raw_mapping)
         malus = st.injury_malus.get(pid) or {}
-        for attr, delta in malus.items():
-            if attr.endswith("_base") and attr in adjusted:
-                base_val = adjusted.get(attr)
-                try:
-                    base_num = float(base_val) if base_val is not None else 0.0
-                except (TypeError, ValueError):
-                    base_num = 0.0
-                try:
-                    delta_num = float(delta)
-                except (TypeError, ValueError):
-                    delta_num = 0.0
-                adjusted[attr] = base_num + delta_num
+        for attr, factor in malus.items():
+            if attr == "stamina_pct":
+                continue  # applied to stamina separately, not a _base column
+            base_key = f"{attr}_base"
+            if base_key not in adjusted:
+                continue
+            try:
+                base_num = float(adjusted[base_key] or 0.0)
+            except (TypeError, ValueError):
+                base_num = 0.0
+            try:
+                factor_num = float(factor)
+            except (TypeError, ValueError):
+                factor_num = 1.0
+            adjusted[base_key] = max(1.0, base_num * factor_num)
 
         st.engine_views[pid] = _build_engine_player_view_from_mapping(
             adjusted, week_cache.position_weights

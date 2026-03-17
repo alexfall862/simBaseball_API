@@ -7,6 +7,7 @@ from sqlalchemy import MetaData, Table, select, and_
 from db import get_engine
 from rosters import _get_tables as _get_roster_tables
 from services.stamina import get_effective_stamina, get_effective_stamina_bulk
+from services.injuries import get_active_injury_malus_bulk
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,17 @@ _USAGE_THRESHOLDS = {
     "play_tired": 40,
     "desperation": 0,
 }
+
+
+def _apply_injury_stamina_pct(stamina_by_player: Dict[int, int], malus_by_player: Dict[int, Dict]) -> None:
+    """
+    Mutate stamina_by_player in-place: apply stamina_pct from injury malus.
+    A pitcher with stamina_pct=0.0 injury has effective stamina forced to 0.
+    """
+    for pid, malus in malus_by_player.items():
+        stam_pct = malus.get("stamina_pct")
+        if stam_pct is not None and pid in stamina_by_player:
+            stamina_by_player[pid] = int(max(0, stamina_by_player[pid] * float(stam_pct)))
 
 
 def _safe_float(val) -> float:
@@ -248,6 +260,8 @@ def _fallback_pick_starter_without_rotation(
 
     # Bulk-load all needed data
     stamina_by_player = get_effective_stamina_bulk(conn, pitcher_ids, league_year_id)
+    injury_malus = get_active_injury_malus_bulk(conn, pitcher_ids)
+    _apply_injury_stamina_pct(stamina_by_player, injury_malus)
     usage_prefs = _get_usage_preferences_bulk(conn, pitcher_ids)
     ratings_by_player = _load_pitcher_ratings_bulk(conn, pitcher_ids)
 
@@ -365,6 +379,8 @@ def pick_starting_pitcher(
 
     # Bulk-load stamina and usage preferences for all rotation pitchers
     stamina_by_player = get_effective_stamina_bulk(conn, pitcher_ids, league_year_id)
+    injury_malus = get_active_injury_malus_bulk(conn, pitcher_ids)
+    _apply_injury_stamina_pct(stamina_by_player, injury_malus)
     usage_prefs = _get_usage_preferences_bulk(conn, pitcher_ids)
 
     candidates: List[Dict[str, Any]] = []
@@ -444,14 +460,17 @@ def pick_starting_pitcher_from_cache(cache, team_id: int) -> Dict[str, Any]:
             continue
         pid = int(s_row["player_id"])
 
-        stamina = cache.stamina.get(pid, 100)
+        raw_stamina = cache.stamina.get(pid, 100)
+        stam_pct = cache.injury_malus.get(pid, {}).get("stamina_pct")
+        if stam_pct is not None:
+            raw_stamina = int(max(0, raw_stamina * float(stam_pct)))
         usage_pref = usage_prefs.get(pid, "normal")
         threshold = _USAGE_THRESHOLDS.get(usage_pref, 70)
 
         candidates.append({
             "player_id": pid,
             "slot": slot_num,
-            "stamina": stamina,
+            "stamina": raw_stamina,
             "usage_preference": usage_pref,
             "threshold": threshold,
         })
@@ -488,7 +507,10 @@ def _fallback_pick_starter_from_cache(cache, team_id: int) -> Dict[str, Any]:
     candidates: List[Dict[str, Any]] = []
 
     for pid in pitcher_ids:
-        stamina = cache.stamina.get(pid, 100)
+        raw_stamina = cache.stamina.get(pid, 100)
+        stam_pct = cache.injury_malus.get(pid, {}).get("stamina_pct")
+        if stam_pct is not None:
+            raw_stamina = int(max(0, raw_stamina * float(stam_pct)))
         usage_pref = usage_prefs.get(pid, "normal")
         threshold = _USAGE_THRESHOLDS.get(usage_pref, 70)
 
@@ -498,7 +520,7 @@ def _fallback_pick_starter_from_cache(cache, team_id: int) -> Dict[str, Any]:
         candidates.append({
             "player_id": pid,
             "slot": None,
-            "stamina": stamina,
+            "stamina": raw_stamina,
             "usage_preference": usage_pref,
             "threshold": threshold,
             "ability_score": ability_score,

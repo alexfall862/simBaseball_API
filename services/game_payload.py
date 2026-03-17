@@ -1290,7 +1290,7 @@ def build_engine_player_view(conn, player_id: int) -> EnginePlayerView:
             factor_num = float(factor)
         except (TypeError, ValueError):
             factor_num = 1.0
-        adjusted_mapping[base_key] = base_num * factor_num
+        adjusted_mapping[base_key] = max(1.0, base_num * factor_num)
 
     # Load position weights from DB
     pos_weights = _load_position_weights(conn)
@@ -1373,7 +1373,7 @@ def build_engine_player_views_bulk(
                 factor_num = float(factor)
             except (TypeError, ValueError):
                 factor_num = 1.0
-            adjusted_mapping[base_key] = base_num * factor_num
+            adjusted_mapping[base_key] = max(1.0, base_num * factor_num)
 
         engine_player = _build_engine_player_view_from_mapping(adjusted_mapping, pos_weights)
 
@@ -1520,6 +1520,7 @@ def build_team_game_side(
         if injury_stam_pct is not None:
             raw_stamina = int(max(0.0, raw_stamina * injury_stam_pct))
         ep["stamina"] = raw_stamina
+        ep["benched_by_injury"] = (injury_stam_pct is not None and raw_stamina == 0)
 
         # Strategy
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
@@ -1544,6 +1545,8 @@ def build_team_game_side(
             players_by_id=players_by_id,
             rng=rng,
         )
+        if pregame_injuries:
+            _persist_pregame_injuries(conn, pregame_injuries, league_year_id)
 
     # 2) Validate starter is on the roster; fallback to best available if not
     if starter_id not in players_by_id:
@@ -1671,7 +1674,13 @@ def build_team_game_side_from_cache(
             continue
 
         ep = dict(base_view)
-        ep["stamina"] = int(cache.stamina.get(pid, 100))
+
+        raw_stamina = int(cache.stamina.get(pid, 100))
+        stam_pct = cache.injury_malus.get(pid, {}).get("stamina_pct")
+        if stam_pct is not None:
+            raw_stamina = int(max(0, raw_stamina * float(stam_pct)))
+        ep["stamina"] = raw_stamina
+        ep["benched_by_injury"] = (stam_pct is not None and raw_stamina == 0)
 
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
         ep.update(strat)
@@ -1694,17 +1703,23 @@ def build_team_game_side_from_cache(
             players_by_id=players_by_id,
             rng=rng,
         )
+        if pregame_injuries:
+            _persist_pregame_injuries(conn, pregame_injuries, league_year_id)
 
     # Validate starter is on the roster; fallback to best available if not
-    if starter_id not in players_by_id:
+    if starter_id not in players_by_id or players_by_id[starter_id].get("benched_by_injury"):
         roster_pitchers = [
             pid for pid, pdata in players_by_id.items()
             if (pdata.get("ptype") or "").lower() == "pitcher"
         ]
-        if roster_pitchers:
-            starter_id = max(roster_pitchers, key=lambda pid: players_by_id[pid].get("stamina", 100))
+        # Prefer pitchers not benched by injury; fall back to anyone if no healthy pitchers
+        eligible = [pid for pid in roster_pitchers if not players_by_id[pid].get("benched_by_injury")]
+        if not eligible:
+            eligible = roster_pitchers
+        if eligible:
+            starter_id = max(eligible, key=lambda pid: players_by_id[pid].get("stamina", 100))
             logger.warning(
-                "build_team_game_side_from_cache: starter_id not on roster for team %s, "
+                "build_team_game_side_from_cache: starter_id not on roster or benched for team %s, "
                 "falling back to player %s", team_id, starter_id,
             )
         else:
@@ -2428,6 +2443,82 @@ def _normalize_engine_effects(effects: Dict[str, Any]) -> Dict[str, float]:
             except (TypeError, ValueError):
                 continue
     return out
+
+
+def _persist_pregame_injuries(
+    conn,
+    pregame_injuries: List[Dict[str, Any]],
+    league_year_id: int,
+) -> int:
+    """
+    Persist pregame injuries to player_injury_events and player_injury_state.
+
+    Called immediately after roll_pregame_injuries_for_team so that the
+    rolled injuries are visible via the roster/player endpoints for the
+    duration of the subweek (or until they expire via weekly advancement).
+
+    Returns count of injuries persisted.
+    """
+    from sqlalchemy import text as sa_text
+
+    if not pregame_injuries:
+        return 0
+
+    injury_insert = sa_text("""
+        INSERT INTO player_injury_events
+            (player_id, injury_type_id, league_year_id, weeks_assigned,
+             weeks_remaining, malus_json)
+        VALUES
+            (:player_id, :injury_type_id, :league_year_id, :weeks_assigned,
+             :weeks_remaining, :malus_json)
+    """)
+    injury_state_upsert = sa_text("""
+        INSERT INTO player_injury_state
+            (player_id, status, current_event_id, weeks_remaining, last_updated_at)
+        VALUES
+            (:player_id, 'injured', :event_id, :weeks_remaining, NOW())
+        ON DUPLICATE KEY UPDATE
+            status           = 'injured',
+            current_event_id = IF(:weeks_remaining > weeks_remaining,
+                                  :event_id, current_event_id),
+            weeks_remaining  = GREATEST(:weeks_remaining, weeks_remaining),
+            last_updated_at  = NOW()
+    """)
+
+    count = 0
+    for inj in pregame_injuries:
+        pid = inj.get("player_id")
+        if pid is None:
+            continue
+        pid = int(pid)
+        injury_type_id = int(inj.get("injury_type_id", 0))
+        duration_weeks = int(inj.get("duration_weeks", 1))
+        effects = inj.get("effects") or {}
+
+        try:
+            ev_result = conn.execute(injury_insert, {
+                "player_id": pid,
+                "injury_type_id": injury_type_id,
+                "league_year_id": league_year_id,
+                "weeks_assigned": duration_weeks,
+                "weeks_remaining": duration_weeks,
+                "malus_json": json.dumps(effects),
+            })
+            event_id = ev_result.lastrowid
+            conn.execute(injury_state_upsert, {
+                "player_id": pid,
+                "event_id": event_id,
+                "weeks_remaining": duration_weeks,
+            })
+            count += 1
+        except Exception:
+            logger.exception(
+                "_persist_pregame_injuries: failed for player %d", pid
+            )
+
+    if count:
+        logger.info("_persist_pregame_injuries: persisted %d pregame injuries", count)
+    return count
 
 
 def _drain_stamina_and_persist_injuries(
