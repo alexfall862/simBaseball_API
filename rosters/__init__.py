@@ -138,20 +138,132 @@ def _load_stamina_for_players(conn, player_ids):
     return stamina_map
 
 
-def _attach_stamina_to_players(conn, players_out):
-    """Attach stamina and has_fatigue_data fields to a list of player dicts."""
+def _load_injury_data_for_players(conn, player_ids):
+    """
+    Bulk-load injury state, active event details, and combined maluses for a
+    list of player IDs.
+
+    Returns:
+      {
+        player_id: {
+          "is_injured": bool,
+          "combined_malus": {"contact": 0.7, "stamina_pct": 0.0, ...},
+          "injury_details": [
+            {
+              "event_id": int,
+              "injury_type_id": int,
+              "injury_name": str,
+              "weeks_remaining": int,
+              "weeks_assigned": int,
+              "effects": {"contact": 0.7, ...},
+            },
+            ...
+          ],
+        },
+        ...
+      }
+
+    Players with no injury data get is_injured=False, empty malus and details.
+    """
+    if not player_ids:
+        return {}
+
+    from services.injuries import get_active_injury_malus_bulk, _parse_malus_json
+
+    ph = ", ".join(f":p{i}" for i in range(len(player_ids)))
+    params = {f"p{i}": pid for i, pid in enumerate(player_ids)}
+
+    # Combined malus (acute + career, multiplicative)
+    combined_malus_by_player = get_active_injury_malus_bulk(conn, player_ids)
+
+    # Active event details for display (only currently-injured players)
+    rows = conn.execute(sa_text(f"""
+        SELECT
+            pie.id          AS event_id,
+            pie.player_id,
+            pie.injury_type_id,
+            it.name         AS injury_name,
+            pie.weeks_remaining,
+            pie.weeks_assigned,
+            pie.malus_json
+        FROM player_injury_events pie
+        JOIN player_injury_state pis ON pis.player_id = pie.player_id
+        JOIN injury_types it ON it.id = pie.injury_type_id
+        WHERE pie.player_id IN ({ph})
+          AND pie.weeks_remaining > 0
+          AND pis.status = 'injured'
+    """), params).mappings().all()
+
+    details_by_player = {}
+    for r in rows:
+        pid = int(r["player_id"])
+        details_by_player.setdefault(pid, []).append({
+            "event_id": int(r["event_id"]),
+            "injury_type_id": int(r["injury_type_id"]),
+            "injury_name": r["injury_name"],
+            "weeks_remaining": int(r["weeks_remaining"]),
+            "weeks_assigned": int(r["weeks_assigned"]),
+            "effects": _parse_malus_json(r["malus_json"]),
+        })
+
+    result = {}
+    for pid in player_ids:
+        result[pid] = {
+            "is_injured": pid in details_by_player,
+            "combined_malus": combined_malus_by_player.get(pid, {}),
+            "injury_details": details_by_player.get(pid, []),
+        }
+    return result
+
+
+def _attach_injury_and_stamina_to_players(conn, players_out):
+    """
+    For each player dict in players_out:
+      - Apply active injury maluses to all *_base attributes (multiplicative).
+      - Apply stamina_pct malus to stamina (zeroes it when benched by injury).
+      - Attach stamina, has_fatigue_data, is_injured, injury_details.
+    """
     pids = [p["id"] for p in players_out if p.get("id")]
     if not pids:
         return
+
     stamina_map = _load_stamina_for_players(conn, pids)
+    injury_map = _load_injury_data_for_players(conn, pids)
+
     for p in players_out:
         pid = p.get("id")
-        if pid and pid in stamina_map:
-            p["stamina"] = stamina_map[pid]["stamina"]
-            p["has_fatigue_data"] = True
-        else:
-            p["stamina"] = 100
-            p["has_fatigue_data"] = False
+        if pid is None:
+            continue
+
+        # --- stamina ---
+        raw = stamina_map.get(pid)
+        stamina_val = int(raw["stamina"]) if raw else 100
+        p["has_fatigue_data"] = bool(raw)
+
+        inj = injury_map.get(pid, {})
+        malus = inj.get("combined_malus", {})
+
+        # Apply stamina_pct (e.g. 0.0 forces stamina to 0 for benched players)
+        stam_pct = malus.get("stamina_pct")
+        if stam_pct is not None:
+            stamina_val = int(max(0, stamina_val * float(stam_pct)))
+        p["stamina"] = stamina_val
+
+        # --- attribute maluses on *_base columns ---
+        for attr, factor in malus.items():
+            if attr == "stamina_pct":
+                continue
+            base_key = f"{attr}_base"
+            if base_key not in p:
+                continue
+            try:
+                p[base_key] = float(p[base_key] or 0.0) * float(factor)
+            except (TypeError, ValueError):
+                pass
+
+        # --- injury fields ---
+        p["is_injured"] = inj.get("is_injured", False)
+        p["injury_details"] = inj.get("injury_details", [])
 
 
 _DEFAULT_POSITION_WEIGHTS = {
@@ -1225,7 +1337,7 @@ def get_org_roster(org_abbrev: str):
 
             # Attach stamina data
             try:
-                _attach_stamina_to_players(conn, players_out)
+                _attach_injury_and_stamina_to_players(conn, players_out)
             except Exception:
                 pass
 
@@ -1399,7 +1511,7 @@ def get_all_rosters_grouped():
             # Attach stamina to all players across all orgs
             try:
                 all_players = [p for b in by_org.values() for p in b["players"]]
-                _attach_stamina_to_players(conn, all_players)
+                _attach_injury_and_stamina_to_players(conn, all_players)
             except Exception:
                 pass
 

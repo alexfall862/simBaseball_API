@@ -108,6 +108,48 @@ def get_player(player_id):
 
             player_dict = _row_to_dict(row)
 
+            # Apply injury maluses and attach injury/stamina fields
+            try:
+                from rosters import _load_injury_data_for_players, _load_stamina_for_players
+                inj_map = _load_injury_data_for_players(conn, [player_id])
+                inj = inj_map.get(player_id, {})
+                malus = inj.get("combined_malus", {})
+
+                # Stamina
+                ly_row = conn.execute(text(
+                    "SELECT current_league_year_id FROM league_state LIMIT 1"
+                )).first()
+                if ly_row and ly_row[0]:
+                    stam_map = _load_stamina_for_players(conn, [player_id])
+                    raw = stam_map.get(player_id)
+                    stamina_val = int(raw["stamina"]) if raw else 100
+                    player_dict["has_fatigue_data"] = bool(raw)
+                else:
+                    stamina_val = 100
+                    player_dict["has_fatigue_data"] = False
+
+                stam_pct = malus.get("stamina_pct")
+                if stam_pct is not None:
+                    stamina_val = int(max(0, stamina_val * float(stam_pct)))
+                player_dict["stamina"] = stamina_val
+
+                # Attribute maluses on *_base columns
+                for attr, factor in malus.items():
+                    if attr == "stamina_pct":
+                        continue
+                    base_key = f"{attr}_base"
+                    if base_key in player_dict and player_dict[base_key] is not None:
+                        try:
+                            player_dict[base_key] = float(player_dict[base_key]) * float(factor)
+                        except (TypeError, ValueError):
+                            pass
+
+                player_dict["is_injured"] = inj.get("is_injured", False)
+                player_dict["injury_details"] = inj.get("injury_details", [])
+            except Exception:
+                player_dict["is_injured"] = False
+                player_dict["injury_details"] = []
+
             # Apply fog-of-war if viewing_org_id is provided
             if viewing_org_id:
                 from services.attribute_visibility import (
