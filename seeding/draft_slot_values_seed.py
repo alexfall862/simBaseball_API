@@ -46,11 +46,11 @@ def seed_slot_values():
     sql = text("""
         INSERT INTO draft_slot_values (round, pick_in_round, slot_value)
         VALUES (:round, NULL, :slot_value)
-        ON DUPLICATE KEY UPDATE slot_value = VALUES(slot_value)
+        ON DUPLICATE KEY UPDATE slot_value = :u_slot_value
     """)
     with engine.begin() as conn:
         for rnd, val in SLOT_VALUES:
-            conn.execute(sql, {"round": rnd, "slot_value": val})
+            conn.execute(sql, {"round": rnd, "slot_value": val, "u_slot_value": val})
     log.info("Seeded %d draft slot values", len(SLOT_VALUES))
 
 

@@ -300,10 +300,9 @@ def update_roster(
                      is_starter, source)
                 VALUES
                     (:eid, :label, :pid, :pos, :starter, 'manual')
-                AS new_row
                 ON DUPLICATE KEY UPDATE
-                    team_label = new_row.team_label,
-                    position_code = new_row.position_code,
+                    team_label = :u_label,
+                    position_code = :u_pos,
                     source = 'manual'
             """), {
                 "eid": event_id,
@@ -311,6 +310,8 @@ def update_roster(
                 "pid": pid,
                 "pos": change.get("position_code", ""),
                 "starter": 1 if change.get("is_starter") else 0,
+                "u_label": change.get("team_label", ""),
+                "u_pos": change.get("position_code", ""),
             })
             added += 1
 

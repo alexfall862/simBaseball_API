@@ -321,19 +321,21 @@ def _create_signing_rows(conn, league_year_id: int):
     """Pre-create draft_signing rows with slot values for all picks."""
     conn.execute(text("""
         INSERT INTO draft_signing (draft_pick_id, slot_value)
-        SELECT dp.id, COALESCE(
-            dsv_pick.slot_value,
-            dsv_round.slot_value,
-            60000.00
-        )
-        FROM draft_picks dp
-        LEFT JOIN draft_slot_values dsv_pick
-            ON dsv_pick.round = dp.round AND dsv_pick.pick_in_round = dp.pick_in_round
-        LEFT JOIN draft_slot_values dsv_round
-            ON dsv_round.round = dp.round AND dsv_round.pick_in_round IS NULL
-        WHERE dp.league_year_id = :lyid
-        AS new_row
-        ON DUPLICATE KEY UPDATE slot_value = new_row.slot_value
+        SELECT src.id, src.sv
+        FROM (
+            SELECT dp.id, COALESCE(
+                dsv_pick.slot_value,
+                dsv_round.slot_value,
+                60000.00
+            ) AS sv
+            FROM draft_picks dp
+            LEFT JOIN draft_slot_values dsv_pick
+                ON dsv_pick.round = dp.round AND dsv_pick.pick_in_round = dp.pick_in_round
+            LEFT JOIN draft_slot_values dsv_round
+                ON dsv_round.round = dp.round AND dsv_round.pick_in_round IS NULL
+            WHERE dp.league_year_id = :lyid
+        ) AS src
+        ON DUPLICATE KEY UPDATE slot_value = src.sv
     """), {"lyid": league_year_id})
 
 

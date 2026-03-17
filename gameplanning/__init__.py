@@ -245,19 +245,28 @@ def put_player_strategy(org_id: int, player_id: int):
         # Nothing to update, but still do upsert to ensure row exists
         pass
 
-    # Use row alias syntax (MySQL 8.0.19+) instead of VALUES() which was
-    # removed in MySQL 9.0.  The alias "new_row" lets us reference the
-    # incoming values in the ON DUPLICATE KEY UPDATE clause.
-    set_clause = ", ".join(f"{k} = new_row.{k}" for k in values) if values else "id = id"
+    # Use separate bind params for the UPDATE clause (prefixed with u_)
+    # to avoid any driver issues with reusing named params.  This avoids
+    # both VALUES() (removed in MySQL 9.0) and AS alias (unreliable with
+    # some driver/version combos).
+    set_parts = []
+    update_params = {}
+    for k in values:
+        u_key = f"u_{k}"
+        set_parts.append(f"{k} = :{u_key}")
+        update_params[u_key] = values[k]
+    set_clause = ", ".join(set_parts) if set_parts else "id = id"
+
     col_names = ["playerID", "orgID"] + list(values.keys())
     placeholders = ", ".join(f":{c}" for c in col_names)
     col_list = ", ".join(col_names)
 
     params = {"playerID": player_id, "orgID": org_id}
     params.update(values)
+    params.update(update_params)
 
     sql = text(
-        f"INSERT INTO playerStrategies ({col_list}) VALUES ({placeholders}) AS new_row "
+        f"INSERT INTO playerStrategies ({col_list}) VALUES ({placeholders}) "
         f"ON DUPLICATE KEY UPDATE {set_clause}"
     )
 
@@ -349,11 +358,20 @@ def put_team_strategy(team_id: int):
     col_names = list(values.keys())
     placeholders = ", ".join(f":{c}" for c in col_names)
     col_list = ", ".join(col_names)
-    set_parts = [f"{c} = new_row.{c}" for c in col_names if c != "team_id"]
+
+    update_params = {}
+    set_parts = []
+    for c in col_names:
+        if c == "team_id":
+            continue
+        u_key = f"u_{c}"
+        set_parts.append(f"{c} = :{u_key}")
+        update_params[u_key] = values[c]
     set_clause = ", ".join(set_parts) if set_parts else "id = id"
+    values.update(update_params)
 
     sql = text(
-        f"INSERT INTO team_strategy ({col_list}) VALUES ({placeholders}) AS new_row "
+        f"INSERT INTO team_strategy ({col_list}) VALUES ({placeholders}) "
         f"ON DUPLICATE KEY UPDATE {set_clause}"
     )
 

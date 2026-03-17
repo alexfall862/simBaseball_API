@@ -2100,19 +2100,18 @@ def _store_game_results(
              :home_team_id, :away_team_id, :home_score, :away_score,
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
              :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
-        AS new_row
         ON DUPLICATE KEY UPDATE
-            home_score         = new_row.home_score,
-            away_score         = new_row.away_score,
-            winning_team_id    = new_row.winning_team_id,
-            losing_team_id     = new_row.losing_team_id,
-            winning_org_id     = new_row.winning_org_id,
-            losing_org_id      = new_row.losing_org_id,
-            game_outcome       = new_row.game_outcome,
-            boxscore_json      = new_row.boxscore_json,
-            play_by_play_json  = new_row.play_by_play_json,
-            game_type          = new_row.game_type,
-            completed_at       = new_row.completed_at
+            home_score         = :u_home_score,
+            away_score         = :u_away_score,
+            winning_team_id    = :u_winning_team_id,
+            losing_team_id     = :u_losing_team_id,
+            winning_org_id     = :u_winning_org_id,
+            losing_org_id      = :u_losing_org_id,
+            game_outcome       = :u_game_outcome,
+            boxscore_json      = :u_boxscore_json,
+            play_by_play_json  = :u_play_by_play_json,
+            game_type          = :u_game_type,
+            completed_at       = NOW()
     """)
 
     count = 0
@@ -2217,6 +2216,16 @@ def _store_game_results(
                 "boxscore_json": boxscore_str,
                 "play_by_play_json": pbp_str,
                 "game_type": game_type,
+                "u_home_score": home_score,
+                "u_away_score": away_score,
+                "u_winning_team_id": winning_team_id,
+                "u_losing_team_id": losing_team_id,
+                "u_winning_org_id": winning_org_id,
+                "u_losing_org_id": losing_org_id,
+                "u_game_outcome": game_outcome,
+                "u_boxscore_json": boxscore_str,
+                "u_play_by_play_json": pbp_str,
+                "u_game_type": game_type,
             })
             count += 1
         except Exception:
@@ -2293,19 +2302,18 @@ def _store_game_results_bulk(
              :home_team_id, :away_team_id, :home_score, :away_score,
              :winning_team_id, :losing_team_id, :winning_org_id, :losing_org_id,
              :game_outcome, :boxscore_json, :play_by_play_json, :game_type, NOW())
-        AS new_row
         ON DUPLICATE KEY UPDATE
-            home_score         = new_row.home_score,
-            away_score         = new_row.away_score,
-            winning_team_id    = new_row.winning_team_id,
-            losing_team_id     = new_row.losing_team_id,
-            winning_org_id     = new_row.winning_org_id,
-            losing_org_id      = new_row.losing_org_id,
-            game_outcome       = new_row.game_outcome,
-            boxscore_json      = new_row.boxscore_json,
-            play_by_play_json  = new_row.play_by_play_json,
-            game_type          = new_row.game_type,
-            completed_at       = new_row.completed_at
+            home_score         = :u_home_score,
+            away_score         = :u_away_score,
+            winning_team_id    = :u_winning_team_id,
+            losing_team_id     = :u_losing_team_id,
+            winning_org_id     = :u_winning_org_id,
+            losing_org_id      = :u_losing_org_id,
+            game_outcome       = :u_game_outcome,
+            boxscore_json      = :u_boxscore_json,
+            play_by_play_json  = :u_play_by_play_json,
+            game_type          = :u_game_type,
+            completed_at       = NOW()
     """)
 
     all_params = []
@@ -2383,6 +2391,16 @@ def _store_game_results_bulk(
             "boxscore_json": boxscore_str,
             "play_by_play_json": pbp_str,
             "game_type": game_type,
+            "u_home_score": home_score,
+            "u_away_score": away_score,
+            "u_winning_team_id": winning_team_id,
+            "u_losing_team_id": losing_team_id,
+            "u_winning_org_id": winning_org_id,
+            "u_losing_org_id": losing_org_id,
+            "u_game_outcome": game_outcome,
+            "u_boxscore_json": boxscore_str,
+            "u_play_by_play_json": pbp_str,
+            "u_game_type": game_type,
         })
 
     if not all_params:
