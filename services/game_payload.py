@@ -28,6 +28,17 @@ import random
 from services.stamina import get_effective_stamina, get_effective_stamina_bulk
 from services.injuries import get_active_injury_malus, get_active_injury_malus_bulk
 
+# Map our DB injury_risk labels to the engine's expected label keys.
+# Engine uses: "Safe", "Dependable", "Normal", "Risky", "Volatile"
+# DB stores:   "Iron Man", "Dependable", "Normal", "Undependable", "Tires Easily"
+_INJURY_RISK_TO_ENGINE: Dict[str, str] = {
+    "Iron Man":     "Safe",
+    "Dependable":   "Dependable",
+    "Normal":       "Normal",
+    "Undependable": "Risky",
+    "Tires Easily": "Volatile",
+}
+
 
 @dataclass
 class EnginePlayerView:
@@ -1522,6 +1533,10 @@ def build_team_game_side(
         ep["stamina"] = raw_stamina
         ep["benched_by_injury"] = (injury_stam_pct is not None and raw_stamina == 0)
 
+        # Translate injury_risk to the engine's label vocabulary
+        if ep.get("injury_risk"):
+            ep["injury_risk"] = _INJURY_RISK_TO_ENGINE.get(ep["injury_risk"], ep["injury_risk"])
+
         # Strategy
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
         ep.update(strat)
@@ -1681,6 +1696,10 @@ def build_team_game_side_from_cache(
             raw_stamina = int(max(0, raw_stamina * float(stam_pct)))
         ep["stamina"] = raw_stamina
         ep["benched_by_injury"] = (stam_pct is not None and raw_stamina == 0)
+
+        # Translate injury_risk to the engine's label vocabulary
+        if ep.get("injury_risk"):
+            ep["injury_risk"] = _INJURY_RISK_TO_ENGINE.get(ep["injury_risk"], ep["injury_risk"])
 
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
         ep.update(strat)
@@ -2525,6 +2544,7 @@ def _drain_stamina_and_persist_injuries(
     conn,
     results: List[Dict[str, Any]],
     league_year_id: int,
+    injury_types: List[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
     """
     Per-level safe post-subweek updates: stamina drain + injury persistence.
@@ -2534,8 +2554,25 @@ def _drain_stamina_and_persist_injuries(
 
     Recovery is NOT done here — call _apply_global_stamina_recovery() once
     after all levels have finished their drain phase.
+
+    injury_types: optional list of injury type dicts (from get_all_injury_types).
+    When provided, effects are computed from impact_template_json if the engine
+    does not return them — ensuring malus_json is never stored as "{}".
     """
     from sqlalchemy import text as sa_text
+
+    # Build injury_type_id → row lookup AND code → id lookup for template fallback.
+    # code lookup is needed because pregame injury entries from the engine omit injury_type_id.
+    injury_type_map: Dict[int, Dict[str, Any]] = {}
+    injury_code_to_id: Dict[str, int] = {}
+    if injury_types:
+        for it in injury_types:
+            tid = it.get("id") or it.get("injury_type_id")
+            if tid is not None:
+                injury_type_map[int(tid)] = it
+                code = it.get("code")
+                if code:
+                    injury_code_to_id[str(code)] = int(tid)
 
     injuries_persisted = 0
     drain_count = 0
@@ -2613,9 +2650,50 @@ def _drain_stamina_and_persist_injuries(
             if pid is None:
                 continue
             pid = int(pid)
-            injury_type_id = int(inj.get("injury_type_id", 0))
+            # Pregame injuries were already persisted by _persist_pregame_injuries
+            # before the game ran. Skip them here to avoid duplicate events with
+            # empty malus_json overwriting the good event already in the DB.
+            if inj.get("timeframe") == "pregame":
+                continue
+            # injury_type_id is absent from pregame entries — fall back to code lookup
+            raw_tid = inj.get("injury_type_id")
+            if raw_tid:
+                injury_type_id = int(raw_tid)
+            else:
+                code = inj.get("code") or ""
+                injury_type_id = injury_code_to_id.get(str(code), 0)
+                if not injury_type_id:
+                    logger.warning(
+                        "drain_stamina: no injury_type_id and unknown code %r for player %d — skipping",
+                        code, pid,
+                    )
+                    continue
             duration_weeks = int(inj.get("duration_weeks", 1))
             effects = _normalize_engine_effects(inj.get("effects") or {})
+
+            # If the engine returned no effects, derive them from the injury type template.
+            # This ensures malus_json is never stored as "{}" for engine-reported injuries.
+            if not effects and injury_type_id in injury_type_map:
+                it_row = injury_type_map[injury_type_id]
+                raw = it_row.get("impact_template_json") or "{}"
+                try:
+                    template = raw if isinstance(raw, dict) else json.loads(raw)
+                    for attr, cfg in template.items():
+                        if isinstance(cfg, dict):
+                            min_pct = float(cfg.get("min_pct", 0))
+                            max_pct = float(cfg.get("max_pct", 0))
+                            mid_pct = (min_pct + max_pct) / 2.0
+                            effects[attr] = max(0.0, 1.0 - mid_pct)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    logger.warning(
+                        "drain_stamina: failed to parse template for injury_type_id %d",
+                        injury_type_id,
+                    )
+
+            logger.debug(
+                "drain_stamina: player %d injury_type %d → effects=%s",
+                pid, injury_type_id, effects,
+            )
 
             try:
                 ev_result = conn.execute(injury_insert, {
@@ -2710,13 +2788,14 @@ def _update_player_state_bulk(
     results: List[Dict[str, Any]],
     league_year_id: int,
     league_level: int | None = None,
+    injury_types: List[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
     """
     Combined drain + recovery + injuries.  Used by legacy single-level code path.
     For parallel processing, use _drain_stamina_and_persist_injuries() +
     _apply_global_stamina_recovery() separately.
     """
-    counts = _drain_stamina_and_persist_injuries(conn, results, league_year_id)
+    counts = _drain_stamina_and_persist_injuries(conn, results, league_year_id, injury_types=injury_types)
     recovery_count = _apply_global_stamina_recovery(conn, league_year_id, league_level)
     counts["recovery_count"] = recovery_count
     return counts
@@ -3022,7 +3101,8 @@ def _process_level_subweek(
 
         # --- All post-engine writes in a single transaction ---
 
-        # Engine diagnostic
+        # Engine diagnostic (isolated savepoint so a failure here cannot
+        # poison the outer transaction with a PendingRollbackError)
         try:
             sent_ids = [p.get("game_id") for p in payloads]
             received_ids = set()
@@ -3031,24 +3111,25 @@ def _process_level_subweek(
                 if gid is not None:
                     received_ids.add(int(gid))
             missing_ids = [gid for gid in sent_ids if gid and int(gid) not in received_ids]
-            level_conn.execute(sa_text("""
-                INSERT INTO engine_diagnostic_log
-                    (league_year_id, season_week, subweek, league_level,
-                     games_sent, results_received, missing_game_ids,
-                     error_message)
-                VALUES
-                    (:lyid, :sw, :sub, :ll,
-                     :sent, :recv, :missing, :err)
-            """), {
-                "lyid": league_year_id,
-                "sw": season_week,
-                "sub": subweek,
-                "ll": level,
-                "sent": len(payloads),
-                "recv": len(results),
-                "missing": json.dumps(missing_ids) if missing_ids else None,
-                "err": None,
-            })
+            with level_conn.begin_nested():
+                level_conn.execute(sa_text("""
+                    INSERT INTO engine_diagnostic_log
+                        (league_year_id, season_week, subweek, league_level,
+                         games_sent, results_received, missing_game_ids,
+                         error_message)
+                    VALUES
+                        (:lyid, :sw, :sub, :ll,
+                         :sent, :recv, :missing, :err)
+                """), {
+                    "lyid": league_year_id,
+                    "sw": season_week,
+                    "sub": subweek,
+                    "ll": level,
+                    "sent": len(payloads),
+                    "recv": len(results),
+                    "missing": json.dumps(missing_ids) if missing_ids else None,
+                    "err": None,
+                })
             if missing_ids:
                 logger.warning(
                     "Engine diagnostic: %d missing game(s) for level %d, subweek '%s': %s",
@@ -3062,19 +3143,20 @@ def _process_level_subweek(
 
         # Update diagnostic with stored count
         try:
-            level_conn.execute(sa_text("""
-                UPDATE engine_diagnostic_log
-                SET results_stored = :stored
-                WHERE league_year_id = :lyid AND season_week = :sw
-                  AND subweek = :sub AND league_level = :ll
-                ORDER BY id DESC LIMIT 1
-            """), {
-                "stored": result_count,
-                "lyid": league_year_id,
-                "sw": season_week,
-                "sub": subweek,
-                "ll": level,
-            })
+            with level_conn.begin_nested():
+                level_conn.execute(sa_text("""
+                    UPDATE engine_diagnostic_log
+                    SET results_stored = :stored
+                    WHERE league_year_id = :lyid AND season_week = :sw
+                      AND subweek = :sub AND league_level = :ll
+                    ORDER BY id DESC LIMIT 1
+                """), {
+                    "stored": result_count,
+                    "lyid": league_year_id,
+                    "sw": season_week,
+                    "sub": subweek,
+                    "ll": level,
+                })
         except Exception:
             pass
 
@@ -3097,7 +3179,7 @@ def _process_level_subweek(
 
         # Stamina drain + injuries (NO recovery — that's global)
         drain_counts = _drain_stamina_and_persist_injuries(
-            level_conn, results, league_year_id,
+            level_conn, results, league_year_id, injury_types=injury_types,
         )
 
         # Rotation advancement

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Dict, Any, Iterable
 
 from sqlalchemy import MetaData, Table, select, and_
 
 from db import get_engine
+
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # Table reflection + cache
@@ -192,6 +195,11 @@ def get_active_injury_malus_bulk(
             if parsed:
                 event_malus_by_player.setdefault(pid, []).append(parsed)
 
+    logger.debug(
+        "get_active_injury_malus_bulk: %d injured players, %d have event malus data",
+        len(injured_pids), len(event_malus_by_player),
+    )
+
     # 3) Load career injuries (always apply)
     career_rows = (
         conn.execute(
@@ -227,6 +235,12 @@ def get_active_injury_malus_bulk(
     # Strip out no-op entries (factor == 1.0) to keep return value clean
     for pid in list(out):
         out[pid] = {k: v for k, v in out[pid].items() if v != 1.0}
+
+    non_empty = {pid: v for pid, v in out.items() if v}
+    logger.debug(
+        "get_active_injury_malus_bulk: returning non-empty malus for %d players",
+        len(non_empty),
+    )
 
     return out
 
