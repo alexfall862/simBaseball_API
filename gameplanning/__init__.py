@@ -264,10 +264,12 @@ def put_player_strategy(org_id: int, player_id: int):
     engine = get_engine()
     tbl = _reflect_table("playerStrategies")
     try:
-        with engine.connect() as conn:
+        # Write: commit and release locks immediately
+        with engine.begin() as conn:
             conn.execute(sql, params)
-            conn.commit()
-            # Fetch updated row
+
+        # Read back the saved row on a separate connection
+        with engine.connect() as conn:
             row = conn.execute(
                 select(tbl).where(
                     and_(tbl.c.playerID == player_id, tbl.c.orgID == org_id)
@@ -358,9 +360,10 @@ def put_team_strategy(team_id: int):
     engine = get_engine()
     tbl = _reflect_table("team_strategy")
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             conn.execute(sql, values)
-            conn.commit()
+
+        with engine.connect() as conn:
             row = conn.execute(
                 select(tbl).where(tbl.c.team_id == team_id).limit(1)
             ).first()
