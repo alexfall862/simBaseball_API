@@ -5,10 +5,98 @@ from typing import Dict, Any, List
 
 import json
 import logging
+import sys
 
 from sqlalchemy import MetaData, Table, select, and_
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Roster depletion guard
+# ---------------------------------------------------------------------------
+
+class RosterDepletionError(RuntimeError):
+    """
+    Raised when a team's available (non-benched) player count drops below the
+    minimum needed to simulate games.  Halts the sim immediately so you can
+    investigate and lower the injury rate before continuing.
+    """
+
+
+# Minimum non-benched players / pitchers required per team to continue.
+# Adjust these if you intentionally run with smaller rosters.
+_MIN_AVAILABLE_PLAYERS = 12
+_MIN_AVAILABLE_PITCHERS = 3
+
+
+def _check_roster_availability(cache, season_week: int, subweek: str, level: int) -> None:
+    """
+    Pre-flight check run after the subweek cache is loaded, before any payloads
+    are built or sent to the engine.
+
+    For each team, counts players NOT benched by injury (stamina_pct == 0.0).
+    If any team falls below _MIN_AVAILABLE_PLAYERS or _MIN_AVAILABLE_PITCHERS,
+    prints a full report to stderr and raises RosterDepletionError.
+    """
+    problems = []
+
+    for team_id, player_ids in cache.roster_by_team.items():
+        available = []
+        available_pitchers = []
+
+        for pid in player_ids:
+            stam_pct = cache.injury_malus.get(pid, {}).get("stamina_pct")
+            benched = stam_pct is not None and float(stam_pct) == 0.0
+            if benched:
+                continue
+            available.append(pid)
+            view = cache.engine_views.get(pid) or {}
+            if (view.get("ptype") or "").strip().lower() == "pitcher":
+                available_pitchers.append(pid)
+
+        team_abbrev = (cache.team_meta.get(team_id) or {}).get("team_abbrev") or str(team_id)
+        total = len(player_ids)
+        benched_count = total - len(available)
+
+        if len(available) < _MIN_AVAILABLE_PLAYERS:
+            problems.append(
+                f"  {team_abbrev:6s} (team {team_id:>6}): "
+                f"{len(available)}/{total} available — "
+                f"{benched_count} benched by injury  "
+                f"[need ≥{_MIN_AVAILABLE_PLAYERS} total, ≥{_MIN_AVAILABLE_PITCHERS} pitchers]"
+            )
+        elif len(available_pitchers) < _MIN_AVAILABLE_PITCHERS:
+            problems.append(
+                f"  {team_abbrev:6s} (team {team_id:>6}): "
+                f"only {len(available_pitchers)} pitchers available  "
+                f"[need ≥{_MIN_AVAILABLE_PITCHERS}]"
+            )
+
+    if not problems:
+        return
+
+    border = "=" * 72
+    msg_lines = [
+        "",
+        border,
+        f"  ROSTER DEPLETION — Week {season_week}, Subweek '{subweek}', Level {level}",
+        border,
+        "  The following teams cannot field a playable roster:",
+        "",
+        *problems,
+        "",
+        "  Simulation halted before any games were built.",
+        "  To continue: lower the injury base rate in level_game_config,",
+        "  or advance the week to allow injuries to heal.",
+        border,
+        "",
+    ]
+    msg = "\n".join(msg_lines)
+
+    print(msg, file=sys.stderr, flush=True)
+    logger.error("Roster depletion detected — sim halted. See stderr for details.")
+    raise RosterDepletionError(msg)
 
 from db import get_engine
 from rosters import (
@@ -1373,7 +1461,7 @@ def build_engine_player_views_bulk(
                 factor_num = float(factor)
             except (TypeError, ValueError):
                 factor_num = 1.0
-            adjusted_mapping[base_key] = max(1.0, base_num * factor_num)
+            adjusted_mapping[base_key] = max(0.0, base_num * factor_num)
 
         engine_player = _build_engine_player_view_from_mapping(adjusted_mapping, pos_weights)
 
@@ -2631,11 +2719,6 @@ def _drain_stamina_and_persist_injuries(
             if pid is None:
                 continue
             pid = int(pid)
-            # Pregame injuries were already persisted by _persist_pregame_injuries
-            # before the game ran. Skip them here to avoid duplicate events with
-            # empty malus_json overwriting the good event already in the DB.
-            if inj.get("timeframe") == "pregame":
-                continue
             # injury_type_id is absent from pregame entries — fall back to code lookup
             raw_tid = inj.get("injury_type_id")
             if raw_tid:
@@ -2652,19 +2735,25 @@ def _drain_stamina_and_persist_injuries(
             duration_weeks = int(inj.get("duration_weeks", 1))
             effects = _normalize_engine_effects(inj.get("effects") or {})
 
-            # If the engine returned no effects, derive them from the injury type template.
-            # This ensures malus_json is never stored as "{}" for engine-reported injuries.
-            if not effects and injury_type_id in injury_type_map:
+            # stamina_pct is a backend roster-management attribute — the engine
+            # handles in-game energy via stamina_cost, not as an injury effect.
+            # We always derive stamina_pct from the injury type template so that
+            # injured players are benched for the correct number of weeks.
+            # Other template attributes (contact, speed, etc.) are also filled in
+            # from the template for any attribute the engine did not return.
+            if injury_type_id in injury_type_map:
                 it_row = injury_type_map[injury_type_id]
                 raw = it_row.get("impact_template_json") or "{}"
                 try:
                     template = raw if isinstance(raw, dict) else json.loads(raw)
                     for attr, cfg in template.items():
+                        if attr in effects:
+                            continue  # keep engine-supplied value
                         if isinstance(cfg, dict):
                             min_pct = float(cfg.get("min_pct", 0))
                             max_pct = float(cfg.get("max_pct", 0))
-                            mid_pct = (min_pct + max_pct) / 2.0
-                            effects[attr] = max(0.0, 1.0 - mid_pct)
+                            rolled_pct = round(random.uniform(min_pct, max_pct), 2)
+                            effects[attr] = max(0.0, 1.0 - rolled_pct)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     logger.warning(
                         "drain_stamina: failed to parse template for injury_type_id %d",
@@ -2844,170 +2933,6 @@ def _load_stamina_recovery_config(conn, league_level: int = None) -> dict:
     }
 
 
-def _update_player_state_after_subweek(
-    conn,
-    results: List[Dict[str, Any]],
-    league_year_id: int,
-    league_level: int | None = None,
-) -> Dict[str, int]:
-    """
-    Post-subweek state updates (single-game version).
-    This function handles:
-      1. Apply stamina drain from engine stamina_cost values.
-      2. Stamina recovery for all fatigued players (modified by durability).
-      3. Injury persistence.
-    """
-    from sqlalchemy import text as sa_text
-
-    injuries_persisted = 0
-    drain_count = 0
-
-    # --- 1. STAMINA DRAIN from engine stamina_cost ---
-    player_costs = {}
-    for result in results:
-        nested = result.get("result") or {}
-        stats = result.get("stats") or nested.get("stats")
-        if not stats:
-            continue
-        for pid_str, p in (stats.get("pitchers") or {}).items():
-            cost = p.get("stamina_cost")
-            if cost is not None and int(cost) > 0:
-                player_costs[int(pid_str)] = int(cost)
-        for pid_str, b in (stats.get("batters") or {}).items():
-            pid = int(pid_str)
-            if pid not in player_costs:
-                cost = b.get("stamina_cost")
-                if cost is not None and int(cost) > 0:
-                    player_costs[pid] = int(cost)
-
-    if player_costs:
-        drain_upsert = sa_text("""
-            INSERT INTO player_fatigue_state
-                (player_id, league_year_id, stamina, last_updated_at)
-            VALUES
-                (:player_id, :league_year_id, GREATEST(0, 100 - :cost), NOW())
-            ON DUPLICATE KEY UPDATE
-                stamina = GREATEST(0, stamina - :cost),
-                last_updated_at = NOW()
-        """)
-        drain_params = [
-            {"player_id": pid, "league_year_id": league_year_id, "cost": cost}
-            for pid, cost in player_costs.items()
-        ]
-        try:
-            conn.execute(drain_upsert, drain_params)
-            drain_count = len(drain_params)
-            logger.info(
-                "update_player_state: applied stamina drain to %d players",
-                drain_count,
-            )
-        except Exception:
-            logger.exception("update_player_state: stamina drain failed")
-
-    # --- 2. Rest recovery for all fatigued players ---
-    rec_cfg = _load_stamina_recovery_config(conn, league_level)
-    recovery_sql = sa_text("""
-        UPDATE player_fatigue_state pfs
-        JOIN simbbPlayers p ON p.id = pfs.player_id
-        SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(
-            CASE WHEN p.ptype = 'Pitcher' THEN :base_recovery_pitcher
-                 ELSE :base_recovery
-            END *
-            CASE p.durability
-                WHEN 'Iron Man'      THEN :mult_iron_man
-                WHEN 'Dependable'    THEN :mult_dependable
-                WHEN 'Normal'        THEN :mult_normal
-                WHEN 'Undependable'  THEN :mult_undependable
-                WHEN 'Tires Easily'  THEN :mult_tires_easily
-                ELSE :mult_normal
-            END)),
-            pfs.last_updated_at = NOW()
-        WHERE pfs.league_year_id = :league_year_id
-          AND pfs.stamina < 100
-    """)
-
-    recovery_count = 0
-    try:
-        rest_result = conn.execute(recovery_sql, {
-            "base_recovery": rec_cfg["base_recovery"],
-            "base_recovery_pitcher": rec_cfg["base_recovery_pitcher"],
-            "mult_iron_man": rec_cfg["Iron Man"],
-            "mult_dependable": rec_cfg["Dependable"],
-            "mult_normal": rec_cfg["Normal"],
-            "mult_undependable": rec_cfg["Undependable"],
-            "mult_tires_easily": rec_cfg["Tires Easily"],
-            "league_year_id": league_year_id,
-        })
-        recovery_count = rest_result.rowcount
-        logger.info("update_player_state: %d players recovered stamina", recovery_count)
-    except Exception:
-        logger.exception("update_player_state: rest recovery failed")
-
-    # --- 2. Injury persistence (if engine reports injuries) ---
-    injury_insert = sa_text("""
-        INSERT INTO player_injury_events
-            (player_id, injury_type_id, league_year_id, weeks_assigned,
-             weeks_remaining, malus_json)
-        VALUES
-            (:player_id, :injury_type_id, :league_year_id, :weeks_assigned,
-             :weeks_remaining, :malus_json)
-    """)
-
-    injury_state_upsert = sa_text("""
-        INSERT INTO player_injury_state
-            (player_id, status, current_event_id, weeks_remaining, last_updated_at)
-        VALUES
-            (:player_id, 'injured', :event_id, :weeks_remaining, NOW())
-        ON DUPLICATE KEY UPDATE
-            status           = 'injured',
-            current_event_id = IF(:weeks_remaining > weeks_remaining,
-                                  :event_id, current_event_id),
-            weeks_remaining  = GREATEST(weeks_remaining, :weeks_remaining),
-            last_updated_at  = NOW()
-    """)
-
-    for result in results:
-        injuries = result.get("injuries") or []
-        for inj in injuries:
-            pid = inj.get("player_id")
-            if pid is None:
-                continue
-            pid = int(pid)
-
-            injury_type_id = int(inj.get("injury_type_id", 0))
-            duration_weeks = int(inj.get("duration_weeks", 1))
-            effects = _normalize_engine_effects(inj.get("effects") or {})
-
-            try:
-                ev_result = conn.execute(injury_insert, {
-                    "player_id": pid,
-                    "injury_type_id": injury_type_id,
-                    "league_year_id": league_year_id,
-                    "weeks_assigned": duration_weeks,
-                    "weeks_remaining": duration_weeks,
-                    "malus_json": json.dumps(effects),
-                })
-                event_id = ev_result.lastrowid
-                conn.execute(injury_state_upsert, {
-                    "player_id": pid,
-                    "event_id": event_id,
-                    "weeks_remaining": duration_weeks,
-                })
-                injuries_persisted += 1
-            except Exception:
-                logger.exception(
-                    "update_player_state: injury persistence failed for player %d",
-                    pid,
-                )
-
-    logger.info(
-        "update_player_state: %d drained, %d recovered, %d injuries persisted",
-        drain_count, recovery_count, injuries_persisted,
-    )
-    return {"drain_count": drain_count, "recovery_count": recovery_count,
-            "injuries_persisted": injuries_persisted}
-
-
 # -------------------------------------------------------------------
 # Public: weekly batch processing
 # -------------------------------------------------------------------
@@ -3045,6 +2970,9 @@ def _process_level_subweek(
         # Load mutable state for this subweek (uses shared week_cache)
         state = load_subweek_state(level_conn, week_cache, league_year_id, season_week)
         cache = SubweekCache.from_week_and_state(week_cache, state)
+
+        # Pre-flight: halt immediately if any team's roster is depleted
+        _check_roster_availability(cache, season_week, subweek, level)
 
         # Build payloads from cache (zero DB per game)
         payloads = []

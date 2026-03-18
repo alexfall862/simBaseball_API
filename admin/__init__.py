@@ -113,6 +113,96 @@ def admin_toggle_write_mode():
     session["admin_write_mode"] = enabled
     return jsonify(ok=True, write_mode=enabled)
 
+@admin_bp.get("/api/injury-diagnostics")
+def admin_injury_diagnostics():
+    """
+    Diagnostic snapshot of the injury system.
+    Returns counts, sample rows, and a per-player malus check so you can
+    immediately see whether injuries exist and whether maluses are populated.
+
+    GET /admin/api/injury-diagnostics
+    GET /admin/api/injury-diagnostics?league_year_id=123&sample_players=5
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+
+    engine = get_engine()
+    league_year_id = request.args.get("league_year_id", type=int)
+    sample_players = request.args.get("sample_players", default=10, type=int)
+
+    with engine.connect() as conn:
+        # 1. player_injury_state counts
+        state_counts = conn.execute(text(
+            "SELECT status, COUNT(*) as cnt FROM player_injury_state GROUP BY status"
+        )).mappings().all()
+
+        # 2. player_injury_events breakdown
+        event_stats = conn.execute(text("""
+            SELECT
+                COUNT(*) as total_events,
+                SUM(weeks_remaining > 0) as active_events,
+                SUM(weeks_remaining > 0 AND (malus_json IS NULL OR malus_json = '{}')) as active_empty_malus,
+                SUM(weeks_remaining > 0 AND malus_json != '{}' AND malus_json IS NOT NULL) as active_with_malus
+            FROM player_injury_events
+        """)).mappings().first()
+
+        # 3. Sample of recent active events
+        sample_events = conn.execute(text("""
+            SELECT pie.id, pie.player_id, pie.injury_type_id, pie.weeks_assigned,
+                   pie.weeks_remaining, pie.malus_json,
+                   pis.status as state_status,
+                   it.code as injury_code, it.name as injury_name,
+                   it.impact_template_json
+            FROM player_injury_events pie
+            LEFT JOIN player_injury_state pis ON pis.player_id = pie.player_id
+            LEFT JOIN injury_types it ON it.id = pie.injury_type_id
+            WHERE pie.weeks_remaining > 0
+            ORDER BY pie.id DESC
+            LIMIT :lim
+        """), {"lim": sample_players}).mappings().all()
+
+        # 4. Injury types with templates
+        injury_types = conn.execute(text("""
+            SELECT id, code, name,
+                   (impact_template_json IS NOT NULL AND impact_template_json != '{}') as has_template,
+                   impact_template_json
+            FROM injury_types
+            LIMIT 20
+        """)).mappings().all()
+
+        # 5. gamelist — do game rows have random_seed?
+        seed_stats_q = "SELECT COUNT(*) as total, SUM(random_seed IS NOT NULL) as has_seed FROM gamelist"
+        if league_year_id:
+            seed_stats = conn.execute(text(
+                seed_stats_q.replace("FROM gamelist", "FROM gamelist WHERE league_year_id = :ly")
+            ), {"ly": league_year_id}).mappings().first()
+        else:
+            seed_stats = conn.execute(text(seed_stats_q)).mappings().first()
+
+        # 6. What does get_active_injury_malus_bulk return for players with active events?
+        malus_sample = []
+        if sample_events:
+            from services.injuries import get_active_injury_malus_bulk
+            pids = list({int(r["player_id"]) for r in sample_events})[:sample_players]
+            malus_result = get_active_injury_malus_bulk(conn, pids)
+            malus_sample = [
+                {"player_id": pid, "malus": malus_result.get(pid, {})}
+                for pid in pids
+            ]
+
+    return jsonify(
+        injury_state_counts=[dict(r) for r in state_counts],
+        event_stats=dict(event_stats) if event_stats else {},
+        sample_active_events=[dict(r) for r in sample_events],
+        injury_types=[dict(r) for r in injury_types],
+        gamelist_seed_stats=dict(seed_stats) if seed_stats else {},
+        malus_by_player=malus_sample,
+    )
+
+
 @admin_bp.get("/presets")
 def admin_presets():
     guard = _require_admin()

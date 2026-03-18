@@ -902,32 +902,58 @@ def build_defense_and_lineup(
             if chosen in remaining_ids:
                 remaining_ids.remove(chosen)
 
-    # DH assignment
+    # DH assignment — include starter_id so a two-way player can bat as DH.
+    # Also consult plans_by_position["dh"] so a plan-configured DH (including
+    # a two-way pitcher) is honoured before falling back to best-scorer logic.
     if use_dh:
+        dh_pool = remaining_ids + (
+            [starter_id] if starter_id in players_by_id and starter_id not in remaining_ids else []
+        )
         best_pid = None
         best_score = None
-        for pid in remaining_ids:
-            p = players_by_id[pid]
-            if not _is_player_available_for_lineup(p):
-                continue
 
-            base_pos_rating = _get_rating(p, "dh_rating")
-            off_score = _compute_offense_score(p)
-            score = base_pos_rating * 0.7 + off_score * 0.3
+        # Plan-based pass: respect locked/priority plan rows for DH
+        dh_plan_rows = plans_by_position.get("dh", [])
+        if dh_plan_rows:
+            for row in dh_plan_rows:
+                pid = int(row["player_id"])
+                if pid not in players_by_id or pid not in dh_pool:
+                    continue
+                p = players_by_id[pid]
+                if not _is_player_available_for_lineup(p):
+                    continue
+                w = float(row.get("target_weight") or 0.0)
+                if w <= 0:
+                    continue
+                base_pos_rating = _get_rating(p, "dh_rating")
+                off_score = _compute_offense_score(p)
+                score = base_pos_rating * 0.7 + off_score * 0.3
+                if bool(row.get("locked")):
+                    score += 1000.0
+                if best_pid is None or score > best_score:
+                    best_pid = pid
+                    best_score = score
 
-            if best_pid is None or score > best_score:
-                best_pid = pid
-                best_score = score
+        # Score-based pass: if no plan candidate, pick best from full pool
+        if best_pid is None:
+            for pid in dh_pool:
+                p = players_by_id[pid]
+                if not _is_player_available_for_lineup(p):
+                    continue
+                base_pos_rating = _get_rating(p, "dh_rating")
+                off_score = _compute_offense_score(p)
+                score = base_pos_rating * 0.7 + off_score * 0.3
+                if best_pid is None or score > best_score:
+                    best_pid = pid
+                    best_score = score
 
-        # Fallback: if no remaining player passed availability, pick the
-        # best remaining player so the DH slot is never left empty in a DH
-        # league (avoids pitcher batting). Exclude stamina=0 (benched by
-        # injury) unless no one else is available.
-        if best_pid is None and remaining_ids:
-            fallback_pool = [pid for pid in remaining_ids
+        # Fallback: if no player passed availability, pick best non-benched
+        # so the DH slot is never left empty in a DH league.
+        if best_pid is None and dh_pool:
+            fallback_pool = [pid for pid in dh_pool
                              if not players_by_id[pid].get("benched_by_injury")]
             if not fallback_pool:
-                fallback_pool = remaining_ids  # true last resort
+                fallback_pool = dh_pool  # true last resort
             fallback_pid = None
             fallback_score = None
             for pid in fallback_pool:
@@ -1025,27 +1051,56 @@ def build_defense_and_lineup_from_cache(
                 remaining_ids.remove(chosen)
 
     if use_dh:
+        # Include starter_id so a two-way player can bat as DH
+        dh_pool = remaining_ids + (
+            [starter_id] if starter_id in players_by_id and starter_id not in remaining_ids else []
+        )
         best_pid = None
         best_score = None
-        for pid in remaining_ids:
-            p = players_by_id[pid]
-            if not _is_player_available_for_lineup(p):
-                continue
-            base_pos_rating = _get_rating(p, "dh_rating")
-            off_score = _compute_offense_score(p)
-            score = base_pos_rating * 0.7 + off_score * 0.3
-            if best_pid is None or score > best_score:
-                best_pid = pid
-                best_score = score
+
+        # Plan-based pass: respect locked/priority plan rows for DH
+        dh_plan_rows = plans_by_position.get("dh", [])
+        if dh_plan_rows:
+            for row in dh_plan_rows:
+                pid = int(row["player_id"])
+                if pid not in players_by_id or pid not in dh_pool:
+                    continue
+                p = players_by_id[pid]
+                if not _is_player_available_for_lineup(p):
+                    continue
+                w = float(row.get("target_weight") or 0.0)
+                if w <= 0:
+                    continue
+                base_pos_rating = _get_rating(p, "dh_rating")
+                off_score = _compute_offense_score(p)
+                score = base_pos_rating * 0.7 + off_score * 0.3
+                if bool(row.get("locked")):
+                    score += 1000.0
+                if best_pid is None or score > best_score:
+                    best_pid = pid
+                    best_score = score
+
+        # Score-based pass: if no plan candidate, pick best from full pool
+        if best_pid is None:
+            for pid in dh_pool:
+                p = players_by_id[pid]
+                if not _is_player_available_for_lineup(p):
+                    continue
+                base_pos_rating = _get_rating(p, "dh_rating")
+                off_score = _compute_offense_score(p)
+                score = base_pos_rating * 0.7 + off_score * 0.3
+                if best_pid is None or score > best_score:
+                    best_pid = pid
+                    best_score = score
 
         # Fallback: pick best remaining player so the DH slot is never empty
         # in a DH league. Exclude stamina=0 (benched by injury) unless no
         # one else is available.
-        if best_pid is None and remaining_ids:
-            fallback_pool = [pid for pid in remaining_ids
+        if best_pid is None and dh_pool:
+            fallback_pool = [pid for pid in dh_pool
                              if not players_by_id[pid].get("benched_by_injury")]
             if not fallback_pool:
-                fallback_pool = remaining_ids  # true last resort
+                fallback_pool = dh_pool  # true last resort
             fallback_pid = None
             fallback_score = None
             for pid in fallback_pool:

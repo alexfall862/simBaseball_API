@@ -140,11 +140,11 @@ def _get_pregame_base_rate(conn, league_level_id: int) -> float:
 
 # Injury risk → multiplier
 _RISK_MULTIPLIERS: Dict[str, float] = {
-    "iron man": 0.5,
-    "normal": 1.0,
-    "needs rest": 1.5,
-    "fragile": 2.0,
-    "high": 1.5,
+    "safe":       0.5,
+    "dependable": 0.75,
+    "normal":     1.0,
+    "risky":      1.5,
+    "volatile":   2.0,
 }
 
 
@@ -324,6 +324,8 @@ def _apply_effects_to_player(
             base_stam = 0.0
         new_stam = int(max(0.0, base_stam * factor))
         player["stamina"] = new_stam
+        if new_stam == 0:
+            player["benched_by_injury"] = True
 
     # Other attributes (e.g. 'contact', 'power', etc. -> scale *_base fields)
     for attr, factor in effects.items():

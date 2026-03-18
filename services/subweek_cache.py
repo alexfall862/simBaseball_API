@@ -16,6 +16,7 @@ Usage:
 
 import json
 import logging
+import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Set, Tuple
 
@@ -328,6 +329,93 @@ def load_week_cache(
     return wc
 
 
+def _repair_malus_json(conn, player_ids: list) -> None:
+    """
+    Ensure all active injury events have the complete set of malus attributes
+    defined by their injury type's impact_template_json.
+
+    stamina_pct is a backend roster-management attribute — the engine never
+    returns it as an injury effect.  This function adds any template attributes
+    missing from malus_json (preserving engine-supplied values like contact).
+
+    Safe to call on every subweek load — it is a no-op when nothing is missing.
+    """
+    if not player_ids:
+        return
+
+    from sqlalchemy import text as sa_text
+
+    ph = ", ".join(f":p{i}" for i in range(len(player_ids)))
+    params = {f"p{i}": pid for i, pid in enumerate(player_ids)}
+
+    try:
+        rows = conn.execute(sa_text(f"""
+            SELECT pie.id AS event_id, pie.malus_json,
+                   it.impact_template_json
+            FROM player_injury_events pie
+            JOIN player_injury_state pis ON pis.player_id = pie.player_id
+            JOIN injury_types it ON it.id = pie.injury_type_id
+            WHERE pie.player_id IN ({ph})
+              AND pie.weeks_remaining > 0
+              AND pis.status = 'injured'
+        """), params).mappings().all()
+    except Exception:
+        logger.warning("_repair_malus_json: query failed", exc_info=True)
+        return
+
+    if not rows:
+        return
+
+    updates = []
+    for row in rows:
+        raw_template = row["impact_template_json"]
+        if not raw_template:
+            continue
+        try:
+            template = raw_template if isinstance(raw_template, dict) else json.loads(raw_template)
+        except (TypeError, json.JSONDecodeError):
+            continue
+
+        try:
+            existing = json.loads(row["malus_json"] or "{}")
+            if not isinstance(existing, dict):
+                existing = {}
+        except (TypeError, json.JSONDecodeError):
+            existing = {}
+
+        updated = dict(existing)
+        changed = False
+        for attr, cfg in template.items():
+            if attr in updated:
+                continue  # engine-supplied value — keep it
+            if isinstance(cfg, dict):
+                try:
+                    min_pct = float(cfg.get("min_pct", 0))
+                    max_pct = float(cfg.get("max_pct", 0))
+                    rolled_pct = round(random.uniform(min_pct, max_pct), 2)
+                    updated[attr] = max(0.0, 1.0 - rolled_pct)
+                    changed = True
+                except (TypeError, ValueError):
+                    continue
+
+        if changed:
+            updates.append({"event_id": int(row["event_id"]), "malus_json": json.dumps(updated)})
+
+    if not updates:
+        return
+
+    try:
+        conn.execute(sa_text(
+            "UPDATE player_injury_events SET malus_json = :malus_json WHERE id = :event_id"
+        ), updates)
+        logger.info(
+            "_repair_malus_json: added missing template attributes to %d injury events",
+            len(updates),
+        )
+    except Exception:
+        logger.warning("_repair_malus_json: UPDATE failed", exc_info=True)
+
+
 # ===================================================================
 # load_subweek_state: mutable data, called once per subweek (~4 queries)
 # ===================================================================
@@ -358,9 +446,28 @@ def load_subweek_state(
         return st
 
     # ---------------------------------------------------------------
+    # 0) Repair any injury events stored with empty malus_json before
+    #    this subweek's cache is built.  Injuries persisted before the
+    #    template-fallback fix exist in the DB with malus_json = '{}',
+    #    meaning they contribute zero malus and players play normally
+    #    despite being marked as injured.  This one-time repair computes
+    #    the correct malus from the injury type template and updates the row.
+    # ---------------------------------------------------------------
+    _repair_malus_json(conn, all_pids)
+
+    # ---------------------------------------------------------------
     # 1) Injury maluses (bulk)
     # ---------------------------------------------------------------
     st.injury_malus = get_active_injury_malus_bulk(conn, all_pids)
+    injured_count = sum(1 for v in st.injury_malus.values() if v)
+    logger.info(
+        "load_subweek_state: %d players total, %d have active injury malus",
+        len(all_pids), injured_count,
+    )
+    if injured_count:
+        for pid, malus in st.injury_malus.items():
+            if malus:
+                logger.info("  injury_malus player %d: %s", pid, malus)
 
     # ---------------------------------------------------------------
     # 2) Engine views (derived from static player_rows + mutable injury_malus)
@@ -386,7 +493,7 @@ def load_subweek_state(
                 factor_num = float(factor)
             except (TypeError, ValueError):
                 factor_num = 1.0
-            adjusted[base_key] = max(1.0, base_num * factor_num)
+            adjusted[base_key] = max(0.0, base_num * factor_num)
 
         st.engine_views[pid] = _build_engine_player_view_from_mapping(
             adjusted, week_cache.position_weights
