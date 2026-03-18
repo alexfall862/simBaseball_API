@@ -28,17 +28,6 @@ import random
 from services.stamina import get_effective_stamina, get_effective_stamina_bulk
 from services.injuries import get_active_injury_malus, get_active_injury_malus_bulk
 
-# Map our DB injury_risk labels to the engine's expected label keys.
-# Engine uses: "Safe", "Dependable", "Normal", "Risky", "Volatile"
-# DB stores:   "Iron Man", "Dependable", "Normal", "Undependable", "Tires Easily"
-_INJURY_RISK_TO_ENGINE: Dict[str, str] = {
-    "Iron Man":     "Safe",
-    "Dependable":   "Dependable",
-    "Normal":       "Normal",
-    "Undependable": "Risky",
-    "Tires Easily": "Volatile",
-}
-
 
 @dataclass
 class EnginePlayerView:
@@ -1533,10 +1522,6 @@ def build_team_game_side(
         ep["stamina"] = raw_stamina
         ep["benched_by_injury"] = (injury_stam_pct is not None and raw_stamina == 0)
 
-        # Translate injury_risk to the engine's label vocabulary
-        if ep.get("injury_risk"):
-            ep["injury_risk"] = _INJURY_RISK_TO_ENGINE.get(ep["injury_risk"], ep["injury_risk"])
-
         # Strategy
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
         ep.update(strat)
@@ -1696,10 +1681,6 @@ def build_team_game_side_from_cache(
             raw_stamina = int(max(0, raw_stamina * float(stam_pct)))
         ep["stamina"] = raw_stamina
         ep["benched_by_injury"] = (stam_pct is not None and raw_stamina == 0)
-
-        # Translate injury_risk to the engine's label vocabulary
-        if ep.get("injury_risk"):
-            ep["injury_risk"] = _INJURY_RISK_TO_ENGINE.get(ep["injury_risk"], ep["injury_risk"])
 
         strat = strategies_by_player.get(pid) or DEFAULT_PLAYER_STRATEGY
         ep.update(strat)
