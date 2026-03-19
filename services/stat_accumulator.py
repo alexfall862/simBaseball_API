@@ -22,15 +22,65 @@ logger = logging.getLogger("app")
 # and reduces lock hold time on InnoDB.
 _BULK_CHUNK_SIZE = 100
 
+# MySQL error codes worth retrying at a smaller granularity
+_LOCK_WAIT_TIMEOUT = 1205
+_DEADLOCK = 1213
+
 
 def _chunked_execute(conn, stmt, params: list, chunk_size: int = _BULK_CHUNK_SIZE) -> int:
-    """Execute a statement in chunks to avoid oversized SQL and long lock holds."""
+    """Execute a statement in chunks to avoid oversized SQL and long lock holds.
+
+    Each chunk runs in a savepoint so a failure doesn't poison the outer
+    transaction.  On lock-timeout / deadlock, the failed chunk is retried
+    row-by-row (each row in its own savepoint) so that only the genuinely
+    conflicting rows are lost rather than the entire batch.
+    """
     total = 0
     for i in range(0, len(params), chunk_size):
         chunk = params[i:i + chunk_size]
-        conn.execute(stmt, chunk)
-        total += len(chunk)
+        try:
+            with conn.begin_nested():
+                conn.execute(stmt, chunk)
+            total += len(chunk)
+        except Exception as exc:
+            mysql_errno = _extract_mysql_errno(exc)
+            if mysql_errno in (_LOCK_WAIT_TIMEOUT, _DEADLOCK):
+                logger.warning(
+                    "_chunked_execute: lock error %d on chunk of %d rows, retrying row-by-row",
+                    mysql_errno, len(chunk),
+                )
+                total += _row_by_row_fallback(conn, stmt, chunk)
+            else:
+                raise
     return total
+
+
+def _row_by_row_fallback(conn, stmt, rows: list) -> int:
+    """Insert rows one at a time, each in a savepoint, skipping failures."""
+    inserted = 0
+    for row in rows:
+        try:
+            with conn.begin_nested():
+                conn.execute(stmt, [row])
+            inserted += 1
+        except Exception as exc:
+            mysql_errno = _extract_mysql_errno(exc)
+            logger.warning(
+                "_row_by_row_fallback: failed for player_id %s (mysql errno %s)",
+                row.get("player_id", "?"), mysql_errno,
+            )
+    return inserted
+
+
+def _extract_mysql_errno(exc: Exception) -> int | None:
+    """Pull the MySQL error number from a SQLAlchemy-wrapped exception."""
+    orig = getattr(exc, "orig", None)
+    if orig is not None and hasattr(orig, "args") and orig.args:
+        try:
+            return int(orig.args[0])
+        except (TypeError, ValueError, IndexError):
+            pass
+    return None
 
 
 def accumulate_game_stats(
@@ -580,6 +630,31 @@ _GAME_PITCHING_INSERT = text(f"""
 """)
 
 
+# Per-game fielding lines (for re-sim rollback of player_fielding_stats)
+_GAME_FIELDING_INSERT_FRESH = text("""
+    INSERT INTO game_fielding_lines
+        (game_id, player_id, team_id, league_year_id, position_code,
+         innings, putouts, assists, errors)
+    VALUES
+        (:game_id, :player_id, :team_id, :league_year_id, :position_code,
+         :innings, :putouts, :assists, :errors)
+""")
+
+_GAME_FIELDING_INSERT = text("""
+    INSERT INTO game_fielding_lines
+        (game_id, player_id, team_id, league_year_id, position_code,
+         innings, putouts, assists, errors)
+    VALUES
+        (:game_id, :player_id, :team_id, :league_year_id, :position_code,
+         :innings, :putouts, :assists, :errors)
+    AS new_row ON DUPLICATE KEY UPDATE
+        innings = new_row.innings,
+        putouts = new_row.putouts,
+        assists = new_row.assists,
+        errors  = new_row.errors
+""")
+
+
 def _insert_game_batting_lines(
     conn, game_id: int, batters: Dict[str, Any], league_year_id: int,
     fielders: Dict[str, Any] = None,
@@ -756,6 +831,7 @@ def accumulate_subweek_stats_bulk(
     # Per-game lines (always written for box score reconstruction)
     game_batting_params = []
     game_pitching_params = []
+    game_fielding_params = []
     substitution_params = []
 
     # Types that should NOT accumulate into season stats
@@ -865,33 +941,36 @@ def accumulate_subweek_stats_bulk(
                     "stat_accumulator bulk: failed to build pitching params for %s", pid_str
                 )
 
-        # Fielding season stats (skip for allstar/wbc)
-        if not skip_season:
-            for pid_str, f in fielders.items():
-                try:
-                    if "_" in pid_str:
-                        pid_part, pos_part = pid_str.rsplit("_", 1)
-                        player_id = int(pid_part)
-                        position_code = _FIELDING_POS_NORMALIZE.get(pos_part.lower(), pos_part)
-                    else:
-                        player_id = int(pid_str)
-                        raw_pos = str(f.get("position_code", ""))
-                        position_code = _FIELDING_POS_NORMALIZE.get(raw_pos.lower(), raw_pos)
+        # Fielding season stats (skip for allstar/wbc) + per-game fielding lines
+        for pid_str, f in fielders.items():
+            try:
+                if "_" in pid_str:
+                    pid_part, pos_part = pid_str.rsplit("_", 1)
+                    player_id = int(pid_part)
+                    position_code = _FIELDING_POS_NORMALIZE.get(pos_part.lower(), pos_part)
+                else:
+                    player_id = int(pid_str)
+                    raw_pos = str(f.get("position_code", ""))
+                    position_code = _FIELDING_POS_NORMALIZE.get(raw_pos.lower(), raw_pos)
 
-                    fielding_params.append({
-                        "player_id":      player_id,
-                        "league_year_id": league_year_id,
-                        "team_id":        int(f["team_id"]),
-                        "position_code":  position_code[:16],
-                        "innings":        int(f.get("innings", 0)),
-                        "putouts":        int(f.get("putouts", 0)),
-                        "assists":        int(f.get("assists", 0)),
-                        "errors":         int(f.get("errors", 0)),
-                    })
-                except Exception:
-                    logger.exception(
-                        "stat_accumulator bulk: failed to build fielding params for %s", pid_str
-                    )
+                field_row = {
+                    "player_id":      player_id,
+                    "league_year_id": league_year_id,
+                    "team_id":        int(f["team_id"]),
+                    "position_code":  position_code[:16],
+                    "innings":        int(f.get("innings", 0)),
+                    "putouts":        int(f.get("putouts", 0)),
+                    "assists":        int(f.get("assists", 0)),
+                    "errors":         int(f.get("errors", 0)),
+                }
+                if not skip_season:
+                    fielding_params.append(field_row)
+                # Always write per-game fielding line (for re-sim rollback)
+                game_fielding_params.append({**field_row, "game_id": game_id})
+            except Exception:
+                logger.exception(
+                    "stat_accumulator bulk: failed to build fielding params for %s", pid_str
+                )
 
         # Substitutions
         subs = game_result.get("substitutions") or nested.get("substitutions") or []
@@ -975,6 +1054,19 @@ def accumulate_subweek_stats_bulk(
                         logger.exception("stat_accumulator bulk: game pitching upsert also failed (%d rows)", len(game_pitching_params))
                 else:
                     logger.exception("stat_accumulator bulk: game pitching insert failed (%d rows)", len(game_pitching_params))
+
+        if game_fielding_params:
+            game_field_stmt = _GAME_FIELDING_INSERT if is_resim else _GAME_FIELDING_INSERT_FRESH
+            try:
+                _chunked_execute(conn, game_field_stmt, game_fielding_params)
+            except Exception:
+                if not is_resim:
+                    try:
+                        _chunked_execute(conn, _GAME_FIELDING_INSERT, game_fielding_params)
+                    except Exception:
+                        logger.exception("stat_accumulator bulk: game fielding upsert also failed (%d rows)", len(game_fielding_params))
+                else:
+                    logger.exception("stat_accumulator bulk: game fielding insert failed (%d rows)", len(game_fielding_params))
 
         if substitution_params:
             try:
