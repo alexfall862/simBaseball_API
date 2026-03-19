@@ -715,13 +715,13 @@ def wipe_season():
                         break
             deleted[label] = total
 
-        # 1. game_results — chunked (can be very large)
+        # 1. game_results — chunked with small batch (rows contain ~1MB JSON each)
         gr_where = "season IN :season_ids"
         gr_params = {"season_ids": tuple(season_ids) if season_ids else (0,)}
         if league_level is not None:
             gr_where += " AND league_level = :league_level"
             gr_params["league_level"] = league_level
-        _wipe_chunked("game_results", "game_results", gr_where, gr_params)
+        _wipe_chunked("game_results", "game_results", gr_where, gr_params, batch=500)
 
         # 2-4. Per-game line tables — chunked
         for tbl_name in ("game_batting_lines", "game_pitching_lines",

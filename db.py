@@ -15,13 +15,14 @@ def get_engine():
         if not database_url:
             raise RuntimeError("DATABASE_URL is not set")
 
-        # Socket-level timeouts prevent indefinite hangs when MySQL is unresponsive.
-        # These are distinct from MAX_EXECUTION_TIME (query-level, used by app.py
-        # for HTTP-serving connections).  60s is conservative — the largest
-        # operation is a bulk upsert of ~300 rows which normally completes in <5s.
+        # Socket-level timeouts prevent indefinite hangs when MySQL is truly
+        # unresponsive (network partition, server crash).  These must be generous
+        # enough for legitimate long-running operations: season wipes delete rows
+        # with ~1MB JSON blobs, bulk stat accumulation can touch thousands of rows,
+        # and simulation pipelines run multi-minute transactions.
         connect_args = {
-            "read_timeout": 60,
-            "write_timeout": 60,
+            "read_timeout": 600,
+            "write_timeout": 600,
         }
         if os.getenv("RAILWAY_ENVIRONMENT"):
             connect_args["ssl"] = {}
