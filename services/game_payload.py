@@ -2506,13 +2506,37 @@ def _store_game_results_bulk(
     if not all_params:
         return 0
 
+    # Try bulk insert in a savepoint so failures don't poison the connection
     try:
-        conn.execute(insert_sql, all_params)
+        with conn.begin_nested():
+            conn.execute(insert_sql, all_params)
         logger.info("store_game_results_bulk: inserted/updated %d game result rows", len(all_params))
         return len(all_params)
     except Exception:
-        logger.exception("store_game_results_bulk: bulk INSERT failed (%d rows)", len(all_params))
-        return 0
+        logger.warning(
+            "store_game_results_bulk: bulk INSERT failed (%d rows), falling back to row-by-row",
+            len(all_params),
+        )
+
+    # Row-by-row fallback — each row in its own savepoint so one bad row
+    # (or a connection hiccup on a very large payload) doesn't lose them all
+    inserted = 0
+    for params in all_params:
+        try:
+            with conn.begin_nested():
+                conn.execute(insert_sql, [params])
+            inserted += 1
+        except Exception:
+            logger.exception(
+                "store_game_results_bulk: row-by-row INSERT failed for game_id %s",
+                params.get("game_id"),
+            )
+
+    logger.info(
+        "store_game_results_bulk: row-by-row inserted %d / %d game result rows",
+        inserted, len(all_params),
+    )
+    return inserted
 
 
 def _update_playoff_series_bulk(
