@@ -29,6 +29,40 @@ _STAR_THRESHOLDS = [
 # Interest gauge buckets for fog-of-war
 _INTEREST_BUCKETS = ["Low", "Medium", "High", "Very High"]
 
+# Recruiting status progression — driven by total_interest / threshold ratio
+_RECRUITING_STAGES = [
+    (0.90, "May Sign this Week"),
+    (0.70, "May Sign Soon"),
+    (0.50, "Narrowing to Top 3"),
+    (0.30, "Locking Down Top 5"),
+    (0.10, "Listening to Offers"),
+]
+
+# Signing tendency threshold modifiers (applied to star_base)
+_TENDENCY_MULT = {
+    "Signs Very Early": 0.90,
+    "Signs Early":      0.95,
+    "Signs Normal":     1.00,
+    "Signs Late":       1.05,
+    "Signs Very Late":  1.10,
+}
+
+
+def _get_recruiting_stage(total_interest, threshold, committed_org_abbrev=None):
+    """Derive recruiting status from interest/threshold ratio."""
+    if committed_org_abbrev:
+        return f"Signed to {committed_org_abbrev}"
+    if total_interest <= 0:
+        return "Open"
+    if threshold <= 0:
+        # Threshold fully decayed — any interest means imminent signing
+        return "May Sign this Week"
+    ratio = total_interest / threshold
+    for cutoff, label in _RECRUITING_STAGES:
+        if ratio >= cutoff:
+            return label
+    return "Open"
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -235,6 +269,11 @@ def compute_star_rankings(conn, league_year_id):
                 "rpt": r["rank_by_ptype"],
             },
         )
+        # Persist star rating permanently on the player record
+        conn.execute(
+            text("UPDATE simbbPlayers SET recruit_stars = :star WHERE id = :pid"),
+            {"star": r["star"], "pid": r["player_id"]},
+        )
 
     return len(all_ranked)
 
@@ -303,16 +342,37 @@ def submit_weekly_investments(conn, org_id, league_year_id, week, investments):
         pts = inv["points"]
 
         # Validate points
-        if pts <= 0:
-            errors.append({"player_id": pid, "error": "Points must be positive"})
+        if pts < 0:
+            errors.append({"player_id": pid, "error": "Points cannot be negative"})
             continue
         if pts > max_per_player:
             errors.append({"player_id": pid, "error": f"Max {max_per_player} per player per week"})
             continue
 
-        # Check budget
-        if points_used + pts > weekly_budget:
-            errors.append({"player_id": pid, "error": "Exceeds weekly budget"})
+        # Check existing investment this week for this player
+        existing_inv = conn.execute(
+            text("""
+                SELECT points FROM recruiting_investments
+                WHERE org_id = :org AND player_id = :pid
+                  AND league_year_id = :ly AND week = :week
+            """),
+            {"org": org_id, "pid": pid, "ly": league_year_id, "week": week},
+        ).first()
+
+        # pts == 0 means remove this investment
+        if pts == 0:
+            if existing_inv:
+                conn.execute(
+                    text("""
+                        DELETE FROM recruiting_investments
+                        WHERE org_id = :org AND player_id = :pid
+                          AND league_year_id = :ly AND week = :week
+                    """),
+                    {"org": org_id, "pid": pid,
+                     "ly": league_year_id, "week": week},
+                )
+                points_used -= existing_inv[0]
+            accepted.append({"player_id": pid, "points": 0})
             continue
 
         # Verify player is in HS pool and not committed
@@ -345,16 +405,6 @@ def submit_weekly_investments(conn, org_id, league_year_id, week, investments):
             errors.append({"player_id": pid, "error": "Player already committed"})
             continue
 
-        # Check existing investment this week for this player
-        existing_inv = conn.execute(
-            text("""
-                SELECT points FROM recruiting_investments
-                WHERE org_id = :org AND player_id = :pid
-                  AND league_year_id = :ly AND week = :week
-            """),
-            {"org": org_id, "pid": pid, "ly": league_year_id, "week": week},
-        ).first()
-
         if existing_inv:
             # Replace existing investment (adjust budget tracking)
             old_pts = existing_inv[0]
@@ -375,6 +425,11 @@ def submit_weekly_investments(conn, org_id, league_year_id, week, investments):
             )
             points_used += net_change
         else:
+            # Check budget for new investment
+            if points_used + pts > weekly_budget:
+                errors.append({"player_id": pid, "error": "Exceeds weekly budget"})
+                continue
+
             conn.execute(
                 text("""
                     INSERT INTO recruiting_investments
@@ -436,6 +491,21 @@ def resolve_recruiting_week(conn, league_year_id, week, config=None):
         {"ly": league_year_id},
     ).all()
 
+    # Batch-fetch signing_tendency for all invested players
+    tendency_map = {}
+    if invested_players:
+        pids = [r[0] for r in invested_players]
+        ph = ", ".join([f":t{i}" for i in range(len(pids))])
+        tparams = {f"t{i}": pid for i, pid in enumerate(pids)}
+        tend_rows = conn.execute(
+            text(f"""
+                SELECT id, signing_tendency FROM simbbPlayers
+                WHERE id IN ({ph})
+            """),
+            tparams,
+        ).all()
+        tendency_map = {r[0]: r[1] for r in tend_rows}
+
     commitments = []
     uncommitted_count = 0
 
@@ -451,8 +521,11 @@ def resolve_recruiting_week(conn, league_year_id, week, config=None):
 
         star = star_row[0] if star_row else 1
         sc = star_config.get(star, star_config[1])
-        threshold = sc["base"] - (week * sc["decay"])
-        threshold = max(threshold, 0)
+
+        # Apply signing tendency modifier to base threshold
+        tendency = tendency_map.get(player_id, "Signs Normal")
+        modified_base = sc["base"] * _TENDENCY_MULT.get(tendency, 1.0)
+        threshold = max(modified_base - (week * sc["decay"]), 0)
 
         # Get cumulative investments per org
         org_totals = conn.execute(
@@ -470,13 +543,13 @@ def resolve_recruiting_week(conn, league_year_id, week, config=None):
         if not org_totals:
             continue
 
-        total_interest = sum(r[1] for r in org_totals)
-        leader_pts = org_totals[0][1]
+        total_interest = float(sum(r[1] for r in org_totals))
+        leader_pts = float(org_totals[0][1])
 
         # Anti-snipe check
         snipe_active = False
         for r in org_totals:
-            oid, pts, first_wk = r[0], r[1], r[2]
+            oid, pts, first_wk = r[0], float(r[1]), r[2]
             if oid == org_totals[0][0]:
                 continue  # skip leader
             if pts >= snipe_pct * leader_pts:
@@ -738,18 +811,34 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
 
     Returns: {
         star_rating, rank_overall, rank_by_ptype, ptype,
-        status ('uncommitted' | 'committed'),
+        status (activity-based progression label),
         commitment (if committed): {org_id, week, org_name},
         interest_gauge (fuzzed per viewing_org),
-        competitor_count,
+        competitor_team_ids,
         your_investment (if viewing_org_id provided),
     }
     """
-    # Star ranking
+    # Fetch current week + config for status computation
+    state_row = conn.execute(
+        text("SELECT current_week FROM recruiting_state WHERE league_year_id = :ly"),
+        {"ly": league_year_id},
+    ).first()
+    current_week = state_row[0] if state_row else 0
+
+    config = get_recruiting_config(conn)
+    star_cfg = {}
+    for s in range(1, 6):
+        star_cfg[s] = {
+            "base": _cfg_float(config, f"star{s}_base", 20 * s),
+            "decay": _cfg_float(config, f"star{s}_decay", s),
+        }
+
+    # Star ranking + signing_tendency
     ranking = conn.execute(
         text("""
             SELECT rr.star_rating, rr.rank_overall, rr.rank_by_ptype,
-                   rr.composite_score, p.ptype, p.firstname, p.lastname
+                   rr.composite_score, p.ptype, p.firstname, p.lastname,
+                   p.signing_tendency
             FROM recruiting_rankings rr
             JOIN simbbPlayers p ON p.id = rr.player_id
             WHERE rr.player_id = :pid AND rr.league_year_id = :ly
@@ -757,11 +846,12 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
         {"pid": player_id, "ly": league_year_id},
     ).first()
 
+    signing_tendency = "Signs Normal"
     if not ranking:
         # Fall back to base player info when rankings haven't been generated
         player = conn.execute(
             text("""
-                SELECT id, firstname, lastname, ptype
+                SELECT id, firstname, lastname, ptype, signing_tendency
                 FROM simbbPlayers WHERE id = :pid
             """),
             {"pid": player_id},
@@ -769,6 +859,7 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
         if not player:
             return None
         pm = player._mapping
+        signing_tendency = pm.get("signing_tendency", "Signs Normal")
         result = {
             "player_id": player_id,
             "player_name": f"{pm['firstname']} {pm['lastname']}",
@@ -779,6 +870,7 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
         }
     else:
         m = ranking._mapping
+        signing_tendency = m.get("signing_tendency", "Signs Normal")
         result = {
             "player_id": player_id,
             "player_name": f"{m['firstname']} {m['lastname']}",
@@ -800,9 +892,35 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
         {"pid": player_id, "ly": league_year_id},
     ).first()
 
+    # Competitor team IDs and total interest
+    org_investments = conn.execute(
+        text("""
+            SELECT ri.org_id, t.id AS team_id, SUM(ri.points) AS total_pts
+            FROM recruiting_investments ri
+            JOIN teams t ON t.orgID = ri.org_id AND t.team_level = 3
+            WHERE ri.player_id = :pid AND ri.league_year_id = :ly
+            GROUP BY ri.org_id, t.id
+        """),
+        {"pid": player_id, "ly": league_year_id},
+    ).all()
+
+    total_interest = sum(float(r[2]) for r in org_investments)
+
+    # Filter to orgs with >50% of leader's points
+    if org_investments:
+        max_pts = max(float(r[2]) for r in org_investments)
+        half = max_pts * 0.50
+        result["competitor_team_ids"] = [
+            int(r[1]) for r in org_investments
+            if r[0] != viewing_org_id and float(r[2]) >= half
+        ]
+    else:
+        result["competitor_team_ids"] = []
+
+    # Status: signed or activity-based progression
     if commitment:
         cm = commitment._mapping
-        result["status"] = "committed"
+        result["status"] = f"Signed to {cm['org_abbrev']}"
         result["commitment"] = {
             "org_id": cm["org_id"],
             "org_abbrev": cm["org_abbrev"],
@@ -810,21 +928,11 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
             "points_total": cm["points_total"],
         }
     else:
-        result["status"] = "uncommitted"
-
-    # Competitor count and total interest
-    org_investments = conn.execute(
-        text("""
-            SELECT org_id, SUM(points) AS total_pts
-            FROM recruiting_investments
-            WHERE player_id = :pid AND league_year_id = :ly
-            GROUP BY org_id
-        """),
-        {"pid": player_id, "ly": league_year_id},
-    ).all()
-
-    total_interest = sum(r[1] for r in org_investments)
-    result["competitor_count"] = len(org_investments)
+        star = result["star_rating"] or 1
+        sc = star_cfg.get(star, star_cfg[1])
+        modified_base = sc["base"] * _TENDENCY_MULT.get(signing_tendency, 1.0)
+        threshold = max(modified_base - (current_week * sc["decay"]), 0)
+        result["status"] = _get_recruiting_stage(total_interest, threshold)
 
     # Interest gauge (fuzzed per viewing org)
     result["interest_gauge"] = _fuzz_interest_gauge(
@@ -855,8 +963,23 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     """
     Get an org's full recruiting board: all players on the explicit board
     OR invested in, with cumulative points, star rating, and fuzzed
-    interest gauges.
+    interest gauges. Status reflects per-player activity progression.
     """
+    # Fetch current week + config for status computation
+    state_row = conn.execute(
+        text("SELECT current_week FROM recruiting_state WHERE league_year_id = :ly"),
+        {"ly": league_year_id},
+    ).first()
+    current_week = state_row[0] if state_row else 0
+
+    config = get_recruiting_config(conn)
+    star_config = {}
+    for s in range(1, 6):
+        star_config[s] = {
+            "base": _cfg_float(config, f"star{s}_base", 20 * s),
+            "decay": _cfg_float(config, f"star{s}_decay", s),
+        }
+
     # Players explicitly added to the recruiting_board table
     board_rows = conn.execute(
         text("""
@@ -903,10 +1026,10 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     ).all()
     rank_map = {r[0]: r._mapping for r in rankings}
 
-    # Also fetch basic player info for board players that may lack rankings
+    # Also fetch basic player info + signing_tendency for all board players
     player_info = conn.execute(
         text(f"""
-            SELECT id, firstname, lastname, ptype
+            SELECT id, firstname, lastname, ptype, signing_tendency
             FROM simbbPlayers
             WHERE id IN ({placeholders})
         """),
@@ -928,19 +1051,25 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     ).all()
     commit_map = {r[0]: r._mapping for r in commitments}
 
-    # Batch fetch total interest per player + competitor count
-    interest_data = conn.execute(
+    # Batch fetch per-org investment totals with team IDs for competitor logos
+    interest_rows = conn.execute(
         text(f"""
-            SELECT player_id, COUNT(DISTINCT org_id) AS num_orgs,
-                   SUM(points) AS total_pts
-            FROM recruiting_investments
-            WHERE league_year_id = :ly
-              AND player_id IN ({placeholders})
-            GROUP BY player_id
+            SELECT ri.player_id, ri.org_id, t.id AS team_id,
+                   SUM(ri.points) AS total_pts
+            FROM recruiting_investments ri
+            JOIN teams t ON t.orgID = ri.org_id AND t.team_level = 3
+            WHERE ri.league_year_id = :ly
+              AND ri.player_id IN ({placeholders})
+            GROUP BY ri.player_id, ri.org_id, t.id
         """),
         params,
     ).all()
-    interest_map = {r[0]: (int(r[1]), int(r[2])) for r in interest_data}
+    # per_player_orgs: {player_id: [(org_id, team_id, total_pts), ...]}
+    per_player_orgs = {}
+    for r in interest_rows:
+        per_player_orgs.setdefault(r[0], []).append(
+            (int(r[1]), int(r[2]), int(r[3]))
+        )
 
     board = []
     for pid in player_ids:
@@ -971,31 +1100,49 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
 
         entry["on_board"] = pid in board_pids
 
-        # Interest gauge (fuzzed)
-        num_orgs, total_pts = interest_map.get(pid, (0, 0))
+        # Interest gauge (fuzzed) + competitor team IDs (>50% of leader)
+        org_pts_list = per_player_orgs.get(pid, [])
+        total_pts = sum(pts for _, _, pts in org_pts_list)
         entry["interest_gauge"] = _fuzz_interest_gauge(
             total_pts, org_id, pid
         )
-        entry["competitor_count"] = num_orgs
+        if org_pts_list:
+            max_pts = max(pts for _, _, pts in org_pts_list)
+            half = max_pts * 0.50
+            entry["competitor_team_ids"] = [
+                tid for oid, tid, pts in org_pts_list
+                if oid != org_id and pts >= half
+            ]
+        else:
+            entry["competitor_team_ids"] = []
 
-        # Commitment status
+        # Status: activity-based progression or signed
         cm = commit_map.get(pid)
         if cm:
-            entry["status"] = "committed"
+            entry["status"] = f"Signed to {cm['org_abbrev']}"
             entry["committed_to"] = {
                 "org_id": cm["org_id"],
                 "org_abbrev": cm["org_abbrev"],
                 "week_committed": cm["week_committed"],
             }
         else:
-            entry["status"] = "uncommitted"
+            # Compute threshold for this player's star tier + tendency
+            star = entry["star_rating"] or 1
+            sc = star_config.get(star, star_config[1])
+            pi_info = player_info_map.get(pid)
+            tendency = (pi_info["signing_tendency"]
+                        if pi_info and "signing_tendency" in pi_info.keys()
+                        else "Signs Normal")
+            modified_base = sc["base"] * _TENDENCY_MULT.get(tendency, 1.0)
+            threshold = max(modified_base - (current_week * sc["decay"]), 0)
+            entry["status"] = _get_recruiting_stage(total_pts, threshold)
             entry["committed_to"] = None
 
         board.append(entry)
 
-    # Sort: uncommitted first (by star desc), then committed
+    # Sort: non-signed first (by star desc), then signed
     board.sort(key=lambda x: (
-        0 if x["status"] == "uncommitted" else 1,
+        0 if not x["status"].startswith("Signed") else 1,
         -(x["star_rating"] or 0),
         x["rank_overall"] or 999999,
     ))

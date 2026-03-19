@@ -1,0 +1,886 @@
+# Free Agency & Contract Negotiation — Frontend Guide
+
+This document covers every endpoint, response shape, and workflow the frontend needs to implement the free agency page, roster contract actions (extensions, buyouts), and the auction board.
+
+All endpoints are under `/api/v1`. All monetary values from the API are strings (Decimal precision) unless noted as `float`.
+
+---
+
+## Table of Contents
+
+1. [Concepts](#concepts)
+2. [Free Agent Pool Page](#free-agent-pool-page)
+3. [Auction Board](#auction-board)
+4. [Player Detail Modal](#player-detail-modal)
+5. [Inline Scouting](#inline-scouting)
+6. [Roster Table: Extension Modal](#roster-table-extension-modal)
+7. [Roster Table: Buyout Modal](#roster-table-buyout-modal)
+8. [Market Dashboard](#market-dashboard)
+9. [Signing Budget](#signing-budget)
+10. [Endpoint Reference](#endpoint-reference)
+
+---
+
+## Concepts
+
+### Contract Phases
+
+Every player under contract is in one of four phases based on their league level and MLB service years:
+
+| Phase | Condition | What Happens at Contract End |
+|-------|-----------|------------------------------|
+| `minor` | Level < 9 | Auto-renewed at $40,000 by holding org |
+| `pre_arb` | Level 9, service < 3 | Auto-renewed at $800,000 by holding org |
+| `arb_eligible` | Level 9, service 3-5 | Auto-renewed at WAR-based salary (40%/60%/80% of market rate for arb years 1/2/3) |
+| `fa_eligible` | Level 9, service 6+ | Enters the free agent auction |
+
+### Player Demands
+
+Players generate minimum contract demands based on their WAR, age, and the current market rate ($/WAR). These demands are the floor — any offer below them is rejected by the API.
+
+- **FA demands**: minimum AAV, preferred year range, minimum total value
+- **Extension demands**: 90% of FA baseline (security discount for the player)
+- **Buyout demands**: based on remaining guaranteed money vs. open-market value
+
+### 3-Phase Auction
+
+When a player becomes a free agent (end of season or mid-season release), they enter a competitive auction:
+
+| Phase | Duration | Rules |
+|-------|----------|-------|
+| **Open** | 1 game week (stays open indefinitely with 0 offers) | Any org can submit an offer |
+| **Listening** | 1 game week | Only existing bidders can update; must increase AAV |
+| **Finalize** | 1 game week | Only top 3 bidders remain; must increase AAV; winner signs at end |
+
+Phases advance automatically when the simulation processes `advance_week()`.
+
+### Fog of War
+
+Player attributes on the free agency page are **fuzzed** (shown as shifted letter grades) unless the viewing org has spent scouting points to unlock precise values. The fuzz is deterministic per (org, player, attribute) — the same org always sees the same fuzz for a given player.
+
+**Scouting actions available on the FA page:**
+
+| Action | Cost | Effect |
+|--------|------|--------|
+| `pro_attrs_precise` | 15 pts | Reveals true 20-80 numeric attributes |
+| `pro_potential_precise` | 15 pts | Reveals true potential letter grades |
+
+---
+
+## Free Agent Pool Page
+
+The main page for browsing available free agents.
+
+### Loading the Pool
+
+```
+GET /api/v1/fa-auction/free-agent-pool
+  ?viewing_org_id={orgId}
+  &league_year_id={leagueYearId}
+  &page=1
+  &per_page=50
+  &sort=lastname
+  &dir=asc
+```
+
+**Required params:** `viewing_org_id`, `league_year_id`
+
+**Filter params (all optional):**
+
+| Param | Type | Example | Notes |
+|-------|------|---------|-------|
+| `ptype` | string | `Pitcher` or `Position` | Player type filter |
+| `search` | string | `Judge` | Name search, min 2 chars |
+| `min_age` | int | `25` | |
+| `max_age` | int | `32` | |
+| `area` | string | `US` | Geographic region |
+| `has_auction` | string | `true` | Only players currently in an active auction |
+
+**Sort columns:** `lastname`, `firstname`, `age`, `ptype`, `area`, `displayovr`, any `_base` attribute (e.g., `contact_base`, `power_base`), any `_pot` attribute.
+
+### Response
+
+```json
+{
+  "total": 245,
+  "page": 1,
+  "per_page": 50,
+  "pages": 5,
+  "players": [ /* see below */ ]
+}
+```
+
+### Player Object in Pool
+
+```json
+{
+  "id": 12345,
+  "firstname": "Aaron",
+  "lastname": "Judge",
+  "age": 34,
+  "ptype": "Position",
+  "area": "US",
+  "displayovr": 72,
+  "height": 79,
+  "weight": 282,
+  "bat_hand": "R",
+  "pitch_hand": "R",
+  "durability": 65,
+  "injury_risk": 30,
+
+  "contact_base": "A-",
+  "power_base": "A",
+  "discipline_base": "B+",
+  "speed_base": "C+",
+  "contact_pot": "A",
+  "power_pot": "A+",
+
+  "last_level": 9,
+  "last_org_abbrev": "NYY",
+
+  "auction": {
+    "auction_id": 42,
+    "phase": "listening",
+    "min_aav": 12000000.0,
+    "offer_count": 3,
+    "my_offer": {
+      "offer_id": 101,
+      "years": 3,
+      "bonus": 5000000.0,
+      "total_value": 41000000.0,
+      "aav": 13666666.67,
+      "status": "active"
+    }
+  },
+
+  "demand": {
+    "min_aav": "12000000.00",
+    "min_years": 3,
+    "max_years": 5,
+    "war": 4.2
+  },
+
+  "scouting": {
+    "unlocked": ["pro_attrs_precise"],
+    "attrs_precise": true,
+    "pots_precise": false,
+    "available_actions": ["pro_potential_precise"]
+  }
+}
+```
+
+**Notes:**
+- `_base` fields are **fuzzed letter grades** (e.g., `"A-"`, `"B+"`) unless `scouting.attrs_precise` is true, in which case they may be numeric 20-80 values.
+- `_pot` fields are fuzzed letter grades or `"?"` if completely unknown. Precise if `scouting.pots_precise` is true.
+- `auction` is `null` if the player is not currently in an active auction.
+- `demand` is `null` if no FA demand has been computed for this player yet.
+- `my_offer` inside `auction` is `null` if the viewing org has not submitted an offer.
+
+### Suggested UI Layout
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Free Agency Pool                                    Budget: $X │
+│  ┌──────┐ ┌────────┐ ┌─────────────┐ ┌──────────┐             │
+│  │ Type ▼│ │ Age ▼  │ │ Search...   │ │ In Auction│             │
+│  └──────┘ └────────┘ └─────────────┘ └──────────┘             │
+├─────┬─────┬────┬─────┬──────┬───────┬───────┬────────┬────────┤
+│Name │ Age │Type│ OVR │Demand│Phase  │Offers │My Offer│ Action │
+├─────┼─────┼────┼─────┼──────┼───────┼───────┼────────┼────────┤
+│Judge│  34 │ B  │ 72  │$12M  │Listen.│  3    │$13.7M  │[Update]│
+│Smith│  28 │ P  │ 65  │$8M   │ Open  │  0    │  —     │[Offer] │
+│Doe  │  31 │ B  │ 58  │$4M   │  —    │  —    │  —     │[View]  │
+└─────┴─────┴────┴─────┴──────┴───────┴───────┴────────┴────────┘
+                                                  Page 1 of 5  ▶
+```
+
+- **Phase column**: Show badge (green=Open, yellow=Listening, red=Finalize, gray=none)
+- **Action button**: "Offer" if no auction or open auction with no offer; "Update" if has existing offer; "View" for detail modal
+- Clicking any row opens the [Player Detail Modal](#player-detail-modal)
+
+---
+
+## Auction Board
+
+A focused view showing only players currently in an active auction, enriched with fuzzed ratings.
+
+### Loading the Board
+
+```
+GET /api/v1/fa-auction/board
+  ?league_year_id={leagueYearId}
+  &org_id={orgId}
+```
+
+### Response
+
+Array of auction entries:
+
+```json
+{
+  "auction_id": 42,
+  "player_id": 12345,
+  "player_name": "Aaron Judge",
+  "player_type": "Position",
+  "war": 4.2,
+  "age": 34,
+  "phase": "listening",
+  "min_aav": 12000000.0,
+  "min_total_value": 36000000.0,
+  "min_years": 3,
+  "max_years": 5,
+  "offer_count": 3,
+  "competing_teams": ["BOS", "LAD", "NYY"],
+  "my_offer": { /* same shape as pool */ },
+  "entered_week": 12,
+
+  "ratings": {
+    "contact_base": "A-",
+    "power_base": "A",
+    "contact_pot": "A",
+    "power_pot": "A+"
+  },
+  "display_format": "letter_grade",
+  "scouting": {
+    "attrs_precise": false,
+    "pots_precise": false,
+    "available_actions": ["pro_attrs_precise", "pro_potential_precise"]
+  }
+}
+```
+
+**Key display rules:**
+- `competing_teams` is alphabetically sorted — this is intentional. Do NOT reorder by offer value (that info is hidden).
+- The number of offers is shown, but NOT the competing offer amounts.
+- The viewer's own offer (`my_offer`) shows exact details.
+
+---
+
+## Player Detail Modal
+
+Shown when a user clicks a player row on the FA pool or auction board.
+
+### Loading Detail
+
+```
+GET /api/v1/fa-auction/player-detail/{playerId}
+  ?viewing_org_id={orgId}
+  &league_year_id={leagueYearId}
+```
+
+### Response
+
+```json
+{
+  "bio": {
+    "id": 12345,
+    "firstname": "Aaron",
+    "lastname": "Judge",
+    "age": 34,
+    "ptype": "Position",
+    "area": "US",
+    "height": 79,
+    "weight": 282,
+    "bat_hand": "R",
+    "pitch_hand": "R",
+    "arm_angle": null,
+    "durability": 65,
+    "injury_risk": 30,
+    "displayovr": 72
+  },
+
+  "attributes": {
+    "contact_base": "A-",
+    "power_base": "A",
+    "discipline_base": "B+",
+    "speed_base": "C+"
+  },
+
+  "potentials": {
+    "contact_pot": "A",
+    "power_pot": "A+",
+    "speed_pot": "?"
+  },
+
+  "display_format": "letter_grade",
+
+  "contract_history": [
+    {
+      "org": "NYY",
+      "years": 5,
+      "salary": 18000000.0,
+      "bonus": 10000000.0,
+      "signed_year": 2021,
+      "is_extension": false,
+      "is_buyout": false
+    }
+  ],
+
+  "demand": {
+    "min_aav": "12000000.00",
+    "min_years": 3,
+    "max_years": 5,
+    "war": 4.2
+  },
+
+  "auction": {
+    "auction_id": 42,
+    "phase": "listening",
+    "min_aav": 12000000.0,
+    "offer_count": 3,
+    "competing_teams": ["BOS", "LAD", "NYY"],
+    "my_offer": null
+  },
+
+  "scouting": {
+    "unlocked": [],
+    "attrs_precise": false,
+    "pots_precise": false,
+    "available_actions": ["pro_attrs_precise", "pro_potential_precise"]
+  },
+
+  "stats_summary": {
+    "batting": {
+      "avg": ".285",
+      "hr": 35,
+      "rbi": 0,
+      "ab": 520,
+      "hits": 148,
+      "walks": 78,
+      "sb": 5
+    },
+    "pitching": null
+  }
+}
+```
+
+### Attribute Display Logic
+
+| `display_format` | `scouting.attrs_precise` | How to Show Attributes |
+|-------------------|--------------------------|------------------------|
+| `"letter_grade"` | `false` | Show as letter grade badges (e.g., "A-", "B+"). These are FUZZED. |
+| `"20-80"` | `true` | Show as numeric ratings (e.g., 65, 72). These are PRECISE. |
+
+| `scouting.pots_precise` | How to Show Potentials |
+|--------------------------|------------------------|
+| `false` | Show as fuzzed letter grades or `"?"` for unknown |
+| `true` | Show as precise letter grades |
+
+### Suggested Modal Layout
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Aaron Judge  ·  34  ·  Position  ·  R/R  ·  6'7" 282 lbs  │
+│  OVR: 72  ·  WAR: 4.2  ·  Last: NYY (MLB)                  │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ATTRIBUTES (fuzzed)         POTENTIALS (fuzzed)             │
+│  Contact: A-                 Contact: A                      │
+│  Power:   A                  Power:   A+                     │
+│  Speed:   C+                 Speed:   ?                      │
+│  [🔍 Scout Attributes $15]  [🔍 Scout Potentials $15]       │
+│                                                              │
+├──────────────────────────────────────────────────────────────┤
+│  LAST SEASON                                                 │
+│  .285 AVG · 35 HR · 148 H · 78 BB · 520 AB                 │
+│                                                              │
+├──────────────────────────────────────────────────────────────┤
+│  DEMANDS                          CONTRACT HISTORY           │
+│  Min AAV:  $12,000,000           NYY · 5yr · $18M/yr        │
+│  Years:    3-5                     signed 2021               │
+│  WAR:      4.2                                               │
+│                                                              │
+├──────────────────────────────────────────────────────────────┤
+│  AUCTION STATUS: Listening  ·  3 offers                      │
+│  Competing: BOS, LAD, NYY                                    │
+│  Your offer: —                                               │
+│                                                              │
+│  [Make Offer]                                                │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Making an Offer
+
+### Submit Offer (new or update)
+
+```
+POST /api/v1/fa-auction/{auctionId}/offer
+```
+
+```json
+{
+  "org_id": 1,
+  "years": 3,
+  "salaries": [12000000, 13000000, 14000000],
+  "bonus": 5000000,
+  "level_id": 9,
+  "league_year_id": 5,
+  "game_week_id": 12,
+  "current_week": 12,
+  "executed_by": "user"
+}
+```
+
+**Important fields:**
+- `salaries` must be an array with exactly `years` entries (one salary per year)
+- `bonus` is paid from the org's cash balance immediately at signing
+- `salaries` are future payroll obligations (deducted weekly from revenue)
+- `level_id` is the level the player will be assigned to
+
+**Response (success):**
+
+```json
+{
+  "offer_id": 101,
+  "auction_id": 42,
+  "org_id": 1,
+  "years": 3,
+  "bonus": 5000000.0,
+  "total_value": 44000000.0,
+  "aav": 14666666.67,
+  "is_update": false,
+  "phase": "open"
+}
+```
+
+**Error responses (400):**
+
+```json
+{ "error": "Total value (30000000) below player minimum (36000000)" }
+{ "error": "Bonus (20000000) exceeds available budget (15000000)" }
+{ "error": "Listening phase: only existing bidders can update offers" }
+{ "error": "Listening phase: new AAV (12000000) must be >= old AAV (13000000)" }
+{ "error": "Finalize phase: only existing bidders can update offers" }
+{ "error": "Your offer was eliminated — cannot update" }
+```
+
+### Offer Form Validation (client-side)
+
+Before submitting, validate:
+
+1. **Total value >= player's min_total_value**: `sum(salaries) + bonus >= demand.min_aav * years`
+2. **Bonus <= available budget**: Check against `/transactions/signing-budget/{orgId}`
+3. **Years within range**: `demand.min_years <= years <= demand.max_years` (1-5 hard limit)
+4. **AAV not decreased** (if updating): new AAV must be >= previous `my_offer.aav`
+
+Show a live-computed AAV and total value as the user fills in salaries:
+
+```
+AAV = (sum(salaries) + bonus) / years
+Total Value = sum(salaries) + bonus
+```
+
+### Withdraw Offer
+
+Only allowed during the **Open** phase.
+
+```
+DELETE /api/v1/fa-auction/{auctionId}/offer/{orgId}
+```
+
+Response: `{ "withdrawn": true, "auction_id": 42, "org_id": 1 }`
+
+---
+
+## Inline Scouting
+
+Users can spend scouting points directly from the FA page to reveal precise attributes.
+
+### Scout a Player
+
+```
+POST /api/v1/fa-auction/scout-player
+```
+
+```json
+{
+  "org_id": 1,
+  "league_year_id": 5,
+  "player_id": 12345,
+  "action_type": "pro_attrs_precise"
+}
+```
+
+**Available action types for free agents:**
+
+| Action | Cost | What It Reveals |
+|--------|------|-----------------|
+| `pro_attrs_precise` | 15 pts | True 20-80 numeric attribute ratings |
+| `pro_potential_precise` | 15 pts | True potential letter grades |
+
+**Response:**
+
+```json
+{
+  "scouting_result": {
+    "status": "unlocked",
+    "action_type": "pro_attrs_precise",
+    "cost": 15,
+    "budget": {
+      "total_points": 500,
+      "spent_points": 215,
+      "remaining_points": 285
+    }
+  },
+  "player": {
+    /* Full player detail with updated visibility — same shape as player-detail endpoint */
+  }
+}
+```
+
+After scouting, the `player` object in the response will have:
+- `display_format` changed from `"letter_grade"` to `"20-80"` (if attrs were scouted)
+- `attributes` will contain numeric values instead of letter grades
+- `scouting.attrs_precise` will be `true`
+
+**Update the UI in-place** with the returned `player` object — no need for a second API call.
+
+If the player was already scouted: `status` will be `"already_unlocked"` and `cost` will be `0`.
+
+### Scouting Budget
+
+Check remaining scouting points:
+
+```
+GET /api/v1/scouting/budget/{orgId}?league_year_id={leagueYearId}
+```
+
+Response:
+```json
+{
+  "org_id": 1,
+  "total_points": 500,
+  "spent_points": 200,
+  "remaining_points": 300
+}
+```
+
+---
+
+## Roster Table: Extension Modal
+
+On the user's roster page, players with expiring contracts (`is_expiring: true`) who are arb-eligible or FA-eligible should show an "Extend" button.
+
+### Loading Contract Overview with Demands
+
+```
+GET /api/v1/transactions/contract-overview/{orgId}?league_year_id={leagueYearId}
+```
+
+Each player in the response includes a `demand` object when `league_year_id` is provided:
+
+```json
+{
+  "player_id": 12345,
+  "player_name": "Aaron Judge",
+  "age": 34,
+  "position": "Position",
+  "contract_id": 789,
+  "current_level": 9,
+  "years": 3,
+  "current_year": 3,
+  "years_remaining": 0,
+  "salary": 15000000.0,
+  "on_ir": false,
+  "mlb_service_years": 8,
+  "contract_phase": "fa_eligible",
+  "years_to_arb": null,
+  "years_to_fa": null,
+  "is_expiring": true,
+  "demand": {
+    "type": "extension",
+    "min_aav": "10800000.00",
+    "min_years": 2,
+    "war": 4.2,
+    "buyout_price": "7500000.00"
+  }
+}
+```
+
+### When to Show Extension vs Buyout Buttons
+
+| Condition | Button |
+|-----------|--------|
+| `is_expiring == true` AND `contract_phase` in `["arb_eligible", "fa_eligible"]` | Show **Extend** button |
+| Any player with an active contract | Show **Buyout** button |
+| `contract_phase == "minor"` or `"pre_arb"` | No extend button (auto-renewed) |
+
+### Extension Modal
+
+When the user clicks "Extend":
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Extend: Aaron Judge                                     │
+│                                                          │
+│  PLAYER DEMANDS                                          │
+│  Min AAV: $10,800,000  ·  Years: 2-5  ·  WAR: 4.2      │
+│                                                          │
+│  YOUR OFFER                                              │
+│  Years: [3 ▼]                                            │
+│  Signing Bonus: [$5,000,000    ]                         │
+│                                                          │
+│  Year 1 Salary: [$11,000,000   ]                         │
+│  Year 2 Salary: [$12,000,000   ]                         │
+│  Year 3 Salary: [$13,000,000   ]                         │
+│                                                          │
+│  Total Value: $41,000,000   AAV: $13,666,667             │
+│  ✅ Meets player minimum                                 │
+│                                                          │
+│  [Submit Extension]                                      │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Submit Extension
+
+```
+POST /api/v1/transactions/extend
+```
+
+```json
+{
+  "contract_id": 789,
+  "org_id": 1,
+  "years": 3,
+  "salaries": [11000000, 12000000, 13000000],
+  "bonus": 5000000,
+  "league_year_id": 5,
+  "game_week_id": 12,
+  "executed_by": "user"
+}
+```
+
+**Validation (server-side, will return 400):**
+- `Extension AAV ({offer}) below player's minimum demand ({min_aav})`
+- `Extension years ({years}) below player's minimum demand ({min_years} years)`
+- `Signing bonus ({bonus}) exceeds available budget ({budget})`
+
+**Success response:**
+
+```json
+{
+  "transaction_id": 55,
+  "original_contract_id": 789,
+  "extension_contract_id": 790,
+  "player_id": 12345,
+  "years": 3,
+  "bonus": 5000000.0,
+  "starts_league_year": 2027
+}
+```
+
+---
+
+## Roster Table: Buyout Modal
+
+Any player on the roster can be bought out.
+
+### Buyout Modal
+
+When the user clicks "Buyout":
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Buyout: Aaron Judge                                     │
+│                                                          │
+│  PLAYER DEMANDS                                          │
+│  Minimum Buyout: $7,500,000  ·  WAR: 4.2                │
+│  Remaining Guaranteed: $15,000,000                       │
+│                                                          │
+│  YOUR OFFER                                              │
+│  Buyout Amount: [$8,000,000    ]                         │
+│  ✅ Meets player minimum                                 │
+│                                                          │
+│  [Confirm Buyout]                                        │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Submit Buyout
+
+```
+POST /api/v1/transactions/buyout
+```
+
+```json
+{
+  "contract_id": 789,
+  "org_id": 1,
+  "buyout_amount": 8000000,
+  "league_year_id": 5,
+  "game_week_id": 12,
+  "executed_by": "user"
+}
+```
+
+**Validation (server-side):**
+- `Buyout amount ({amount}) below player's minimum demand ({min_price})`
+- The buyout amount is deducted from the org's cash balance immediately.
+
+**Success response:**
+
+```json
+{
+  "transaction_id": 56,
+  "contract_id": 789,
+  "buyout_contract_id": 791,
+  "player_id": 12345,
+  "buyout_amount": 8000000.0
+}
+```
+
+After a successful buyout, the player is released and (if FA-eligible) automatically enters the free agent auction.
+
+---
+
+## Market Dashboard
+
+Shows historical contract pricing data.
+
+### Loading Market Data
+
+```
+GET /api/v1/fa-auction/market-summary?league_year_id={leagueYearId}
+```
+
+### Response
+
+```json
+{
+  "dollar_per_war": "8500000.00",
+  "total_signings": 42,
+  "avg_years": 2.3,
+  "avg_aav": "6500000.00",
+  "avg_total_value": "14950000.00",
+  "war_tiers": {
+    "0-1": 15,
+    "1-2": 12,
+    "2-3": 8,
+    "3-4": 5,
+    "4+": 2
+  },
+  "recent_signings": [
+    {
+      "player_id": 456,
+      "name": "Mike Trout",
+      "war": 5.1,
+      "total_value": "85000000.00",
+      "aav": "17000000.00",
+      "years": 5,
+      "age": 31,
+      "source": "fa_auction"
+    }
+  ]
+}
+```
+
+**`source` values:** `fa_auction`, `direct_signing`, `extension`, `arb_renewal`
+
+### Current $/WAR Rate
+
+```
+GET /api/v1/fa-auction/market-rate?league_year_id={leagueYearId}
+```
+
+Response: `{ "dollar_per_war": "8500000.00" }`
+
+---
+
+## Signing Budget
+
+### Check Available Cash
+
+```
+GET /api/v1/transactions/signing-budget/{orgId}?league_year_id={leagueYearId}
+```
+
+Response: `{ "org_id": 1, "available_budget": 45000000.0 }`
+
+This is the org's cash balance minus already-committed signing bonuses for the current year. **Only bonuses** come from this balance — salaries are future payroll obligations deducted weekly from game revenue.
+
+**Display this prominently** on the offer form so users know their ceiling for bonuses.
+
+---
+
+## Endpoint Reference
+
+### Free Agent Browsing
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/fa-auction/free-agent-pool` | Paginated FA list with fuzzed attrs, demands, auction status |
+| GET | `/fa-auction/player-detail/{id}` | Full player profile modal |
+| GET | `/fa-auction/board` | Active auctions only, with ratings |
+| GET | `/fa-auction/market-summary` | Market pricing dashboard data |
+| GET | `/fa-auction/market-rate` | Current $/WAR rate |
+
+### Auction Actions
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/fa-auction/{auctionId}/offer` | Submit or update an offer |
+| DELETE | `/fa-auction/{auctionId}/offer/{orgId}` | Withdraw (open phase only) |
+| POST | `/fa-auction/scout-player` | Inline scouting + refreshed detail |
+| POST | `/fa-auction/advance-phases` | Admin: manually trigger phase transitions |
+
+### Roster Contract Actions
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/transactions/contract-overview/{orgId}?league_year_id=X` | Roster with demand data |
+| POST | `/transactions/extend` | Submit extension offer |
+| POST | `/transactions/buyout` | Submit buyout |
+| GET | `/transactions/signing-budget/{orgId}?league_year_id=X` | Available cash for bonuses |
+| GET | `/transactions/contract-status/{playerId}` | Single player contract info |
+
+### Demand Computation
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/fa-auction/player-demand/{id}?league_year_id=X&type=fa` | Cached demand lookup |
+| POST | `/fa-auction/compute-demands` | Force (re)compute a demand |
+
+---
+
+## Common Patterns
+
+### Currency Display
+
+All monetary values from the API are either `string` (Decimal precision, e.g., `"12000000.00"`) or `float`. Parse with `parseFloat()` and format with `toLocaleString()`:
+
+```js
+const formatted = '$' + parseFloat(demand.min_aav).toLocaleString();
+// → "$12,000,000"
+```
+
+### Offer AAV Calculation
+
+```js
+const totalValue = salaries.reduce((a, b) => a + b, 0) + bonus;
+const aav = years > 0 ? totalValue / years : 0;
+```
+
+### Phase Badge Colors
+
+```js
+const phaseColors = {
+  open: 'green',
+  listening: 'yellow',
+  finalize: 'red',
+  completed: 'gray',
+  withdrawn: 'gray',
+};
+```
+
+### Error Handling
+
+All endpoints return errors as `{ "error": "message" }` with HTTP 400. Display the error message directly — it's user-readable (e.g., "Bonus exceeds available budget").
+
+### Refreshing After Actions
+
+After these actions, refresh the relevant data:
+- **After submitting an offer**: Refresh the pool/board row for that player
+- **After scouting**: Use the `player` object from the scout response directly
+- **After extension/buyout**: Refresh the contract overview for the org
+- **After a week advances**: Auction phases may have changed — refresh the board

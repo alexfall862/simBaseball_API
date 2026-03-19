@@ -159,6 +159,7 @@ def _get_scouting_columns():
             "arm_angle", "durability", "injury_risk",
             "displayovr",
             "left_split", "center_split", "right_split",
+            "recruit_stars",
         ):
             cols.append(col)
         # All _base ability columns (numeric, sortable)
@@ -561,6 +562,10 @@ def api_pro_pool():
 
         players_list = _build_player_list(rows, tables)
 
+        # Add star_rating from permanent recruit_stars column
+        for player in players_list:
+            player["star_rating"] = player.get("recruit_stars")
+
         # Apply fog-of-war fuzz for pool listing
         if viewing_org_id:
             # Determine pool type per player based on their org
@@ -714,9 +719,12 @@ def api_college_pool():
 
         players_list = _build_player_list(rows, tables)
 
-        # Add star_rating to each player
+        # Add star_rating: prefer current-year ranking, fall back to permanent recruit_stars
         for player in players_list:
-            player["star_rating"] = star_map.get(player["id"])
+            player["star_rating"] = (
+                star_map.get(player["id"])
+                or player.get("recruit_stars")
+            )
 
         # Generate deterministic stats from raw attributes (before fuzz)
         for player in players_list:

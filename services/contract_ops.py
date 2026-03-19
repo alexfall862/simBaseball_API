@@ -155,10 +155,15 @@ def get_player_contract_status(conn, player_id: int) -> Optional[Dict[str, Any]]
 
 # ── Public: org-wide contract overview ───────────────────────────────
 
-def get_org_contract_overview(conn, org_id: int) -> List[Dict[str, Any]]:
+def get_org_contract_overview(
+    conn, org_id: int, league_year_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """
     Return contract status for every active player held by an org.
     Sorted by level (desc) then last name.
+
+    If league_year_id is provided, pre-attaches demand summaries
+    (extension for expiring arb/FA-eligible, buyout for all).
     """
     t = _t(conn)
     c = t["contracts"]
@@ -222,7 +227,56 @@ def get_org_contract_overview(conn, org_id: int) -> List[Dict[str, Any]]:
             "years_to_arb": max(0, ARB_THRESHOLD - svc) if phase in ("minor", "pre_arb") else None,
             "years_to_fa": max(0, FA_THRESHOLD - svc) if phase != "fa_eligible" else None,
             "is_expiring": m["current_year"] == m["years"],
+            "demand": None,
         })
+
+    # Attach demand summaries if league_year_id provided
+    if league_year_id and results:
+        try:
+            from services.player_demands import (
+                get_player_demand, compute_extension_demand, compute_buyout_demand,
+            )
+            for entry in results:
+                pid = entry["player_id"]
+                cid = entry["contract_id"]
+                phase = entry["contract_phase"]
+                demand = {}
+
+                # Extension demand for expiring arb/FA-eligible players
+                if entry["is_expiring"] and phase in ("arb_eligible", "fa_eligible"):
+                    try:
+                        ext = get_player_demand(conn, pid, league_year_id, "extension")
+                        if not ext:
+                            ext = compute_extension_demand(
+                                conn, pid, cid, league_year_id, entry["current_level"],
+                            )
+                        if ext:
+                            demand["type"] = "extension"
+                            demand["min_aav"] = ext.get("min_aav")
+                            demand["min_years"] = ext.get("min_years")
+                            demand["war"] = ext.get("war")
+                    except Exception:
+                        pass
+
+                # Buyout demand for all players
+                try:
+                    buyout = get_player_demand(conn, pid, league_year_id, "buyout")
+                    if not buyout:
+                        buyout = compute_buyout_demand(
+                            conn, pid, cid, league_year_id, entry["current_level"],
+                        )
+                    if buyout:
+                        demand["buyout_price"] = buyout.get("buyout_price")
+                        if not demand.get("type"):
+                            demand["type"] = "buyout"
+                        if not demand.get("war") and buyout.get("war"):
+                            demand["war"] = buyout.get("war")
+                except Exception:
+                    pass
+
+                entry["demand"] = demand if demand else None
+        except Exception as e:
+            log.warning("Failed to attach demand summaries: %s", e)
 
     return results
 

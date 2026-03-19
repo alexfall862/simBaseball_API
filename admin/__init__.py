@@ -1264,6 +1264,30 @@ def admin_fix_amateur_contracts():
         return jsonify(ok=False, error="migration_failed", message=str(e)), 500
 
 
+@admin_bp.post("/migrations/add-recruiting-columns")
+def admin_add_recruiting_columns():
+    """
+    Add signing_tendency + recruit_stars columns and backfill.
+
+    POST /admin/migrations/add-recruiting-columns
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from migrations.add_recruiting_columns import migrate_add_recruiting_columns
+
+        engine = get_engine()
+        result = migrate_add_recruiting_columns(engine)
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_add_recruiting_columns failed")
+        return jsonify(ok=False, error="migration_failed", message=str(e)), 500
+
+
 @admin_bp.post("/populate-college-orgs")
 def admin_populate_college_orgs():
     """

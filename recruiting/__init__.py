@@ -517,6 +517,39 @@ def commitments():
                 params,
             ).all()
 
+            # Batch-fetch competitor team IDs for committed players
+            committed_pids = [r._mapping["player_id"] for r in rows]
+            competitor_map = {}  # player_id -> [team_id, ...]
+            if committed_pids:
+                cph = ", ".join([f":cp{i}" for i in range(len(committed_pids))])
+                cparams = {"ly": league_year_id}
+                cparams.update({f"cp{i}": pid for i, pid in enumerate(committed_pids)})
+                inv_rows = conn.execute(
+                    sa_text(f"""
+                        SELECT ri.player_id, ri.org_id, t.id AS team_id,
+                               SUM(ri.points) AS total_pts
+                        FROM recruiting_investments ri
+                        JOIN teams t ON t.orgID = ri.org_id AND t.team_level = 3
+                        WHERE ri.league_year_id = :ly
+                          AND ri.player_id IN ({cph})
+                        GROUP BY ri.player_id, ri.org_id, t.id
+                    """),
+                    cparams,
+                ).all()
+                # Group by player_id
+                per_player = {}
+                for ir in inv_rows:
+                    per_player.setdefault(ir[0], []).append(
+                        (int(ir[1]), int(ir[2]), int(ir[3]))
+                    )
+                # Apply 50% filter per player
+                for pid, org_list in per_player.items():
+                    max_pts = max(pts for _, _, pts in org_list)
+                    half = max_pts * 0.50
+                    competitor_map[pid] = [
+                        tid for _, tid, pts in org_list if pts >= half
+                    ]
+
             result = []
             for r in rows:
                 m = r._mapping
@@ -529,6 +562,7 @@ def commitments():
                     "star_rating": m["star_rating"],
                     "week_committed": m["week_committed"],
                     "points_total": m["points_total"],
+                    "competitor_team_ids": competitor_map.get(m["player_id"], []),
                 })
 
         total_pages = max(1, -(-count_row // per_page))

@@ -8960,11 +8960,17 @@
     }
     el.innerHTML = '<button class="btn btn-secondary" id="btn-gpa-ps-load" style="padding:2px 10px;font-size:0.85em">Load Player Strategies</button><div id="gpa-ps-table" style="margin-top:8px"></div>';
     document.getElementById('btn-gpa-ps-load').addEventListener('click', () => {
+      _gpaStatus('Loading player strategies...', 'var(--text-secondary)');
       fetch(`${ADMIN_BASE}/gameplan-audit/player-strategies?team_id=${_gpaTeamId}`, { credentials: 'include' })
-        .then(r => r.json())
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
         .then(data => {
-          if (!data.ok) { _gpaStatus(`Error: ${data.message}`, '#f44336'); return; }
+          if (!data.ok) { _gpaStatus(`Error: ${data.message || data.error || 'unknown'}`, '#f44336'); return; }
           const strats = data.strategies || [];
+          if (!strats.length) { _gpaStatus('No player strategies found for this team', '#ff9800'); return; }
+          _gpaStatus(`${strats.length} strategies loaded`, '#4caf50');
           let html = '<div style="overflow-x:auto;max-height:500px"><table class="data-table"><thead><tr><th>Player</th><th>Type</th><th>Plate</th><th>Pitching</th><th>Baserun</th><th>Usage</th><th>Steal%</th><th>Pick%</th><th>Pull#</th><th>Leash</th><th></th></tr></thead><tbody>';
           strats.forEach(s => {
             const isPit = s.ptype === 'Pitcher';
@@ -8984,7 +8990,8 @@
           });
           html += '</tbody></table></div>';
           document.getElementById('gpa-ps-table').innerHTML = html;
-        });
+        })
+        .catch(err => { _gpaStatus(`Failed to load strategies: ${err}`, '#f44336'); });
     });
   }
 

@@ -678,6 +678,61 @@ def get_auction_board(
         }
         result.append(entry)
 
+    # Enrich with fuzzed player attributes and scouting status
+    if result and viewer_org_id:
+        try:
+            player_ids = [e["player_id"] for e in result]
+            # Load player attributes
+            attr_rows = conn.execute(
+                select(players).where(players.c.id.in_(player_ids))
+            ).all()
+            attr_map = {}
+            for r in attr_rows:
+                m = dict(r._mapping)
+                pid = m["id"]
+                ratings = {}
+                for key, val in m.items():
+                    if key.endswith("_base") or key.endswith("_pot"):
+                        ratings[key] = val
+                attr_map[pid] = ratings
+
+            # Apply fog-of-war fuzz
+            rating_dicts = [{"id": pid, **attrs} for pid, attrs in attr_map.items()]
+            try:
+                from scouting import _apply_pool_fuzz
+                _apply_pool_fuzz(rating_dicts, viewer_org_id, "pro")
+            except Exception:
+                pass
+            fuzzed_map = {d["id"]: {k: v for k, v in d.items() if k != "id"} for d in rating_dicts}
+
+            # Load scouting actions
+            scouting_map = {}
+            try:
+                from services.attribute_visibility import _load_scouting_actions_batch
+                actions = _load_scouting_actions_batch(conn, viewer_org_id, player_ids)
+                for pid, acts in actions.items():
+                    act_types = set(acts) if isinstance(acts, (list, set)) else set()
+                    scouting_map[pid] = {
+                        "attrs_precise": "pro_attrs_precise" in act_types,
+                        "pots_precise": "pro_potential_precise" in act_types,
+                        "available_actions": _available_pro_actions(act_types),
+                    }
+            except Exception:
+                pass
+
+            # Attach to entries
+            for entry in result:
+                pid = entry["player_id"]
+                entry["ratings"] = fuzzed_map.get(pid, {})
+                entry["display_format"] = "letter_grade"
+                entry["scouting"] = scouting_map.get(pid, {
+                    "attrs_precise": False,
+                    "pots_precise": False,
+                    "available_actions": ["pro_attrs_precise", "pro_potential_precise"],
+                })
+        except Exception as e:
+            log.warning("Auction board rating enrichment failed: %s", e)
+
     return result
 
 
@@ -711,6 +766,553 @@ def get_auction_detail(
         "phase": a["phase"],
         "war": float(a["war_at_entry"]),
         "age": int(a["age_at_entry"]),
+    }
+
+
+# ── Free agent pool (paginated, fuzzed) ─────────────────────────────
+
+def get_free_agent_pool(
+    conn,
+    viewing_org_id: int,
+    league_year_id: int,
+    page: int = 1,
+    per_page: int = 50,
+    filters: Optional[Dict[str, Any]] = None,
+    sort: str = "lastname",
+    sort_dir: str = "asc",
+) -> Dict[str, Any]:
+    """
+    Paginated list of unsigned non-amateur players with fog-of-war
+    fuzzed attributes, auction status, demand summaries, and scouting info.
+
+    Excludes INTAM (org 339) and HS (org 340) players.
+    """
+    t = _t(conn)
+    contracts = t["contracts"]
+    details_tbl = Table("contractDetails", MetaData(), autoload_with=conn.engine)
+    shares = Table("contractTeamShare", MetaData(), autoload_with=conn.engine)
+    players = t["players"]
+    auc = t["auction"]
+    offers = t["offers"]
+    demands_tbl = t["demands"]
+    orgs = t["organizations"]
+
+    filters = filters or {}
+
+    # Subquery: player_ids who have at least one active holder
+    held_subq = (
+        select(contracts.c.playerID)
+        .select_from(
+            contracts
+            .join(details_tbl, details_tbl.c.contractID == contracts.c.id)
+            .join(shares, shares.c.contractDetailsID == details_tbl.c.id)
+        )
+        .where(and_(
+            contracts.c.isFinished == 0,
+            shares.c.isHolder == 1,
+        ))
+        .group_by(contracts.c.playerID)
+        .subquery()
+    )
+
+    # Get last contract info for each player (for last_level and last_org)
+    last_contract = (
+        select(
+            contracts.c.playerID,
+            func.max(contracts.c.id).label("last_contract_id"),
+        )
+        .group_by(contracts.c.playerID)
+        .subquery()
+    )
+
+    last_info = (
+        select(
+            contracts.c.playerID,
+            contracts.c.current_level.label("last_level"),
+            shares.c.orgID.label("last_org_id"),
+        )
+        .select_from(
+            contracts
+            .join(details_tbl, details_tbl.c.contractID == contracts.c.id)
+            .join(shares, shares.c.contractDetailsID == details_tbl.c.id)
+        )
+        .where(contracts.c.id == last_contract.c.last_contract_id)
+        .correlate(last_contract)
+        .subquery()
+    )
+
+    # Build player columns dynamically (all _base, _pot, bio)
+    player_cols = []
+    for col in players.c:
+        name = col.name
+        if name in (
+            "id", "firstname", "lastname", "age", "ptype",
+            "area", "height", "weight", "bat_hand", "pitch_hand",
+            "arm_angle", "durability", "injury_risk", "displayovr",
+        ):
+            player_cols.append(col)
+        elif name.endswith("_base") or name.endswith("_pot"):
+            player_cols.append(col)
+        elif name.startswith("pitch") and (name.endswith("_name") or name.endswith("_ovr")):
+            player_cols.append(col)
+
+    # Conditions: free agents (not held), exclude amateur levels
+    conditions = [
+        players.c.id.notin_(select(held_subq.c.playerID)),
+    ]
+
+    # Exclude HS (org 340 / level 1) and INTAM (org 339 / level 2) players
+    # by requiring last_level >= 3 when we have contract history
+    # Players without contracts are included as long as they're non-amateur
+
+    # Filters
+    if filters.get("ptype"):
+        conditions.append(players.c.ptype == filters["ptype"])
+    if filters.get("area"):
+        conditions.append(players.c.area == filters["area"])
+    if filters.get("min_age"):
+        conditions.append(players.c.age >= filters["min_age"])
+    if filters.get("max_age"):
+        conditions.append(players.c.age <= filters["max_age"])
+    if filters.get("search") and len(filters["search"]) >= 2:
+        from sqlalchemy import or_
+        pattern = f"%{filters['search']}%"
+        conditions.append(or_(
+            players.c.firstname.like(pattern),
+            players.c.lastname.like(pattern),
+        ))
+
+    where = and_(*conditions)
+
+    # Count
+    total = conn.execute(
+        select(func.count()).select_from(players).where(where)
+    ).scalar()
+
+    # Sort
+    sort_dir_fn = players.c.lastname.asc
+    if sort in ("lastname", "firstname", "age", "ptype", "area", "displayovr"):
+        sort_col = getattr(players.c, sort, players.c.lastname)
+        sort_dir_fn = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
+    elif sort.endswith("_base") and hasattr(players.c, sort):
+        sort_col = getattr(players.c, sort)
+        sort_dir_fn = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
+    elif sort.endswith("_pot") and hasattr(players.c, sort):
+        sort_col = getattr(players.c, sort)
+        sort_dir_fn = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
+    else:
+        sort_dir_fn = players.c.lastname.asc()
+
+    # Query players
+    offset = (page - 1) * per_page
+    rows = conn.execute(
+        select(*player_cols)
+        .where(where)
+        .order_by(sort_dir_fn)
+        .limit(per_page)
+        .offset(offset)
+    ).all()
+
+    player_ids = [r._mapping["id"] for r in rows]
+    if not player_ids:
+        pages = 0 if total == 0 else (total + per_page - 1) // per_page
+        return {"total": total, "page": page, "per_page": per_page, "pages": pages, "players": []}
+
+    # Build player dicts
+    player_list = []
+    for r in rows:
+        m = dict(r._mapping)
+        player_list.append(m)
+
+    # Get last level/org info
+    last_info_rows = conn.execute(sa_text("""
+        SELECT c.playerID, c.current_level AS last_level,
+               o.org_abbrev AS last_org_abbrev
+        FROM contracts c
+        JOIN (
+            SELECT playerID, MAX(id) AS max_id FROM contracts GROUP BY playerID
+        ) latest ON c.id = latest.max_id
+        JOIN contractDetails cd ON cd.contractID = c.id
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+        JOIN organizations o ON o.id = cts.orgID
+        WHERE c.playerID IN :pids
+        GROUP BY c.playerID
+    """), {"pids": tuple(player_ids) if player_ids else (0,)}).mappings().all()
+
+    last_info_map = {
+        int(r["playerID"]): {"last_level": r["last_level"], "last_org_abbrev": r["last_org_abbrev"]}
+        for r in last_info_rows
+    }
+
+    # Filter out amateur-level players (last_level < 3)
+    filtered_list = []
+    for p in player_list:
+        pid = p["id"]
+        info = last_info_map.get(pid)
+        if info and info["last_level"] is not None:
+            if int(info["last_level"]) < 3:
+                continue
+            p["last_level"] = int(info["last_level"])
+            p["last_org_abbrev"] = info["last_org_abbrev"]
+        else:
+            p["last_level"] = None
+            p["last_org_abbrev"] = None
+        filtered_list.append(p)
+
+    # Apply fog-of-war fuzz
+    try:
+        from scouting import _apply_pool_fuzz
+        _apply_pool_fuzz(filtered_list, viewing_org_id, "pro")
+    except Exception as e:
+        log.warning("Pool fuzz failed, serving unfuzzed: %s", e)
+
+    # Attach auction data
+    auction_rows = conn.execute(
+        select(
+            auc.c.id.label("auction_id"),
+            auc.c.player_id,
+            auc.c.phase,
+            auc.c.min_aav,
+            auc.c.min_total_value,
+        )
+        .where(and_(
+            auc.c.player_id.in_(player_ids),
+            auc.c.league_year_id == league_year_id,
+            auc.c.phase.in_(["open", "listening", "finalize"]),
+        ))
+    ).mappings().all()
+    auction_map = {int(r["player_id"]): dict(r) for r in auction_rows}
+
+    # Offer counts per auction
+    auction_ids = [r["auction_id"] for r in auction_rows]
+    offer_counts = {}
+    viewer_offers = {}
+    if auction_ids:
+        oc_rows = conn.execute(
+            select(
+                offers.c.auction_id,
+                func.count().label("cnt"),
+            )
+            .where(and_(
+                offers.c.auction_id.in_(auction_ids),
+                offers.c.status == "active",
+            ))
+            .group_by(offers.c.auction_id)
+        ).mappings().all()
+        offer_counts = {int(r["auction_id"]): int(r["cnt"]) for r in oc_rows}
+
+        if viewing_org_id:
+            vo_rows = conn.execute(
+                select(offers)
+                .where(and_(
+                    offers.c.auction_id.in_(auction_ids),
+                    offers.c.org_id == viewing_org_id,
+                ))
+            ).mappings().all()
+            for r in vo_rows:
+                viewer_offers[int(r["auction_id"])] = {
+                    "offer_id": int(r["id"]),
+                    "years": int(r["years"]),
+                    "bonus": float(r["bonus"]),
+                    "total_value": float(r["total_value"]),
+                    "aav": float(r["aav"]),
+                    "status": r["status"],
+                }
+
+    # Attach demand summaries
+    demand_rows = conn.execute(
+        select(demands_tbl)
+        .where(and_(
+            demands_tbl.c.player_id.in_(player_ids),
+            demands_tbl.c.league_year_id == league_year_id,
+            demands_tbl.c.demand_type == "fa",
+        ))
+    ).mappings().all()
+    demand_map = {int(r["player_id"]): r for r in demand_rows}
+
+    # Attach scouting visibility
+    scouting_map = {}
+    if viewing_org_id:
+        try:
+            from services.attribute_visibility import _load_scouting_actions_batch
+            actions = _load_scouting_actions_batch(conn, viewing_org_id, player_ids)
+            for pid, acts in actions.items():
+                act_types = set(acts) if isinstance(acts, (list, set)) else set()
+                scouting_map[pid] = {
+                    "unlocked": sorted(act_types),
+                    "attrs_precise": "pro_attrs_precise" in act_types,
+                    "pots_precise": "pro_potential_precise" in act_types,
+                    "available_actions": _available_pro_actions(act_types),
+                }
+        except Exception as e:
+            log.warning("Scouting visibility load failed: %s", e)
+
+    # Assemble response
+    result_players = []
+    for p in filtered_list:
+        pid = p["id"]
+        auc_data = auction_map.get(pid)
+        auction_info = None
+        if auc_data:
+            aid = int(auc_data["auction_id"])
+            auction_info = {
+                "auction_id": aid,
+                "phase": auc_data["phase"],
+                "min_aav": float(auc_data["min_aav"]),
+                "offer_count": offer_counts.get(aid, 0),
+                "my_offer": viewer_offers.get(aid),
+            }
+
+        demand_row = demand_map.get(pid)
+        demand_info = None
+        if demand_row:
+            demand_info = {
+                "min_aav": str(demand_row["min_aav"]) if demand_row["min_aav"] else None,
+                "min_years": int(demand_row["min_years"]) if demand_row["min_years"] else None,
+                "max_years": int(demand_row["max_years"]) if demand_row["max_years"] else None,
+                "war": float(demand_row["war_snapshot"]),
+            }
+
+        p["auction"] = auction_info
+        p["demand"] = demand_info
+        p["scouting"] = scouting_map.get(pid, {
+            "unlocked": [],
+            "attrs_precise": False,
+            "pots_precise": False,
+            "available_actions": ["pro_attrs_precise", "pro_potential_precise"],
+        })
+        result_players.append(p)
+
+    # Apply has_auction filter if requested (post-query since it depends on auction join)
+    if filters.get("has_auction"):
+        result_players = [p for p in result_players if p["auction"] is not None]
+
+    pages = (total + per_page - 1) // per_page if total else 0
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+        "players": result_players,
+    }
+
+
+def _available_pro_actions(unlocked: set) -> List[str]:
+    """Return scouting actions available for a pro-level free agent."""
+    available = []
+    if "pro_attrs_precise" not in unlocked:
+        available.append("pro_attrs_precise")
+    if "pro_potential_precise" not in unlocked:
+        available.append("pro_potential_precise")
+    return available
+
+
+# ── Player detail (full profile) ────────────────────────────────────
+
+def get_free_agent_detail(
+    conn,
+    player_id: int,
+    viewing_org_id: int,
+    league_year_id: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Full profile for a free agent — combines scouted attributes,
+    contract history, demand data, auction status, and stats summary.
+    """
+    t = _t(conn)
+    players = t["players"]
+    contracts = t["contracts"]
+    details_tbl = Table("contractDetails", MetaData(), autoload_with=conn.engine)
+    shares = Table("contractTeamShare", MetaData(), autoload_with=conn.engine)
+    orgs = t["organizations"]
+    demands_tbl = t["demands"]
+
+    # Load player
+    player = conn.execute(
+        select(players).where(players.c.id == player_id)
+    ).first()
+    if not player:
+        return None
+
+    pm = dict(player._mapping)
+
+    # Bio
+    bio = {
+        k: pm.get(k) for k in (
+            "id", "firstname", "lastname", "age", "ptype", "area",
+            "height", "weight", "bat_hand", "pitch_hand", "arm_angle",
+            "durability", "injury_risk", "displayovr",
+        )
+    }
+
+    # Attributes (fuzzed or precise based on scouting)
+    attributes = {}
+    potentials = {}
+    for key, val in pm.items():
+        if key.endswith("_base"):
+            attributes[key] = val
+        elif key.endswith("_pot"):
+            potentials[key] = val
+        elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
+            attributes[key] = val
+
+    # Scouting visibility
+    scouting_info = {"unlocked": [], "attrs_precise": False, "pots_precise": False,
+                     "available_actions": ["pro_attrs_precise", "pro_potential_precise"]}
+    display_format = "letter_grade"
+    try:
+        from services.attribute_visibility import _load_scouting_actions_batch, fuzz_letter_grade
+        from services.scouting_service import base_to_letter_grade
+        actions = _load_scouting_actions_batch(conn, viewing_org_id, [player_id])
+        act_types = set(actions.get(player_id, []))
+        scouting_info = {
+            "unlocked": sorted(act_types),
+            "attrs_precise": "pro_attrs_precise" in act_types,
+            "pots_precise": "pro_potential_precise" in act_types,
+            "available_actions": _available_pro_actions(act_types),
+        }
+
+        if "pro_attrs_precise" in act_types:
+            display_format = "20-80"
+            # Keep raw numeric values
+        else:
+            display_format = "letter_grade"
+            # Fuzz base attrs to letter grades
+            for key in list(attributes.keys()):
+                if key.endswith("_base"):
+                    raw = attributes[key]
+                    true_grade = base_to_letter_grade(raw)
+                    attributes[key] = fuzz_letter_grade(
+                        true_grade, viewing_org_id, player_id, key
+                    )
+
+        if "pro_potential_precise" in act_types:
+            pass  # keep precise potentials
+        else:
+            for key in list(potentials.keys()):
+                true_pot = potentials[key]
+                if true_pot:
+                    potentials[key] = fuzz_letter_grade(
+                        true_pot, viewing_org_id, player_id, key
+                    )
+                else:
+                    potentials[key] = "?"
+    except Exception as e:
+        log.warning("Scouting visibility failed for player %d: %s", player_id, e)
+
+    # Contract history
+    history_rows = conn.execute(sa_text("""
+        SELECT c.id, c.years, c.leagueYearSigned, c.isExtension, c.isBuyout,
+               c.bonus, cd.salary, o.org_abbrev
+        FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = 1
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+        JOIN organizations o ON o.id = c.signingOrg
+        WHERE c.playerID = :pid
+        ORDER BY c.leagueYearSigned DESC
+    """), {"pid": player_id}).mappings().all()
+
+    contract_history = [
+        {
+            "org": r["org_abbrev"],
+            "years": int(r["years"]),
+            "salary": float(r["salary"]),
+            "bonus": float(r["bonus"]),
+            "signed_year": int(r["leagueYearSigned"]),
+            "is_extension": bool(r["isExtension"]),
+            "is_buyout": bool(r["isBuyout"]),
+        }
+        for r in history_rows
+    ]
+
+    # Demand data
+    demand_info = None
+    try:
+        from services.player_demands import get_player_demand, compute_fa_demand
+        demand = get_player_demand(conn, player_id, league_year_id, "fa")
+        if not demand:
+            demand = compute_fa_demand(conn, player_id, league_year_id)
+        if demand:
+            demand_info = {
+                "min_aav": demand.get("min_aav"),
+                "min_years": demand.get("min_years"),
+                "max_years": demand.get("max_years"),
+                "war": demand.get("war"),
+            }
+    except Exception as e:
+        log.warning("Demand computation failed for player %d: %s", player_id, e)
+
+    # Auction status
+    auction_info = None
+    try:
+        auction_detail = get_auction_detail(conn, None, viewing_org_id)
+        # Find auction for this player
+        auc_row = conn.execute(
+            select(t["auction"])
+            .where(and_(
+                t["auction"].c.player_id == player_id,
+                t["auction"].c.league_year_id == league_year_id,
+                t["auction"].c.phase.in_(["open", "listening", "finalize"]),
+            ))
+        ).first()
+        if auc_row:
+            auction_info = get_auction_detail(conn, int(auc_row._mapping["id"]), viewing_org_id)
+    except Exception as e:
+        log.warning("Auction lookup failed for player %d: %s", player_id, e)
+
+    # Stats summary (last season)
+    stats_summary = {"batting": None, "pitching": None}
+    try:
+        bat = conn.execute(sa_text("""
+            SELECT at_bats, hits, doubles_hit, triples, home_runs,
+                   walks, strikeouts, runs, stolen_bases, caught_stealing
+            FROM player_batting_stats
+            WHERE player_id = :pid AND league_year_id = :ly
+            LIMIT 1
+        """), {"pid": player_id, "ly": league_year_id}).mappings().first()
+        if bat and bat["at_bats"] and int(bat["at_bats"]) > 0:
+            ab = int(bat["at_bats"])
+            h = int(bat["hits"])
+            stats_summary["batting"] = {
+                "avg": f".{round(h * 1000 / ab):03d}" if ab > 0 else ".000",
+                "hr": int(bat["home_runs"]),
+                "rbi": 0,  # RBI not in batting stats table directly
+                "ab": ab,
+                "hits": h,
+                "walks": int(bat["walks"]),
+                "sb": int(bat["stolen_bases"]),
+            }
+        pit = conn.execute(sa_text("""
+            SELECT innings_pitched_outs, earned_runs, wins, losses,
+                   strikeouts, walks
+            FROM player_pitching_stats
+            WHERE player_id = :pid AND league_year_id = :ly
+            LIMIT 1
+        """), {"pid": player_id, "ly": league_year_id}).mappings().first()
+        if pit and pit["innings_pitched_outs"] and int(pit["innings_pitched_outs"]) > 0:
+            ipo = int(pit["innings_pitched_outs"])
+            ip = ipo / 3.0
+            er = int(pit["earned_runs"])
+            stats_summary["pitching"] = {
+                "era": round(er * 9.0 / ip, 2) if ip > 0 else 0.0,
+                "ip": round(ip, 1),
+                "wins": int(pit["wins"]),
+                "losses": int(pit["losses"]),
+                "strikeouts": int(pit["strikeouts"]),
+            }
+    except Exception as e:
+        log.warning("Stats summary failed for player %d: %s", player_id, e)
+
+    return {
+        "bio": bio,
+        "attributes": attributes,
+        "potentials": potentials,
+        "display_format": display_format,
+        "contract_history": contract_history,
+        "demand": demand_info,
+        "auction": auction_info,
+        "scouting": scouting_info,
+        "stats_summary": stats_summary,
     }
 
 

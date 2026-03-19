@@ -1636,17 +1636,20 @@ def build_team_game_side(
         if pregame_injuries:
             _persist_pregame_injuries(conn, pregame_injuries, league_year_id)
 
-    # 2) Validate starter is on the roster; fallback to best available if not
-    if starter_id not in players_by_id:
+    # 2) Validate starter is on the roster and not benched; fallback to best available if not
+    if starter_id not in players_by_id or players_by_id[starter_id].get("benched_by_injury"):
         roster_pitchers = [
             pid for pid, pdata in players_by_id.items()
             if (pdata.get("ptype") or "").lower() == "pitcher"
         ]
-        if roster_pitchers:
-            # Pick highest-stamina pitcher on the actual roster
-            starter_id = max(roster_pitchers, key=lambda pid: players_by_id[pid].get("stamina", 100))
+        # Prefer pitchers not benched by injury; fall back to anyone if no healthy pitchers
+        eligible = [pid for pid in roster_pitchers if not players_by_id[pid].get("benched_by_injury")]
+        if not eligible:
+            eligible = roster_pitchers
+        if eligible:
+            starter_id = max(eligible, key=lambda pid: players_by_id[pid].get("stamina", 100))
             logger.warning(
-                "build_team_game_side: starter_id not on roster for team %s, "
+                "build_team_game_side: starter_id not on roster or benched for team %s, "
                 "falling back to player %s", team_id, starter_id,
             )
         else:
@@ -1933,6 +1936,10 @@ def build_game_payload_core_from_cache(
         use_dh=use_dh,
     )
 
+    # Carry scheduled rotation slot so advancement knows which slot to move past
+    home_side["scheduled_rotation_slot"] = home_rot.get("scheduled_rotation_slot")
+    away_side["scheduled_rotation_slot"] = away_rot.get("scheduled_rotation_slot")
+
     payload: Dict[str, Any] = {
         "game_id": game_id,
         "league_level_id": league_level_id,
@@ -2047,6 +2054,10 @@ def build_game_payload_core(conn, game_id: int) -> Dict[str, Any]:
         random_seed=random_seed,
         use_dh=use_dh,
     )
+
+    # Carry scheduled rotation slot so advancement knows which slot to move past
+    home_side["scheduled_rotation_slot"] = home_rot.get("scheduled_rotation_slot")
+    away_side["scheduled_rotation_slot"] = away_rot.get("scheduled_rotation_slot")
 
     payload: Dict[str, Any] = {
         "game_id": game_id,
@@ -3613,6 +3624,9 @@ def build_synthetic_matchups(
             )
             continue
 
+        home_side["scheduled_rotation_slot"] = home_rot.get("scheduled_rotation_slot")
+        away_side["scheduled_rotation_slot"] = away_rot.get("scheduled_rotation_slot")
+
         payload = {
             "game_id": -(game_idx + 1),  # Negative IDs for synthetic games
             "league_level_id": league_level,
@@ -3794,6 +3808,9 @@ def build_synthetic_matchups_with_progress(
             if on_progress:
                 on_progress(games_attempted, count)
             continue
+
+        home_side["scheduled_rotation_slot"] = home_rot.get("scheduled_rotation_slot")
+        away_side["scheduled_rotation_slot"] = away_rot.get("scheduled_rotation_slot")
 
         payload = {
             "game_id": -(game_idx + 1),

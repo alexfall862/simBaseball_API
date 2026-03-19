@@ -594,11 +594,13 @@ def api_contract_status(player_id: int):
 
 @transactions_bp.get("/transactions/contract-overview/<int:org_id>")
 def api_contract_overview(org_id: int):
-    """Return contract status for all active players held by an org."""
+    """Return contract status for all active players held by an org.
+    Optional: ?league_year_id=X to include demand summaries."""
     try:
+        league_year_id = request.args.get("league_year_id", type=int)
         engine = get_engine()
         with engine.connect() as conn:
-            overview = get_org_contract_overview(conn, org_id)
+            overview = get_org_contract_overview(conn, org_id, league_year_id)
         return jsonify(overview), 200
     except SQLAlchemyError:
         return jsonify(error="db_error", message="Database error"), 500

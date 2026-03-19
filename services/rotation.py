@@ -21,6 +21,17 @@ _USAGE_THRESHOLDS = {
     "desperation": 0,
 }
 
+# Role priority for bullpen spot-starts (lower = preferred)
+_SPOT_START_ROLE_PRIORITY = {
+    "long": 0,
+    "mop_up": 1,
+    "middle": 2,
+    "setup": 3,
+    "closer": 4,
+}
+
+_SPOT_START_STAMINA_THRESHOLD = 70  # "normal" threshold for spot starters
+
 
 def _apply_injury_stamina_pct(stamina_by_player: Dict[int, int], malus_by_player: Dict[int, Dict]) -> None:
     """
@@ -95,6 +106,7 @@ def _get_rotation_tables():
     slots = Table("team_pitching_rotation_slots", md, autoload_with=engine)
     state = Table("team_rotation_state", md, autoload_with=engine)
     strategies = Table("playerStrategies", md, autoload_with=engine)
+    bullpen_order = Table("team_bullpen_order", md, autoload_with=engine)
 
     _rotation_tables = {
         "rotation": rotation,
@@ -102,6 +114,7 @@ def _get_rotation_tables():
         "state": state,
         "strategies": strategies,
         "players": _get_roster_tables()["players"],
+        "bullpen_order": bullpen_order,
     }
     _metadata = md
     return _rotation_tables
@@ -240,6 +253,135 @@ def _get_usage_preferences_bulk(conn, player_ids: List[int]) -> Dict[int, str]:
     return result
 
 
+# -------------------------------------------------------------------
+# Bullpen spot-starter selection
+# -------------------------------------------------------------------
+
+def _find_bullpen_spot_starter(
+    conn,
+    team_id: int,
+    league_year_id: int,
+    exclude_pids: set[int],
+) -> Dict[str, Any] | None:
+    """
+    Find the best bullpen pitcher to make a spot start when the scheduled
+    rotation starter is unavailable.
+
+    Prefers mop_up / long relievers with high endurance. Returns a candidate
+    dict compatible with the rotation candidates list, or None if no suitable
+    reliever is available.
+    """
+    tables = _get_rotation_tables()
+    bo = tables["bullpen_order"]
+
+    rows = conn.execute(
+        select(bo).where(bo.c.team_id == team_id).order_by(bo.c.slot.asc())
+    ).mappings().all()
+
+    bp_pitchers = [
+        {"player_id": int(r["player_id"]), "role": r.get("role") or "middle"}
+        for r in rows
+        if int(r["player_id"]) not in exclude_pids
+    ]
+    if not bp_pitchers:
+        return None
+
+    bp_ids = [p["player_id"] for p in bp_pitchers]
+
+    # Load stamina + injury data
+    stamina_by_player = get_effective_stamina_bulk(conn, bp_ids, league_year_id)
+    injury_malus = get_active_injury_malus_bulk(conn, bp_ids)
+    _apply_injury_stamina_pct(stamina_by_player, injury_malus)
+
+    # Load endurance ratings for ranking
+    ratings = _load_pitcher_ratings_bulk(conn, bp_ids)
+
+    candidates = []
+    for bp in bp_pitchers:
+        pid = bp["player_id"]
+        stamina = stamina_by_player.get(pid, 100)
+        if stamina < _SPOT_START_STAMINA_THRESHOLD:
+            continue
+        role = bp["role"]
+        pendurance = _safe_float(ratings.get(pid, {}).get("pendurance_base"))
+        role_priority = _SPOT_START_ROLE_PRIORITY.get(role, 2)
+        candidates.append({
+            "player_id": pid,
+            "slot": None,
+            "stamina": stamina,
+            "usage_preference": "normal",
+            "threshold": _SPOT_START_STAMINA_THRESHOLD,
+            "role_priority": role_priority,
+            "pendurance": pendurance,
+            "is_spot_starter": True,
+        })
+
+    if not candidates:
+        return None
+
+    # Sort: prefer lower role_priority (mop_up first), then higher endurance
+    candidates.sort(key=lambda c: (c["role_priority"], -c["pendurance"]))
+    best = candidates[0]
+    logger.info(
+        "Bullpen spot starter for team %s: player %s (role_pri=%d, pendurance=%.1f, stamina=%d)",
+        team_id, best["player_id"], best["role_priority"], best["pendurance"], best["stamina"],
+    )
+    return best
+
+
+def _find_bullpen_spot_starter_from_cache(
+    cache,
+    team_id: int,
+    exclude_pids: set[int],
+) -> Dict[str, Any] | None:
+    """
+    Cache-aware variant of _find_bullpen_spot_starter.  Zero DB queries.
+    """
+    bp_rows = cache.bullpen_order_by_team.get(team_id, [])
+
+    bp_pitchers = [
+        {"player_id": int(r["player_id"]), "role": r.get("role") or "middle"}
+        for r in bp_rows
+        if int(r["player_id"]) not in exclude_pids
+    ]
+    if not bp_pitchers:
+        return None
+
+    candidates = []
+    for bp in bp_pitchers:
+        pid = bp["player_id"]
+        raw_stamina = cache.stamina.get(pid, 100)
+        stam_pct = cache.injury_malus.get(pid, {}).get("stamina_pct")
+        if stam_pct is not None:
+            raw_stamina = int(max(0, raw_stamina * float(stam_pct)))
+        if raw_stamina < _SPOT_START_STAMINA_THRESHOLD:
+            continue
+        role = bp["role"]
+        pendurance = _safe_float(cache.player_rows.get(pid, {}).get("pendurance_base"))
+        role_priority = _SPOT_START_ROLE_PRIORITY.get(role, 2)
+        candidates.append({
+            "player_id": pid,
+            "slot": None,
+            "stamina": raw_stamina,
+            "usage_preference": "normal",
+            "threshold": _SPOT_START_STAMINA_THRESHOLD,
+            "role_priority": role_priority,
+            "pendurance": pendurance,
+            "is_spot_starter": True,
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: (c["role_priority"], -c["pendurance"]))
+    best = candidates[0]
+    logger.info(
+        "Bullpen spot starter (cached) for team %s: player %s (role_pri=%d, pendurance=%.1f, stamina=%d)",
+        team_id, best["player_id"], best["role_priority"], best["pendurance"], best["stamina"],
+    )
+    return best
+
+
 def _fallback_pick_starter_without_rotation(
     conn,
     team_id: int,
@@ -313,6 +455,7 @@ def _fallback_pick_starter_without_rotation(
     return {
         "starter_id": starter["player_id"],
         "candidates": candidates,
+        "scheduled_rotation_slot": None,  # no rotation configured
     }
 
 
@@ -403,18 +546,42 @@ def pick_starting_pitcher(
             }
         )
 
-    starter = None
-    for cand in candidates:
-        if cand["stamina"] >= cand["threshold"]:
-            starter = cand
-            break
+    # The first candidate is the scheduled starter (whose turn it is)
+    scheduled = candidates[0]
+    scheduled_slot = scheduled["slot"]
 
-    if starter is None:
-        starter = max(candidates, key=lambda c: c["stamina"])
+    if scheduled["stamina"] >= scheduled["threshold"]:
+        # Normal case: scheduled starter is good to go
+        starter = scheduled
+    else:
+        # Scheduled starter unavailable — try a bullpen spot starter
+        # before compressing the rotation by using the next rotation pitcher
+        rotation_pids = {c["player_id"] for c in candidates}
+        spot = _find_bullpen_spot_starter(
+            conn, team_id, league_year_id, exclude_pids=rotation_pids,
+        )
+        if spot is not None:
+            starter = spot
+            candidates.append(spot)
+        else:
+            # No bullpen option — try remaining rotation pitchers
+            starter = None
+            for cand in candidates[1:]:
+                if cand["stamina"] >= cand["threshold"]:
+                    starter = cand
+                    break
+            if starter is None:
+                # Desperation: highest stamina from anyone in rotation
+                starter = max(candidates, key=lambda c: c["stamina"])
+                logger.warning(
+                    "Desperation mode: no pitchers meet threshold for team_id %s",
+                    team_id,
+                )
 
     return {
         "starter_id": starter["player_id"],
         "candidates": candidates,
+        "scheduled_rotation_slot": scheduled_slot,
     }
 
 
@@ -475,14 +642,30 @@ def pick_starting_pitcher_from_cache(cache, team_id: int) -> Dict[str, Any]:
             "threshold": threshold,
         })
 
-    starter = None
-    for cand in candidates:
-        if cand["stamina"] >= cand["threshold"]:
-            starter = cand
-            break
+    # The first candidate is the scheduled starter (whose turn it is)
+    scheduled = candidates[0] if candidates else None
+    scheduled_slot = scheduled["slot"] if scheduled else None
 
-    if starter is None and candidates:
-        starter = max(candidates, key=lambda c: c["stamina"])
+    if scheduled and scheduled["stamina"] >= scheduled["threshold"]:
+        starter = scheduled
+    else:
+        # Scheduled starter unavailable — try a bullpen spot starter
+        rotation_pids = {c["player_id"] for c in candidates}
+        spot = _find_bullpen_spot_starter_from_cache(
+            cache, team_id, exclude_pids=rotation_pids,
+        )
+        if spot is not None:
+            starter = spot
+            candidates.append(spot)
+        else:
+            # No bullpen option — try remaining rotation pitchers
+            starter = None
+            for cand in candidates[1:]:
+                if cand["stamina"] >= cand["threshold"]:
+                    starter = cand
+                    break
+            if starter is None and candidates:
+                starter = max(candidates, key=lambda c: c["stamina"])
 
     if starter is None:
         raise ValueError(f"No rotation candidates found for team_id {team_id}")
@@ -490,6 +673,7 @@ def pick_starting_pitcher_from_cache(cache, team_id: int) -> Dict[str, Any]:
     return {
         "starter_id": starter["player_id"],
         "candidates": candidates,
+        "scheduled_rotation_slot": scheduled_slot,
     }
 
 
@@ -540,6 +724,7 @@ def _fallback_pick_starter_from_cache(cache, team_id: int) -> Dict[str, Any]:
     return {
         "starter_id": starter["player_id"],
         "candidates": candidates,
+        "scheduled_rotation_slot": None,  # no rotation configured
     }
 
 
@@ -579,17 +764,18 @@ def advance_rotation_states_bulk(conn, payloads: List[Dict[str, Any]]) -> int:
     """
     from sqlalchemy import text as sa_text
 
-    # Collect (team_id, starter_id, game_id) pairs from all games
-    team_starters: Dict[int, tuple] = {}  # team_id → (starter_id, game_id)
+    # Collect (team_id, starter_id, game_id, scheduled_slot) from all games
+    team_starters: Dict[int, tuple] = {}  # team_id → (starter_id, game_id, scheduled_slot)
     for payload in payloads:
         game_id = payload.get("game_id")
         for side_key in ("home_side", "away_side"):
             side = payload.get(side_key) or {}
             team_id = side.get("team_id")
             starter_id = side.get("starting_pitcher_id")
+            scheduled_slot = side.get("scheduled_rotation_slot")
             if team_id and starter_id:
                 # Last game in subweek wins (teams play at most once per subweek)
-                team_starters[int(team_id)] = (int(starter_id), game_id)
+                team_starters[int(team_id)] = (int(starter_id), game_id, scheduled_slot)
 
     if not team_starters:
         return 0
@@ -635,7 +821,7 @@ def advance_rotation_states_bulk(conn, payloads: List[Dict[str, Any]]) -> int:
             last_updated_at = NOW()
     """)
 
-    for team_id, (starter_id, game_id) in team_starters.items():
+    for team_id, (starter_id, game_id, scheduled_slot) in team_starters.items():
         rot_info = rot_by_team.get(team_id)
         if not rot_info:
             continue  # Team has no configured rotation
@@ -645,11 +831,14 @@ def advance_rotation_states_bulk(conn, payloads: List[Dict[str, Any]]) -> int:
         starter_slot = slot_map.get(starter_id)
 
         if starter_slot is not None:
-            # Advance to this slot so next pick starts from slot+1
+            # Starter is in the rotation — advance to their slot
             new_slot = starter_slot
+        elif scheduled_slot is not None:
+            # Spot starter (bullpen arm) filled in — advance past the
+            # scheduled slot so the rotation doesn't get stuck
+            new_slot = int(scheduled_slot)
         else:
-            # Starter wasn't in the rotation (desperation/fallback pick)
-            # Don't advance — keep current position
+            # No rotation info at all (desperation/fallback) — don't advance
             continue
 
         conn.execute(update_sql, {

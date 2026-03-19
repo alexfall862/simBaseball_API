@@ -206,3 +206,111 @@ def market_rate():
     with engine.connect() as conn:
         dpw = get_current_dollar_per_war(conn, league_year_id)
     return jsonify({"dollar_per_war": str(dpw)})
+
+
+# ── Free agent pool (paginated, fuzzed) ─────────────────────────────
+
+@fa_auction_bp.route("/fa-auction/free-agent-pool", methods=["GET"])
+def free_agent_pool():
+    """
+    GET /fa-auction/free-agent-pool?viewing_org_id=X&league_year_id=Y
+    Paginated list of unsigned non-amateur players with fuzzed attributes.
+    """
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not viewing_org_id or not league_year_id:
+        return jsonify({"error": "viewing_org_id and league_year_id required"}), 400
+
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = max(1, min(request.args.get("per_page", 50, type=int), 200))
+    sort = request.args.get("sort", "lastname")
+    sort_dir = request.args.get("dir", "asc")
+
+    filters = {}
+    if request.args.get("ptype"):
+        filters["ptype"] = request.args.get("ptype")
+    if request.args.get("search"):
+        filters["search"] = request.args.get("search")
+    if request.args.get("min_age", type=int) is not None:
+        filters["min_age"] = request.args.get("min_age", type=int)
+    if request.args.get("max_age", type=int) is not None:
+        filters["max_age"] = request.args.get("max_age", type=int)
+    if request.args.get("area"):
+        filters["area"] = request.args.get("area")
+    if request.args.get("has_auction"):
+        filters["has_auction"] = request.args.get("has_auction", "").lower() in ("1", "true", "yes")
+
+    engine = get_engine()
+    from services.fa_auction import get_free_agent_pool
+    with engine.connect() as conn:
+        result = get_free_agent_pool(
+            conn, viewing_org_id, league_year_id,
+            page=page, per_page=per_page,
+            filters=filters, sort=sort, sort_dir=sort_dir,
+        )
+    return jsonify(result)
+
+
+# ── Player detail ──────────────────────────────────────────────────
+
+@fa_auction_bp.route("/fa-auction/player-detail/<int:player_id>", methods=["GET"])
+def player_detail(player_id):
+    """
+    GET /fa-auction/player-detail/<id>?viewing_org_id=X&league_year_id=Y
+    Full profile for a free agent with scouted attributes, contract history,
+    demand data, auction status, and stats summary.
+    """
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not viewing_org_id or not league_year_id:
+        return jsonify({"error": "viewing_org_id and league_year_id required"}), 400
+
+    engine = get_engine()
+    from services.fa_auction import get_free_agent_detail
+    with engine.connect() as conn:
+        detail = get_free_agent_detail(conn, player_id, viewing_org_id, league_year_id)
+    if not detail:
+        return jsonify({"error": "Player not found"}), 404
+    return jsonify(detail)
+
+
+# ── Inline scouting ────────────────────────────────────────────────
+
+@fa_auction_bp.route("/fa-auction/scout-player", methods=["POST"])
+def scout_player():
+    """
+    POST /fa-auction/scout-player
+    Spend scouting points to reveal player attributes, then return
+    the refreshed player detail.
+    """
+    data = request.get_json(force=True)
+    org_id = data.get("org_id")
+    league_year_id = data.get("league_year_id")
+    player_id = data.get("player_id")
+    action_type = data.get("action_type")
+
+    if not all([org_id, league_year_id, player_id, action_type]):
+        return jsonify({"error": "org_id, league_year_id, player_id, action_type required"}), 400
+
+    engine = get_engine()
+    from services.scouting_service import perform_scouting_action
+    from services.fa_auction import get_free_agent_detail
+
+    try:
+        with engine.begin() as conn:
+            scout_result = perform_scouting_action(
+                conn, org_id, league_year_id, player_id, action_type
+            )
+
+        # Return refreshed player detail with new visibility
+        with engine.connect() as conn:
+            detail = get_free_agent_detail(conn, player_id, org_id, league_year_id)
+
+        return jsonify({
+            "scouting_result": scout_result,
+            "player": detail,
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
