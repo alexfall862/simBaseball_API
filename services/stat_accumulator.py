@@ -12,11 +12,30 @@ results come back from the engine.
 """
 
 import logging
+from contextlib import contextmanager
 from typing import Any, Dict, List
 
 from sqlalchemy import text
 
 logger = logging.getLogger("app")
+
+
+@contextmanager
+def _fk_checks_disabled(conn):
+    """Temporarily disable FK checks for bulk writes.
+
+    Always re-enables in the finally block.  If re-enable fails (e.g. the
+    connection was lost), the pool checkout listener in db.py will reset
+    FK checks when the connection is next checked out.
+    """
+    conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+    try:
+        yield
+    finally:
+        try:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        except Exception:
+            logger.exception("_fk_checks_disabled: failed to re-enable FK checks")
 
 # Chunk size for executemany batching — keeps SQL statement size reasonable
 # and reduces lock hold time on InnoDB.
@@ -1002,9 +1021,7 @@ def accumulate_subweek_stats_bulk(
     # from cache/engine results, so referential integrity is guaranteed).
     totals = {"batters": 0, "pitchers": 0, "fielders": 0}
 
-    try:
-        conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-
+    with _fk_checks_disabled(conn):
         # --- Season accumulation UPSERTs (chunked) ---
         if batting_params:
             try:
@@ -1033,7 +1050,6 @@ def accumulate_subweek_stats_bulk(
                 _chunked_execute(conn, game_bat_stmt, game_batting_params)
             except Exception:
                 if not is_resim:
-                    # Fresh insert failed (likely duplicate from partial re-sim) — retry with upsert
                     logger.warning("stat_accumulator bulk: fresh batting insert failed, retrying with upsert")
                     try:
                         _chunked_execute(conn, _GAME_BATTING_INSERT, game_batting_params)
@@ -1073,13 +1089,6 @@ def accumulate_subweek_stats_bulk(
                 _chunked_execute(conn, _GAME_SUBSTITUTION_INSERT, substitution_params)
             except Exception:
                 logger.exception("stat_accumulator bulk: substitution insert failed (%d rows)", len(substitution_params))
-
-    finally:
-        # Always re-enable FK checks, even if an exception occurred
-        try:
-            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
-        except Exception:
-            logger.exception("stat_accumulator bulk: failed to re-enable FK checks")
 
     logger.info(
         "stat_accumulator bulk: %d batters, %d pitchers, %d fielders, "
@@ -1133,8 +1142,8 @@ def record_subweek_position_usage_bulk(
         return 0
 
     try:
-        conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-        total = _chunked_execute(conn, _USAGE_UPSERT, usage_params)
+        with _fk_checks_disabled(conn):
+            total = _chunked_execute(conn, _USAGE_UPSERT, usage_params)
         logger.info("stat_accumulator bulk: %d position usage rows upserted", total)
         return total
     except Exception:
@@ -1142,13 +1151,4 @@ def record_subweek_position_usage_bulk(
             "stat_accumulator bulk: position usage upsert failed (%d rows)",
             len(usage_params),
         )
-        try:
-            conn.rollback()
-        except Exception:
-            pass
         return 0
-    finally:
-        try:
-            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
-        except Exception:
-            pass

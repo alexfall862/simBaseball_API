@@ -2776,7 +2776,8 @@ def _drain_stamina_and_persist_injuries(
             for pid, cost in player_costs.items()
         ]
         try:
-            conn.execute(drain_upsert, drain_params)
+            with conn.begin_nested():
+                conn.execute(drain_upsert, drain_params)
             drain_count = len(drain_params)
             logger.info(
                 "drain_stamina: applied stamina drain to %d players "
@@ -2800,8 +2801,9 @@ def _drain_stamina_and_persist_injuries(
             for pid, cost in costs_map.items():
                 cost_params.append({"game_id": gid, "player_id": pid, "cost": cost})
         try:
-            conn.execute(update_bat_cost, cost_params)
-            conn.execute(update_pitch_cost, cost_params)
+            with conn.begin_nested():
+                conn.execute(update_bat_cost, cost_params)
+                conn.execute(update_pitch_cost, cost_params)
         except Exception:
             logger.debug("drain_stamina: stamina_cost column update skipped (column may not exist yet)")
 
@@ -2885,21 +2887,22 @@ def _drain_stamina_and_persist_injuries(
             )
 
             try:
-                ev_result = conn.execute(injury_insert, {
-                    "player_id": pid,
-                    "injury_type_id": injury_type_id,
-                    "league_year_id": league_year_id,
-                    "gamelist_id": int(_r_game_id) if _r_game_id is not None else None,
-                    "weeks_assigned": duration_weeks,
-                    "weeks_remaining": duration_weeks,
-                    "malus_json": json.dumps(effects),
-                })
-                event_id = ev_result.lastrowid
-                conn.execute(injury_state_upsert, {
-                    "player_id": pid,
-                    "event_id": event_id,
-                    "weeks_remaining": duration_weeks,
-                })
+                with conn.begin_nested():
+                    ev_result = conn.execute(injury_insert, {
+                        "player_id": pid,
+                        "injury_type_id": injury_type_id,
+                        "league_year_id": league_year_id,
+                        "gamelist_id": int(_r_game_id) if _r_game_id is not None else None,
+                        "weeks_assigned": duration_weeks,
+                        "weeks_remaining": duration_weeks,
+                        "malus_json": json.dumps(effects),
+                    })
+                    event_id = ev_result.lastrowid
+                    conn.execute(injury_state_upsert, {
+                        "player_id": pid,
+                        "event_id": event_id,
+                        "weeks_remaining": duration_weeks,
+                    })
                 injuries_persisted += 1
             except Exception:
                 logger.exception(
@@ -3107,298 +3110,283 @@ def _rollback_prior_results(
 
     counts: Dict[str, int] = {}
 
-    # ---------------------------------------------------------------
-    # 1) Reverse season BATTING stats from old game_batting_lines
-    # ---------------------------------------------------------------
-    old_bat = conn.execute(sa_text(f"""
-        SELECT player_id, league_year_id, team_id,
-               COUNT(*) AS game_count,
-               SUM(at_bats) AS at_bats, SUM(runs) AS runs,
-               SUM(hits) AS hits, SUM(doubles_hit) AS doubles_hit,
-               SUM(triples) AS triples, SUM(home_runs) AS home_runs,
-               SUM(inside_the_park_hr) AS inside_the_park_hr,
-               SUM(rbi) AS rbi, SUM(walks) AS walks,
-               SUM(strikeouts) AS strikeouts,
-               SUM(stolen_bases) AS stolen_bases,
-               SUM(caught_stealing) AS caught_stealing
-        FROM game_batting_lines
-        WHERE game_id IN ({ph})
-        GROUP BY player_id, league_year_id, team_id
-    """), gp).mappings().all()
-
-    if old_bat:
-        reverse_bat = sa_text("""
-            UPDATE player_batting_stats SET
-                games          = GREATEST(0, games - :game_count),
-                at_bats        = GREATEST(0, at_bats - :at_bats),
-                runs           = GREATEST(0, runs - :runs),
-                hits           = GREATEST(0, hits - :hits),
-                doubles_hit    = GREATEST(0, doubles_hit - :doubles_hit),
-                triples        = GREATEST(0, triples - :triples),
-                home_runs      = GREATEST(0, home_runs - :home_runs),
-                inside_the_park_hr = GREATEST(0, inside_the_park_hr - :inside_the_park_hr),
-                rbi            = GREATEST(0, rbi - :rbi),
-                walks          = GREATEST(0, walks - :walks),
-                strikeouts     = GREATEST(0, strikeouts - :strikeouts),
-                stolen_bases   = GREATEST(0, stolen_bases - :stolen_bases),
-                caught_stealing = GREATEST(0, caught_stealing - :caught_stealing)
-            WHERE player_id = :player_id
-              AND league_year_id = :league_year_id
-              AND team_id = :team_id
-        """)
-        for row in old_bat:
-            conn.execute(reverse_bat, dict(row))
-        counts["batting_reversed"] = len(old_bat)
-
-    # ---------------------------------------------------------------
-    # 2) Reverse season PITCHING stats from old game_pitching_lines
-    # ---------------------------------------------------------------
-    old_pitch = conn.execute(sa_text(f"""
-        SELECT player_id, league_year_id, team_id,
-               COUNT(*) AS game_count,
-               SUM(games_started) AS games_started,
-               SUM(win) AS win, SUM(loss) AS loss,
-               SUM(save_recorded) AS save_recorded,
-               SUM(hold) AS hold, SUM(blown_save) AS blown_save,
-               SUM(quality_start) AS quality_start,
-               SUM(innings_pitched_outs) AS innings_pitched_outs,
-               SUM(hits_allowed) AS hits_allowed,
-               SUM(runs_allowed) AS runs_allowed,
-               SUM(earned_runs) AS earned_runs,
-               SUM(walks) AS walks, SUM(strikeouts) AS strikeouts,
-               SUM(home_runs_allowed) AS home_runs_allowed,
-               SUM(inside_the_park_hr_allowed) AS inside_the_park_hr_allowed
-        FROM game_pitching_lines
-        WHERE game_id IN ({ph})
-        GROUP BY player_id, league_year_id, team_id
-    """), gp).mappings().all()
-
-    if old_pitch:
-        reverse_pitch = sa_text("""
-            UPDATE player_pitching_stats SET
-                games              = GREATEST(0, games - :game_count),
-                games_started      = GREATEST(0, games_started - :games_started),
-                wins               = GREATEST(0, wins - :win),
-                losses             = GREATEST(0, losses - :loss),
-                saves              = GREATEST(0, saves - :save_recorded),
-                holds              = GREATEST(0, holds - :hold),
-                blown_saves        = GREATEST(0, blown_saves - :blown_save),
-                quality_starts     = GREATEST(0, quality_starts - :quality_start),
-                innings_pitched_outs = GREATEST(0, innings_pitched_outs - :innings_pitched_outs),
-                hits_allowed       = GREATEST(0, hits_allowed - :hits_allowed),
-                runs_allowed       = GREATEST(0, runs_allowed - :runs_allowed),
-                earned_runs        = GREATEST(0, earned_runs - :earned_runs),
-                walks              = GREATEST(0, walks - :walks),
-                strikeouts         = GREATEST(0, strikeouts - :strikeouts),
-                home_runs_allowed  = GREATEST(0, home_runs_allowed - :home_runs_allowed),
-                inside_the_park_hr_allowed = GREATEST(0, inside_the_park_hr_allowed - :inside_the_park_hr_allowed)
-            WHERE player_id = :player_id
-              AND league_year_id = :league_year_id
-              AND team_id = :team_id
-        """)
-        for row in old_pitch:
-            conn.execute(reverse_pitch, dict(row))
-        counts["pitching_reversed"] = len(old_pitch)
-
-    # ---------------------------------------------------------------
-    # 3) Reverse season FIELDING stats from old game_fielding_lines
-    # ---------------------------------------------------------------
+    # Wrap the entire rollback in a savepoint — partial rollback
+    # (e.g. batting reversed but not pitching) is worse than no rollback.
     try:
-        old_field = conn.execute(sa_text(f"""
-            SELECT player_id, league_year_id, team_id, position_code,
-                   COUNT(*) AS game_count,
-                   SUM(innings) AS innings, SUM(putouts) AS putouts,
-                   SUM(assists) AS assists, SUM(errors) AS errors
-            FROM game_fielding_lines
-            WHERE game_id IN ({ph})
-            GROUP BY player_id, league_year_id, team_id, position_code
-        """), gp).mappings().all()
+        with conn.begin_nested():
+            # -----------------------------------------------------------
+            # 1) Reverse season BATTING stats from old game_batting_lines
+            # -----------------------------------------------------------
+            old_bat = conn.execute(sa_text(f"""
+                SELECT player_id, league_year_id, team_id,
+                       COUNT(*) AS game_count,
+                       SUM(at_bats) AS at_bats, SUM(runs) AS runs,
+                       SUM(hits) AS hits, SUM(doubles_hit) AS doubles_hit,
+                       SUM(triples) AS triples, SUM(home_runs) AS home_runs,
+                       SUM(inside_the_park_hr) AS inside_the_park_hr,
+                       SUM(rbi) AS rbi, SUM(walks) AS walks,
+                       SUM(strikeouts) AS strikeouts,
+                       SUM(stolen_bases) AS stolen_bases,
+                       SUM(caught_stealing) AS caught_stealing
+                FROM game_batting_lines
+                WHERE game_id IN ({ph})
+                GROUP BY player_id, league_year_id, team_id
+            """), gp).mappings().all()
 
-        if old_field:
-            reverse_field = sa_text("""
-                UPDATE player_fielding_stats SET
-                    games   = GREATEST(0, games - :game_count),
-                    innings = GREATEST(0, innings - :innings),
-                    putouts = GREATEST(0, putouts - :putouts),
-                    assists = GREATEST(0, assists - :assists),
-                    errors  = GREATEST(0, errors - :errors)
-                WHERE player_id = :player_id
-                  AND league_year_id = :league_year_id
-                  AND team_id = :team_id
-                  AND position_code = :position_code
-            """)
-            for row in old_field:
-                conn.execute(reverse_field, dict(row))
-            counts["fielding_reversed"] = len(old_field)
+            if old_bat:
+                reverse_bat = sa_text("""
+                    UPDATE player_batting_stats SET
+                        games          = GREATEST(0, games - :game_count),
+                        at_bats        = GREATEST(0, at_bats - :at_bats),
+                        runs           = GREATEST(0, runs - :runs),
+                        hits           = GREATEST(0, hits - :hits),
+                        doubles_hit    = GREATEST(0, doubles_hit - :doubles_hit),
+                        triples        = GREATEST(0, triples - :triples),
+                        home_runs      = GREATEST(0, home_runs - :home_runs),
+                        inside_the_park_hr = GREATEST(0, inside_the_park_hr - :inside_the_park_hr),
+                        rbi            = GREATEST(0, rbi - :rbi),
+                        walks          = GREATEST(0, walks - :walks),
+                        strikeouts     = GREATEST(0, strikeouts - :strikeouts),
+                        stolen_bases   = GREATEST(0, stolen_bases - :stolen_bases),
+                        caught_stealing = GREATEST(0, caught_stealing - :caught_stealing)
+                    WHERE player_id = :player_id
+                      AND league_year_id = :league_year_id
+                      AND team_id = :team_id
+                """)
+                for row in old_bat:
+                    conn.execute(reverse_bat, dict(row))
+                counts["batting_reversed"] = len(old_bat)
+
+            # -----------------------------------------------------------
+            # 2) Reverse season PITCHING stats from old game_pitching_lines
+            # -----------------------------------------------------------
+            old_pitch = conn.execute(sa_text(f"""
+                SELECT player_id, league_year_id, team_id,
+                       COUNT(*) AS game_count,
+                       SUM(games_started) AS games_started,
+                       SUM(win) AS win, SUM(loss) AS loss,
+                       SUM(save_recorded) AS save_recorded,
+                       SUM(hold) AS hold, SUM(blown_save) AS blown_save,
+                       SUM(quality_start) AS quality_start,
+                       SUM(innings_pitched_outs) AS innings_pitched_outs,
+                       SUM(hits_allowed) AS hits_allowed,
+                       SUM(runs_allowed) AS runs_allowed,
+                       SUM(earned_runs) AS earned_runs,
+                       SUM(walks) AS walks, SUM(strikeouts) AS strikeouts,
+                       SUM(home_runs_allowed) AS home_runs_allowed,
+                       SUM(inside_the_park_hr_allowed) AS inside_the_park_hr_allowed
+                FROM game_pitching_lines
+                WHERE game_id IN ({ph})
+                GROUP BY player_id, league_year_id, team_id
+            """), gp).mappings().all()
+
+            if old_pitch:
+                reverse_pitch = sa_text("""
+                    UPDATE player_pitching_stats SET
+                        games              = GREATEST(0, games - :game_count),
+                        games_started      = GREATEST(0, games_started - :games_started),
+                        wins               = GREATEST(0, wins - :win),
+                        losses             = GREATEST(0, losses - :loss),
+                        saves              = GREATEST(0, saves - :save_recorded),
+                        holds              = GREATEST(0, holds - :hold),
+                        blown_saves        = GREATEST(0, blown_saves - :blown_save),
+                        quality_starts     = GREATEST(0, quality_starts - :quality_start),
+                        innings_pitched_outs = GREATEST(0, innings_pitched_outs - :innings_pitched_outs),
+                        hits_allowed       = GREATEST(0, hits_allowed - :hits_allowed),
+                        runs_allowed       = GREATEST(0, runs_allowed - :runs_allowed),
+                        earned_runs        = GREATEST(0, earned_runs - :earned_runs),
+                        walks              = GREATEST(0, walks - :walks),
+                        strikeouts         = GREATEST(0, strikeouts - :strikeouts),
+                        home_runs_allowed  = GREATEST(0, home_runs_allowed - :home_runs_allowed),
+                        inside_the_park_hr_allowed = GREATEST(0, inside_the_park_hr_allowed - :inside_the_park_hr_allowed)
+                    WHERE player_id = :player_id
+                      AND league_year_id = :league_year_id
+                      AND team_id = :team_id
+                """)
+                for row in old_pitch:
+                    conn.execute(reverse_pitch, dict(row))
+                counts["pitching_reversed"] = len(old_pitch)
+
+            # -----------------------------------------------------------
+            # 3) Reverse season FIELDING stats from old game_fielding_lines
+            # -----------------------------------------------------------
+            old_field = conn.execute(sa_text(f"""
+                SELECT player_id, league_year_id, team_id, position_code,
+                       COUNT(*) AS game_count,
+                       SUM(innings) AS innings, SUM(putouts) AS putouts,
+                       SUM(assists) AS assists, SUM(errors) AS errors
+                FROM game_fielding_lines
+                WHERE game_id IN ({ph})
+                GROUP BY player_id, league_year_id, team_id, position_code
+            """), gp).mappings().all()
+
+            if old_field:
+                reverse_field = sa_text("""
+                    UPDATE player_fielding_stats SET
+                        games   = GREATEST(0, games - :game_count),
+                        innings = GREATEST(0, innings - :innings),
+                        putouts = GREATEST(0, putouts - :putouts),
+                        assists = GREATEST(0, assists - :assists),
+                        errors  = GREATEST(0, errors - :errors)
+                    WHERE player_id = :player_id
+                      AND league_year_id = :league_year_id
+                      AND team_id = :team_id
+                      AND position_code = :position_code
+                """)
+                for row in old_field:
+                    conn.execute(reverse_field, dict(row))
+                counts["fielding_reversed"] = len(old_field)
+
+            # -----------------------------------------------------------
+            # 4) Reverse STAMINA drain using stored stamina_cost
+            # -----------------------------------------------------------
+            old_costs = conn.execute(sa_text(f"""
+                SELECT player_id, MAX(stamina_cost) AS stamina_cost
+                FROM (
+                    SELECT player_id, stamina_cost FROM game_batting_lines
+                    WHERE game_id IN ({ph}) AND stamina_cost IS NOT NULL
+                    UNION ALL
+                    SELECT player_id, stamina_cost FROM game_pitching_lines
+                    WHERE game_id IN ({ph}) AND stamina_cost IS NOT NULL
+                ) combined
+                GROUP BY player_id
+            """), gp).mappings().all()
+
+            if old_costs:
+                restore_stamina = sa_text("""
+                    UPDATE player_fatigue_state
+                    SET stamina = LEAST(100, stamina + :cost),
+                        last_updated_at = NOW()
+                    WHERE player_id = :player_id AND league_year_id = :league_year_id
+                """)
+                for row in old_costs:
+                    cost = row["stamina_cost"]
+                    if cost and int(cost) > 0:
+                        conn.execute(restore_stamina, {
+                            "player_id": int(row["player_id"]),
+                            "league_year_id": league_year_id,
+                            "cost": int(cost),
+                        })
+                counts["stamina_restored"] = len(old_costs)
+
+            # -----------------------------------------------------------
+            # 5) Reverse POSITION USAGE
+            # -----------------------------------------------------------
+            old_usage = conn.execute(sa_text(f"""
+                SELECT gbl.player_id, gbl.team_id, gbl.position_code,
+                       COUNT(*) AS start_count
+                FROM game_batting_lines gbl
+                WHERE gbl.game_id IN ({ph})
+                  AND gbl.position_code IS NOT NULL
+                  AND gbl.position_code != ''
+                GROUP BY gbl.player_id, gbl.team_id, gbl.position_code
+            """), gp).mappings().all()
+
+            if old_usage:
+                decr_usage = sa_text("""
+                    UPDATE player_position_usage_week
+                    SET starts_this_week = GREATEST(0, starts_this_week - :start_count)
+                    WHERE league_year_id = :league_year_id
+                      AND season_week = :season_week
+                      AND team_id = :team_id
+                      AND player_id = :player_id
+                      AND position_code = :position_code
+                """)
+                pos_map = {
+                    "c": "c", "1b": "fb", "2b": "sb", "3b": "tb", "ss": "ss",
+                    "lf": "lf", "cf": "cf", "rf": "rf", "dh": "dh", "p": "p",
+                    "fb": "fb", "sb": "sb", "tb": "tb",
+                }
+                for row in old_usage:
+                    usage_pos = pos_map.get(str(row["position_code"]).lower())
+                    if not usage_pos:
+                        continue
+                    conn.execute(decr_usage, {
+                        "league_year_id": league_year_id,
+                        "season_week": season_week,
+                        "team_id": int(row["team_id"]),
+                        "player_id": int(row["player_id"]),
+                        "position_code": usage_pos,
+                        "start_count": int(row["start_count"]),
+                    })
+                counts["usage_reversed"] = len(old_usage)
+
+            # -----------------------------------------------------------
+            # 6) Reverse PLAYOFF SERIES win counts
+            # -----------------------------------------------------------
+            old_playoff = conn.execute(sa_text(f"""
+                SELECT gr.game_id, gr.home_team_id, gr.away_team_id,
+                       gr.winning_team_id, gr.game_type
+                FROM game_results gr
+                WHERE gr.game_id IN ({ph}) AND gr.game_type = 'playoff'
+            """), gp).mappings().all()
+
+            for pg in old_playoff:
+                old_winner = pg["winning_team_id"]
+                if not old_winner:
+                    continue
+                old_winner = int(old_winner)
+                home_tid = int(pg["home_team_id"])
+                away_tid = int(pg["away_team_id"])
+
+                series = conn.execute(sa_text("""
+                    SELECT id, team_a_id, team_b_id, wins_a, wins_b, status
+                    FROM playoff_series
+                    WHERE (team_a_id = :home OR team_a_id = :away)
+                      AND (team_b_id = :home OR team_b_id = :away)
+                    ORDER BY id DESC LIMIT 1
+                """), {"home": home_tid, "away": away_tid}).mappings().first()
+
+                if not series:
+                    continue
+
+                sid = int(series["id"])
+                team_a = int(series["team_a_id"])
+                if old_winner == team_a:
+                    conn.execute(sa_text("""
+                        UPDATE playoff_series
+                        SET wins_a = GREATEST(0, wins_a - 1),
+                            status = 'active', winner_team_id = NULL
+                        WHERE id = :sid
+                    """), {"sid": sid})
+                else:
+                    conn.execute(sa_text("""
+                        UPDATE playoff_series
+                        SET wins_b = GREATEST(0, wins_b - 1),
+                            status = 'active', winner_team_id = NULL
+                        WHERE id = :sid
+                    """), {"sid": sid})
+            counts["playoff_reversed"] = len(old_playoff)
+
+            # -----------------------------------------------------------
+            # 7) Delete old INJURY EVENTS for these games
+            # -----------------------------------------------------------
+            del_result = conn.execute(sa_text(
+                f"DELETE FROM player_injury_events WHERE gamelist_id IN ({ph})"
+            ), gp)
+            counts["injuries_deleted"] = del_result.rowcount
+
+            # -----------------------------------------------------------
+            # 8) Delete old per-game lines and substitutions
+            # -----------------------------------------------------------
+            for table in ("game_batting_lines", "game_pitching_lines",
+                          "game_fielding_lines", "game_substitutions"):
+                conn.execute(sa_text(f"DELETE FROM {table} WHERE game_id IN ({ph})"), gp)
+
+        # Savepoint released successfully
+        logger.info(
+            "rollback_prior_results: rolled back %d game(s): %s",
+            len(resim_game_ids), counts,
+        )
+        return counts
+
     except Exception:
-        logger.debug("rollback_prior_results: game_fielding_lines table not available — skipping fielding reversal")
-
-    # ---------------------------------------------------------------
-    # 4) Reverse STAMINA drain using stored stamina_cost
-    # ---------------------------------------------------------------
-    # Collect stamina costs from both batting and pitching lines
-    # (a player in both has the same cost — use MAX to avoid double-restore)
-    old_costs = conn.execute(sa_text(f"""
-        SELECT player_id, MAX(stamina_cost) AS stamina_cost
-        FROM (
-            SELECT player_id, stamina_cost FROM game_batting_lines
-            WHERE game_id IN ({ph}) AND stamina_cost IS NOT NULL
-            UNION ALL
-            SELECT player_id, stamina_cost FROM game_pitching_lines
-            WHERE game_id IN ({ph}) AND stamina_cost IS NOT NULL
-        ) combined
-        GROUP BY player_id
-    """), gp).mappings().all()
-
-    if old_costs:
-        restore_stamina = sa_text("""
-            UPDATE player_fatigue_state
-            SET stamina = LEAST(100, stamina + :cost),
-                last_updated_at = NOW()
-            WHERE player_id = :player_id AND league_year_id = :league_year_id
-        """)
-        for row in old_costs:
-            cost = row["stamina_cost"]
-            if cost and int(cost) > 0:
-                conn.execute(restore_stamina, {
-                    "player_id": int(row["player_id"]),
-                    "league_year_id": league_year_id,
-                    "cost": int(cost),
-                })
-        counts["stamina_restored"] = len(old_costs)
-
-    # ---------------------------------------------------------------
-    # 5) Reverse POSITION USAGE
-    # ---------------------------------------------------------------
-    # We know team_ids and the week — decrement by reading old batting lines
-    # which have position_code per player per game
-    old_usage = conn.execute(sa_text(f"""
-        SELECT gbl.player_id, gbl.team_id, gbl.position_code,
-               gr.home_team_id, gr.away_team_id,
-               COUNT(*) AS start_count
-        FROM game_batting_lines gbl
-        JOIN game_results gr ON gr.game_id = gbl.game_id
-        WHERE gbl.game_id IN ({ph})
-          AND gbl.position_code IS NOT NULL
-          AND gbl.position_code != ''
-        GROUP BY gbl.player_id, gbl.team_id, gbl.position_code,
-                 gr.home_team_id, gr.away_team_id
-    """), gp).mappings().all()
-
-    if old_usage:
-        # We need vs_hand but it's not stored in game_batting_lines.
-        # Approximate by decrementing across both hands if needed.
-        # Since position_usage_week is per (player, team, pos, vs_hand, week),
-        # decrement all matching rows proportionally.
-        decr_usage = sa_text("""
-            UPDATE player_position_usage_week
-            SET starts_this_week = GREATEST(0, starts_this_week - :start_count)
-            WHERE league_year_id = :league_year_id
-              AND season_week = :season_week
-              AND team_id = :team_id
-              AND player_id = :player_id
-              AND position_code = :position_code
-        """)
-        for row in old_usage:
-            pos = str(row["position_code"]).lower()
-            # Normalize position codes to match usage table enum
-            pos_map = {
-                "c": "c", "1b": "fb", "2b": "sb", "3b": "tb", "ss": "ss",
-                "lf": "lf", "cf": "cf", "rf": "rf", "dh": "dh", "p": "p",
-                "fb": "fb", "sb": "sb", "tb": "tb",
-            }
-            usage_pos = pos_map.get(pos)
-            if not usage_pos:
-                continue
-            conn.execute(decr_usage, {
-                "league_year_id": league_year_id,
-                "season_week": season_week,
-                "team_id": int(row["team_id"]),
-                "player_id": int(row["player_id"]),
-                "position_code": usage_pos,
-                "start_count": int(row["start_count"]),
-            })
-        counts["usage_reversed"] = len(old_usage)
-
-    # ---------------------------------------------------------------
-    # 6) Reverse PLAYOFF SERIES win counts
-    # ---------------------------------------------------------------
-    old_playoff = conn.execute(sa_text(f"""
-        SELECT gr.game_id, gr.home_team_id, gr.away_team_id,
-               gr.winning_team_id, gr.game_type
-        FROM game_results gr
-        WHERE gr.game_id IN ({ph}) AND gr.game_type = 'playoff'
-    """), gp).mappings().all()
-
-    for pg in old_playoff:
-        old_winner = pg["winning_team_id"]
-        if not old_winner:
-            continue
-        old_winner = int(old_winner)
-        home_tid = int(pg["home_team_id"])
-        away_tid = int(pg["away_team_id"])
-
-        series = conn.execute(sa_text("""
-            SELECT id, team_a_id, team_b_id, wins_a, wins_b, status
-            FROM playoff_series
-            WHERE (team_a_id = :home OR team_a_id = :away)
-              AND (team_b_id = :home OR team_b_id = :away)
-            ORDER BY id DESC LIMIT 1
-        """), {"home": home_tid, "away": away_tid}).mappings().first()
-
-        if not series:
-            continue
-
-        sid = int(series["id"])
-        team_a = int(series["team_a_id"])
-        if old_winner == team_a:
-            conn.execute(sa_text("""
-                UPDATE playoff_series
-                SET wins_a = GREATEST(0, wins_a - 1),
-                    status = 'active', winner_team_id = NULL
-                WHERE id = :sid
-            """), {"sid": sid})
-        else:
-            conn.execute(sa_text("""
-                UPDATE playoff_series
-                SET wins_b = GREATEST(0, wins_b - 1),
-                    status = 'active', winner_team_id = NULL
-                WHERE id = :sid
-            """), {"sid": sid})
-    counts["playoff_reversed"] = len(old_playoff)
-
-    # ---------------------------------------------------------------
-    # 7) Delete old INJURY EVENTS for these games
-    # ---------------------------------------------------------------
-    try:
-        del_result = conn.execute(sa_text(
-            f"DELETE FROM player_injury_events WHERE gamelist_id IN ({ph})"
-        ), gp)
-        counts["injuries_deleted"] = del_result.rowcount
-    except Exception:
-        logger.debug("rollback_prior_results: injury event deletion failed (gamelist_id may not be populated)")
-        counts["injuries_deleted"] = 0
-
-    # ---------------------------------------------------------------
-    # 8) Delete old per-game lines and substitutions
-    # ---------------------------------------------------------------
-    for table in ("game_batting_lines", "game_pitching_lines",
-                  "game_substitutions"):
-        try:
-            conn.execute(sa_text(f"DELETE FROM {table} WHERE game_id IN ({ph})"), gp)
-        except Exception:
-            logger.exception("rollback_prior_results: failed to delete from %s", table)
-
-    try:
-        conn.execute(sa_text(f"DELETE FROM game_fielding_lines WHERE game_id IN ({ph})"), gp)
-    except Exception:
-        pass  # table may not exist yet
-
-    logger.info(
-        "rollback_prior_results: rolled back %d game(s): %s",
-        len(resim_game_ids), counts,
-    )
-    return counts
+        logger.exception(
+            "rollback_prior_results: FAILED to roll back %d game(s) — "
+            "re-sim will proceed with upsert mode to overwrite stale data",
+            len(resim_game_ids),
+        )
+        return {"rolled_back": 0, "error": True}
 
 
 # -------------------------------------------------------------------
