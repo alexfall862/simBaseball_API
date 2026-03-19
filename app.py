@@ -238,6 +238,12 @@ def create_app(config_object=Config):
         app.logger.exception("Failed to register transactions blueprint: %s", e)
 
     try:
+        from fa_auction import fa_auction_bp
+        app.register_blueprint(fa_auction_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register fa_auction blueprint: %s", e)
+
+    try:
         from player_ops import player_ops_bp
         app.register_blueprint(player_ops_bp, url_prefix="/api/v1")
     except Exception as e:

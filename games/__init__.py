@@ -244,6 +244,86 @@ def simulate_week():
         ), 500
 
 
+@games_bp.post("/games/simulate-subweek")
+def simulate_subweek():
+    """
+    Simulate a single subweek (a, b, c, or d) for a given week.
+
+    Request body:
+    {
+        "league_year_id": 2026,
+        "season_week": 53,
+        "subweek": "a",
+        "league_level": 9  // optional
+    }
+    """
+    body = request.get_json(force=True, silent=True) or {}
+
+    league_year_id = body.get("league_year_id")
+    season_week = body.get("season_week")
+    subweek = body.get("subweek")
+    league_level = body.get("league_level")
+
+    if not league_year_id or not season_week or not subweek:
+        return jsonify(
+            error="missing_field",
+            message="league_year_id, season_week, and subweek are required"
+        ), 400
+
+    if subweek not in ("a", "b", "c", "d"):
+        return jsonify(
+            error="invalid_subweek",
+            message="subweek must be one of: a, b, c, d"
+        ), 400
+
+    try:
+        league_year_id = int(league_year_id)
+        season_week = int(season_week)
+        if league_level is not None:
+            league_level = int(league_level)
+    except (TypeError, ValueError) as e:
+        return jsonify(error="invalid_type", message=str(e)), 400
+
+    engine = get_engine()
+
+    try:
+        update_timestamp({"week": season_week, "run_games": True})
+
+        with engine.connect() as conn:
+            result = build_week_payloads(
+                conn=conn,
+                league_year_id=league_year_id,
+                season_week=season_week,
+                league_level=league_level,
+                subweek_filter=subweek,
+            )
+
+        # Mark just this subweek as completed
+        set_subweek_completed(subweek, broadcast=False)
+        set_run_games(False, broadcast=True)
+
+        games_in_subweek = len(result.get("subweeks", {}).get(subweek, []))
+        current_app.logger.info(
+            "simulate_subweek: %d games in subweek '%s' (week %d, level %s)",
+            games_in_subweek, subweek, season_week, league_level,
+        )
+
+        return jsonify(result), 200
+
+    except ValueError as e:
+        set_run_games(False, broadcast=True)
+        return jsonify(error="validation_error", message=str(e)), 404
+
+    except SQLAlchemyError as e:
+        set_run_games(False, broadcast=True)
+        return jsonify(error="database_error", message=str(e)), 500
+
+    except Exception as e:
+        set_run_games(False, broadcast=True)
+        current_app.logger.exception("simulate_subweek: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
 @games_bp.post("/games/advance-week")
 def advance_week_endpoint():
     """
@@ -594,10 +674,10 @@ def wipe_season():
     try:
         from sqlalchemy import text as sa_text, MetaData, Table, select
 
-        with engine.begin() as conn:
-            deleted = {}
+        deleted = {}
 
-            # Resolve season_id from league_year_id
+        # Resolve season_id from league_year_id
+        with engine.connect() as conn:
             md = MetaData()
             league_years = Table("league_years", md, autoload_with=engine)
             seasons = Table("seasons", md, autoload_with=engine)
@@ -616,126 +696,153 @@ def wipe_season():
             ).all()
             season_ids = [int(r[0]) for r in season_rows]
 
-            # 1. game_results (uses season FK, optionally filtered by level)
-            gr_sql = "DELETE FROM game_results WHERE season IN :season_ids"
-            params = {"season_ids": tuple(season_ids) if season_ids else (0,)}
-            if league_level is not None:
-                gr_sql += " AND league_level = :league_level"
-                params["league_level"] = league_level
-            r = conn.execute(sa_text(gr_sql), params)
-            deleted["game_results"] = r.rowcount
+        # Helper: fresh connection per step so a dropped conn doesn't kill everything
+        def _wipe(label, sql, params=None):
+            with engine.begin() as c:
+                r = c.execute(sa_text(sql), params or {})
+                deleted[label] = r.rowcount
 
-            # 2-4. Per-game line tables (keyed by league_year_id)
-            for tbl_name in ("game_batting_lines", "game_pitching_lines",
-                             "game_substitutions"):
-                r = conn.execute(sa_text(
-                    f"DELETE FROM {tbl_name} WHERE league_year_id = :lyid"
-                ), {"lyid": league_year_id})
-                deleted[tbl_name] = r.rowcount
+        # Chunked delete for very large tables — deletes BATCH_SIZE rows at a time
+        def _wipe_chunked(label, table, where_clause, params, batch=5000):
+            total = 0
+            while True:
+                with engine.begin() as c:
+                    r = c.execute(sa_text(
+                        f"DELETE FROM {table} WHERE {where_clause} LIMIT {batch}"
+                    ), params)
+                    total += r.rowcount
+                    if r.rowcount < batch:
+                        break
+            deleted[label] = total
 
-            # 5-7. Player stat tables (keyed by league_year_id)
-            for tbl_name in ("player_batting_stats", "player_pitching_stats",
-                             "player_fielding_stats"):
-                r = conn.execute(sa_text(
-                    f"DELETE FROM {tbl_name} WHERE league_year_id = :lyid"
-                ), {"lyid": league_year_id})
-                deleted[tbl_name] = r.rowcount
+        # 1. game_results — chunked (can be very large)
+        gr_where = "season IN :season_ids"
+        gr_params = {"season_ids": tuple(season_ids) if season_ids else (0,)}
+        if league_level is not None:
+            gr_where += " AND league_level = :league_level"
+            gr_params["league_level"] = league_level
+        _wipe_chunked("game_results", "game_results", gr_where, gr_params)
 
-            # 5. Financial ledger (keyed by league_year_id)
-            # NOTE: org_media_shares is NOT wiped — it's configuration data
-            # (each org's share percentage), not simulation output.
-            r = conn.execute(sa_text(
-                "DELETE FROM org_ledger_entries WHERE league_year_id = :lyid"
-            ), {"lyid": league_year_id})
-            deleted["org_ledger_entries"] = r.rowcount
+        # 2-4. Per-game line tables — chunked
+        for tbl_name in ("game_batting_lines", "game_pitching_lines",
+                         "game_substitutions"):
+            _wipe_chunked(tbl_name, tbl_name,
+                          "league_year_id = :lyid", {"lyid": league_year_id})
 
-            # 6. Position usage
-            r = conn.execute(sa_text(
-                "DELETE FROM player_position_usage_week WHERE league_year_id = :lyid"
-            ), {"lyid": league_year_id})
-            deleted["player_position_usage_week"] = r.rowcount
+        # 5-7. Player stat tables — chunked (can be large)
+        for tbl_name in ("player_batting_stats", "player_pitching_stats",
+                         "player_fielding_stats"):
+            _wipe_chunked(tbl_name, tbl_name,
+                          "league_year_id = :lyid", {"lyid": league_year_id})
 
-            # 6. Injury events (FK SET NULL cascades to player_injury_state)
-            r = conn.execute(sa_text(
-                "DELETE FROM player_injury_events WHERE league_year_id = :lyid"
-            ), {"lyid": league_year_id})
-            deleted["player_injury_events"] = r.rowcount
+        # 5. Financial ledger — chunked
+        _wipe_chunked("org_ledger_entries", "org_ledger_entries",
+                      "league_year_id = :lyid", {"lyid": league_year_id})
 
-            # 7. Reset orphaned injury states to healthy
-            r = conn.execute(sa_text(
-                "UPDATE player_injury_state "
-                "SET status = 'healthy', weeks_remaining = 0 "
-                "WHERE current_event_id IS NULL AND status = 'injured'"
-            ))
-            deleted["injury_states_reset"] = r.rowcount
+        # 6. Position usage — chunked
+        _wipe_chunked("player_position_usage_week", "player_position_usage_week",
+                      "league_year_id = :lyid", {"lyid": league_year_id})
 
-            # 8. Fatigue state
-            r = conn.execute(sa_text(
-                "DELETE FROM player_fatigue_state WHERE league_year_id = :lyid"
-            ), {"lyid": league_year_id})
-            deleted["player_fatigue_state"] = r.rowcount
+        # 6. Injury events (FK SET NULL cascades to player_injury_state)
+        _wipe("player_injury_events",
+              "DELETE FROM player_injury_events WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
 
-            # 8b. Scouting actions — only reset attribute unlocks (change
-            #     season-to-season); potential unlocks are permanent.
-            r = conn.execute(sa_text(
-                "DELETE FROM scouting_actions WHERE league_year_id = :lyid "
-                "AND action_type IN ('hs_report', 'draft_attrs_fuzzed', "
-                "'draft_attrs_precise', 'pro_attrs_precise')"
-            ), {"lyid": league_year_id})
-            deleted["scouting_actions_attrs"] = r.rowcount
+        # 7. Reset orphaned injury states to healthy
+        _wipe("injury_states_reset",
+              "UPDATE player_injury_state "
+              "SET status = 'healthy', weeks_remaining = 0 "
+              "WHERE current_event_id IS NULL AND status = 'injured'")
 
-            # 8c. Scouting budgets (per-org spend tracking)
-            r = conn.execute(sa_text(
-                "DELETE FROM scouting_budgets WHERE league_year_id = :lyid"
-            ), {"lyid": league_year_id})
-            deleted["scouting_budgets"] = r.rowcount
+        # 8. Fatigue state
+        _wipe("player_fatigue_state",
+              "DELETE FROM player_fatigue_state WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
 
-            # 8d-8h. Recruiting data — NOT wiped on season wipe.
-            # Rankings, investments, commitments, state, and board all
-            # persist so star ratings and in-progress recruiting survive
-            # a season replay.  They are cleaned up naturally when a new
-            # league_year starts.
+        # 8b. Scouting actions — only reset attribute unlocks
+        _wipe("scouting_actions_attrs",
+              "DELETE FROM scouting_actions WHERE league_year_id = :lyid "
+              "AND action_type IN ('hs_report', 'draft_attrs_fuzzed', "
+              "'draft_attrs_precise', 'pro_attrs_precise')",
+              {"lyid": league_year_id})
 
-            # 8i. Listed positions (overrides + derived)
-            r = conn.execute(sa_text(
-                "DELETE FROM player_listed_position WHERE league_year_id = :lyid"
-            ), {"lyid": league_year_id})
-            deleted["player_listed_position"] = r.rowcount
+        # 8c. Scouting budgets
+        _wipe("scouting_budgets",
+              "DELETE FROM scouting_budgets WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
 
-            # 9. Reset rotation state (pointer only — rotation config preserved)
-            r = conn.execute(sa_text(
-                "UPDATE team_rotation_state SET current_slot = 0, "
-                "last_game_id = NULL, last_updated_at = NOW()"
-            ))
-            deleted["rotation_states_reset"] = r.rowcount
+        # 8d-8h. Recruiting data — NOT wiped on season wipe.
 
-            # 10. Reset timestamp
-            conn.execute(sa_text(
-                "UPDATE timestamp_state SET "
-                "week = 1, games_a_ran = 0, games_b_ran = 0, "
-                "games_c_ran = 0, games_d_ran = 0, run_games = 0 "
-                "WHERE id = 1"
-            ))
+        # 8i. Listed positions
+        _wipe("player_listed_position",
+              "DELETE FROM player_listed_position WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
 
-            # 10. Reclaim disk space from deleted rows
-            optimize_tables = [
-                "game_results", "game_batting_lines", "game_pitching_lines",
-                "game_substitutions",
-                "player_batting_stats", "player_pitching_stats",
-                "player_fielding_stats", "player_position_usage_week",
-                "player_injury_events", "player_fatigue_state",
-                "org_ledger_entries",
-                "scouting_actions", "scouting_budgets",
-                "player_listed_position",
-            ]
-            for tbl in optimize_tables:
-                conn.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))
-            deleted["optimized_tables"] = len(optimize_tables)
+        # 8j. Playoff series + bracket
+        _wipe("playoff_series",
+              "DELETE FROM playoff_series WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
+        _wipe("cws_bracket",
+              "DELETE FROM cws_bracket WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
 
-            # 11. Re-run year-start books (media payouts + bonuses)
-            from financials.books import run_year_start_books
-            books_result = run_year_start_books(engine, year)
-            deleted["year_start_books"] = books_result
+        # Remove playoff/allstar/wbc gamelist entries (regular schedule preserved)
+        if season_ids:
+            sid_csv = ",".join(str(s) for s in season_ids)
+            for gt in ("playoff", "allstar", "wbc"):
+                _wipe(f"{gt}_gamelist",
+                      f"DELETE FROM gamelist WHERE game_type = '{gt}' "
+                      f"AND season IN ({sid_csv})")
+
+        # 8k. Special events (allstar + wbc) — rosters first (FK), then events
+        _wipe("special_event_rosters",
+              "DELETE ser FROM special_event_rosters ser "
+              "JOIN special_events se ON se.id = ser.event_id "
+              "WHERE se.league_year_id = :lyid",
+              {"lyid": league_year_id})
+        _wipe("special_events",
+              "DELETE FROM special_events WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
+
+        # 8l. WBC teams — cascade-deleted by special_events FK, no explicit wipe needed
+
+        # 9. Reset rotation state
+        _wipe("rotation_states_reset",
+              "UPDATE team_rotation_state SET current_slot = 0, "
+              "last_game_id = NULL, last_updated_at = NOW()")
+
+        # 10. Reset timestamp
+        _wipe("timestamp_reset",
+              "UPDATE timestamp_state SET "
+              "week = 1, games_a_ran = 0, games_b_ran = 0, "
+              "games_c_ran = 0, games_d_ran = 0, run_games = 0 "
+              "WHERE id = 1")
+
+        # 11. Reclaim disk space (each OPTIMIZE is its own implicit commit)
+        optimize_tables = [
+            "game_results", "game_batting_lines", "game_pitching_lines",
+            "game_substitutions",
+            "player_batting_stats", "player_pitching_stats",
+            "player_fielding_stats", "player_position_usage_week",
+            "player_injury_events", "player_fatigue_state",
+            "org_ledger_entries",
+            "scouting_actions", "scouting_budgets",
+            "player_listed_position",
+            "playoff_series", "cws_bracket",
+            "special_events", "special_event_rosters",
+        ]
+        for tbl in optimize_tables:
+            try:
+                with engine.begin() as c:
+                    c.execute(sa_text(f"OPTIMIZE TABLE {tbl}"))
+            except Exception:
+                pass  # OPTIMIZE is best-effort
+        deleted["optimized_tables"] = len(optimize_tables)
+
+        # 12. Re-run year-start books (media payouts + bonuses)
+        from financials.books import run_year_start_books
+        books_result = run_year_start_books(engine, year)
+        deleted["year_start_books"] = books_result
 
         # Broadcast updated timestamp
         from services.websocket_manager import ws_manager

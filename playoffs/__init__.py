@@ -15,6 +15,9 @@ from services.playoffs import (
     advance_round,
     advance_cws_round,
     get_bracket,
+    get_pending_playoff_games,
+    process_completed_playoff_games,
+    wipe_playoffs,
 )
 
 playoffs_bp = Blueprint("playoffs", __name__)
@@ -201,6 +204,67 @@ def update_series():
             result = update_series_after_game(conn, game_id)
         if result is None:
             return jsonify(message="Not a playoff game"), 200
+        return jsonify(result), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.get("/playoffs/pending-games/<int:league_year_id>/<int:league_level>")
+def pending_games(league_year_id: int, league_level: int):
+    """
+    Get all pending (unsimulated) playoff gamelist entries for active/pending series.
+    Useful for the admin UI to show which games are next.
+    """
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            games = get_pending_playoff_games(conn, league_year_id, league_level)
+        return jsonify(games=games), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.post("/playoffs/process-results")
+def process_results():
+    """
+    Scan for completed playoff games that haven't been tracked in playoff_series
+    yet and process them. This is a catch-up mechanism for games simulated via
+    the normal simulate-week flow.
+
+    Body: {league_year_id, league_level}
+    """
+    data = request.get_json(force=True)
+    league_year_id = int(data["league_year_id"])
+    league_level = int(data["league_level"])
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            updates = process_completed_playoff_games(
+                conn, league_year_id, league_level
+            )
+        return jsonify(updates=updates, processed=len(updates)), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.post("/playoffs/wipe")
+def wipe():
+    """
+    Wipe all playoff data for a given league year and level.
+    Removes series, games, results, and per-game stat lines.
+    Season-accumulated stats and stamina are left untouched.
+
+    Body: {league_year_id, league_level}
+    """
+    data = request.get_json(force=True)
+    league_year_id = int(data["league_year_id"])
+    league_level = int(data["league_level"])
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = wipe_playoffs(conn, league_year_id, league_level)
         return jsonify(result), 200
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500

@@ -2504,6 +2504,53 @@ def _store_game_results_bulk(
         return 0
 
 
+def _update_playoff_series_bulk(
+    conn,
+    results: List[Dict[str, Any]],
+    payloads: List[Dict[str, Any]],
+    games: List[Any],
+) -> List[Dict[str, Any]]:
+    """
+    After storing game results, update playoff_series win counts for any
+    playoff games in this batch.  Automatically generates the next game
+    for active series.
+
+    Returns list of series update dicts (one per playoff game processed).
+    """
+    from services.playoffs import update_series_after_game
+
+    # Build game_type lookup from gamelist rows
+    game_type_by_id: Dict[int, str] = {}
+    for g in games:
+        gid = int(g["id"] if isinstance(g, dict) else g["id"])
+        gt = str((g.get("game_type") if isinstance(g, dict) else g["game_type"]) or "regular")
+        game_type_by_id[gid] = gt
+
+    updates = []
+    for result in results:
+        game_id = result.get("game_id")
+        if game_id is None:
+            continue
+        game_id = int(game_id)
+
+        if game_type_by_id.get(game_id) != "playoff":
+            continue
+
+        try:
+            update = update_series_after_game(conn, game_id)
+            if update:
+                updates.append(update)
+                logger.info(
+                    "playoff_series auto-update for game %d: series %d → %d-%d (%s)",
+                    game_id, update["series_id"],
+                    update["wins_a"], update["wins_b"], update["status"],
+                )
+        except Exception:
+            logger.exception("playoff_series update failed for game %d", game_id)
+
+    return updates
+
+
 def _normalize_engine_effects(effects: Dict[str, Any]) -> Dict[str, float]:
     """
     Flatten engine injury effects into a simple {attr: multiplier} dict.
@@ -3094,14 +3141,17 @@ def _process_level_subweek(
         # Rotation advancement
         rot_count = advance_rotation_states_bulk(level_conn, payloads)
 
+        # Playoff series tracking: update wins/losses and generate next games
+        playoff_updates = _update_playoff_series_bulk(level_conn, results, payloads, games)
+
         # Single commit for all writes
         level_conn.commit()
 
         logger.info(
             "Level %d subweek '%s' complete: %d results, stats=%s, "
-            "usage=%d, drain=%s, rotations=%d",
+            "usage=%d, drain=%s, rotations=%d, playoff_updates=%d",
             level, subweek, result_count, stat_counts,
-            usage_count, drain_counts, rot_count,
+            usage_count, drain_counts, rot_count, len(playoff_updates),
         )
 
         return {
@@ -3109,6 +3159,7 @@ def _process_level_subweek(
             "results": results,
             "result_count": result_count,
             "stat_counts": stat_counts,
+            "playoff_updates": playoff_updates,
         }
 
 
@@ -3118,6 +3169,7 @@ def build_week_payloads(
     season_week: int,
     league_level: int | None = None,
     simulate: bool = True,
+    subweek_filter: str | None = None,
 ) -> Dict[str, Any]:
     """
     Build game payloads for all games in a given season_week.
@@ -3125,6 +3177,8 @@ def build_week_payloads(
     Processes games sequentially by subweek (a -> b -> c -> d) to support
     state updates between subweeks.  Within each subweek, different league
     levels are processed in PARALLEL using ThreadPoolExecutor.
+
+    If subweek_filter is set (e.g. "a"), only that single subweek is processed.
 
     After all levels complete for a subweek, global stamina recovery runs
     once (Option B — avoids double-recovery across levels).
@@ -3257,7 +3311,9 @@ def build_week_payloads(
     subweek_payloads: Dict[str, List[Dict[str, Any]]] = {}
     total_games = 0
 
-    for subweek in ["a", "b", "c", "d"]:
+    subweeks_to_run = [subweek_filter] if subweek_filter else ["a", "b", "c", "d"]
+
+    for subweek in subweeks_to_run:
         levels_games = games_by_subweek[subweek]
 
         if not levels_games:

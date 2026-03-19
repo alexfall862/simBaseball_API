@@ -80,6 +80,12 @@
       <a href="#" class="nav-item" data-section="tx-amateur">
         <span class="nav-icon">&#127891;</span> Amateur Seeding
       </a>
+      <a href="#" class="nav-item" data-section="fa-auction">
+        <span class="nav-icon">&#128176;</span> FA Auction
+      </a>
+      <a href="#" class="nav-item" data-section="fa-market">
+        <span class="nav-icon">&#128200;</span> Market Dashboard
+      </a>
     </div>
 
     <div class="nav-section">
@@ -1211,9 +1217,11 @@
             <div class="form-group" id="tx-buyout-group" style="display:none">
               <label>Buyout Amount ($)</label>
               <input type="number" id="tx-buyout-amount" min="0" step="1000" />
+              <div id="tx-buyout-demand" class="text-muted" style="margin-top: 4px; font-size: 0.85rem"></div>
             </div>
           </div>
           <div id="tx-extend-group" style="display:none">
+            <div id="tx-ext-demand" class="alert alert-info" style="display:none; margin-bottom: 12px"></div>
             <div class="form-grid">
               <div class="form-group">
                 <label>Extension Years</label>
@@ -1551,6 +1559,136 @@
             <button class="btn btn-primary" id="btn-populate-college">Populate Orgs</button>
           </div>
           <pre id="populate-college-result" class="result-box" style="margin-top: 12px"></pre>
+        </div>
+      </section>
+
+      <!-- ── FA Auction Board ────────────────────────────────── -->
+      <section id="section-fa-auction" class="section">
+        <div class="card">
+          <h3>Free Agent Auction Board</h3>
+          <div class="form-row" style="gap: 12px; align-items: flex-end; margin-bottom: 16px">
+            <div class="form-group">
+              <label for="fa-auc-org">Your Organization</label>
+              <select id="fa-auc-org"></select>
+            </div>
+            <button class="btn btn-secondary" id="btn-fa-load-board">Load Board</button>
+            <button class="btn btn-secondary" id="btn-fa-advance-phases" title="Admin: manually advance auction phases">Advance Phases</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Age</th>
+                  <th>Type</th>
+                  <th>WAR</th>
+                  <th>Min AAV</th>
+                  <th>Phase</th>
+                  <th># Offers</th>
+                  <th>Competing</th>
+                  <th>Your Offer</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="fa-auc-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Offer Modal -->
+        <div id="fa-offer-modal" style="display:none; margin-top: 16px">
+          <div class="card">
+            <h3>Make Offer: <span id="fa-offer-player-name"></span></h3>
+            <div class="form-grid" style="margin-bottom: 16px">
+              <div class="form-group">
+                <label>Player WAR</label>
+                <span id="fa-offer-war" class="text-muted"></span>
+              </div>
+              <div class="form-group">
+                <label>Player Min AAV</label>
+                <span id="fa-offer-min-aav" class="text-muted"></span>
+              </div>
+              <div class="form-group">
+                <label>Phase</label>
+                <span id="fa-offer-phase" class="text-muted"></span>
+              </div>
+              <div class="form-group">
+                <label>Your Budget</label>
+                <span id="fa-offer-budget" class="text-muted"></span>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="fa-offer-years">Years</label>
+                <input type="number" id="fa-offer-years" min="1" max="5" value="1" />
+              </div>
+              <div class="form-group">
+                <label for="fa-offer-bonus">Signing Bonus ($)</label>
+                <input type="number" id="fa-offer-bonus" min="0" step="100000" value="0" />
+              </div>
+              <div class="form-group">
+                <label for="fa-offer-level">Assign to Level</label>
+                <select id="fa-offer-level">
+                  <option value="9">MLB (9)</option>
+                  <option value="8">AAA (8)</option>
+                  <option value="7">AA (7)</option>
+                  <option value="6">High-A (6)</option>
+                  <option value="5">A (5)</option>
+                </select>
+              </div>
+            </div>
+            <div id="fa-offer-salaries" class="form-grid" style="margin-top: 12px"></div>
+            <div class="form-grid" style="margin-top: 12px">
+              <div class="form-group">
+                <label>Total Value</label>
+                <span id="fa-offer-total" class="text-muted">$0</span>
+              </div>
+              <div class="form-group">
+                <label>AAV</label>
+                <span id="fa-offer-aav" class="text-muted">$0</span>
+              </div>
+            </div>
+            <div id="fa-offer-warning" class="alert alert-warning" style="display:none; margin-top: 8px"></div>
+            <div style="margin-top: 12px">
+              <button class="btn btn-primary" id="btn-fa-submit-offer">Submit Offer</button>
+              <button class="btn btn-secondary" id="btn-fa-cancel-offer" style="margin-left: 8px">Cancel</button>
+            </div>
+            <pre id="fa-offer-result" class="result-box" style="margin-top: 12px; display:none"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Market Dashboard ────────────────────────────────── -->
+      <section id="section-fa-market" class="section">
+        <div class="card">
+          <h3>Contract Market Dashboard</h3>
+          <button class="btn btn-secondary" id="btn-fa-load-market">Load Market Data</button>
+          <div id="fa-market-data" style="display:none; margin-top: 16px">
+            <div class="grid-3" id="fa-market-summary-cards"></div>
+            <div class="card" style="margin-top: 16px">
+              <h4>WAR Tier Distribution</h4>
+              <canvas id="fa-market-tiers-chart" height="200"></canvas>
+            </div>
+            <div class="card" style="margin-top: 16px">
+              <h4>Recent Signings</h4>
+              <div class="table-container">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Player</th>
+                      <th>Age</th>
+                      <th>WAR</th>
+                      <th>Years</th>
+                      <th>AAV</th>
+                      <th>Total Value</th>
+                      <th>Source</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fa-market-recent-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -3160,14 +3298,20 @@
               </select>
             </div>
             <button id="btn-po-generate" class="btn btn-primary">Generate Bracket</button>
+            <button id="btn-po-process" class="btn btn-secondary">Process Results</button>
             <button id="btn-po-advance" class="btn btn-secondary">Advance Round</button>
             <button id="btn-po-refresh" class="btn btn-secondary">Refresh</button>
+            <button id="btn-po-wipe" class="btn btn-danger">Wipe Playoffs</button>
           </div>
           <div id="po-status" class="status-msg"></div>
         </div>
         <div class="card" id="po-field-card" style="display:none">
           <h4>Playoff Field</h4>
           <div id="po-field"></div>
+        </div>
+        <div class="card" id="po-pending-card" style="display:none">
+          <h4>Pending Games</h4>
+          <div id="po-pending"></div>
         </div>
         <div class="card" id="po-bracket-card" style="display:none">
           <h4>Bracket</h4>
@@ -3183,14 +3327,30 @@
               <label>League Year</label>
               <select id="as-lyid"></select>
             </div>
+            <div>
+              <label>League Level</label>
+              <select id="as-level">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">High-A (6)</option>
+                <option value="5">A (5)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
             <button id="btn-as-create" class="btn btn-primary">Create Event</button>
+            <button id="btn-as-simulate" class="btn btn-warning">Simulate Game</button>
             <button id="btn-as-refresh" class="btn btn-secondary">Load Rosters</button>
           </div>
           <div id="as-status" class="status-msg"></div>
-          <div>
+          <div style="margin-top:8px">
             <label>Event ID</label>
             <input id="as-eid" type="number" placeholder="Event ID" style="width:100px" />
           </div>
+        </div>
+        <div class="card" id="as-result-card" style="display:none">
+          <h4>Game Result</h4>
+          <div id="as-result"></div>
         </div>
         <div class="card" id="as-rosters-card" style="display:none">
           <h4>Rosters</h4>

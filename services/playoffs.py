@@ -32,6 +32,115 @@ CLINCH = {3: 2, 5: 3, 7: 4}
 
 
 # =====================================================================
+# Helpers — game generation
+# =====================================================================
+
+def _create_game_1_for_series(
+    engine, conn, league_year_id: int, league_level: int,
+    team_a_id: int, team_b_id: int,
+    series_length: int, start_week: int,
+) -> None:
+    """
+    Insert only game 1 of a series into gamelist.
+    Subsequent games are created by generate_next_series_game() after each result.
+    """
+    if series_length == 1:
+        home, away = team_a_id, team_b_id
+    else:
+        pattern = HOME_PATTERNS[series_length]
+        home = team_a_id if pattern[0] else team_b_id
+        away = team_b_id if pattern[0] else team_a_id
+
+    # Find first available subweek slot on start_week
+    week, subweek = _next_available_subweek(
+        conn, league_year_id, league_level,
+        team_a_id, team_b_id, start_week,
+    )
+
+    _insert_single_playoff_game(
+        conn, league_year_id, league_level,
+        home, away, week, subweek,
+    )
+
+
+def generate_next_series_game(conn, series_id: int) -> Optional[Dict[str, Any]]:
+    """
+    After a series game is played and update_series_after_game has run,
+    generate the next game if the series is still active (not clinched).
+
+    Returns info about the created game, or None if the series is complete
+    or no more games are needed.
+    """
+    series = conn.execute(sa_text("""
+        SELECT id, league_year_id, league_level, round, series_number,
+               team_a_id, team_b_id, seed_a, seed_b,
+               wins_a, wins_b, series_length, status, start_week
+        FROM playoff_series WHERE id = :sid
+    """), {"sid": series_id}).mappings().first()
+
+    if not series or series["status"] == "complete":
+        return None
+
+    series_len = int(series["series_length"])
+    wins_a = int(series["wins_a"])
+    wins_b = int(series["wins_b"])
+    games_played = wins_a + wins_b
+
+    # Single-game series — no next game
+    if series_len == 1:
+        return None
+
+    # Already clinched?
+    if wins_a >= CLINCH[series_len] or wins_b >= CLINCH[series_len]:
+        return None
+
+    # Determine game number (0-based) for the NEXT game
+    game_idx = games_played  # next game is the one after all played games
+    if game_idx >= series_len:
+        return None  # shouldn't happen, but safety check
+
+    # Determine home/away from the pattern
+    pattern = HOME_PATTERNS[series_len]
+    team_a_id = int(series["team_a_id"])
+    team_b_id = int(series["team_b_id"])
+
+    if pattern[game_idx]:
+        home, away = team_a_id, team_b_id
+    else:
+        home, away = team_b_id, team_a_id
+
+    # Determine week and subweek: each game in the series goes on the next
+    # available subweek slot (a→b→c→d, then spill to next week).
+    start_week = int(series["start_week"])
+    league_year_id = int(series["league_year_id"])
+    league_level = int(series["league_level"])
+
+    # Find the next free subweek slot for this series' teams
+    week, subweek = _next_available_subweek(
+        conn, league_year_id, league_level,
+        team_a_id, team_b_id, start_week,
+    )
+
+    _insert_single_playoff_game(
+        conn, league_year_id, league_level,
+        home, away, week, subweek,
+    )
+
+    log.info(
+        "playoffs: generated game %d for series %d (%s), week %d, %d @ %d",
+        game_idx + 1, series_id, series["round"], week, away, home,
+    )
+
+    return {
+        "series_id": series_id,
+        "game_number": game_idx + 1,
+        "home_team_id": home,
+        "away_team_id": away,
+        "week": week,
+    }
+
+
+# =====================================================================
 # MLB Playoffs (Level 9)
 # =====================================================================
 
@@ -169,17 +278,11 @@ def create_mlb_bracket(
                 "week": start_week, "conf": conf,
             })
 
-            # Generate games via schedule_generator.add_series
-            from services.schedule_generator import add_series
-            add_series(
-                engine,
-                league_year=_get_league_year(conn, league_year_id),
-                league_level=9,
-                home_team_id=team_a["team_id"],  # higher seed hosts all Bo3
-                away_team_id=team_b["team_id"],
-                week=start_week,
-                games=3,
-                game_type="playoff",
+            # Generate only game 1 — subsequent games created after each result
+            _create_game_1_for_series(
+                engine, conn, league_year_id, 9,
+                team_a["team_id"], team_b["team_id"],
+                series_length=3, start_week=start_week,
             )
 
             created.append({
@@ -198,7 +301,8 @@ def create_mlb_bracket(
 def update_series_after_game(conn, game_id: int) -> Optional[Dict[str, Any]]:
     """
     After a playoff game completes, update the corresponding series win counts.
-    Looks up the series via gamelist → playoff_series matching.
+    If the series is still active, automatically generates the next game.
+    If the series is clinched, marks it complete.
 
     Returns series status dict if found, None if game is not a playoff game.
     """
@@ -241,7 +345,7 @@ def update_series_after_game(conn, game_id: int) -> Optional[Dict[str, Any]]:
     else:
         wins_b += 1
 
-    clinch_target = CLINCH[series_len]
+    clinch_target = CLINCH.get(series_len, 1)
     winner_id = None
     status = "active"
 
@@ -267,13 +371,21 @@ def update_series_after_game(conn, game_id: int) -> Optional[Dict[str, Any]]:
         series_id, wins_a, wins_b, status, winner_id,
     )
 
-    return {
+    result = {
         "series_id": series_id,
         "wins_a": wins_a,
         "wins_b": wins_b,
         "status": status,
         "winner_team_id": winner_id,
+        "next_game": None,
     }
+
+    # Auto-generate the next game if the series is still active
+    if status == "active":
+        next_game = generate_next_series_game(conn, series_id)
+        result["next_game"] = next_game
+
+    return result
 
 
 def advance_round(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
@@ -317,16 +429,24 @@ def _advance_mlb_round(
 ) -> Dict[str, Any]:
     """Advance MLB playoffs to the next round."""
 
-    # Determine which round just completed
-    for rnd in MLB_ROUNDS:
-        info = complete_rounds.get(rnd)
-        if info and info["total"] == info["done"]:
-            next_idx = MLB_ROUNDS.index(rnd) + 1
-            if next_idx >= len(MLB_ROUNDS):
-                return {"status": "complete", "message": "World Series is complete!"}
-            next_round = MLB_ROUNDS[next_idx]
-            break
-    else:
+    # Determine which round just completed and needs advancement.
+    # Walk rounds in order; find the latest complete round whose NEXT round
+    # does not yet exist (i.e. hasn't been advanced into already).
+    rnd = None
+    next_round = None
+    for i, r in enumerate(MLB_ROUNDS):
+        info = complete_rounds.get(r)
+        if not info or info["total"] != info["done"]:
+            continue
+        nxt_idx = i + 1
+        if nxt_idx >= len(MLB_ROUNDS):
+            return {"status": "complete", "message": "World Series is complete!"}
+        candidate = MLB_ROUNDS[nxt_idx]
+        if candidate not in complete_rounds:
+            # Next round doesn't exist yet — this is the one to advance from
+            rnd = r
+            next_round = candidate
+    if rnd is None:
         return {"error": "No fully complete round found to advance from"}
 
     # Get the last completed round's start week to calculate next week
@@ -347,7 +467,6 @@ def _advance_mlb_round(
     """), {"lyid": league_year_id, "rnd": rnd}).mappings().all()
 
     created = []
-    league_year = _get_league_year(conn, league_year_id)
 
     if next_round == "DS":
         # DS: Seed 1 vs lowest remaining WC survivor, Seed 2 vs other
@@ -430,11 +549,11 @@ def _advance_mlb_round(
                     "week": next_week, "conf": conf,
                 })
 
-                # Bo5 games: 2-2-1 home pattern
-                _generate_series_games(
-                    engine, league_year, 9,
+                # Only game 1 — subsequent games auto-generated after each result
+                _create_game_1_for_series(
+                    engine, conn, league_year_id, 9,
                     top_seed["team_id"], opp_tid,
-                    next_week, 4, HOME_PATTERNS[5],
+                    series_length=5, start_week=next_week,
                 )
 
                 created.append({
@@ -479,10 +598,10 @@ def _advance_mlb_round(
                 "week": next_week, "conf": conf,
             })
 
-            _generate_series_games(
-                engine, league_year, 9,
+            _create_game_1_for_series(
+                engine, conn, league_year_id, 9,
                 int(w1["winner_team_id"]), int(w2["winner_team_id"]),
-                next_week, 4, HOME_PATTERNS[7],
+                series_length=7, start_week=next_week,
             )
 
             created.append({
@@ -528,10 +647,10 @@ def _advance_mlb_round(
             "week": next_week,
         })
 
-        _generate_series_games(
-            engine, league_year, 9,
+        _create_game_1_for_series(
+            engine, conn, league_year_id, 9,
             team_a_id, team_b_id,
-            next_week, 4, HOME_PATTERNS[7],
+            series_length=7, start_week=next_week,
         )
 
         created.append({"round": "WS", "matchup": "AL champ vs NL champ"})
@@ -615,7 +734,6 @@ def create_milb_bracket(
     QF: 1v8, 2v7, 3v6, 4v5 — all Bo7.
     """
     engine = get_engine()
-    league_year = _get_league_year(conn, league_year_id)
     seeds = {t["seed"]: t for t in field}
     created = []
 
@@ -640,10 +758,10 @@ def create_milb_bracket(
             "week": start_week,
         })
 
-        _generate_series_games(
-            engine, league_year, league_level,
+        _create_game_1_for_series(
+            engine, conn, league_year_id, league_level,
             team_a["team_id"], team_b["team_id"],
-            start_week, 4, HOME_PATTERNS[7],
+            series_length=7, start_week=start_week,
         )
 
         created.append({
@@ -660,17 +778,21 @@ def _advance_milb_round(
 ) -> Dict[str, Any]:
     """Advance minor league playoffs (QF→SF→F)."""
     MILB_ROUNDS = ["QF", "SF", "F"]
-    league_year = _get_league_year(conn, league_year_id)
 
-    for rnd in MILB_ROUNDS:
-        info = complete_rounds.get(rnd)
-        if info and info["total"] == info["done"]:
-            next_idx = MILB_ROUNDS.index(rnd) + 1
-            if next_idx >= len(MILB_ROUNDS):
-                return {"status": "complete", "message": "Finals complete!"}
-            next_round = MILB_ROUNDS[next_idx]
-            break
-    else:
+    rnd = None
+    next_round = None
+    for i, r in enumerate(MILB_ROUNDS):
+        info = complete_rounds.get(r)
+        if not info or info["total"] != info["done"]:
+            continue
+        nxt_idx = i + 1
+        if nxt_idx >= len(MILB_ROUNDS):
+            return {"status": "complete", "message": "Finals complete!"}
+        candidate = MILB_ROUNDS[nxt_idx]
+        if candidate not in complete_rounds:
+            rnd = r
+            next_round = candidate
+    if rnd is None:
         return {"error": "No fully complete round found"}
 
     last_week_row = conn.execute(sa_text("""
@@ -723,10 +845,10 @@ def _advance_milb_round(
                 "week": next_week,
             })
 
-            _generate_series_games(
-                engine, league_year, league_level,
+            _create_game_1_for_series(
+                engine, conn, league_year_id, league_level,
                 int(w_a["winner_team_id"]), int(w_b["winner_team_id"]),
-                next_week, 4, HOME_PATTERNS[7],
+                series_length=7, start_week=next_week,
             )
 
             created.append({"round": "SF", "matchup": f"#{a_seed} vs #{b_seed}"})
@@ -760,10 +882,10 @@ def _advance_milb_round(
             "week": next_week,
         })
 
-        _generate_series_games(
-            engine, league_year, league_level,
+        _create_game_1_for_series(
+            engine, conn, league_year_id, league_level,
             int(w_a["winner_team_id"]), int(w_b["winner_team_id"]),
-            next_week, 4, HOME_PATTERNS[7],
+            series_length=7, start_week=next_week,
         )
 
         created.append({"round": "F", "matchup": f"#{a_seed} vs #{b_seed}"})
@@ -910,9 +1032,6 @@ def create_cws_bracket(
     Double elimination: losers drop to losers bracket; 2 losses = eliminated.
     First round: 1v8, 2v7, 3v6, 4v5 — single games.
     """
-    engine = get_engine()
-    league_year = _get_league_year(conn, league_year_id)
-
     # Insert bracket entries
     for t in field:
         conn.execute(sa_text("""
@@ -951,17 +1070,15 @@ def create_cws_bracket(
             "week": start_week,
         })
 
-        # Single game — higher seed hosts
-        from services.schedule_generator import add_series
-        add_series(
-            engine,
-            league_year=league_year,
-            league_level=3,
-            home_team_id=team_a["team_id"],
-            away_team_id=team_b["team_id"],
-            week=start_week,
-            games=1,
-            game_type="playoff",
+        # Single game — higher seed hosts, find available subweek
+        week, subweek = _next_available_subweek(
+            conn, league_year_id, 3,
+            team_a["team_id"], team_b["team_id"], start_week,
+        )
+        _insert_single_playoff_game(
+            conn, league_year_id, 3,
+            team_a["team_id"], team_b["team_id"],
+            week, subweek,
         )
 
         created.append({
@@ -980,9 +1097,6 @@ def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
     - When 2 teams remain, play championship (if loser bracket team wins,
       they play again since the winners bracket team hasn't lost yet).
     """
-    engine = get_engine()
-    league_year = _get_league_year(conn, league_year_id)
-
     # Get all CWS series for this league year
     all_series = conn.execute(sa_text("""
         SELECT id, round, series_number, team_a_id, team_b_id,
@@ -1086,12 +1200,8 @@ def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
             "week": next_week,
         })
 
-        from services.schedule_generator import add_series
-        add_series(
-            engine, league_year=league_year, league_level=3,
-            home_team_id=t1["team_id"], away_team_id=t2["team_id"],
-            week=next_week, games=1, game_type="playoff",
-        )
+        w, sw = _next_available_subweek(conn, league_year_id, 3, t1["team_id"], t2["team_id"], next_week)
+        _insert_single_playoff_game(conn, league_year_id, 3, t1["team_id"], t2["team_id"], w, sw)
 
         created.append({"round": next_round, "matchup": f"#{t1['seed']} vs #{t2['seed']}"})
         return {"round_advanced": next_round, "series_created": created, "week": next_week}
@@ -1123,12 +1233,8 @@ def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
                 "week": next_week,
             })
 
-            from services.schedule_generator import add_series
-            add_series(
-                engine, league_year=league_year, league_level=3,
-                home_team_id=t1["team_id"], away_team_id=t2["team_id"],
-                week=next_week, games=1, game_type="playoff",
-            )
+            w, sw = _next_available_subweek(conn, league_year_id, 3, t1["team_id"], t2["team_id"], next_week)
+            _insert_single_playoff_game(conn, league_year_id, 3, t1["team_id"], t2["team_id"], w, sw)
             created.append({"round": next_w_round, "matchup": f"#{t1['seed']} vs #{t2['seed']}"})
 
     # Generate next losers bracket round
@@ -1158,12 +1264,8 @@ def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
                 "week": next_week,
             })
 
-            from services.schedule_generator import add_series
-            add_series(
-                engine, league_year=league_year, league_level=3,
-                home_team_id=t1["team_id"], away_team_id=t2["team_id"],
-                week=next_week, games=1, game_type="playoff",
-            )
+            w, sw = _next_available_subweek(conn, league_year_id, 3, t1["team_id"], t2["team_id"], next_week)
+            _insert_single_playoff_game(conn, league_year_id, 3, t1["team_id"], t2["team_id"], w, sw)
             created.append({"round": next_l_round, "matchup": f"#{t1['seed']} vs #{t2['seed']}"})
 
     return {"round_advanced": f"W{round_num+1}/L{round_num+1}", "series_created": created, "week": next_week}
@@ -1229,6 +1331,194 @@ def get_bracket(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
 
 
 # =====================================================================
+# Pending / Catch-up queries
+# =====================================================================
+
+def get_pending_playoff_games(
+    conn, league_year_id: int, league_level: int,
+) -> List[Dict[str, Any]]:
+    """
+    Return all gamelist rows for pending/active playoff series that do NOT
+    yet have a game_results row.  These are the games waiting to be simulated.
+    """
+    rows = conn.execute(sa_text("""
+        SELECT gl.id AS game_id, gl.away_team, gl.home_team,
+               gl.season_week, gl.season_subweek,
+               ta.team_abbrev AS away_abbrev,
+               th.team_abbrev AS home_abbrev,
+               ps.id AS series_id, ps.round, ps.series_number,
+               ps.wins_a, ps.wins_b, ps.series_length, ps.status AS series_status
+        FROM gamelist gl
+        JOIN teams ta ON ta.id = gl.away_team
+        JOIN teams th ON th.id = gl.home_team
+        JOIN playoff_series ps
+          ON ps.league_year_id = :lyid AND ps.league_level = :level
+          AND ps.status IN ('pending', 'active')
+          AND ((ps.team_a_id = gl.home_team AND ps.team_b_id = gl.away_team)
+            OR (ps.team_a_id = gl.away_team AND ps.team_b_id = gl.home_team))
+        LEFT JOIN game_results gr ON gr.game_id = gl.id
+        WHERE gl.game_type = 'playoff'
+          AND gl.league_level = :level
+          AND gr.game_id IS NULL
+        ORDER BY gl.season_week, gl.season_subweek, ps.round, ps.series_number
+    """), {"lyid": league_year_id, "level": league_level}).mappings().all()
+
+    return [{
+        "game_id": int(r["game_id"]),
+        "away_team": int(r["away_team"]),
+        "home_team": int(r["home_team"]),
+        "away_abbrev": r["away_abbrev"],
+        "home_abbrev": r["home_abbrev"],
+        "season_week": int(r["season_week"]),
+        "season_subweek": r["season_subweek"],
+        "series_id": int(r["series_id"]),
+        "round": r["round"],
+        "series_number": int(r["series_number"]),
+        "wins_a": int(r["wins_a"]),
+        "wins_b": int(r["wins_b"]),
+        "series_length": int(r["series_length"]),
+        "series_status": r["series_status"],
+    } for r in rows]
+
+
+def process_completed_playoff_games(
+    conn, league_year_id: int, league_level: int,
+) -> List[Dict[str, Any]]:
+    """
+    Find completed playoff game_results that haven't been reflected in
+    playoff_series yet (wins not counted) and process them in order.
+
+    This is a catch-up mechanism: it identifies games whose results exist
+    but whose series wins_a/wins_b don't yet account for them.
+    """
+    # Find all completed playoff games for active/pending series
+    rows = conn.execute(sa_text("""
+        SELECT gr.game_id, gr.winning_team_id, gr.home_team_id, gr.away_team_id,
+               gr.season_week, gr.season_subweek
+        FROM game_results gr
+        JOIN gamelist gl ON gl.id = gr.game_id
+        JOIN playoff_series ps
+          ON ps.league_year_id = :lyid AND ps.league_level = :level
+          AND ps.status IN ('pending', 'active')
+          AND ((ps.team_a_id = gr.home_team_id AND ps.team_b_id = gr.away_team_id)
+            OR (ps.team_a_id = gr.away_team_id AND ps.team_b_id = gr.home_team_id))
+        WHERE gr.game_type = 'playoff'
+          AND gl.league_level = :level
+        ORDER BY gr.season_week, gr.season_subweek
+    """), {"lyid": league_year_id, "level": league_level}).mappings().all()
+
+    # Now check which of these have NOT been counted yet.
+    # Strategy: count game_results for each series vs wins_a + wins_b.
+    # If more results than counted wins, process the uncounted ones.
+    updates = []
+    for r in rows:
+        game_id = int(r["game_id"])
+        result = update_series_after_game(conn, game_id)
+        if result:
+            updates.append(result)
+
+    return updates
+
+
+# =====================================================================
+# Wipe / Reset
+# =====================================================================
+
+def wipe_playoffs(
+    conn, league_year_id: int, league_level: int,
+) -> Dict[str, Any]:
+    """
+    Delete all playoff data for a given league year and level so the user
+    can regenerate the bracket from scratch.
+
+    Removes:
+      - playoff_series rows
+      - gamelist rows (game_type='playoff')
+      - game_results rows (game_type='playoff')
+      - game_batting_lines / game_pitching_lines for those games
+      - game_substitutions for those games
+      - cws_bracket rows (level 3 only)
+
+    Does NOT touch:
+      - Season-accumulated player stats (would require reverse-engineering
+        each game's contribution — too fragile).  Playoff stats in season
+        totals are left as-is.
+      - Stamina / fatigue state.
+    """
+    params = {"lyid": league_year_id, "level": league_level}
+
+    # 1. Identify the gamelist IDs we need to cascade-delete from
+    game_ids_rows = conn.execute(sa_text("""
+        SELECT id FROM gamelist
+        WHERE game_type = 'playoff' AND league_level = :level
+          AND season IN (
+              SELECT s.id FROM seasons s
+              JOIN league_years ly ON ly.league_year = s.year
+              WHERE ly.id = :lyid
+          )
+    """), params).all()
+    game_ids = [int(r[0]) for r in game_ids_rows]
+
+    deleted = {
+        "game_ids": len(game_ids),
+        "game_results": 0,
+        "game_batting_lines": 0,
+        "game_pitching_lines": 0,
+        "game_substitutions": 0,
+        "gamelist": 0,
+        "playoff_series": 0,
+        "cws_bracket": 0,
+    }
+
+    if game_ids:
+        # Build a safe comma-separated list for IN clause
+        gid_csv = ",".join(str(g) for g in game_ids)
+
+        for table in (
+            "game_batting_lines",
+            "game_pitching_lines",
+            "game_substitutions",
+        ):
+            res = conn.execute(sa_text(
+                f"DELETE FROM {table} WHERE game_id IN ({gid_csv})"
+            ))
+            deleted[table] = res.rowcount
+
+        # game_results
+        res = conn.execute(sa_text(
+            f"DELETE FROM game_results WHERE game_id IN ({gid_csv})"
+        ))
+        deleted["game_results"] = res.rowcount
+
+        # gamelist
+        res = conn.execute(sa_text(
+            f"DELETE FROM gamelist WHERE id IN ({gid_csv})"
+        ))
+        deleted["gamelist"] = res.rowcount
+
+    # 2. playoff_series
+    res = conn.execute(sa_text("""
+        DELETE FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = :level
+    """), params)
+    deleted["playoff_series"] = res.rowcount
+
+    # 3. cws_bracket (level 3 only)
+    if league_level == 3:
+        res = conn.execute(sa_text("""
+            DELETE FROM cws_bracket WHERE league_year_id = :lyid
+        """), {"lyid": league_year_id})
+        deleted["cws_bracket"] = res.rowcount
+
+    log.info(
+        "playoffs: wiped level %d for league_year %d: %s",
+        league_level, league_year_id, deleted,
+    )
+
+    return deleted
+
+
+# =====================================================================
 # Helpers
 # =====================================================================
 
@@ -1242,59 +1532,75 @@ def _get_league_year(conn, league_year_id: int) -> int:
     return int(row[0])
 
 
-def _generate_series_games(
-    engine, league_year: int, league_level: int,
-    home_team_id: int, away_team_id: int,
-    start_week: int, games_per_subweek: int,
-    home_pattern: List[bool],
-) -> None:
-    """
-    Generate games for a series across subweeks.
-    Uses add_series() which handles up to 4 games per week (subweeks a-d).
-    For series longer than 4 games, spills into next week.
-    """
-    from services.schedule_generator import add_series
+_SUBWEEKS = ["a", "b", "c", "d"]
 
-    total_games = len(home_pattern)
+
+def _next_available_subweek(
+    conn, league_year_id: int, league_level: int,
+    team_a_id: int, team_b_id: int, start_week: int,
+) -> Tuple[int, str]:
+    """
+    Find the next available (week, subweek) slot for a playoff game between
+    these two teams, starting from start_week.  Checks gamelist for existing
+    entries to avoid collisions.
+    """
+    # Get all occupied subweeks for these teams from start_week onward
+    occupied = conn.execute(sa_text("""
+        SELECT season_week, season_subweek
+        FROM gamelist
+        WHERE game_type = 'playoff' AND league_level = :level
+          AND ((home_team = :ta AND away_team = :tb)
+            OR (home_team = :tb AND away_team = :ta))
+          AND season_week >= :sw
+        ORDER BY season_week, season_subweek
+    """), {
+        "level": league_level,
+        "ta": team_a_id, "tb": team_b_id,
+        "sw": start_week,
+    }).all()
+
+    used = {(int(r[0]), str(r[1])) for r in occupied}
+
+    # Find first free slot
     week = start_week
-    game_idx = 0
-
-    while game_idx < total_games:
-        batch = min(4, total_games - game_idx)
-        batch_pattern = home_pattern[game_idx:game_idx + batch]
-
-        # Check if all games in this batch have the same home team
-        # If mixed, we need individual game insertions
-        all_home = all(p for p in batch_pattern)
-        all_away = all(not p for p in batch_pattern)
-
-        if all_home:
-            add_series(
-                engine, league_year=league_year, league_level=league_level,
-                home_team_id=home_team_id, away_team_id=away_team_id,
-                week=week, games=batch, game_type="playoff",
-            )
-        elif all_away:
-            add_series(
-                engine, league_year=league_year, league_level=league_level,
-                home_team_id=away_team_id, away_team_id=home_team_id,
-                week=week, games=batch, game_type="playoff",
-            )
-        else:
-            # Mixed home/away — insert games one at a time
-            for p in batch_pattern:
-                if p:
-                    add_series(
-                        engine, league_year=league_year, league_level=league_level,
-                        home_team_id=home_team_id, away_team_id=away_team_id,
-                        week=week, games=1, game_type="playoff",
-                    )
-                else:
-                    add_series(
-                        engine, league_year=league_year, league_level=league_level,
-                        home_team_id=away_team_id, away_team_id=home_team_id,
-                        week=week, games=1, game_type="playoff",
-                    )
-
-        game_idx += batch
+    for _ in range(20):  # safety: don't loop forever
+        for sw in _SUBWEEKS:
+            if (week, sw) not in used:
+                return week, sw
         week += 1
+
+    # Fallback (shouldn't happen)
+    return start_week, "a"
+
+
+def _insert_single_playoff_game(
+    conn, league_year_id: int, league_level: int,
+    home_team_id: int, away_team_id: int,
+    week: int, subweek: str,
+) -> None:
+    """Insert one playoff game into gamelist with the specified week/subweek."""
+    season_id = conn.execute(sa_text("""
+        SELECT s.id FROM seasons s
+        JOIN league_years ly ON ly.league_year = s.year
+        WHERE ly.id = :lyid LIMIT 1
+    """), {"lyid": league_year_id}).scalar()
+
+    conn.execute(sa_text("""
+        INSERT INTO gamelist
+            (away_team, home_team, season_week, season_subweek,
+             league_level, season, random_seed, game_type)
+        VALUES
+            (:away, :home, :week, :sub,
+             :level, :season, NULL, 'playoff')
+    """), {
+        "away": away_team_id, "home": home_team_id,
+        "week": week, "sub": subweek,
+        "level": league_level, "season": season_id,
+    })
+
+    log.info(
+        "playoffs: inserted game week %d/%s: %d @ %d (level %d)",
+        week, subweek, away_team_id, home_team_id, league_level,
+    )
+
+

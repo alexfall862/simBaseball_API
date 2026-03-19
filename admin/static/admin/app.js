@@ -962,15 +962,27 @@
 
     const buttons = [];
 
-    if (phase === 'REGULAR_SEASON') {
-      if (!running && !allRan) {
-        buttons.push(`<button class="btn btn-warning" onclick="simQuickRun()">Simulate Week ${ts.Week || ''}</button>`);
+    if (phase === 'REGULAR_SEASON' || phase === 'PLAYOFFS') {
+      // Per-subweek buttons
+      const subweeks = [
+        { key: 'a', flag: ts.GamesARan },
+        { key: 'b', flag: ts.GamesBRan },
+        { key: 'c', flag: ts.GamesCRan },
+        { key: 'd', flag: ts.GamesDRan },
+      ];
+      const pendingSw = subweeks.filter(s => !s.flag);
+      if (!running && pendingSw.length > 0) {
+        // Individual subweek buttons
+        pendingSw.forEach(s => {
+          buttons.push(`<button class="btn btn-warning" onclick="simSubweek('${s.key}')">Sim Subweek ${s.key.toUpperCase()}</button>`);
+        });
+        // Run all remaining button
+        if (pendingSw.length > 1) {
+          buttons.push(`<button class="btn btn-warning" onclick="simQuickRun()">Sim All Remaining</button>`);
+        }
       }
       if (allRan) {
         buttons.push(`<button class="btn btn-primary" onclick="simAdvanceWeek()">Advance to Week ${(ts.Week || 0) + 1}</button>`);
-      }
-      if (anyRan && !allRan) {
-        buttons.push(`<button class="btn btn-warning" onclick="simQuickRun()">Continue Simulation</button>`);
       }
       if (anyRan) {
         buttons.push(`<button class="btn btn-secondary" onclick="simResetWeek()">Reset Week Games</button>`);
@@ -986,6 +998,35 @@
       ? `<div class="button-group">${buttons.join('')}</div>`
       : '<p class="text-muted">No simulation actions available.</p>';
   }
+
+  function simSubweek(sw) {
+    const ts = _tsData;
+    if (!ts) return;
+    const resultBox = document.getElementById('sim-action-result');
+    resultBox.style.display = 'block';
+    resultBox.textContent = `Simulating subweek ${sw.toUpperCase()} of week ${ts.Week}...`;
+
+    const body = { league_year_id: ts.LeagueYearID, season_week: ts.Week, subweek: sw };
+
+    fetch(`${API_BASE}/games/simulate-subweek`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          resultBox.textContent = `Error: ${data.message || data.error}`;
+        } else {
+          const count = (data.subweeks && data.subweeks[sw]) ? data.subweeks[sw].length : 0;
+          resultBox.textContent = `Subweek ${sw.toUpperCase()}: ${count} game(s) simulated`;
+        }
+        refreshSimState();
+      })
+      .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+  window.simSubweek = simSubweek;
 
   function simQuickRun() {
     const ts = _tsData;
@@ -1051,6 +1092,7 @@
 
   const PHASE_BADGE_CLASS = {
     REGULAR_SEASON: 'badge-success',
+    PLAYOFFS: 'badge-running',
     OFFSEASON: 'badge-warning',
     FREE_AGENCY: 'badge-info',
     DRAFT: 'badge-running',
@@ -1059,6 +1101,7 @@
 
   const PHASE_LABEL = {
     REGULAR_SEASON: 'Regular Season',
+    PLAYOFFS: 'Playoffs',
     OFFSEASON: 'Offseason',
     FREE_AGENCY: 'Free Agency',
     DRAFT: 'Draft',
@@ -2817,7 +2860,45 @@
       action === 'buyout' ? 'block' : 'none';
     document.getElementById('tx-extend-group').style.display =
       action === 'extend' ? 'block' : 'none';
-    if (action === 'extend') renderExtSalaryInputs();
+    if (action === 'extend') {
+      renderExtSalaryInputs();
+      _fetchDemand('extension', 'tx-ext-demand');
+    }
+    if (action === 'buyout') {
+      _fetchDemand('buyout', 'tx-buyout-demand');
+    }
+  }
+
+  function _fetchDemand(demandType, targetElId) {
+    if (!txSelectedPlayer || !txSelectedPlayer.player_id) return;
+    const el = document.getElementById(targetElId);
+    el.style.display = 'block';
+    el.textContent = 'Loading player demand...';
+    fetch(`${API_BASE}/fa-auction/compute-demands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        player_id: txSelectedPlayer.player_id,
+        league_year_id: txLeagueYearId || 1,
+        demand_type: demandType,
+        contract_id: txSelectedPlayer.contract_id,
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          el.textContent = 'Demand unavailable: ' + data.error;
+          return;
+        }
+        if (demandType === 'buyout') {
+          el.innerHTML = `Player demands: <strong>$${Number(data.buyout_price).toLocaleString()}</strong> minimum buyout (WAR: ${data.war})`;
+        } else {
+          el.innerHTML = `Player demands: <strong>$${Number(data.min_aav).toLocaleString()}</strong> min AAV, ` +
+            `${data.min_years}-${data.max_years} years (WAR: ${data.war})`;
+        }
+      })
+      .catch(() => { el.textContent = 'Could not load demand'; });
   }
 
   function renderExtSalaryInputs() {
@@ -6819,6 +6900,48 @@
       status.textContent = `Created ${(data.series_created || []).length} series`;
       if (data.field) renderPlayoffField(data.field);
       loadPlayoffBracket(lyid, level);
+      loadPendingGames(lyid, level);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-po-process')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Processing playoff results...';
+    fetch(`${API_BASE}/playoffs/process-results`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: parseInt(level) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      status.textContent = `Processed ${data.processed} game result(s)`;
+      loadPlayoffBracket(lyid, level);
+      loadPendingGames(lyid, level);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-po-wipe')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    const levelLabel = document.getElementById('po-level').selectedOptions[0]?.textContent || level;
+    const status = document.getElementById('po-status');
+    if (!confirm(`Wipe all playoff data for ${levelLabel}? This deletes series, games, and results. Season stats are kept.`)) return;
+    status.textContent = 'Wiping playoffs...';
+    fetch(`${API_BASE}/playoffs/wipe`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: parseInt(level) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      const parts = [];
+      if (data.playoff_series) parts.push(`${data.playoff_series} series`);
+      if (data.gamelist) parts.push(`${data.gamelist} games`);
+      if (data.game_results) parts.push(`${data.game_results} results`);
+      status.textContent = `Wiped: ${parts.join(', ') || 'nothing to wipe'}`;
+      document.getElementById('po-bracket-card').style.display = 'none';
+      document.getElementById('po-pending-card').style.display = 'none';
+      document.getElementById('po-field-card').style.display = 'none';
     }).catch(e => status.textContent = e.message);
   });
 
@@ -6835,6 +6958,7 @@
       if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
       status.textContent = data.status === 'complete' ? data.message : `Advanced to ${data.round_advanced}`;
       loadPlayoffBracket(lyid, level);
+      loadPendingGames(lyid, level);
     }).catch(e => status.textContent = e.message);
   });
 
@@ -6842,6 +6966,7 @@
     const lyid = document.getElementById('po-lyid').value;
     const level = document.getElementById('po-level').value;
     loadPlayoffBracket(lyid, level);
+    loadPendingGames(lyid, level);
   });
 
   function loadPlayoffBracket(lyid, level) {
@@ -6861,12 +6986,14 @@
           html += '<table class="data-table"><thead><tr><th>Matchup</th><th>Score</th><th>Status</th><th>Winner</th></tr></thead><tbody>';
           series.forEach(s => {
             const scoreA = s.wins_a, scoreB = s.wins_b;
+            const gamesPlayed = scoreA + scoreB;
+            const clinch = s.series_length === 1 ? 1 : s.series_length === 3 ? 2 : s.series_length === 5 ? 3 : 4;
             const statusBadge = s.status === 'complete'
               ? '<span class="badge badge-success">Complete</span>'
-              : '<span class="badge badge-warning">In Progress</span>';
+              : `<span class="badge badge-warning">Game ${gamesPlayed + 1} of ${s.series_length}</span>`;
             html += `<tr>
               <td>${s.team_a.abbrev} (#${s.team_a.seed || '-'}) vs ${s.team_b.abbrev} (#${s.team_b.seed || '-'})</td>
-              <td>${scoreA} - ${scoreB}</td>
+              <td>${scoreA} - ${scoreB} (Bo${s.series_length})</td>
               <td>${statusBadge}</td>
               <td>${s.winner ? s.winner.abbrev : '-'}</td>
             </tr>`;
@@ -6884,6 +7011,34 @@
           html += '</tbody></table>';
         }
 
+        div.innerHTML = html;
+      });
+  }
+
+  function loadPendingGames(lyid, level) {
+    fetch(`${API_BASE}/playoffs/pending-games/${lyid}/${level}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('po-pending-card');
+        const div = document.getElementById('po-pending');
+        if (!data.games || data.games.length === 0) {
+          card.style.display = 'none';
+          return;
+        }
+        card.style.display = '';
+        let html = '<table class="data-table"><thead><tr><th>Game ID</th><th>Round</th><th>Matchup</th><th>Series</th><th>Week</th><th>Subweek</th></tr></thead><tbody>';
+        data.games.forEach(g => {
+          const series = `${g.wins_a}-${g.wins_b} (Bo${g.series_length})`;
+          html += `<tr>
+            <td>${g.game_id}</td>
+            <td>${g.round}</td>
+            <td>${g.away_abbrev} @ ${g.home_abbrev}</td>
+            <td>${series}</td>
+            <td>${g.season_week}</td>
+            <td>${g.season_subweek}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
         div.innerHTML = html;
       });
   }
@@ -6917,17 +7072,33 @@
   // --- All-Star ---
   document.getElementById('btn-as-create')?.addEventListener('click', () => {
     const lyid = document.getElementById('as-lyid').value;
+    const level = document.getElementById('as-level').value;
     const status = document.getElementById('as-status');
     status.textContent = 'Creating All-Star event...';
     fetch(`${API_BASE}/allstar/create`, {
       method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: parseInt(level) }),
     }).then(r => r.json()).then(data => {
       if (data.error) { status.textContent = `Error: ${data.message}`; return; }
       document.getElementById('as-eid').value = data.event_id;
-      status.textContent = `Event ${data.event_id} created`;
+      status.textContent = `Event ${data.event_id} created (level ${data.league_level})`;
       loadAllStarRosters(data.event_id);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-as-simulate')?.addEventListener('click', () => {
+    const eid = document.getElementById('as-eid').value;
+    const status = document.getElementById('as-status');
+    if (!eid) { status.textContent = 'Enter event ID first'; return; }
+    status.textContent = 'Simulating All-Star game...';
+    fetch(`${API_BASE}/allstar/${eid}/simulate`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message}`; return; }
+      status.textContent = `${data.home_label} ${data.home_score} - ${data.away_label} ${data.away_score} (Winner: ${data.winner_label})`;
+      loadAllStarResults(parseInt(eid));
     }).catch(e => status.textContent = e.message);
   });
 
@@ -6935,6 +7106,7 @@
     const eid = document.getElementById('as-eid').value;
     if (!eid) { document.getElementById('as-status').textContent = 'Enter event ID'; return; }
     loadAllStarRosters(parseInt(eid));
+    loadAllStarResults(parseInt(eid));
   });
 
   function loadAllStarRosters(eventId) {
@@ -6957,6 +7129,21 @@
           html += '</tbody></table>';
         }
         div.innerHTML = html;
+      });
+  }
+
+  function loadAllStarResults(eventId) {
+    fetch(`${API_BASE}/allstar/${eventId}/results`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('as-result-card');
+        const div = document.getElementById('as-result');
+        if (!data.game_result) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        const gr = data.game_result;
+        div.innerHTML = `<table class="data-table"><thead><tr><th>Home</th><th>Away</th><th>Score</th><th>Winner</th></tr></thead><tbody>
+          <tr><td>${gr.home_label}</td><td>${gr.away_label}</td><td>${gr.home_score} - ${gr.away_score}</td>
+          <td><span class="badge badge-success">${gr.winner_label}</span></td></tr></tbody></table>`;
       });
   }
 
@@ -8869,6 +9056,314 @@
       })
       .catch(err => _gpaStatus(`${label} error: ${err}`, '#f44336'));
   }
+
+  // -----------------------------------------------------------------------
+  // FA Auction Board
+  // -----------------------------------------------------------------------
+
+  let _faAucState = { auctionId: null, playerName: '', minAav: 0, war: 0, phase: '', orgId: null };
+
+  function faLoadBoard() {
+    const orgId = document.getElementById('fa-auc-org').value;
+    _faAucState.orgId = orgId ? parseInt(orgId) : null;
+    fetchTxContext().then(() => {
+      const lyId = txLeagueYearId || 1;
+      const url = `${API_BASE}/fa-auction/board?league_year_id=${lyId}` +
+                  (orgId ? `&org_id=${orgId}` : '');
+      fetch(url, { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => {
+          const tbody = document.getElementById('fa-auc-tbody');
+          if (!Array.isArray(data) || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="10" style="text-align:center">No active auctions</td></tr>';
+            return;
+          }
+          tbody.innerHTML = data.map(a => {
+            const phaseBadge = { open: 'badge-success', listening: 'badge-warning', finalize: 'badge-danger' };
+            const myOffer = a.my_offer
+              ? `$${Number(a.my_offer.aav).toLocaleString()} / ${a.my_offer.years}y`
+              : '—';
+            const competing = a.competing_teams.join(', ') || '—';
+            const btnLabel = a.my_offer ? 'Update' : 'Offer';
+            return `<tr>
+              <td>${a.player_name}</td>
+              <td>${a.age}</td>
+              <td>${a.player_type}</td>
+              <td>${a.war.toFixed(1)}</td>
+              <td>$${Number(a.min_aav).toLocaleString()}</td>
+              <td><span class="badge ${phaseBadge[a.phase] || ''}">${a.phase}</span></td>
+              <td>${a.offer_count}</td>
+              <td>${competing}</td>
+              <td>${myOffer}</td>
+              <td><button class="btn btn-primary btn-sm"
+                    onclick="App.faOpenOffer(${a.auction_id}, '${a.player_name.replace(/'/g,"\\'")}', ${a.min_aav}, ${a.war}, '${a.phase}', ${JSON.stringify(a.my_offer).replace(/"/g,'&quot;')})">${btnLabel}</button></td>
+            </tr>`;
+          }).join('');
+        })
+        .catch(err => {
+          document.getElementById('fa-auc-tbody').innerHTML =
+            `<tr><td colspan="10">Error: ${err}</td></tr>`;
+        });
+    });
+  }
+
+  function faOpenOffer(auctionId, playerName, minAav, war, phase, existingOffer) {
+    _faAucState.auctionId = auctionId;
+    _faAucState.playerName = playerName;
+    _faAucState.minAav = minAav;
+    _faAucState.war = war;
+    _faAucState.phase = phase;
+
+    document.getElementById('fa-offer-player-name').textContent = playerName;
+    document.getElementById('fa-offer-war').textContent = war.toFixed(1);
+    document.getElementById('fa-offer-min-aav').textContent = '$' + Number(minAav).toLocaleString();
+    document.getElementById('fa-offer-phase').textContent = phase;
+
+    // Pre-fill from existing offer or defaults
+    if (existingOffer) {
+      document.getElementById('fa-offer-years').value = existingOffer.years;
+      document.getElementById('fa-offer-bonus').value = existingOffer.bonus;
+      document.getElementById('fa-offer-level').value = existingOffer.level_id;
+    } else {
+      document.getElementById('fa-offer-years').value = 1;
+      document.getElementById('fa-offer-bonus').value = 0;
+      document.getElementById('fa-offer-level').value = 9;
+    }
+
+    faRenderSalaryInputs(existingOffer);
+    faUpdateTotals();
+
+    // Load budget
+    const orgId = _faAucState.orgId;
+    if (orgId) {
+      fetch(`${API_BASE}/transactions/signing-budget/${orgId}?league_year_id=${txLeagueYearId || 1}`,
+            { credentials: 'include' })
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('fa-offer-budget').textContent =
+            '$' + Number(d.available_budget || 0).toLocaleString();
+        })
+        .catch(() => {
+          document.getElementById('fa-offer-budget').textContent = 'N/A';
+        });
+    }
+
+    document.getElementById('fa-offer-modal').style.display = 'block';
+    document.getElementById('fa-offer-result').style.display = 'none';
+    document.getElementById('fa-offer-warning').style.display = 'none';
+  }
+
+  function faRenderSalaryInputs(existingOffer) {
+    const years = parseInt(document.getElementById('fa-offer-years').value) || 1;
+    const container = document.getElementById('fa-offer-salaries');
+    container.innerHTML = '';
+    for (let i = 1; i <= years; i++) {
+      const existing = existingOffer && existingOffer.salaries ? existingOffer.salaries[i - 1] : '';
+      container.innerHTML += `<div class="form-group">
+        <label>Year ${i} Salary ($)</label>
+        <input type="number" id="fa-sal-${i}" min="0" step="100000"
+               value="${existing || ''}" oninput="App.faUpdateTotals()" />
+      </div>`;
+    }
+  }
+
+  function faUpdateTotals() {
+    const years = parseInt(document.getElementById('fa-offer-years').value) || 1;
+    const bonus = parseFloat(document.getElementById('fa-offer-bonus').value) || 0;
+    let totalSalary = 0;
+    for (let i = 1; i <= years; i++) {
+      totalSalary += parseFloat(document.getElementById(`fa-sal-${i}`)?.value || 0);
+    }
+    const total = totalSalary + bonus;
+    const aav = years > 0 ? total / years : 0;
+    document.getElementById('fa-offer-total').textContent = '$' + total.toLocaleString();
+    document.getElementById('fa-offer-aav').textContent = '$' + Math.round(aav).toLocaleString();
+
+    // Warning if below minimum
+    const warn = document.getElementById('fa-offer-warning');
+    if (aav < _faAucState.minAav && totalSalary > 0) {
+      warn.textContent = `AAV ($${Math.round(aav).toLocaleString()}) is below player minimum ($${Number(_faAucState.minAav).toLocaleString()})`;
+      warn.style.display = 'block';
+    } else {
+      warn.style.display = 'none';
+    }
+  }
+
+  function faSubmitOffer() {
+    const orgId = _faAucState.orgId;
+    if (!orgId) { alert('Select your organization first'); return; }
+
+    const years = parseInt(document.getElementById('fa-offer-years').value) || 1;
+    const bonus = parseFloat(document.getElementById('fa-offer-bonus').value) || 0;
+    const levelId = parseInt(document.getElementById('fa-offer-level').value) || 9;
+    const salaries = [];
+    for (let i = 1; i <= years; i++) {
+      salaries.push(parseFloat(document.getElementById(`fa-sal-${i}`)?.value || 0));
+    }
+
+    fetch(`${API_BASE}/fa-auction/${_faAucState.auctionId}/offer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        org_id: parseInt(orgId),
+        years, salaries, bonus,
+        level_id: levelId,
+        league_year_id: txLeagueYearId || 1,
+        game_week_id: txGameWeekId || 1,
+        current_week: txGameWeekId || 0,
+        executed_by: 'admin',
+      }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        const res = document.getElementById('fa-offer-result');
+        res.style.display = 'block';
+        if (data.error) {
+          res.textContent = 'Error: ' + data.error;
+        } else {
+          res.textContent = JSON.stringify(data, null, 2);
+          faLoadBoard(); // refresh
+        }
+      })
+      .catch(err => {
+        document.getElementById('fa-offer-result').style.display = 'block';
+        document.getElementById('fa-offer-result').textContent = 'Error: ' + err;
+      });
+  }
+
+  function faAdvancePhases() {
+    if (!confirm('Advance all FA auction phases? This may finalize signings.')) return;
+    fetchTxContext().then(() => {
+      fetch(`${API_BASE}/fa-auction/advance-phases`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          league_year_id: txLeagueYearId || 1,
+          current_week: txGameWeekId || 0,
+        }),
+      })
+        .then(r => r.json())
+        .then(data => {
+          alert(JSON.stringify(data, null, 2));
+          faLoadBoard();
+        })
+        .catch(err => alert('Error: ' + err));
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // Market Dashboard
+  // -----------------------------------------------------------------------
+
+  function faLoadMarket() {
+    fetchTxContext().then(() => {
+      const lyId = txLeagueYearId || 1;
+      fetch(`${API_BASE}/fa-auction/market-summary?league_year_id=${lyId}`,
+            { credentials: 'include' })
+        .then(r => r.json())
+        .then(data => {
+          document.getElementById('fa-market-data').style.display = 'block';
+
+          // Summary cards
+          const cards = document.getElementById('fa-market-summary-cards');
+          cards.innerHTML = `
+            <div class="card">
+              <div class="card-value">$${Number(data.dollar_per_war).toLocaleString()}</div>
+              <div class="card-label">Current $/WAR</div>
+            </div>
+            <div class="card">
+              <div class="card-value">${data.total_signings}</div>
+              <div class="card-label">Signings (3yr window)</div>
+            </div>
+            <div class="card">
+              <div class="card-value">${data.avg_years}y</div>
+              <div class="card-label">Avg Contract Length</div>
+            </div>
+          `;
+
+          // Recent signings table
+          const tbody = document.getElementById('fa-market-recent-tbody');
+          if (data.recent_signings && data.recent_signings.length > 0) {
+            tbody.innerHTML = data.recent_signings.map(s => `<tr>
+              <td>${s.name}</td>
+              <td>${s.age}</td>
+              <td>${s.war.toFixed(1)}</td>
+              <td>${s.years}</td>
+              <td>$${Number(s.aav).toLocaleString()}</td>
+              <td>$${Number(s.total_value).toLocaleString()}</td>
+              <td>${s.source}</td>
+            </tr>`).join('');
+          } else {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center">No signings yet</td></tr>';
+          }
+
+          // WAR tier chart
+          if (data.war_tiers && typeof Chart !== 'undefined') {
+            const ctx = document.getElementById('fa-market-tiers-chart');
+            if (ctx._chart) ctx._chart.destroy();
+            ctx._chart = new Chart(ctx.getContext('2d'), {
+              type: 'bar',
+              data: {
+                labels: ['0-1 WAR', '1-2 WAR', '2-3 WAR', '3-4 WAR', '4+ WAR'],
+                datasets: [{
+                  label: 'Signings',
+                  data: [data.war_tiers['0-1'], data.war_tiers['1-2'], data.war_tiers['2-3'],
+                         data.war_tiers['3-4'], data.war_tiers['4+']],
+                  backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                  borderColor: 'rgba(59, 130, 246, 1)',
+                  borderWidth: 1,
+                }],
+              },
+              options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                  y: { beginAtZero: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                  x: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                },
+              },
+            });
+          }
+        })
+        .catch(err => {
+          document.getElementById('fa-market-data').style.display = 'block';
+          document.getElementById('fa-market-summary-cards').innerHTML =
+            `<div class="card"><div class="card-value">Error</div><div class="card-label">${err}</div></div>`;
+        });
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // FA Auction event wiring
+  // -----------------------------------------------------------------------
+
+  (function wireAuction() {
+    const btn = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+    btn('btn-fa-load-board', faLoadBoard);
+    btn('btn-fa-advance-phases', faAdvancePhases);
+    btn('btn-fa-submit-offer', faSubmitOffer);
+    btn('btn-fa-cancel-offer', () => { document.getElementById('fa-offer-modal').style.display = 'none'; });
+    btn('btn-fa-load-market', faLoadMarket);
+
+    const yearsInput = document.getElementById('fa-offer-years');
+    if (yearsInput) {
+      yearsInput.addEventListener('change', () => { faRenderSalaryInputs(null); faUpdateTotals(); });
+    }
+    const bonusInput = document.getElementById('fa-offer-bonus');
+    if (bonusInput) bonusInput.addEventListener('input', faUpdateTotals);
+
+    // Populate org dropdown
+    populateTxOrgDropdown('fa-auc-org');
+  })();
+
+  // Expose to global App for inline onclick handlers
+  window.App = window.App || {};
+  Object.assign(window.App, {
+    faOpenOffer,
+    faUpdateTotals,
+  });
 
   // Initialize on DOM ready
   if (document.readyState === 'loading') {

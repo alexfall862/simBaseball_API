@@ -877,6 +877,21 @@ def advance_week(broadcast: bool = True) -> bool:
             except Exception as e:
                 logger.exception(f"Week books failed for week {current_week}, continuing")
 
+            # Process FA auction phase transitions
+            try:
+                from sqlalchemy import text as _text
+                ly_row_auc = conn.execute(
+                    _text("SELECT id FROM league_years WHERE league_year = :yr"),
+                    {"yr": league_year},
+                ).first()
+                if ly_row_auc:
+                    from services.fa_auction import advance_auction_phases
+                    auc_result = advance_auction_phases(conn, new_week, int(ly_row_auc[0]))
+                    conn.commit()
+                    logger.info(f"FA auction phases for week {new_week}: {auc_result}")
+            except Exception as e:
+                logger.exception(f"FA auction phase advance failed for week {new_week}, continuing")
+
             # Refresh listed positions for all teams
             try:
                 from sqlalchemy import text as _text

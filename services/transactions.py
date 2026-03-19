@@ -481,6 +481,26 @@ def release_player(conn, contract_id: int, org_id: int,
         executed_by=executed_by,
     )
 
+    # Enter FA-eligible released players into auction
+    try:
+        st_tbl = Table("player_service_time", MetaData(), autoload_with=conn.engine)
+        svc_row = conn.execute(
+            select(st_tbl.c.mlb_service_years)
+            .where(st_tbl.c.player_id == c["playerID"])
+        ).first()
+        svc = int(svc_row._mapping["mlb_service_years"]) if svc_row else 0
+        if svc >= 6:  # FA_THRESHOLD
+            from services.fa_auction import enter_auction
+            from sqlalchemy import text as _sa_text
+            ts_row = conn.execute(
+                _sa_text("SELECT week FROM timestamp_state WHERE id = 1")
+            ).first()
+            current_week = int(ts_row[0]) if ts_row else 0
+            enter_auction(conn, c["playerID"], league_year_id, current_week)
+    except Exception as e:
+        logger.warning("Failed to enter released player %d into auction: %s",
+                       c["playerID"], e)
+
     return {
         "transaction_id": tx_id,
         "contract_id": contract_id,
@@ -516,6 +536,26 @@ def buyout_player(conn, contract_id: int, org_id: int,
 
     if c["isFinished"]:
         raise ValueError("Contract is already finished")
+
+    # Check player buyout demand
+    try:
+        from services.player_demands import get_player_demand, compute_buyout_demand
+        demand = get_player_demand(conn, c["playerID"], league_year_id, "buyout")
+        if not demand:
+            demand = compute_buyout_demand(
+                conn, c["playerID"], contract_id, league_year_id, c["current_level"],
+            )
+        if demand and demand.get("buyout_price"):
+            min_price = Decimal(demand["buyout_price"])
+            if Decimal(str(buyout_amount)) < min_price:
+                raise ValueError(
+                    f"Buyout amount ({buyout_amount}) below player's minimum "
+                    f"demand ({min_price})"
+                )
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.warning("Buyout demand check skipped: %s", e)
 
     # Get current league_year value
     ly_row = conn.execute(
@@ -805,6 +845,30 @@ def sign_free_agent(conn, player_id: int, org_id: int, years: int,
         executed_by=executed_by,
     )
 
+    # Record to market history for pricing engine
+    try:
+        from services.market_pricing import record_signing_to_market
+        from services.player_demands import get_player_war
+        war = get_player_war(conn, player_id, league_year_id, level_id)
+        total_value = sum(salaries) + bonus
+        aav = total_value / years if years else total_value
+        players_tbl = t["players"]
+        p_row = conn.execute(
+            select(players_tbl.c.age).where(players_tbl.c.id == player_id)
+        ).first()
+        p_age = int(p_row._mapping["age"]) if p_row else 25
+        st_tbl = Table("player_service_time", MetaData(), autoload_with=conn.engine)
+        svc_row = conn.execute(
+            select(st_tbl.c.mlb_service_years).where(st_tbl.c.player_id == player_id)
+        ).first()
+        svc = int(svc_row._mapping["mlb_service_years"]) if svc_row else 0
+        record_signing_to_market(
+            conn, player_id, new_contract_id, war, total_value, aav,
+            years, bonus, p_age, svc, league_year_id, "direct_signing",
+        )
+    except Exception as e:
+        logger.warning("Failed to record signing to market history: %s", e)
+
     return {
         "transaction_id": tx_id,
         "contract_id": new_contract_id,
@@ -842,6 +906,34 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
         raise ValueError("Extension length must be 1-5 years")
     if len(salaries) != years:
         raise ValueError(f"salaries length ({len(salaries)}) must match years ({years})")
+
+    # Check player extension demand
+    try:
+        from services.player_demands import get_player_demand, compute_extension_demand
+        demand = get_player_demand(conn, c["playerID"], league_year_id, "extension")
+        if not demand:
+            demand = compute_extension_demand(
+                conn, c["playerID"], contract_id, league_year_id, c["current_level"],
+            )
+        if demand:
+            if demand.get("min_aav"):
+                total_value = sum(salaries) + bonus
+                offer_aav = total_value / years if years else total_value
+                min_aav = Decimal(demand["min_aav"])
+                if offer_aav < min_aav:
+                    raise ValueError(
+                        f"Extension AAV ({offer_aav}) below player's minimum "
+                        f"demand ({min_aav})"
+                    )
+            if demand.get("min_years") and years < int(demand["min_years"]):
+                raise ValueError(
+                    f"Extension years ({years}) below player's minimum "
+                    f"demand ({demand['min_years']} years)"
+                )
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.warning("Extension demand check skipped: %s", e)
 
     # Validate bonus budget
     budget = _get_signing_budget(conn, org_id, league_year_id)
@@ -923,6 +1015,31 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
         },
         executed_by=executed_by,
     )
+
+    # Record to market history for pricing engine
+    try:
+        from services.market_pricing import record_signing_to_market
+        from services.player_demands import get_player_war
+        war = get_player_war(conn, c["playerID"], league_year_id, c["current_level"])
+        total_value = sum(salaries) + bonus
+        aav = total_value / years if years else total_value
+        players_tbl = t["players"]
+        p_row = conn.execute(
+            select(players_tbl.c.age).where(players_tbl.c.id == c["playerID"])
+        ).first()
+        p_age = int(p_row._mapping["age"]) if p_row else 25
+        st_tbl = Table("player_service_time", MetaData(), autoload_with=conn.engine)
+        svc_row = conn.execute(
+            select(st_tbl.c.mlb_service_years)
+            .where(st_tbl.c.player_id == c["playerID"])
+        ).first()
+        svc = int(svc_row._mapping["mlb_service_years"]) if svc_row else 0
+        record_signing_to_market(
+            conn, c["playerID"], ext_contract_id, war, total_value, aav,
+            years, bonus, p_age, svc, league_year_id, "extension",
+        )
+    except Exception as e:
+        logger.warning("Failed to record extension to market history: %s", e)
 
     return {
         "transaction_id": tx_id,
@@ -1554,6 +1671,44 @@ def rollback_transaction(conn, transaction_id: int,
         # Delete cash ledger entries
         for lid in details.get("ledger_entry_ids", []):
             conn.execute(ledger.delete().where(ledger.c.id == lid))
+
+    elif tx_type == "arb_renewal":
+        # Same as renewal: delete the new contract chain
+        if contract_id:
+            _delete_contract_chain(conn, contract_id)
+        # Restore old contract
+        old_cid = details.get("old_contract_id")
+        if old_cid:
+            conn.execute(
+                update(contracts)
+                .where(contracts.c.id == old_cid)
+                .values(isFinished=0)
+            )
+        # Delete market history entry if recorded
+        mh_id = details.get("market_history_id")
+        if mh_id:
+            try:
+                from services.market_pricing import delete_market_history_entry
+                delete_market_history_entry(conn, mh_id)
+            except Exception:
+                pass
+
+    elif tx_type == "fa_offer":
+        from services.fa_auction import rollback_auction_offer
+        rollback_auction_offer(conn, details)
+
+    elif tx_type == "fa_offer_update":
+        from services.fa_auction import rollback_auction_offer_update
+        rollback_auction_offer_update(conn, details)
+
+    elif tx_type == "fa_auction_sign":
+        # Rollback underlying signing first
+        signing_tx_id = details.get("signing_transaction_id")
+        if signing_tx_id:
+            rollback_transaction(conn, signing_tx_id, executed_by)
+        # Reset auction state
+        from services.fa_auction import rollback_auction_signing
+        rollback_auction_signing(conn, details)
 
     else:
         raise ValueError(f"Rollback not supported for transaction type '{tx_type}'")

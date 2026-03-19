@@ -259,9 +259,12 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
         "contracts_expired": 0,
         "auto_renewed_minor": 0,
         "auto_renewed_pre_arb": 0,
+        "arb_renewed": 0,
         "became_free_agents": 0,
         "extensions_activated": 0,
+        "auction_entries": 0,
     }
+    fa_player_ids = []  # collect FA-eligible players for auction entry
 
     # ── Step 1: Credit service time ──────────────────────────────────
     # Find all players at MLB level (9) with active held contracts
@@ -409,26 +412,90 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
                 )
                 summary["became_free_agents"] += 1
 
+        elif service_years < FA_THRESHOLD:
+            # Arb-eligible — auto-renew at WAR-based salary
+            if holder_org:
+                arb_year = service_years - ARB_THRESHOLD + 1  # 1, 2, or 3
+                try:
+                    from services.player_demands import compute_arb_salary
+                    arb_salary = compute_arb_salary(
+                        conn, player_id, league_year_id, arb_year, level,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "arb salary calc failed for player %d, using PRE_ARB: %s",
+                        player_id, e,
+                    )
+                    arb_salary = PRE_ARB_SALARY
+
+                new_id = _create_renewal_contract(
+                    conn, contract_id, player_id, holder_org,
+                    arb_salary, level, end_year, league_year_id,
+                    tx_type="arb_renewal",
+                )
+
+                # Record to market history
+                try:
+                    from services.market_pricing import record_signing_to_market
+                    from services.player_demands import get_player_war
+                    war = get_player_war(conn, player_id, league_year_id, level)
+                    record_signing_to_market(
+                        conn, player_id, new_id, war,
+                        arb_salary, arb_salary, 1, Decimal("0"),
+                        _get_player_age(conn, player_id),
+                        service_years, league_year_id, "arb_renewal",
+                    )
+                except Exception as e:
+                    log.warning("market history for arb failed: %s", e)
+
+                summary["arb_renewed"] += 1
+            else:
+                conn.execute(
+                    update(c).where(c.c.id == contract_id).values(isFinished=1)
+                )
+                summary["became_free_agents"] += 1
+
         else:
-            # Arb-eligible or FA-eligible — becomes free agent
+            # FA-eligible — finish contract and enter auction
             conn.execute(
                 update(c).where(c.c.id == contract_id).values(isFinished=1)
             )
+            fa_player_ids.append(player_id)
             summary["became_free_agents"] += 1
+
+    # ── Step 4: Enter newly-FA players into auction pool ───────────
+    for pid in fa_player_ids:
+        try:
+            from services.fa_auction import enter_auction
+            enter_auction(conn, pid, league_year_id, current_week=0)
+            summary["auction_entries"] += 1
+        except Exception as e:
+            log.warning("Failed to enter player %d into auction: %s", pid, e)
 
     log.info(
         "end_of_season: year=%d credited=%d advanced=%d expired=%d "
-        "renewed_minor=%d renewed_prearb=%d fa=%d ext=%d",
+        "renewed_minor=%d renewed_prearb=%d arb=%d fa=%d ext=%d auction=%d",
         league_year_val,
         summary["service_time_credited"],
         summary["contracts_advanced"],
         summary["contracts_expired"],
         summary["auto_renewed_minor"],
         summary["auto_renewed_pre_arb"],
+        summary.get("arb_renewed", 0),
         summary["became_free_agents"],
         summary["extensions_activated"],
+        summary.get("auction_entries", 0),
     )
     return summary
+
+
+def _get_player_age(conn, player_id: int) -> int:
+    """Get player age from simbbPlayers."""
+    t = _t(conn)
+    row = conn.execute(
+        select(t["players"].c.age).where(t["players"].c.id == player_id)
+    ).first()
+    return int(row._mapping["age"]) if row else 25
 
 
 # ── Private: create renewal contract ─────────────────────────────────
@@ -442,9 +509,11 @@ def _create_renewal_contract(
     level: int,
     league_year_val: int,
     league_year_id: int,
+    tx_type: str = "renewal",
 ) -> int:
     """
     Create a 1-year renewal contract, finish the old one, and log it.
+    tx_type can be 'renewal' or 'arb_renewal'.
     Returns the new contract ID.
     """
     t = _t(conn)
@@ -498,7 +567,7 @@ def _create_renewal_contract(
     # Log the renewal
     conn.execute(
         tx.insert().values(
-            transaction_type="renewal",
+            transaction_type=tx_type,
             league_year_id=league_year_id,
             primary_org_id=org_id,
             contract_id=new_id,
