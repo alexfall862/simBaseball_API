@@ -149,7 +149,7 @@ def migrate_add_recruiting_columns(engine=None):
     if engine is None:
         engine = get_engine()
 
-    with engine.begin() as conn:
+    with engine.connect() as conn:
         # ── Step 1: Add columns if they don't exist ──
 
         # Check existing columns
@@ -172,6 +172,8 @@ def migrate_add_recruiting_columns(engine=None):
             ))
             log.info("Added recruit_stars column")
 
+        conn.commit()  # commit DDL
+
         # ── Step 2: Backfill signing_tendency for HS players ──
 
         hs_players = conn.execute(
@@ -188,14 +190,26 @@ def migrate_add_recruiting_columns(engine=None):
         ).all()
 
         tendency_count = 0
+        # Build all tendencies first, filter to non-Normal, then bulk update
+        updates = []
         for (pid,) in hs_players:
             tendency = _pick_tendency()
             if tendency != "Signs Normal":
-                conn.execute(
-                    text("UPDATE simbbPlayers SET signing_tendency = :t WHERE id = :pid"),
-                    {"t": tendency, "pid": pid},
-                )
+                updates.append((pid, tendency))
                 tendency_count += 1
+
+        BATCH = 1000
+        for i in range(0, len(updates), BATCH):
+            batch = updates[i:i + BATCH]
+            cases = " ".join(
+                f"WHEN {int(pid)} THEN '{t}'" for pid, t in batch
+            )
+            ids = ", ".join(str(int(pid)) for pid, _ in batch)
+            conn.execute(text(
+                f"UPDATE simbbPlayers SET signing_tendency = CASE id {cases} END "
+                f"WHERE id IN ({ids})"
+            ))
+            conn.commit()
 
         log.info("Backfilled signing_tendency for %d HS players (non-Normal)", tendency_count)
 
@@ -246,11 +260,20 @@ def migrate_add_recruiting_columns(engine=None):
             pit_ranked = _assign_college_stars(pit_scored)
             all_ranked = pos_ranked + pit_ranked
 
-            for r in all_ranked:
-                conn.execute(
-                    text("UPDATE simbbPlayers SET recruit_stars = :star WHERE id = :pid"),
-                    {"star": r["star"], "pid": r["player_id"]},
+            # Bulk update via CASE expression — one statement per batch
+            # instead of one round-trip per player
+            BATCH = 1000
+            for i in range(0, len(all_ranked), BATCH):
+                batch = all_ranked[i:i + BATCH]
+                cases = " ".join(
+                    f"WHEN {int(r['player_id'])} THEN {int(r['star'])}" for r in batch
                 )
+                ids = ", ".join(str(int(r["player_id"])) for r in batch)
+                conn.execute(text(
+                    f"UPDATE simbbPlayers SET recruit_stars = CASE id {cases} END "
+                    f"WHERE id IN ({ids})"
+                ))
+                conn.commit()
 
             log.info("Backfilled recruit_stars for %d college players", len(all_ranked))
         else:
