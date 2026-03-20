@@ -843,24 +843,21 @@ def get_free_agent_pool(
         else:
             order_sql = "p.lastname ASC"
 
-    # Main query: LEFT JOIN to find players NOT held, with last contract info
+    # Main query: EXISTS/NOT EXISTS to find players with contracts but not currently held
     count_sql = sa_text(f"""
         SELECT COUNT(DISTINCT p.id)
         FROM simbbPlayers p
-        INNER JOIN contracts c_any ON c_any.playerID = p.id
-        LEFT JOIN (
-            SELECT c.playerID
-            FROM contracts c
-            JOIN contractDetails cd ON cd.contractID = c.id
-            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
-            WHERE c.isFinished = 0 AND cts.isHolder = 1
-            GROUP BY c.playerID
-        ) held ON held.playerID = p.id
         INNER JOIN (
             SELECT playerID, MAX(id) AS max_cid FROM contracts GROUP BY playerID
         ) latest ON latest.playerID = p.id
         INNER JOIN contracts c_last ON c_last.id = latest.max_cid
-        WHERE held.playerID IS NULL
+        WHERE EXISTS (SELECT 1 FROM contracts c_any WHERE c_any.playerID = p.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM contracts c
+            JOIN contractDetails cd ON cd.contractID = c.id
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+            WHERE c.playerID = p.id AND c.isFinished = 0 AND cts.isHolder = 1
+          )
           AND c_last.current_level >= 3
           {filter_sql}
     """)
@@ -874,15 +871,6 @@ def get_free_agent_pool(
     data_sql = sa_text(f"""
         SELECT p.*, c_last.current_level AS last_level, o.org_abbrev AS last_org_abbrev
         FROM simbbPlayers p
-        INNER JOIN contracts c_any ON c_any.playerID = p.id
-        LEFT JOIN (
-            SELECT c.playerID
-            FROM contracts c
-            JOIN contractDetails cd ON cd.contractID = c.id
-            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
-            WHERE c.isFinished = 0 AND cts.isHolder = 1
-            GROUP BY c.playerID
-        ) held ON held.playerID = p.id
         INNER JOIN (
             SELECT playerID, MAX(id) AS max_cid FROM contracts GROUP BY playerID
         ) latest ON latest.playerID = p.id
@@ -890,10 +878,15 @@ def get_free_agent_pool(
         INNER JOIN contractDetails cd_last ON cd_last.contractID = c_last.id AND cd_last.year = 1
         INNER JOIN contractTeamShare cts_last ON cts_last.contractDetailsID = cd_last.id
         INNER JOIN organizations o ON o.id = cts_last.orgID
-        WHERE held.playerID IS NULL
+        WHERE EXISTS (SELECT 1 FROM contracts c_any WHERE c_any.playerID = p.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM contracts c
+            JOIN contractDetails cd ON cd.contractID = c.id
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+            WHERE c.playerID = p.id AND c.isFinished = 0 AND cts.isHolder = 1
+          )
           AND c_last.current_level >= 3
           {filter_sql}
-        GROUP BY p.id
         ORDER BY {order_sql}
         LIMIT :limit OFFSET :offset
     """)
