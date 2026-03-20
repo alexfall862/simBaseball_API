@@ -404,6 +404,24 @@ def end_regular_season(league_year_id: int) -> Dict[str, Any]:
     engine = get_engine()
     summary: Dict[str, Any] = {"phase_transition": "REGULAR_SEASON -> OFFSEASON"}
 
+    # 0. Resolve any outstanding waivers before contract processing
+    try:
+        from services.waivers import process_expired_waivers
+        with engine.begin() as conn:
+            # Force-resolve all active waivers regardless of expiry week
+            from sqlalchemy import text as _text
+            conn.execute(_text("""
+                UPDATE waiver_claims
+                SET expires_week = 0
+                WHERE status = 'active' AND league_year_id = :lyid
+            """), {"lyid": league_year_id})
+            waiver_result = process_expired_waivers(conn, current_week=9999, league_year_id=league_year_id)
+        summary["waivers_resolved"] = waiver_result
+        logger.info(f"End-of-season waivers resolved: {waiver_result}")
+    except Exception as e:
+        logger.exception("end_regular_season: waiver resolution failed")
+        summary["waivers_error"] = str(e)
+
     # 1. End-of-season contract processing
     try:
         from services.contract_ops import process_end_of_season
@@ -876,6 +894,22 @@ def advance_week(broadcast: bool = True) -> bool:
                 logger.info(f"Week books for week {current_week}: {books_result}")
             except Exception as e:
                 logger.exception(f"Week books failed for week {current_week}, continuing")
+
+            # Process expired waivers (before FA auction so cleared players
+            # who enter auction get their first phase tick this cycle)
+            try:
+                from sqlalchemy import text as _text
+                ly_row_wv = conn.execute(
+                    _text("SELECT id FROM league_years WHERE league_year = :yr"),
+                    {"yr": league_year},
+                ).first()
+                if ly_row_wv:
+                    from services.waivers import process_expired_waivers
+                    waiver_result = process_expired_waivers(conn, new_week, int(ly_row_wv[0]))
+                    conn.commit()
+                    logger.info(f"Waiver processing for week {new_week}: {waiver_result}")
+            except Exception as e:
+                logger.exception(f"Waiver processing failed for week {new_week}, continuing")
 
             # Process FA auction phase transitions
             try:

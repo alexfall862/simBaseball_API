@@ -989,6 +989,14 @@ def get_free_agent_pool(
     ).mappings().all()
     demand_map = {int(r["player_id"]): r for r in demand_rows}
 
+    # Batch-load service time for fa_type derivation
+    st_tbl = Table("player_service_time", MetaData(), autoload_with=conn.engine)
+    st_rows = conn.execute(
+        select(st_tbl.c.player_id, st_tbl.c.mlb_service_years)
+        .where(st_tbl.c.player_id.in_(player_ids))
+    ).mappings().all()
+    service_time_map = {int(r["player_id"]): int(r["mlb_service_years"]) for r in st_rows}
+
     # Attach scouting visibility
     scouting_map = {}
     if viewing_org_id:
@@ -1010,6 +1018,13 @@ def get_free_agent_pool(
     result_players = []
     for p in filtered_list:
         pid = p["id"]
+        svc = service_time_map.get(pid, 0)
+        last_lvl = p.get("last_level") or 9
+
+        # Derive fa_type
+        from services.waivers import _derive_fa_type
+        p["fa_type"] = _derive_fa_type(last_lvl, svc)
+
         auc_data = auction_map.get(pid)
         auction_info = None
         if auc_data:
@@ -1031,6 +1046,20 @@ def get_free_agent_pool(
                 "max_years": int(demand_row["max_years"]) if demand_row["max_years"] else None,
                 "war": float(demand_row["war_snapshot"]),
             }
+        elif p["fa_type"] != "mlb_fa":
+            # Backfill demand for non-MLB-FA players missing demand records
+            try:
+                from services.waivers import _insert_tier_demand
+                _insert_tier_demand(conn, pid, league_year_id, last_lvl, svc)
+                min_aav = "40000" if last_lvl < 9 else "800000"
+                demand_info = {
+                    "min_aav": min_aav,
+                    "min_years": 1,
+                    "max_years": 1,
+                    "war": 0.0,
+                }
+            except Exception as e:
+                log.warning("Demand backfill failed for player %d: %s", pid, e)
 
         p["auction"] = auction_info
         p["demand"] = demand_info

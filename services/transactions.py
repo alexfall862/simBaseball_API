@@ -481,24 +481,39 @@ def release_player(conn, contract_id: int, org_id: int,
         executed_by=executed_by,
     )
 
-    # Enter FA-eligible released players into auction
+    # Place on waivers (all released players, regardless of service time)
+    waiver_info = {}
     try:
+        from services.waivers import place_on_waivers
+        from sqlalchemy import text as _sa_text
+
+        # Get current week
+        ts_row = conn.execute(
+            _sa_text("SELECT week FROM timestamp_state WHERE id = 1")
+        ).first()
+        current_week = int(ts_row[0]) if ts_row else 0
+
+        # Get service time for waiver record
         st_tbl = Table("player_service_time", MetaData(), autoload_with=conn.engine)
         svc_row = conn.execute(
             select(st_tbl.c.mlb_service_years)
             .where(st_tbl.c.player_id == c["playerID"])
         ).first()
         svc = int(svc_row._mapping["mlb_service_years"]) if svc_row else 0
-        if svc >= 6:  # FA_THRESHOLD
-            from services.fa_auction import enter_auction
-            from sqlalchemy import text as _sa_text
-            ts_row = conn.execute(
-                _sa_text("SELECT week FROM timestamp_state WHERE id = 1")
-            ).first()
-            current_week = int(ts_row[0]) if ts_row else 0
-            enter_auction(conn, c["playerID"], league_year_id, current_week)
+
+        waiver_info = place_on_waivers(
+            conn,
+            player_id=c["playerID"],
+            contract_id=contract_id,
+            releasing_org_id=org_id,
+            league_year_id=league_year_id,
+            current_week=current_week,
+            transaction_id=tx_id,
+            last_level=c["current_level"],
+            service_years=svc,
+        )
     except Exception as e:
-        logger.warning("Failed to enter released player %d into auction: %s",
+        logger.warning("Failed to place released player %d on waivers: %s",
                        c["playerID"], e)
 
     return {
@@ -506,6 +521,7 @@ def release_player(conn, contract_id: int, org_id: int,
         "contract_id": contract_id,
         "player_id": c["playerID"],
         "years_remaining_on_books": len(detail_ids),
+        "waiver": waiver_info,
         "player": {
             **_get_player_summary(conn, c["playerID"]),
             "current_level": None,

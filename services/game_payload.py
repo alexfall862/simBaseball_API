@@ -3502,6 +3502,13 @@ def _process_level_subweek(
                 )
         except Exception:
             logger.debug("Engine diagnostic logging failed (non-critical)")
+            # Some DB errors (e.g. missing table) taint the whole transaction
+            # even inside a savepoint.  Rollback to clear PendingRollbackError
+            # so subsequent writes on this connection succeed.
+            try:
+                level_conn.rollback()
+            except Exception:
+                pass
 
         # --- Re-sim detection + rollback (BEFORE storing new results) ---
         all_game_ids = [
@@ -3539,7 +3546,7 @@ def _process_level_subweek(
                     "ll": level,
                 })
         except Exception:
-            pass
+            logger.debug("Engine diagnostic update failed (non-critical)")
 
         # Accumulate stats
         game_type_by_id = {}

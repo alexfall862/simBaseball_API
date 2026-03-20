@@ -1288,6 +1288,30 @@ def admin_add_recruiting_columns():
         return jsonify(ok=False, error="migration_failed", message=str(e)), 500
 
 
+@admin_bp.post("/migrations/add-waiver-tables")
+def admin_add_waiver_tables():
+    """
+    Create waiver wire tables and extend transaction_log enum.
+
+    POST /admin/migrations/add-waiver-tables
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from migrations.add_waiver_tables import migrate_add_waiver_tables
+
+        engine = get_engine()
+        result = migrate_add_waiver_tables(engine)
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_add_waiver_tables failed")
+        return jsonify(ok=False, error="migration_failed", message=str(e)), 500
+
+
 @admin_bp.post("/populate-college-orgs")
 def admin_populate_college_orgs():
     """

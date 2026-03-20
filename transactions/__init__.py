@@ -633,3 +633,88 @@ def api_end_of_season():
         return jsonify(error="validation", message=str(e)), 400
     except SQLAlchemyError:
         return jsonify(error="db_error", message="Database error"), 500
+
+
+# -----------------------------------------------------------------------
+# Waiver Wire
+# -----------------------------------------------------------------------
+
+@transactions_bp.get("/transactions/waivers")
+def api_waiver_wire():
+    """
+    GET /transactions/waivers?league_year_id=X&org_id=Y
+    List active waiver wire entries. org_id optional (shows my_bid flag).
+    """
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+    org_id = request.args.get("org_id", type=int)
+    try:
+        engine = get_engine()
+        from services.waivers import get_waiver_wire
+        with engine.connect() as conn:
+            waivers = get_waiver_wire(conn, league_year_id, org_id=org_id)
+        return jsonify(ok=True, waivers=waivers, count=len(waivers)), 200
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.get("/transactions/waivers/<int:waiver_id>")
+def api_waiver_detail(waiver_id):
+    """
+    GET /transactions/waivers/<id>?org_id=X
+    Single waiver entry with detail. org_id optional (shows my_bid flag).
+    """
+    org_id = request.args.get("org_id", type=int)
+    try:
+        engine = get_engine()
+        from services.waivers import get_waiver_detail
+        with engine.connect() as conn:
+            detail = get_waiver_detail(conn, waiver_id, org_id=org_id)
+        if not detail:
+            return jsonify(error="not_found", message="Waiver not found"), 404
+        return jsonify(ok=True, **detail), 200
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.post("/transactions/waivers/<int:waiver_id>/claim")
+def api_waiver_claim(waiver_id):
+    """
+    POST /transactions/waivers/<id>/claim  {org_id: int}
+    Place a waiver claim.
+    """
+    body, err = _require_json("org_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        from services.waivers import submit_waiver_claim
+        with engine.begin() as conn:
+            result = submit_waiver_claim(conn, waiver_id, int(body["org_id"]))
+        return jsonify(ok=True, **result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.delete("/transactions/waivers/<int:waiver_id>/claim")
+def api_waiver_withdraw(waiver_id):
+    """
+    DELETE /transactions/waivers/<id>/claim  {org_id: int}
+    Withdraw a waiver claim.
+    """
+    body, err = _require_json("org_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        from services.waivers import withdraw_waiver_claim
+        with engine.begin() as conn:
+            result = withdraw_waiver_claim(conn, waiver_id, int(body["org_id"]))
+        return jsonify(ok=True, **result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
