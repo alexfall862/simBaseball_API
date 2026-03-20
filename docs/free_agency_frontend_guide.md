@@ -18,6 +18,10 @@ All endpoints are under `/api/v1`. All monetary values from the API are strings 
 8. [Market Dashboard](#market-dashboard)
 9. [Signing Budget](#signing-budget)
 10. [Endpoint Reference](#endpoint-reference)
+11. [Free Agent Tiers (`fa_type`)](#free-agent-tiers-fa_type) -- NEW
+12. [Waiver Wire](#waiver-wire) -- NEW
+13. [Updated Endpoint Reference](#updated-endpoint-reference) -- NEW
+14. [Updated Full Workflow: Player Lifecycle](#updated-full-workflow-player-lifecycle) -- NEW
 
 ---
 
@@ -883,4 +887,377 @@ After these actions, refresh the relevant data:
 - **After submitting an offer**: Refresh the pool/board row for that player
 - **After scouting**: Use the `player` object from the scout response directly
 - **After extension/buyout**: Refresh the contract overview for the org
-- **After a week advances**: Auction phases may have changed — refresh the board
+- **After placing/withdrawing a waiver claim**: Refresh the waiver wire list
+- **After a week advances**: Auction phases may have changed — refresh the board. Waivers may have resolved — refresh the waiver wire and FA pool.
+
+---
+
+## Free Agent Tiers (`fa_type`)
+
+Every player in the FA pool now includes an `fa_type` field that classifies their free agency tier. This determines their demand floor, whether they go through the auction, and how the UI should present them.
+
+### Tier Definitions
+
+| `fa_type` | Condition | Demand | Auction? |
+|-----------|-----------|--------|----------|
+| `mlb_fa` | 6+ MLB service years | WAR-based (min $1.6M AAV, multi-year) | Yes — 3-phase auction |
+| `arb` | Level 9, 3-5 service years | $800,000 / 1 year | No — direct signing |
+| `pre_arb` | Level 9, <3 service years | $800,000 / 1 year | No — direct signing |
+| `milb_fa` | Last level 4-8 | $40,000 / 1 year | No — direct signing |
+
+### Updated Player Object in Pool
+
+The pool response now includes `fa_type` on every player:
+
+```json
+{
+  "id": 54321,
+  "firstname": "Joe",
+  "lastname": "Smith",
+  "fa_type": "pre_arb",
+  "last_level": 9,
+
+  "auction": null,
+  "demand": {
+    "min_aav": "800000",
+    "min_years": 1,
+    "max_years": 1,
+    "war": 0.0
+  }
+}
+```
+
+**Key change**: `demand` is now guaranteed non-null for all pool players. Players without pre-existing demand records get one auto-generated based on their tier.
+
+### How `fa_type` Affects the UI
+
+| `fa_type` | Auction column | Action button | Signing flow |
+|-----------|---------------|---------------|-------------|
+| `mlb_fa` | Shows phase badge | "Offer" / "Update" | Through auction (`POST /fa-auction/{id}/offer`) |
+| `arb` | "—" (no auction) | "Sign" | Direct (`POST /transactions/sign`) |
+| `pre_arb` | "—" (no auction) | "Sign" | Direct (`POST /transactions/sign`) |
+| `milb_fa` | "—" (no auction) | "Sign" | Direct (`POST /transactions/sign`) |
+
+### Filtering by Tier
+
+Add an `fa_type` filter dropdown to the pool page:
+
+```
+┌──────────┐ ┌────────┐ ┌─────────────┐ ┌──────────┐ ┌───────────┐
+│ Type ▼   │ │ Age ▼  │ │ Search...   │ │In Auction│ │ FA Tier ▼ │
+└──────────┘ └────────┘ └─────────────┘ └──────────┘ └───────────┘
+                                                       All
+                                                       MLB FA
+                                                       Arb-Eligible
+                                                       Pre-Arb
+                                                       MiLB FA
+```
+
+Filter client-side on the `fa_type` field since it's already in the response.
+
+### Signing Non-Auction Free Agents
+
+For `arb`, `pre_arb`, and `milb_fa` players (those without an active auction), use the direct signing endpoint:
+
+```
+POST /api/v1/transactions/sign
+```
+
+```json
+{
+  "player_id": 54321,
+  "org_id": 1,
+  "years": 1,
+  "salaries": [800000],
+  "bonus": 0,
+  "level_id": 9,
+  "league_year_id": 5,
+  "game_week_id": 16,
+  "executed_by": "user"
+}
+```
+
+**Response:**
+
+```json
+{
+  "transaction_id": 1055,
+  "contract_id": 999,
+  "player_id": 54321,
+  "years": 1,
+  "bonus": 0.0,
+  "roster_warning": null
+}
+```
+
+**Validation:** The API enforces that the offer meets the player's demand floor. For non-auction tiers, the minimum is:
+- `milb_fa`: $40,000 / 1 year
+- `pre_arb` and `arb`: $800,000 / 1 year
+
+Users can offer MORE than the minimum (more years, higher salary, bonus) — the demand is just the floor.
+
+### Suggested Sign Modal (Non-Auction)
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Sign: Joe Smith  ·  28  ·  Pitcher  ·  Pre-Arb FA          │
+│                                                              │
+│  PLAYER DEMANDS                                              │
+│  Minimum Salary: $800,000  ·  Min Years: 1                   │
+│                                                              │
+│  YOUR OFFER                                                  │
+│  Years: [1 ▼]                                                │
+│  Signing Bonus: [$0          ]                               │
+│  Year 1 Salary: [$800,000    ]                               │
+│                                                              │
+│  Assign to Level: [MLB (9) ▼]                                │
+│                                                              │
+│  Total Value: $800,000   AAV: $800,000                       │
+│  ✅ Meets player minimum                                     │
+│                                                              │
+│  [Sign Player]                                               │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Waiver Wire
+
+When a player is released mid-season, they are placed on the **waiver wire** for 1 week before becoming a free agent. During the waiver period, any org can place a claim. If multiple orgs claim, the one with the **worst record** (reverse standings order) wins and takes on the full remaining contract.
+
+### How Players End Up on Waivers
+
+The release endpoint now automatically places all released players on waivers:
+
+```
+POST /api/v1/transactions/release
+```
+
+```json
+{
+  "contract_id": 789,
+  "org_id": 1,
+  "league_year_id": 5,
+  "executed_by": "user"
+}
+```
+
+**Updated response** (now includes `waiver` info):
+
+```json
+{
+  "transaction_id": 1020,
+  "contract_id": 789,
+  "player_id": 12345,
+  "years_remaining_on_books": 2,
+  "waiver": {
+    "waiver_claim_id": 501,
+    "expires_week": 16
+  },
+  "player": {
+    "player_id": 12345,
+    "player_name": "Joe Smith",
+    "age": 28,
+    "position": "Pitcher",
+    "current_level": null,
+    "on_ir": false
+  }
+}
+```
+
+### Waiver Wire List
+
+```
+GET /api/v1/transactions/waivers
+  ?league_year_id={leagueYearId}
+  &org_id={orgId}
+```
+
+`org_id` is optional — if provided, each entry includes a `my_bid` flag.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "count": 3,
+  "waivers": [
+    {
+      "waiver_claim_id": 501,
+      "player_id": 54321,
+      "player_name": "Joe Smith",
+      "ptype": "Pitcher",
+      "age": 28,
+      "displayovr": 62,
+      "contract_id": 888,
+      "releasing_org_id": 5,
+      "releasing_org_abbrev": "BOS",
+      "placed_week": 15,
+      "expires_week": 16,
+      "last_level": 9,
+      "service_years": 4,
+      "fa_type": "arb",
+      "bid_count": 2,
+      "my_bid": true
+    }
+  ]
+}
+```
+
+### Waiver Detail
+
+```
+GET /api/v1/transactions/waivers/{waiverClaimId}?org_id={orgId}
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "waiver_claim_id": 501,
+  "player_id": 54321,
+  "player_name": "Joe Smith",
+  "ptype": "Pitcher",
+  "age": 28,
+  "displayovr": 62,
+  "contract_id": 888,
+  "releasing_org_id": 5,
+  "releasing_org_abbrev": "BOS",
+  "placed_week": 15,
+  "expires_week": 16,
+  "last_level": 9,
+  "service_years": 4,
+  "fa_type": "arb",
+  "status": "active",
+  "claiming_org_id": null,
+  "resolved_at": null,
+  "my_bid": false
+}
+```
+
+`status` values: `active` (on waivers), `claimed` (awarded to a team), `cleared` (entered FA pool)
+
+### Place a Waiver Claim
+
+```
+POST /api/v1/transactions/waivers/{waiverClaimId}/claim
+```
+
+```json
+{ "org_id": 2 }
+```
+
+**Response:**
+
+```json
+{ "ok": true, "bid_id": 9001, "waiver_claim_id": 501 }
+```
+
+**Errors (400):**
+- `"Waiver claim {id} is no longer active"` — waiver already resolved
+- `"Cannot claim your own released player"` — self-claim prevention
+
+### Withdraw a Waiver Claim
+
+```
+DELETE /api/v1/transactions/waivers/{waiverClaimId}/claim
+```
+
+```json
+{ "org_id": 2 }
+```
+
+**Response:** `{ "ok": true, "withdrawn": true }`
+
+### What Happens When Waivers Resolve
+
+Waivers resolve automatically when `advance_week()` processes (or at end of regular season). Two outcomes:
+
+| Outcome | What Happens | Frontend Impact |
+|---------|-------------|-----------------|
+| **Claimed** | Worst-record claimant gets the player + full remaining contract. Like a trade with 0% retention. | Player disappears from waiver wire. Appears on claiming org's roster. |
+| **Cleared** | Old contract is finished. Player enters FA pool with tier-appropriate demand. | Player disappears from waiver wire. Appears in FA pool with `fa_type` and `demand`. |
+
+After a week advances, refresh both the waiver wire and the FA pool.
+
+### Suggested Waiver Wire UI
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Waiver Wire                                      Week 15 of 25│
+├──────┬─────┬────┬─────┬─────────┬────────┬───────┬─────────────┤
+│Name  │ Age │Type│ OVR │Released │Expires │Claims │    Action    │
+├──────┼─────┼────┼─────┼─────────┼────────┼───────┼─────────────┤
+│Smith │  28 │ P  │ 62  │ BOS     │ Wk 16  │  2    │[Withdraw]   │
+│Jones │  24 │ B  │ 55  │ NYY     │ Wk 16  │  0    │[Claim]      │
+│Brown │  31 │ P  │ 48  │ LAD     │ Wk 16  │  1    │[Claim]      │
+└──────┴─────┴────┴─────┴─────────┴────────┴───────┴─────────────┘
+```
+
+- Show "Claim" if `my_bid` is false, "Withdraw" if `my_bid` is true
+- Hide the claim button for the releasing org (API rejects it anyway)
+- Show `bid_count` so users know competition level — but NOT which teams bid
+- Show `fa_type` as a badge/tag (e.g., "MiLB FA", "Pre-Arb", "Arb", "MLB FA")
+- After expiry, show resolved status in a "Recent Waivers" section if desired
+
+### Claim Priority Rule
+
+When multiple teams claim the same player, the team with the **worst record at that level** wins. This is reverse standings order — intentionally favoring weaker teams. The frontend does NOT need to compute this; the backend resolves it automatically.
+
+### Waiver Wire Integration Points
+
+The waiver wire should be accessible from:
+1. **Roster page**: After releasing a player, show a confirmation that includes `waiver.expires_week`
+2. **Transactions/activity feed**: Show waiver placements, claims, and resolutions
+3. **Navigation**: Add a "Waivers" tab alongside "Free Agents" and "Auction Board"
+
+---
+
+## Updated Endpoint Reference
+
+### Waiver Wire
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/transactions/waivers?league_year_id=X&org_id=Y` | List active waiver wire entries |
+| GET | `/transactions/waivers/{id}?org_id=Y` | Single waiver detail |
+| POST | `/transactions/waivers/{id}/claim` | Place a waiver claim |
+| DELETE | `/transactions/waivers/{id}/claim` | Withdraw a waiver claim |
+
+### Updated Existing Endpoints
+
+| Endpoint | What Changed |
+|----------|-------------|
+| `POST /transactions/release` | Response now includes `waiver` object with `waiver_claim_id` and `expires_week` |
+| `GET /fa-auction/free-agent-pool` | Each player now includes `fa_type` field. `demand` is guaranteed non-null for all players. |
+
+---
+
+## Updated Full Workflow: Player Lifecycle
+
+```
+Player under contract
+        │
+        ├─ Contract expires (end of season)
+        │       │
+        │       ├─ Minor/Pre-arb/Arb → Auto-renewed by holding org
+        │       │
+        │       └─ FA-eligible (6+ svc) → Enters 3-phase auction
+        │                                       │
+        │                                  fa_type: "mlb_fa"
+        │
+        └─ Released mid-season
+                │
+                └─ ALL releases → Waiver wire (1 week)
+                        │
+                        ├─ Claimed → Full contract transfers to claiming org
+                        │            (worst record wins)
+                        │
+                        └─ Cleared → Old contract finished
+                                │
+                                ├─ svc >= 6 → Enters auction (fa_type: "mlb_fa")
+                                ├─ level 9, svc 3-5 → FA pool (fa_type: "arb")
+                                ├─ level 9, svc < 3 → FA pool (fa_type: "pre_arb")
+                                └─ level < 9 → FA pool (fa_type: "milb_fa")
+```

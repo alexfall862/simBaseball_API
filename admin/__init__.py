@@ -1288,6 +1288,142 @@ def admin_add_recruiting_columns():
         return jsonify(ok=False, error="migration_failed", message=str(e)), 500
 
 
+@admin_bp.get("/debug/player-state/<int:player_id>")
+def admin_debug_player_state(player_id):
+    """
+    Diagnostic view of a player's full contract, auction, and transaction state.
+    GET /admin/debug/player-state/52480
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            # Player bio
+            player = conn.execute(sa_text(
+                "SELECT id, firstName, lastName, ptype, age FROM simbbPlayers WHERE id = :pid"
+            ), {"pid": player_id}).mappings().first()
+            if not player:
+                return jsonify(ok=False, error="player_not_found"), 404
+
+            # All contracts
+            contracts = conn.execute(sa_text("""
+                SELECT c.id, c.years, c.current_year, c.current_level,
+                       c.isFinished, c.isExtension, c.isBuyout, c.onIR,
+                       c.signingOrg, c.leagueYearSigned, c.bonus
+                FROM contracts c
+                WHERE c.playerID = :pid
+                ORDER BY c.id DESC
+            """), {"pid": player_id}).mappings().all()
+
+            # Shares for each contract
+            contract_shares = {}
+            for c in contracts:
+                shares = conn.execute(sa_text("""
+                    SELECT cd.id AS detail_id, cd.year, cd.salary,
+                           cts.orgID, cts.isHolder, cts.salary_share,
+                           o.org_abbrev
+                    FROM contractDetails cd
+                    JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+                    JOIN organizations o ON o.id = cts.orgID
+                    WHERE cd.contractID = :cid
+                    ORDER BY cd.year, cts.orgID
+                """), {"cid": c["id"]}).mappings().all()
+                contract_shares[c["id"]] = [dict(s) for s in shares]
+
+            # Active auctions
+            auctions = conn.execute(sa_text("""
+                SELECT a.id, a.phase, a.league_year_id, a.entered_week,
+                       a.phase_started_week, a.winning_offer_id,
+                       a.min_aav, a.war_at_entry
+                FROM fa_auction a
+                WHERE a.player_id = :pid
+                ORDER BY a.id DESC
+            """), {"pid": player_id}).mappings().all()
+
+            # Offers for each auction
+            auction_offers = {}
+            for a in auctions:
+                aoffers = conn.execute(sa_text("""
+                    SELECT ao.id, ao.org_id, ao.years, ao.aav, ao.bonus,
+                           ao.total_value, ao.status, o.org_abbrev
+                    FROM fa_auction_offers ao
+                    JOIN organizations o ON o.id = ao.org_id
+                    WHERE ao.auction_id = :aid
+                    ORDER BY ao.total_value DESC
+                """), {"aid": a["id"]}).mappings().all()
+                auction_offers[a["id"]] = [dict(o) for o in aoffers]
+
+            # Demands
+            demands = conn.execute(sa_text("""
+                SELECT id, demand_type, min_aav, min_years, max_years,
+                       war_snapshot, league_year_id
+                FROM player_demands
+                WHERE player_id = :pid
+                ORDER BY id DESC
+            """), {"pid": player_id}).mappings().all()
+
+            # Recent transaction log entries
+            tx_logs = conn.execute(sa_text("""
+                SELECT id, transaction_type, primary_org_id, secondary_org_id,
+                       contract_id, player_id, details, notes,
+                       executed_at, executed_by
+                FROM transaction_log
+                WHERE player_id = :pid
+                ORDER BY id DESC
+                LIMIT 20
+            """), {"pid": player_id}).mappings().all()
+
+            # Waiver claims
+            waivers = []
+            try:
+                waivers = conn.execute(sa_text("""
+                    SELECT * FROM waiver_claims WHERE player_id = :pid ORDER BY id DESC
+                """), {"pid": player_id}).mappings().all()
+                waivers = [dict(w) for w in waivers]
+            except Exception:
+                pass
+
+        # Serialize
+        import json
+        def _ser(obj):
+            from datetime import datetime
+            from decimal import Decimal
+            if isinstance(obj, Decimal):
+                return float(obj)
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if isinstance(obj, bytes):
+                return obj.decode("utf-8", errors="replace")
+            return str(obj)
+
+        return jsonify(
+            ok=True,
+            player=dict(player),
+            contracts=[{**dict(c), "shares": contract_shares.get(c["id"], [])}
+                       for c in contracts],
+            auctions=[{**dict(a), "offers": auction_offers.get(a["id"], [])}
+                      for a in auctions],
+            demands=[dict(d) for d in demands],
+            waivers=waivers,
+            transaction_log=[
+                {**{k: _ser(v) if not isinstance(v, (int, str, type(None))) else v
+                    for k, v in dict(t).items()},
+                 "details": json.loads(t["details"]) if t["details"] and isinstance(t["details"], str) else t["details"]}
+                for t in tx_logs
+            ],
+        )
+
+    except Exception as e:
+        logging.exception("debug_player_state failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
 @admin_bp.post("/migrations/add-waiver-tables")
 def admin_add_waiver_tables():
     """
