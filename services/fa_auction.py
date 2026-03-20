@@ -844,6 +844,7 @@ def get_free_agent_pool(
             order_sql = "p.lastname ASC"
 
     # Main query: EXISTS/NOT EXISTS to find players with contracts but not currently held
+    # Also excludes players currently on the waiver wire (active waivers)
     count_sql = sa_text(f"""
         SELECT COUNT(DISTINCT p.id)
         FROM simbbPlayers p
@@ -857,6 +858,10 @@ def get_free_agent_pool(
             JOIN contractDetails cd ON cd.contractID = c.id
             JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
             WHERE c.playerID = p.id AND c.isFinished = 0 AND cts.isHolder = 1
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM waiver_claims wc
+            WHERE wc.player_id = p.id AND wc.status = 'active'
           )
           AND c_last.current_level >= 3
           {filter_sql}
@@ -884,6 +889,10 @@ def get_free_agent_pool(
             JOIN contractDetails cd ON cd.contractID = c.id
             JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
             WHERE c.playerID = p.id AND c.isFinished = 0 AND cts.isHolder = 1
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM waiver_claims wc
+            WHERE wc.player_id = p.id AND wc.status = 'active'
           )
           AND c_last.current_level >= 3
           {filter_sql}
