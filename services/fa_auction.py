@@ -932,11 +932,10 @@ def get_free_agent_pool(
         JOIN (
             SELECT playerID, MAX(id) AS max_id FROM contracts GROUP BY playerID
         ) latest ON c.id = latest.max_id
-        JOIN contractDetails cd ON cd.contractID = c.id
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = 1
         JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
         JOIN organizations o ON o.id = cts.orgID
         WHERE c.playerID IN :pids
-        GROUP BY c.playerID
     """), {"pids": tuple(player_ids) if player_ids else (0,)}).mappings().all()
 
     last_info_map = {
