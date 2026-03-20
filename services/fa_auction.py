@@ -587,8 +587,8 @@ def get_auction_board(
     auctions = conn.execute(
         select(
             auc,
-            players.c.firstName,
-            players.c.lastName,
+            players.c.firstname,
+            players.c.lastname,
             players.c.ptype,
         )
         .select_from(auc.join(players, players.c.id == auc.c.player_id))
@@ -662,7 +662,7 @@ def get_auction_board(
         entry = {
             "auction_id": auction_id,
             "player_id": int(a["player_id"]),
-            "player_name": f"{a['firstName']} {a['lastName']}".strip(),
+            "player_name": f"{a['firstname']} {a['lastname']}".strip(),
             "player_type": a["ptype"],
             "war": float(a["war_at_entry"]),
             "age": int(a["age_at_entry"]),
@@ -745,7 +745,7 @@ def get_auction_detail(
     players = t["players"]
 
     auction = conn.execute(
-        select(auc, players.c.firstName, players.c.lastName, players.c.ptype)
+        select(auc, players.c.firstname, players.c.lastname, players.c.ptype)
         .select_from(auc.join(players, players.c.id == auc.c.player_id))
         .where(auc.c.id == auction_id)
     ).first()
@@ -762,7 +762,7 @@ def get_auction_detail(
     return {
         "auction_id": auction_id,
         "player_id": int(a["player_id"]),
-        "player_name": f"{a['firstName']} {a['lastName']}".strip(),
+        "player_name": f"{a['firstname']} {a['lastname']}".strip(),
         "phase": a["phase"],
         "war": float(a["war_at_entry"]),
         "age": int(a["age_at_entry"]),
@@ -799,163 +799,130 @@ def get_free_agent_pool(
 
     filters = filters or {}
 
-    # Subquery: player_ids who have at least one active holder
-    held_subq = (
-        select(contracts.c.playerID)
-        .select_from(
-            contracts
-            .join(details_tbl, details_tbl.c.contractID == contracts.c.id)
-            .join(shares, shares.c.contractDetailsID == details_tbl.c.id)
-        )
-        .where(and_(
-            contracts.c.isFinished == 0,
-            shares.c.isHolder == 1,
-        ))
-        .group_by(contracts.c.playerID)
-        .subquery()
-    )
+    # Use raw SQL for the free agent query — much faster than NOT IN subquery.
+    # Finds players who have contract history but no active holder,
+    # excludes amateur levels (< 3), and does pagination in one shot.
+    filters = filters or {}
 
-    # Get last contract info for each player (for last_level and last_org)
-    last_contract = (
-        select(
-            contracts.c.playerID,
-            func.max(contracts.c.id).label("last_contract_id"),
-        )
-        .group_by(contracts.c.playerID)
-        .subquery()
-    )
+    # Build WHERE fragments for filters
+    filter_clauses = []
+    params: Dict[str, Any] = {"ly": league_year_id}
 
-    last_info = (
-        select(
-            contracts.c.playerID,
-            contracts.c.current_level.label("last_level"),
-            shares.c.orgID.label("last_org_id"),
-        )
-        .select_from(
-            contracts
-            .join(details_tbl, details_tbl.c.contractID == contracts.c.id)
-            .join(shares, shares.c.contractDetailsID == details_tbl.c.id)
-        )
-        .where(contracts.c.id == last_contract.c.last_contract_id)
-        .correlate(last_contract)
-        .subquery()
-    )
-
-    # Build player columns dynamically (all _base, _pot, bio)
-    player_cols = []
-    for col in players.c:
-        name = col.name
-        if name in (
-            "id", "firstname", "lastname", "age", "ptype",
-            "area", "height", "weight", "bat_hand", "pitch_hand",
-            "arm_angle", "durability", "injury_risk", "displayovr",
-        ):
-            player_cols.append(col)
-        elif name.endswith("_base") or name.endswith("_pot"):
-            player_cols.append(col)
-        elif name.startswith("pitch") and (name.endswith("_name") or name.endswith("_ovr")):
-            player_cols.append(col)
-
-    # Conditions: free agents (not held), exclude amateur levels
-    conditions = [
-        players.c.id.notin_(select(held_subq.c.playerID)),
-    ]
-
-    # Exclude HS (org 340 / level 1) and INTAM (org 339 / level 2) players
-    # by requiring last_level >= 3 when we have contract history
-    # Players without contracts are included as long as they're non-amateur
-
-    # Filters
     if filters.get("ptype"):
-        conditions.append(players.c.ptype == filters["ptype"])
+        filter_clauses.append("AND p.ptype = :ptype")
+        params["ptype"] = filters["ptype"]
     if filters.get("area"):
-        conditions.append(players.c.area == filters["area"])
+        filter_clauses.append("AND p.area = :area")
+        params["area"] = filters["area"]
     if filters.get("min_age"):
-        conditions.append(players.c.age >= filters["min_age"])
+        filter_clauses.append("AND p.age >= :min_age")
+        params["min_age"] = filters["min_age"]
     if filters.get("max_age"):
-        conditions.append(players.c.age <= filters["max_age"])
+        filter_clauses.append("AND p.age <= :max_age")
+        params["max_age"] = filters["max_age"]
     if filters.get("search") and len(filters["search"]) >= 2:
-        from sqlalchemy import or_
-        pattern = f"%{filters['search']}%"
-        conditions.append(or_(
-            players.c.firstname.like(pattern),
-            players.c.lastname.like(pattern),
-        ))
+        filter_clauses.append("AND (p.firstname LIKE :search OR p.lastname LIKE :search)")
+        params["search"] = f"%{filters['search']}%"
 
-    where = and_(*conditions)
-
-    # Count
-    total = conn.execute(
-        select(func.count()).select_from(players).where(where)
-    ).scalar()
+    filter_sql = "\n        ".join(filter_clauses)
 
     # Sort
-    sort_dir_fn = players.c.lastname.asc
-    if sort in ("lastname", "firstname", "age", "ptype", "area", "displayovr"):
-        sort_col = getattr(players.c, sort, players.c.lastname)
-        sort_dir_fn = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
-    elif sort.endswith("_base") and hasattr(players.c, sort):
-        sort_col = getattr(players.c, sort)
-        sort_dir_fn = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
-    elif sort.endswith("_pot") and hasattr(players.c, sort):
-        sort_col = getattr(players.c, sort)
-        sort_dir_fn = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
-    else:
-        sort_dir_fn = players.c.lastname.asc()
+    allowed_sorts = {
+        "lastname", "firstname", "age", "ptype", "area", "displayovr",
+    }
+    if sort not in allowed_sorts and not sort.endswith("_base") and not sort.endswith("_pot"):
+        sort = "lastname"
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "asc"
+    order_sql = f"p.{sort} {sort_dir}" if sort in allowed_sorts else f"p.lastname ASC"
+    # For _base/_pot sorts, validate column exists to prevent injection
+    if sort.endswith("_base") or sort.endswith("_pot"):
+        # Validate against reflected table
+        if hasattr(players.c, sort):
+            order_sql = f"p.{sort} {sort_dir}"
+        else:
+            order_sql = "p.lastname ASC"
 
-    # Query players
-    offset = (page - 1) * per_page
-    rows = conn.execute(
-        select(*player_cols)
-        .where(where)
-        .order_by(sort_dir_fn)
-        .limit(per_page)
-        .offset(offset)
-    ).all()
+    # Main query: LEFT JOIN to find players NOT held, with last contract info
+    count_sql = sa_text(f"""
+        SELECT COUNT(DISTINCT p.id)
+        FROM simbbPlayers p
+        INNER JOIN contracts c_any ON c_any.playerID = p.id
+        LEFT JOIN (
+            SELECT c.playerID
+            FROM contracts c
+            JOIN contractDetails cd ON cd.contractID = c.id
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+            WHERE c.isFinished = 0 AND cts.isHolder = 1
+            GROUP BY c.playerID
+        ) held ON held.playerID = p.id
+        INNER JOIN (
+            SELECT playerID, MAX(id) AS max_cid FROM contracts GROUP BY playerID
+        ) latest ON latest.playerID = p.id
+        INNER JOIN contracts c_last ON c_last.id = latest.max_cid
+        WHERE held.playerID IS NULL
+          AND c_last.current_level >= 3
+          {filter_sql}
+    """)
 
-    player_ids = [r._mapping["id"] for r in rows]
+    total = conn.execute(count_sql, params).scalar() or 0
+
+    offset_val = (page - 1) * per_page
+    params["limit"] = per_page
+    params["offset"] = offset_val
+
+    data_sql = sa_text(f"""
+        SELECT p.*, c_last.current_level AS last_level, o.org_abbrev AS last_org_abbrev
+        FROM simbbPlayers p
+        INNER JOIN contracts c_any ON c_any.playerID = p.id
+        LEFT JOIN (
+            SELECT c.playerID
+            FROM contracts c
+            JOIN contractDetails cd ON cd.contractID = c.id
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+            WHERE c.isFinished = 0 AND cts.isHolder = 1
+            GROUP BY c.playerID
+        ) held ON held.playerID = p.id
+        INNER JOIN (
+            SELECT playerID, MAX(id) AS max_cid FROM contracts GROUP BY playerID
+        ) latest ON latest.playerID = p.id
+        INNER JOIN contracts c_last ON c_last.id = latest.max_cid
+        INNER JOIN contractDetails cd_last ON cd_last.contractID = c_last.id AND cd_last.year = 1
+        INNER JOIN contractTeamShare cts_last ON cts_last.contractDetailsID = cd_last.id
+        INNER JOIN organizations o ON o.id = cts_last.orgID
+        WHERE held.playerID IS NULL
+          AND c_last.current_level >= 3
+          {filter_sql}
+        GROUP BY p.id
+        ORDER BY {order_sql}
+        LIMIT :limit OFFSET :offset
+    """)
+
+    rows = conn.execute(data_sql, params).mappings().all()
+
+    player_ids = [int(r["id"]) for r in rows]
     if not player_ids:
         pages = 0 if total == 0 else (total + per_page - 1) // per_page
         return {"total": total, "page": page, "per_page": per_page, "pages": pages, "players": []}
 
-    # Build player dicts
-    player_list = []
-    for r in rows:
-        m = dict(r._mapping)
-        player_list.append(m)
-
-    # Get last level/org info
-    last_info_rows = conn.execute(sa_text("""
-        SELECT c.playerID, c.current_level AS last_level,
-               o.org_abbrev AS last_org_abbrev
-        FROM contracts c
-        JOIN (
-            SELECT playerID, MAX(id) AS max_id FROM contracts GROUP BY playerID
-        ) latest ON c.id = latest.max_id
-        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = 1
-        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
-        JOIN organizations o ON o.id = cts.orgID
-        WHERE c.playerID IN :pids
-    """), {"pids": tuple(player_ids) if player_ids else (0,)}).mappings().all()
-
-    last_info_map = {
-        int(r["playerID"]): {"last_level": r["last_level"], "last_org_abbrev": r["last_org_abbrev"]}
-        for r in last_info_rows
+    # Build player dicts, keeping only relevant columns
+    bio_keys = {
+        "id", "firstname", "lastname", "age", "ptype",
+        "area", "height", "weight", "bat_hand", "pitch_hand",
+        "arm_angle", "durability", "injury_risk", "displayovr",
+        "last_level", "last_org_abbrev",
     }
-
-    # Filter out amateur-level players (last_level < 3)
     filtered_list = []
-    for p in player_list:
-        pid = p["id"]
-        info = last_info_map.get(pid)
-        if info and info["last_level"] is not None:
-            if int(info["last_level"]) < 3:
-                continue
-            p["last_level"] = int(info["last_level"])
-            p["last_org_abbrev"] = info["last_org_abbrev"]
-        else:
-            p["last_level"] = None
-            p["last_org_abbrev"] = None
+    for r in rows:
+        m = dict(r)
+        p = {}
+        for key, val in m.items():
+            if key in bio_keys or key.endswith("_base") or key.endswith("_pot"):
+                p[key] = val
+            elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
+                p[key] = val
+        p["last_level"] = int(m["last_level"]) if m.get("last_level") else None
+        p["last_org_abbrev"] = m.get("last_org_abbrev")
         filtered_list.append(p)
 
     # Apply fog-of-war fuzz
@@ -1244,8 +1211,6 @@ def get_free_agent_detail(
     # Auction status
     auction_info = None
     try:
-        auction_detail = get_auction_detail(conn, None, viewing_org_id)
-        # Find auction for this player
         auc_row = conn.execute(
             select(t["auction"])
             .where(and_(
