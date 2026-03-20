@@ -1288,6 +1288,72 @@ def admin_add_recruiting_columns():
         return jsonify(ok=False, error="migration_failed", message=str(e)), 500
 
 
+@admin_bp.post("/debug/cancel-orphan-auction/<int:player_id>")
+def admin_cancel_orphan_auction(player_id):
+    """
+    Cancel any active auction for a player who already has an active held contract.
+    POST /admin/debug/cancel-orphan-auction/52480
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            # Check if player has an active held contract
+            held = conn.execute(sa_text("""
+                SELECT c.id, c.current_level, o.org_abbrev
+                FROM contracts c
+                JOIN contractDetails cd ON cd.contractID = c.id
+                JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
+                JOIN organizations o ON o.id = cts.orgID
+                WHERE c.playerID = :pid AND c.isFinished = 0 AND cts.isHolder = 1
+                LIMIT 1
+            """), {"pid": player_id}).mappings().first()
+
+            if not held:
+                return jsonify(ok=False, error="no_active_contract",
+                               message="Player has no active held contract — auction may be legitimate"), 400
+
+            # Find and cancel active auctions
+            active = conn.execute(sa_text("""
+                SELECT id, phase FROM fa_auction
+                WHERE player_id = :pid AND phase IN ('open', 'listening', 'finalize')
+            """), {"pid": player_id}).mappings().all()
+
+            if not active:
+                return jsonify(ok=True, message="No active auctions found", cancelled=0)
+
+            cancelled_ids = []
+            for a in active:
+                conn.execute(sa_text("""
+                    UPDATE fa_auction SET phase = 'completed', winning_offer_id = NULL
+                    WHERE id = :aid
+                """), {"aid": a["id"]})
+                # Also mark any active offers as lost
+                conn.execute(sa_text("""
+                    UPDATE fa_auction_offers SET status = 'lost'
+                    WHERE auction_id = :aid AND status = 'active'
+                """), {"aid": a["id"]})
+                cancelled_ids.append(a["id"])
+
+            return jsonify(
+                ok=True,
+                message=f"Cancelled {len(cancelled_ids)} orphan auction(s)",
+                cancelled_auction_ids=cancelled_ids,
+                player_held_by=held["org_abbrev"],
+                contract_id=held["id"],
+            )
+
+    except Exception as e:
+        logging.exception("cancel_orphan_auction failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
 @admin_bp.get("/debug/player-state/<int:player_id>")
 def admin_debug_player_state(player_id):
     """

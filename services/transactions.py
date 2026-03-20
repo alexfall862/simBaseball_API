@@ -1597,6 +1597,19 @@ def rollback_transaction(conn, transaction_id: int,
     if isinstance(details, str):
         details = json.loads(details)
 
+    # Guard against double-rollback: check if this transaction was already rolled back
+    already_rolled = conn.execute(
+        select(func.count()).select_from(tx_log)
+        .where(and_(
+            tx_log.c.notes == f"ROLLBACK of transaction {transaction_id}",
+        ))
+    ).scalar_one()
+    if already_rolled:
+        raise ValueError(
+            f"Transaction {transaction_id} has already been rolled back "
+            f"({already_rolled} rollback(s) found)"
+        )
+
     contract_id = tx.get("contract_id")
 
     if tx_type in ("promote", "demote"):
