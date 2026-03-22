@@ -30,9 +30,10 @@ def get_engine():
         _engine = create_engine(
             database_url,
             pool_pre_ping=True,
-            pool_recycle=280,  # recycle before Railway proxy drops idle conns (~5min)
+            pool_recycle=280,   # recycle before Railway proxy drops idle conns (~5min)
             pool_size=10,
-            max_overflow=10,
+            max_overflow=10,    # up to 20 per process; DB allows 151 total
+            pool_timeout=30,    # fail fast instead of hanging forever if pool is exhausted
             future=True,
             connect_args=connect_args,
         )

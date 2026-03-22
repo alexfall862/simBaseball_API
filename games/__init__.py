@@ -806,6 +806,31 @@ def wipe_season():
 
         # 8l. WBC teams — cascade-deleted by special_events FK, no explicit wipe needed
 
+        # 8m. Transaction log
+        _wipe_chunked("transaction_log", "transaction_log",
+                      "league_year_id = :lyid", {"lyid": league_year_id})
+
+        # 8n. FA auction system (offers first due to FK, then auctions, demands, market history)
+        _wipe("fa_auction_offers",
+              "DELETE ao FROM fa_auction_offers ao "
+              "JOIN fa_auction a ON a.id = ao.auction_id "
+              "WHERE a.league_year_id = :lyid",
+              {"lyid": league_year_id})
+        _wipe("fa_auction",
+              "DELETE FROM fa_auction WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
+        _wipe("player_demands",
+              "DELETE FROM player_demands WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
+        _wipe("fa_market_history",
+              "DELETE FROM fa_market_history WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
+
+        # 8o. Waiver claims
+        _wipe("waiver_claims",
+              "DELETE FROM waiver_claims WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
+
         # 9. Reset rotation state
         _wipe("rotation_states_reset",
               "UPDATE team_rotation_state SET current_slot = 0, "
@@ -830,6 +855,9 @@ def wipe_season():
             "player_listed_position",
             "playoff_series", "cws_bracket",
             "special_events", "special_event_rosters",
+            "transaction_log",
+            "fa_auction_offers", "fa_auction", "player_demands",
+            "fa_market_history", "waiver_claims",
         ]
         for tbl in optimize_tables:
             try:
@@ -2074,12 +2102,37 @@ def _run_all_levels_task(task_id: str, league_year_id: int,
                     for sw_key in ["a", "b", "c", "d"]:
                         if subweeks.get(sw_key):
                             set_subweek_completed(sw_key, broadcast=False)
-                except ValueError:
-                    # No games for this level/week — skip silently
-                    pass
+                except ValueError as ve:
+                    # No games for this level/week — skip but log
+                    logger.debug(
+                        "run_all_levels: no games for level %d week %d: %s",
+                        level, week, ve,
+                    )
+                except Exception as ex:
+                    # Unexpected error — log but continue to next week
+                    logger.exception(
+                        "run_all_levels: error at level %d week %d: %s",
+                        level, week, ex,
+                    )
 
                 set_run_games(False, broadcast=False)
-                advance_week(broadcast=True)
+
+                # Tick injuries (decrement weeks_remaining, heal players)
+                # but do NOT call full advance_week() which triggers waivers,
+                # auction phases, and timestamp increment — those should only
+                # happen once per real game week, not per level-week.
+                try:
+                    healed = _tick_injuries(engine)
+                    if healed:
+                        logger.debug(
+                            "run_all_levels: %d players healed at level %d week %d",
+                            healed, level, week,
+                        )
+                except Exception as inj_err:
+                    logger.warning(
+                        "run_all_levels: injury tick failed at level %d week %d: %s",
+                        level, week, inj_err,
+                    )
 
                 steps_completed += 1
                 store.set_progress(task_id, steps_completed)

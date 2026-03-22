@@ -221,6 +221,7 @@
 
     // Transactions — Log
     document.getElementById('btn-tx-load-log').addEventListener('click', loadTransactionLog);
+    document.getElementById('btn-tx-bulk-delete').addEventListener('click', bulkDeleteTxLog);
 
     // Amateur Seeding
     document.getElementById('btn-amateur-preview').addEventListener('click', loadAmateurPreview);
@@ -3469,6 +3470,7 @@
             <td style="white-space: nowrap">
               <button class="btn btn-sm btn-secondary" onclick="App.viewTxDetail(${e.id})">Detail</button>
               ${!isRollback ? `<button class="btn btn-sm btn-danger" onclick="App.rollbackTx(${e.id})">Rollback</button>` : '<span class="text-muted" style="font-size: 0.8em">rolled back</span>'}
+              <button class="btn btn-sm" style="opacity:0.6" onclick="App.deleteTxEntry(${e.id})" title="Delete log entry">&times;</button>
             </td>
           </tr>`;
         }).join('');
@@ -3561,6 +3563,59 @@
         titleEl.textContent = `Rollback Failed`;
         summaryEl.innerHTML = `<span class="text-danger">Error: ${err.message}</span>`;
       });
+  }
+
+  function deleteTxEntry(txId) {
+    if (!confirm(`Delete transaction log entry #${txId}? This only removes the log record, not the underlying data.`)) return;
+    fetch(`${API_BASE}/transactions/log/${txId}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          loadTransactionLog();
+        } else {
+          alert('Error: ' + (data.message || data.error));
+        }
+      })
+      .catch(err => alert('Error: ' + err.message));
+  }
+
+  function bulkDeleteTxLog() {
+    const sel = document.getElementById('tx-bulk-types');
+    const types = Array.from(sel.selectedOptions).map(o => o.value);
+    if (!types.length) { alert('Select at least one category'); return; }
+
+    const lyId = txLeagueYearId;
+    if (!lyId) {
+      fetchTxContext();
+      alert('League year not loaded yet — try again');
+      return;
+    }
+
+    if (!confirm(`Delete all ${types.join(', ')} entries for league year ${lyId}?`)) return;
+
+    const resultEl = document.getElementById('tx-bulk-result');
+    resultEl.style.display = 'block';
+    resultEl.textContent = 'Deleting...';
+
+    fetch(`${API_BASE}/transactions/log/bulk-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ league_year_id: lyId, types }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          resultEl.textContent = `Deleted ${data.deleted_count} entries (types: ${data.types.join(', ')})`;
+          loadTransactionLog();
+        } else {
+          resultEl.textContent = 'Error: ' + (data.message || data.error);
+        }
+      })
+      .catch(err => { resultEl.textContent = 'Error: ' + err.message; });
   }
 
   // ── Player Engine: Generation ──────────────────────────────────────
@@ -8381,6 +8436,7 @@
     viewTxDetail,
     closeTxDetail,
     rollbackTx,
+    deleteTxEntry,
     editGame,
     drillCorrelation,
     loadBlabResults,

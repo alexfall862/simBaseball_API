@@ -1391,6 +1391,13 @@
                 <option value="signing">Signing</option>
                 <option value="extension">Extension</option>
                 <option value="trade">Trade</option>
+                <option value="renewal">Renewal</option>
+                <option value="arb_renewal">Arb Renewal</option>
+                <option value="fa_offer">FA Offer</option>
+                <option value="fa_offer_update">FA Offer Update</option>
+                <option value="fa_auction_sign">FA Auction Sign</option>
+                <option value="draft_sign">Draft Sign</option>
+                <option value="draft_pick_trade">Draft Pick Trade</option>
               </select>
             </label>
             <label>Org ID:
@@ -1436,6 +1443,35 @@
                 <pre id="tx-log-detail" class="result-box" style="margin-top: 4px;"></pre>
               </details>
             </div>
+          </div>
+
+          <!-- Bulk clear -->
+          <div class="card" style="margin-top: 16px; border: 1px solid var(--border);">
+            <h4>Bulk Clear Log Entries</h4>
+            <p class="text-muted" style="margin-bottom: 12px">Delete transaction log entries by category to reduce DB size. Trades, signings, extensions, buyouts, and auction signings are protected by default.</p>
+            <div class="form-row" style="gap: 8px; flex-wrap: wrap; align-items: flex-end;">
+              <div class="form-group">
+                <label for="tx-bulk-types">Categories to clear</label>
+                <select id="tx-bulk-types" multiple size="6" style="min-width: 200px">
+                  <option value="promote">Promote</option>
+                  <option value="demote">Demote</option>
+                  <option value="ir_place">IR Place</option>
+                  <option value="ir_activate">IR Activate</option>
+                  <option value="renewal">Renewal</option>
+                  <option value="arb_renewal">Arb Renewal</option>
+                  <option value="fa_offer">FA Offer</option>
+                  <option value="fa_offer_update">FA Offer Update</option>
+                  <option value="release" disabled>Release (protected)</option>
+                  <option value="trade" disabled>Trade (protected)</option>
+                  <option value="signing" disabled>Signing (protected)</option>
+                  <option value="extension" disabled>Extension (protected)</option>
+                  <option value="buyout" disabled>Buyout (protected)</option>
+                  <option value="fa_auction_sign" disabled>FA Auction Sign (protected)</option>
+                </select>
+              </div>
+              <button class="btn btn-danger" id="btn-tx-bulk-delete">Clear Selected</button>
+            </div>
+            <pre id="tx-bulk-result" class="result-box" style="margin-top: 8px; display:none"></pre>
           </div>
         </div>
       </section>

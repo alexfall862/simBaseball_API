@@ -575,6 +575,82 @@ def api_rollback():
 
 
 # -----------------------------------------------------------------------
+# Transaction Log Cleanup
+# -----------------------------------------------------------------------
+
+@transactions_bp.delete("/transactions/log/<int:tx_id>")
+def api_delete_log_entry(tx_id: int):
+    """Delete a single transaction log entry by ID."""
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            from sqlalchemy import text as sa_text
+            result = conn.execute(
+                sa_text("DELETE FROM transaction_log WHERE id = :tid"),
+                {"tid": tx_id},
+            )
+            if result.rowcount == 0:
+                return jsonify(error="not_found",
+                               message=f"Transaction {tx_id} not found"), 404
+        return jsonify(ok=True, deleted_id=tx_id), 200
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.post("/transactions/log/bulk-delete")
+def api_bulk_delete_log():
+    """
+    Bulk-delete transaction log entries by category and/or league_year.
+
+    Body: {
+        "league_year_id": int (required),
+        "types": ["promote", "demote", ...]  (required, non-empty list)
+    }
+
+    Protected types that cannot be bulk-deleted: trade, signing, extension,
+    buyout, fa_auction_sign. These must be deleted individually if needed.
+    """
+    body, err = _require_json("league_year_id", "types")
+    if err:
+        return err
+
+    league_year_id = int(body["league_year_id"])
+    types = body["types"]
+    if not isinstance(types, list) or not types:
+        return jsonify(error="validation",
+                       message="types must be a non-empty list"), 400
+
+    # Protect high-value transaction types from accidental bulk wipe
+    PROTECTED_TYPES = {"trade", "signing", "extension", "buyout",
+                       "fa_auction_sign"}
+    requested_protected = set(types) & PROTECTED_TYPES
+    if requested_protected and not body.get("confirm_protected"):
+        return jsonify(
+            error="confirmation_required",
+            message=f"Types {sorted(requested_protected)} are protected. "
+                    f"Set confirm_protected=true to include them.",
+            protected_types=sorted(requested_protected),
+        ), 400
+
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            from sqlalchemy import text as sa_text
+            result = conn.execute(
+                sa_text(
+                    "DELETE FROM transaction_log "
+                    "WHERE league_year_id = :lyid "
+                    "AND transaction_type IN :types"
+                ),
+                {"lyid": league_year_id, "types": tuple(types)},
+            )
+        return jsonify(ok=True, deleted_count=result.rowcount,
+                       types=types, league_year_id=league_year_id), 200
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+# -----------------------------------------------------------------------
 # Contract Status & End-of-Season
 # -----------------------------------------------------------------------
 
