@@ -295,29 +295,116 @@ def refresh_all_teams(conn, league_year_id: int):
     """
     Recompute listed positions for every team with active rosters.
     Called on season init and advance-week.
+
+    Uses three bulk queries (all rosters, all plans, all rotations) instead
+    of per-team queries to avoid ~600 individual DB round-trips.
     """
-    team_rows = conn.execute(text("""
-        SELECT DISTINCT t.id
-        FROM teams t
-        JOIN contracts c ON 1=1
+    from collections import defaultdict
+
+    # 1. Bulk-load ALL rostered players across all teams (single query)
+    roster_rows = conn.execute(text("""
+        SELECT t.id AS team_id, p.id AS player_id, p.ptype,
+               p.power_base, p.contact_base, p.eye_base, p.discipline_base,
+               p.speed_base, p.baserunning_base, p.basereaction_base,
+               p.fieldcatch_base, p.fieldreact_base, p.fieldspot_base,
+               p.throwacc_base, p.throwpower_base,
+               p.catchframe_base, p.catchsequence_base,
+               p.pendurance_base, p.pgencontrol_base, p.psequencing_base,
+               p.pthrowpower_base, p.pickoff_base,
+               p.pitch1_name, p.pitch1_consist_base, p.pitch1_pacc_base,
+               p.pitch1_pbrk_base, p.pitch1_pcntrl_base,
+               p.pitch2_name, p.pitch2_consist_base, p.pitch2_pacc_base,
+               p.pitch2_pbrk_base, p.pitch2_pcntrl_base,
+               p.pitch3_name, p.pitch3_consist_base, p.pitch3_pacc_base,
+               p.pitch3_pbrk_base, p.pitch3_pcntrl_base,
+               p.pitch4_name, p.pitch4_consist_base, p.pitch4_pacc_base,
+               p.pitch4_pbrk_base, p.pitch4_pcntrl_base,
+               p.pitch5_name, p.pitch5_consist_base, p.pitch5_pacc_base,
+               p.pitch5_pbrk_base, p.pitch5_pcntrl_base
+        FROM simbbPlayers p
+        JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
         JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
         JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
-        WHERE c.isActive = 1
-          AND t.orgID = cts.orgID
-          AND t.team_level = c.current_level
+        JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
     """)).all()
 
-    total = 0
-    for row in team_rows:
-        tid = row[0]
-        try:
-            count = refresh_team(conn, tid, league_year_id)
-            total += count
-        except Exception:
-            log.exception(f"Failed to refresh listed positions for team {tid}")
+    if not roster_rows:
+        log.info("Listed positions refreshed: 0 players across 0 teams")
+        return 0
 
-    log.info(f"Listed positions refreshed: {total} players across {len(team_rows)} teams")
-    return total
+    # Group players by team_id
+    players_by_team: Dict[int, list] = defaultdict(list)
+    for row in roster_rows:
+        m = row._mapping
+        players_by_team[int(m["team_id"])].append(dict(m))
+
+    team_ids = list(players_by_team.keys())
+
+    # 2. Bulk-load ALL position plans (single query)
+    plan_rows = conn.execute(text("""
+        SELECT team_id, player_id, position_code
+        FROM team_position_plan
+        ORDER BY team_id, priority ASC
+    """)).all()
+
+    plan_by_team: Dict[int, Dict[int, str]] = defaultdict(dict)
+    for r in plan_rows:
+        tid, pid, pos = int(r[0]), int(r[1]), r[2]
+        if pid not in plan_by_team[tid]:  # first = highest priority
+            plan_by_team[tid][pid] = pos
+
+    # 3. Bulk-load ALL rotation pitcher IDs (single query)
+    rot_rows = conn.execute(text("""
+        SELECT tpr.team_id, tprs.player_id
+        FROM team_pitching_rotation_slots tprs
+        JOIN team_pitching_rotation tpr ON tpr.id = tprs.rotation_id
+    """)).all()
+
+    rotation_by_team: Dict[int, set] = defaultdict(set)
+    for r in rot_rows:
+        rotation_by_team[int(r[0])].add(int(r[1]))
+
+    # 4. Derive positions for all teams in Python
+    all_positions = []
+    for tid in team_ids:
+        players = players_by_team[tid]
+        plan_map = plan_by_team.get(tid, {})
+        rotation_pids = rotation_by_team.get(tid, set())
+
+        for p in players:
+            pid = p["player_id"]
+            ptype = (p.get("ptype") or "").strip().lower()
+
+            if ptype == "pitcher":
+                if pid in rotation_pids:
+                    pos = "sp"
+                    src = "gameplan" if rotation_pids else "auto"
+                else:
+                    pos = "rp"
+                    src = "gameplan" if rotation_pids else "auto"
+            elif pid in plan_map:
+                plan_pos = plan_map[pid]
+                if plan_pos == "p":
+                    pos = "sp" if pid in rotation_pids else "rp"
+                else:
+                    pos = plan_pos
+                src = "gameplan"
+            else:
+                pos = compute_auto_position(p)
+                src = "auto"
+
+            all_positions.append({
+                "player_id": pid,
+                "team_id": tid,
+                "position_code": pos,
+                "source": src,
+            })
+
+    # 5. Single bulk upsert
+    bulk_upsert_positions(conn, all_positions, league_year_id)
+
+    log.info(f"Listed positions refreshed: {len(all_positions)} players across {len(team_ids)} teams")
+    return len(all_positions)
 
 
 # ── override management ──────────────────────────────────────────────

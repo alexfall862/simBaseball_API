@@ -330,11 +330,15 @@ def _assign_rotation(conn, team_id: int,
         "DELETE FROM team_pitching_rotation_slots WHERE rotation_id = :rid"
     ), {"rid": rotation_id})
 
-    for slot, pid in enumerate(rotation_pids, 1):
+    if rotation_pids:
+        slot_params = [
+            {"rid": rotation_id, "slot": slot, "pid": pid}
+            for slot, pid in enumerate(rotation_pids, 1)
+        ]
         conn.execute(text("""
             INSERT INTO team_pitching_rotation_slots (rotation_id, slot, player_id)
             VALUES (:rid, :slot, :pid)
-        """), {"rid": rotation_id, "slot": slot, "pid": pid})
+        """), slot_params)
 
     # Init rotation state
     conn.execute(text("""
@@ -365,14 +369,18 @@ def _assign_bullpen(conn, team_id: int,
     )
 
     total = len(ranked)
-    for slot, pid in enumerate(ranked, 1):
-        role = _bullpen_role_for_slot(slot, total)
+    bullpen_params = [
+        {"tid": team_id, "slot": slot, "pid": pid,
+         "role": _bullpen_role_for_slot(slot, total)}
+        for slot, pid in enumerate(ranked, 1)
+    ]
+    if bullpen_params:
         conn.execute(text("""
             INSERT INTO team_bullpen_order (team_id, slot, player_id, role)
             VALUES (:tid, :slot, :pid, :role)
             AS new_row ON DUPLICATE KEY UPDATE player_id = new_row.player_id,
                                      role = new_row.role
-        """), {"tid": team_id, "slot": slot, "pid": pid, "role": role})
+        """), bullpen_params)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +392,7 @@ def _assign_defense(conn, team_id: int,
                     use_dh: bool):
     """Assign position players to defensive positions in priority order."""
     remaining = set(position_players.keys())
+    defense_params = []
 
     for pos in _POSITION_PRIORITY_ORDER:
         if not remaining:
@@ -399,12 +408,8 @@ def _assign_defense(conn, team_id: int,
                 best_score = score
 
         if best_pid is not None:
-            conn.execute(text("""
-                INSERT INTO team_position_plan
-                    (team_id, position_code, vs_hand, player_id,
-                     target_weight, priority, locked, lineup_role)
-                VALUES (:tid, :pos, 'both', :pid, 1.0, 1, 0, 'balanced')
-            """), {"tid": team_id, "pos": pos, "pid": best_pid})
+            defense_params.append(
+                {"tid": team_id, "pos": pos, "pid": best_pid})
             remaining.discard(best_pid)
 
     # DH assignment
@@ -418,13 +423,18 @@ def _assign_defense(conn, team_id: int,
                 best_score = score
 
         if best_pid is not None:
-            conn.execute(text("""
-                INSERT INTO team_position_plan
-                    (team_id, position_code, vs_hand, player_id,
-                     target_weight, priority, locked, lineup_role)
-                VALUES (:tid, 'dh', 'both', :pid, 1.0, 1, 0, 'balanced')
-            """), {"tid": team_id, "pid": best_pid})
+            defense_params.append(
+                {"tid": team_id, "pos": "dh", "pid": best_pid})
             remaining.discard(best_pid)
+
+    # Batch INSERT all position assignments
+    if defense_params:
+        conn.execute(text("""
+            INSERT INTO team_position_plan
+                (team_id, position_code, vs_hand, player_id,
+                 target_weight, priority, locked, lineup_role)
+            VALUES (:tid, :pos, 'both', :pid, 1.0, 1, 0, 'balanced')
+        """), defense_params)
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import sys
 from sqlalchemy import MetaData, Table, select, and_
 
 logger = logging.getLogger(__name__)
+from services.sim_failure_log import log_phase2_failure, log_missing_games
 
 
 # ---------------------------------------------------------------------------
@@ -2309,13 +2310,17 @@ def _store_game_results(
              else game_row["game_type"]) or "regular"
         )
 
-        # Serialize boxscore and play-by-play from engine result
-        # Check both top-level and nested result dict
-        boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
-        pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
-        boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
-        pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
-        pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
+        # Only store PBP/boxscore for MLB (level 9) — lower levels
+        # generate the bulk of games and this data is never viewed.
+        if league_level == 9:
+            boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
+            pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
+            boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
+            pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
+            pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
+        else:
+            boxscore_str = None
+            pbp_str = None
 
         try:
             conn.execute(insert_sql, {
@@ -2477,11 +2482,17 @@ def _store_game_results_bulk(
         season_subweek = str((game_row.get("season_subweek") if isinstance(game_row, dict) else game_row["season_subweek"]) or "a")
         game_type = str((game_row.get("game_type") if isinstance(game_row, dict) else game_row["game_type"]) or "regular")
 
-        boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
-        pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
-        boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
-        pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
-        pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
+        # Only store PBP/boxscore for MLB (level 9) — lower levels
+        # generate the bulk of games and this data is never viewed.
+        if league_level == 9:
+            boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
+            pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
+            boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
+            pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
+            pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
+        else:
+            boxscore_str = None
+            pbp_str = None
 
         all_params.append({
             "game_id": game_id,
@@ -2762,22 +2773,38 @@ def _drain_stamina_and_persist_injuries(
             per_game_costs[int(game_id)] = game_costs
 
     if player_costs:
-        drain_upsert = sa_text("""
-            INSERT INTO player_fatigue_state
-                (player_id, league_year_id, stamina, last_updated_at)
-            VALUES
-                (:player_id, :league_year_id, GREATEST(0, 100 - :cost), NOW())
-            ON DUPLICATE KEY UPDATE
-                stamina = GREATEST(0, stamina - :cost),
-                last_updated_at = NOW()
-        """)
+        # Multi-row INSERT ... ON DUPLICATE KEY UPDATE for stamina drain.
+        # We store (100 - cost) as the initial stamina for new rows, and
+        # use the cost value in the ON DUPLICATE KEY clause via new_row.
+        # The 'stamina' column in VALUES holds the NEW-player value;
+        # the UPDATE clause subtracts cost from the EXISTING stamina.
         drain_params = [
             {"player_id": pid, "league_year_id": league_year_id, "cost": cost}
             for pid, cost in player_costs.items()
         ]
+        _DRAIN_CHUNK = 500
         try:
             with conn.begin_nested():
-                conn.execute(drain_upsert, drain_params)
+                for i in range(0, len(drain_params), _DRAIN_CHUNK):
+                    chunk = drain_params[i:i + _DRAIN_CHUNK]
+                    value_parts = []
+                    merged = {}
+                    for j, row in enumerate(chunk):
+                        value_parts.append(
+                            f"(:r{j}_pid, :r{j}_lyid, GREATEST(0, 100 - :r{j}_cost), NOW())"
+                        )
+                        merged[f"r{j}_pid"] = row["player_id"]
+                        merged[f"r{j}_lyid"] = row["league_year_id"]
+                        merged[f"r{j}_cost"] = row["cost"]
+                    sql = (
+                        "INSERT INTO player_fatigue_state "
+                        "(player_id, league_year_id, stamina, last_updated_at) VALUES "
+                        + ", ".join(value_parts)
+                        + " AS new_row ON DUPLICATE KEY UPDATE "
+                        "stamina = GREATEST(0, player_fatigue_state.stamina - (100 - new_row.stamina)), "
+                        "last_updated_at = NOW()"
+                    )
+                    conn.execute(sa_text(sql), merged)
             drain_count = len(drain_params)
             logger.info(
                 "drain_stamina: applied stamina drain to %d players "
@@ -2786,24 +2813,38 @@ def _drain_stamina_and_persist_injuries(
         except Exception:
             logger.exception("drain_stamina: stamina drain failed")
 
-    # Persist stamina_cost on per-game lines for re-sim rollback
+    # Persist stamina_cost on per-game lines for re-sim rollback.
+    # Uses CASE-based bulk UPDATE (1 SQL per chunk) instead of per-row UPDATEs.
     if per_game_costs:
-        update_bat_cost = sa_text("""
-            UPDATE game_batting_lines SET stamina_cost = :cost
-            WHERE game_id = :game_id AND player_id = :player_id
-        """)
-        update_pitch_cost = sa_text("""
-            UPDATE game_pitching_lines SET stamina_cost = :cost
-            WHERE game_id = :game_id AND player_id = :player_id
-        """)
         cost_params = []
         for gid, costs_map in per_game_costs.items():
             for pid, cost in costs_map.items():
-                cost_params.append({"game_id": gid, "player_id": pid, "cost": cost})
+                cost_params.append((int(gid), int(pid), int(cost)))
+
+        _COST_CHUNK = 500
         try:
             with conn.begin_nested():
-                conn.execute(update_bat_cost, cost_params)
-                conn.execute(update_pitch_cost, cost_params)
+                for i in range(0, len(cost_params), _COST_CHUNK):
+                    chunk = cost_params[i:i + _COST_CHUNK]
+                    cases = " ".join(
+                        f"WHEN game_id = :g{j} AND player_id = :p{j} THEN :c{j}"
+                        for j in range(len(chunk))
+                    )
+                    where_pairs = ", ".join(
+                        f"(:g{j}, :p{j})" for j in range(len(chunk))
+                    )
+                    params = {}
+                    for j, (gid, pid, cost) in enumerate(chunk):
+                        params[f"g{j}"] = gid
+                        params[f"p{j}"] = pid
+                        params[f"c{j}"] = cost
+
+                    for table in ("game_batting_lines", "game_pitching_lines"):
+                        conn.execute(sa_text(f"""
+                            UPDATE {table}
+                            SET stamina_cost = CASE {cases} END
+                            WHERE (game_id, player_id) IN ({where_pairs})
+                        """), params)
         except Exception:
             logger.debug("drain_stamina: stamina_cost column update skipped (column may not exist yet)")
 
@@ -2830,8 +2871,9 @@ def _drain_stamina_and_persist_injuries(
             last_updated_at  = NOW()
     """)
 
+    # Pre-compute all injury event params (template merging) before touching DB
+    injury_event_params = []
     for result in results:
-        # Extract game_id for gamelist_id on injury events
         _r_nested = result.get("result") or {}
         _r_game_id = result.get("game_id") or _r_nested.get("game_id") or _r_nested.get("id")
         injuries = result.get("injuries") or []
@@ -2840,7 +2882,6 @@ def _drain_stamina_and_persist_injuries(
             if pid is None:
                 continue
             pid = int(pid)
-            # injury_type_id is absent from pregame entries — fall back to code lookup
             raw_tid = inj.get("injury_type_id")
             if raw_tid:
                 injury_type_id = int(raw_tid)
@@ -2856,12 +2897,7 @@ def _drain_stamina_and_persist_injuries(
             duration_weeks = int(inj.get("duration_weeks", 1))
             effects = _normalize_engine_effects(inj.get("effects") or {})
 
-            # stamina_pct is a backend roster-management attribute — the engine
-            # handles in-game energy via stamina_cost, not as an injury effect.
-            # We always derive stamina_pct from the injury type template so that
-            # injured players are benched for the correct number of weeks.
-            # Other template attributes (contact, speed, etc.) are also filled in
-            # from the template for any attribute the engine did not return.
+            # Fill template attributes the engine didn't return
             if injury_type_id in injury_type_map:
                 it_row = injury_type_map[injury_type_id]
                 raw = it_row.get("impact_template_json") or "{}"
@@ -2869,7 +2905,7 @@ def _drain_stamina_and_persist_injuries(
                     template = raw if isinstance(raw, dict) else json.loads(raw)
                     for attr, cfg in template.items():
                         if attr in effects:
-                            continue  # keep engine-supplied value
+                            continue
                         if isinstance(cfg, dict):
                             min_pct = float(cfg.get("min_pct", 0))
                             max_pct = float(cfg.get("max_pct", 0))
@@ -2881,33 +2917,64 @@ def _drain_stamina_and_persist_injuries(
                         injury_type_id,
                     )
 
-            logger.debug(
-                "drain_stamina: player %d injury_type %d → effects=%s",
-                pid, injury_type_id, effects,
-            )
+            injury_event_params.append({
+                "player_id": pid,
+                "injury_type_id": injury_type_id,
+                "league_year_id": league_year_id,
+                "gamelist_id": int(_r_game_id) if _r_game_id is not None else None,
+                "weeks_assigned": duration_weeks,
+                "weeks_remaining": duration_weeks,
+                "malus_json": json.dumps(effects),
+            })
 
-            try:
-                with conn.begin_nested():
-                    ev_result = conn.execute(injury_insert, {
-                        "player_id": pid,
-                        "injury_type_id": injury_type_id,
-                        "league_year_id": league_year_id,
-                        "gamelist_id": int(_r_game_id) if _r_game_id is not None else None,
-                        "weeks_assigned": duration_weeks,
-                        "weeks_remaining": duration_weeks,
-                        "malus_json": json.dumps(effects),
-                    })
+    # Batch persist: single savepoint, individual INSERTs (need lastrowid),
+    # then batch state UPSERTs at the end.  Falls back to row-by-row on
+    # failure so individual bad rows don't block the rest.
+    if injury_event_params:
+        try:
+            state_params = []
+            with conn.begin_nested():
+                for params in injury_event_params:
+                    ev_result = conn.execute(injury_insert, params)
                     event_id = ev_result.lastrowid
-                    conn.execute(injury_state_upsert, {
-                        "player_id": pid,
+                    state_params.append({
+                        "player_id": params["player_id"],
                         "event_id": event_id,
-                        "weeks_remaining": duration_weeks,
+                        "weeks_remaining": params["weeks_remaining"],
                     })
-                injuries_persisted += 1
+                if state_params:
+                    conn.execute(injury_state_upsert, state_params)
+            injuries_persisted = len(injury_event_params)
+        except Exception:
+            logger.warning(
+                "drain_stamina: batch injury failed for %d injuries, falling back to row-by-row",
+                len(injury_event_params),
+            )
+            try:
+                conn.rollback()
             except Exception:
-                logger.exception(
-                    "drain_stamina: injury persistence failed for player %d", pid
-                )
+                pass
+            # Row-by-row fallback (matches original behavior)
+            for params in injury_event_params:
+                try:
+                    with conn.begin_nested():
+                        ev_result = conn.execute(injury_insert, params)
+                        event_id = ev_result.lastrowid
+                        conn.execute(injury_state_upsert, {
+                            "player_id": params["player_id"],
+                            "event_id": event_id,
+                            "weeks_remaining": params["weeks_remaining"],
+                        })
+                    injuries_persisted += 1
+                except Exception:
+                    logger.exception(
+                        "drain_stamina: injury persistence failed for player %d",
+                        params["player_id"],
+                    )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
     logger.info(
         "drain_stamina: %d drained, %d injuries persisted",
@@ -3390,6 +3457,56 @@ def _rollback_prior_results(
 
 
 # -------------------------------------------------------------------
+# Periodic cleanup of ephemeral data
+# -------------------------------------------------------------------
+
+def _cleanup_stale_data(conn) -> Dict[str, int]:
+    """Delete ephemeral data that accumulates and has no long-term value.
+
+    Called once per build_week_payloads() invocation.  Uses LIMIT to keep
+    each DELETE short and avoid lock contention.
+    """
+    from sqlalchemy import text as sa_text
+    counts = {}
+
+    # background_tasks older than 24 hours (updated_at is unix timestamp)
+    try:
+        r = conn.execute(sa_text(
+            "DELETE FROM background_tasks "
+            "WHERE updated_at < UNIX_TIMESTAMP() - 86400 LIMIT 1000"
+        ))
+        counts["background_tasks"] = r.rowcount
+    except Exception:
+        logger.debug("cleanup: background_tasks skip (table may not exist)")
+
+    # engine_diagnostic_log older than 4 weeks
+    try:
+        r = conn.execute(sa_text(
+            "DELETE FROM engine_diagnostic_log "
+            "WHERE created_at < DATE_SUB(NOW(), INTERVAL 28 DAY) LIMIT 1000"
+        ))
+        counts["engine_diagnostic_log"] = r.rowcount
+    except Exception:
+        logger.debug("cleanup: engine_diagnostic_log skip (table may not exist)")
+
+    # Non-canonical simulation_runs older than 7 days
+    try:
+        r = conn.execute(sa_text(
+            "DELETE FROM simulation_runs "
+            "WHERE is_canonical = 0 "
+            "AND created_at < DATE_SUB(NOW(), INTERVAL 7 DAY) LIMIT 1000"
+        ))
+        counts["simulation_runs"] = r.rowcount
+    except Exception:
+        logger.debug("cleanup: simulation_runs skip (table may not exist)")
+
+    if any(v > 0 for v in counts.values()):
+        logger.info("Stale data cleanup: %s", counts)
+
+    return counts
+
+
+# -------------------------------------------------------------------
 # Public: weekly batch processing
 # -------------------------------------------------------------------
 
@@ -3409,46 +3526,59 @@ def _process_level_subweek(
     Process a single league level within a subweek.
     Runs in its own thread with its own DB connection.
 
-    Returns dict with payloads, results, games, and counts.
+    Phase 1 (parallel-safe): Writes level-isolated data (game results,
+    per-game lines, rotation, playoffs) that only touch rows unique to
+    this level's game IDs.
+
+    Phase 2 data is returned in the ``deferred`` key for the caller to
+    process sequentially — this avoids InnoDB row-lock contention on
+    shared tables (season stats, stamina, position usage) when multiple
+    levels run in parallel.
+
+    Returns dict with payloads, results, counts, and deferred write data.
     """
     from sqlalchemy import text as sa_text
     from services.game_engine_client import simulate_games_batch
-    from services.stat_accumulator import (
-        accumulate_subweek_stats_bulk,
-        record_subweek_position_usage_bulk,
-    )
     from services.rotation import advance_rotation_states_bulk
     from services.subweek_cache import load_subweek_state, SubweekCache
+    from services.timing_log import timed_stage
 
+    _tw = dict(week=season_week, subweek=subweek, level=level)
     engine = get_engine()
 
-    with engine.connect() as level_conn:
-        # Load mutable state for this subweek (uses shared week_cache)
-        state = load_subweek_state(level_conn, week_cache, league_year_id, season_week)
-        cache = SubweekCache.from_week_and_state(week_cache, state)
+    # Scope the WeekCache to only this level's teams so subweek state
+    # queries use ~750 player IDs instead of ~11,000 across all levels.
+    level_team_ids = set()
+    for g in games:
+        level_team_ids.add(int(g["home_team"]))
+        level_team_ids.add(int(g["away_team"]))
+    level_cache = SubweekCache.scoped_to_teams(week_cache, level_team_ids)
 
-        # Pre-flight: halt immediately if any team's roster is depleted
+    # --- Scope 1 (READ): load state & build payloads, then release conn ---
+    with engine.connect() as read_conn:
+        with timed_stage("load_subweek_state", **_tw,
+                         detail=f"{len(level_cache.all_player_ids)} players"):
+            state = load_subweek_state(read_conn, level_cache, league_year_id, season_week)
+        cache = SubweekCache.from_week_and_state(level_cache, state)
+
         _check_roster_availability(cache, season_week, subweek, level)
 
-        # Build payloads from cache (zero DB per game)
-        payloads = []
-        for game_row in games:
-            game_id = int(game_row["id"])
-            try:
-                payload = build_game_payload_core_from_cache(
-                    level_conn, cache, game_row, league_year_id, rules_by_level,
-                )
-                payloads.append(payload)
-            except Exception as e:
-                raise ValueError(
-                    f"Failed to build game {game_id} (level {level}, subweek '{subweek}'): {e}"
-                ) from e
+        with timed_stage("build_payloads", **_tw, detail=f"{len(games)} games"):
+            payloads = []
+            for game_row in games:
+                game_id = int(game_row["id"])
+                try:
+                    payload = build_game_payload_core_from_cache(
+                        read_conn, cache, game_row, league_year_id, rules_by_level,
+                    )
+                    payloads.append(payload)
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed to build game {game_id} (level {level}, subweek '{subweek}'): {e}"
+                    ) from e
 
-        # Send to engine
-        logger.info(
-            "Sending %d games to engine for level %d, subweek '%s'",
-            len(payloads), level, subweek,
-        )
+    # --- Engine call (NO CONNECTION held) ---
+    with timed_stage("engine_call", **_tw, detail=f"{len(payloads)} games"):
         results = simulate_games_batch(
             payloads, subweek,
             game_constants=game_constants,
@@ -3459,12 +3589,13 @@ def _process_level_subweek(
             season_week=season_week,
             league_level=level,
         )
-        logger.info(
-            "Received %d results from engine for level %d, subweek '%s'",
-            len(results), level, subweek,
-        )
+    logger.info(
+        "Received %d results from engine for level %d, subweek '%s'",
+        len(results), level, subweek,
+    )
 
-        # --- All post-engine writes in a single transaction ---
+    # --- Scope 2 (WRITE): all post-engine writes, then commit & release ---
+    with engine.connect() as write_conn:
 
         # Engine diagnostic (isolated savepoint so a failure here cannot
         # poison the outer transaction with a PendingRollbackError)
@@ -3476,8 +3607,8 @@ def _process_level_subweek(
                 if gid is not None:
                     received_ids.add(int(gid))
             missing_ids = [gid for gid in sent_ids if gid and int(gid) not in received_ids]
-            with level_conn.begin_nested():
-                level_conn.execute(sa_text("""
+            with write_conn.begin_nested():
+                write_conn.execute(sa_text("""
                     INSERT INTO engine_diagnostic_log
                         (league_year_id, season_week, subweek, league_level,
                          games_sent, results_received, missing_game_ids,
@@ -3500,13 +3631,15 @@ def _process_level_subweek(
                     "Engine diagnostic: %d missing game(s) for level %d, subweek '%s': %s",
                     len(missing_ids), level, subweek, missing_ids,
                 )
+                log_missing_games(
+                    subweek=subweek, league_level=level,
+                    season_week=season_week, sent_ids=sent_ids,
+                    missing_ids=missing_ids,
+                )
         except Exception:
             logger.debug("Engine diagnostic logging failed (non-critical)")
-            # Some DB errors (e.g. missing table) taint the whole transaction
-            # even inside a savepoint.  Rollback to clear PendingRollbackError
-            # so subsequent writes on this connection succeed.
             try:
-                level_conn.rollback()
+                write_conn.rollback()
             except Exception:
                 pass
 
@@ -3514,7 +3647,7 @@ def _process_level_subweek(
         all_game_ids = [
             int(p.get("game_id")) for p in payloads if p.get("game_id") is not None
         ]
-        resim_game_ids = _detect_resim_games(level_conn, all_game_ids)
+        resim_game_ids = _detect_resim_games(write_conn, all_game_ids)
         is_resim = bool(resim_game_ids)
 
         if resim_game_ids:
@@ -3523,16 +3656,17 @@ def _process_level_subweek(
                 len(resim_game_ids), level, subweek, resim_game_ids,
             )
             _rollback_prior_results(
-                level_conn, resim_game_ids, league_year_id, season_week,
+                write_conn, resim_game_ids, league_year_id, season_week,
             )
 
         # Store game results
-        result_count = _store_game_results_bulk(level_conn, results, payloads, games)
+        with timed_stage("phase1_store_results", **_tw, detail=f"{len(results)} results"):
+            result_count = _store_game_results_bulk(write_conn, results, payloads, games)
 
         # Update diagnostic with stored count
         try:
-            with level_conn.begin_nested():
-                level_conn.execute(sa_text("""
+            with write_conn.begin_nested():
+                write_conn.execute(sa_text("""
                     UPDATE engine_diagnostic_log
                     SET results_stored = :stored
                     WHERE league_year_id = :lyid AND season_week = :sw
@@ -3548,52 +3682,43 @@ def _process_level_subweek(
         except Exception:
             logger.debug("Engine diagnostic update failed (non-critical)")
 
-        # Accumulate stats
-        game_type_by_id = {}
-        for g in games:
-            gid = int(g["id"])
-            gt = str((g.get("game_type") if isinstance(g, dict) else g["game_type"]) or "regular")
-            game_type_by_id[gid] = gt
+        # Level-isolated writes: rotation + playoff series
+        rot_count = advance_rotation_states_bulk(write_conn, payloads)
+        playoff_updates = _update_playoff_series_bulk(write_conn, results, payloads, games)
 
-        stat_counts = accumulate_subweek_stats_bulk(
-            level_conn, results, league_year_id,
-            game_type_by_id=game_type_by_id,
-            is_resim=is_resim,
-        )
+        # Commit level-isolated writes
+        write_conn.commit()
 
-        # Position usage
-        usage_count = record_subweek_position_usage_bulk(
-            level_conn, payloads, league_year_id
-        )
+    # Build game_type map for deferred stat accumulation
+    game_type_by_id = {}
+    for g in games:
+        gid = int(g["id"])
+        gt = str((g.get("game_type") if isinstance(g, dict) else g["game_type"]) or "regular")
+        game_type_by_id[gid] = gt
 
-        # Stamina drain + injuries (NO recovery — that's global)
-        drain_counts = _drain_stamina_and_persist_injuries(
-            level_conn, results, league_year_id, injury_types=injury_types,
-        )
+    logger.info(
+        "Level %d subweek '%s' phase 1 complete: %d results, "
+        "rotations=%d, playoff_updates=%d (cross-level writes deferred)",
+        level, subweek, result_count, rot_count, len(playoff_updates),
+    )
 
-        # Rotation advancement
-        rot_count = advance_rotation_states_bulk(level_conn, payloads)
-
-        # Playoff series tracking: update wins/losses and generate next games
-        playoff_updates = _update_playoff_series_bulk(level_conn, results, payloads, games)
-
-        # Single commit for all writes
-        level_conn.commit()
-
-        logger.info(
-            "Level %d subweek '%s' complete: %d results, stats=%s, "
-            "usage=%d, drain=%s, rotations=%d, playoff_updates=%d",
-            level, subweek, result_count, stat_counts,
-            usage_count, drain_counts, rot_count, len(playoff_updates),
-        )
-
-        return {
-            "payloads": payloads,
+    return {
+        "payloads": payloads,
+        "results": results,
+        "result_count": result_count,
+        "playoff_updates": playoff_updates,
+        # Deferred cross-level write data — processed sequentially by caller
+        "deferred": {
             "results": results,
-            "result_count": result_count,
-            "stat_counts": stat_counts,
-            "playoff_updates": playoff_updates,
-        }
+            "league_year_id": league_year_id,
+            "game_type_by_id": game_type_by_id,
+            "is_resim": is_resim,
+            "payloads": payloads,
+            "injury_types": injury_types,
+            "level": level,
+            "subweek": subweek,
+        },
+    }
 
 
 def build_week_payloads(
@@ -3646,6 +3771,19 @@ def build_week_payloads(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from services.subweek_cache import load_week_cache, load_subweek_state, SubweekCache
+    from services.timing_log import timed_stage, log_timing
+    import time as _time
+
+    # Lightweight cleanup of stale ephemeral data (once per week processing)
+    try:
+        _cleanup_stale_data(conn)
+        conn.commit()
+    except Exception:
+        logger.debug("Stale data cleanup failed (non-critical)")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
     tables = _get_core_tables()
     gamelist = tables["gamelist"]
@@ -3712,13 +3850,15 @@ def build_week_payloads(
 
     # Load WeekCache ONCE for the entire week (~10 queries)
     primary_level = league_level or int(all_games[0]["league_level"])
-    week_cache = load_week_cache(
-        conn,
-        team_ids=list(all_team_ids),
-        league_year_id=league_year_id,
-        season_week=season_week,
-        league_level_id=primary_level,
-    )
+    with timed_stage("load_week_cache", week=season_week,
+                     detail=f"{len(all_team_ids)} teams"):
+        week_cache = load_week_cache(
+            conn,
+            team_ids=list(all_team_ids),
+            league_year_id=league_year_id,
+            season_week=season_week,
+            league_level_id=primary_level,
+        )
     logger.info(
         "WeekCache loaded: %d teams, %d players",
         len(all_team_ids), len(week_cache.all_player_ids),
@@ -3784,7 +3924,13 @@ def build_week_payloads(
 
         else:
             # Simulation mode: parallel processing across levels
+            from services.stat_accumulator import (
+                accumulate_subweek_stats_bulk,
+                record_subweek_position_usage_bulk,
+            )
+
             levels = sorted(levels_games.keys())
+            deferred_list = []  # Collect deferred write data from all levels
 
             if len(levels) == 1:
                 # Single level — no threading overhead needed
@@ -3804,6 +3950,7 @@ def build_week_payloads(
                     )
                     sw_payloads.extend(level_result["payloads"])
                     total_games += len(level_result["payloads"])
+                    deferred_list.append(level_result["deferred"])
                 except Exception as e:
                     raise ValueError(
                         f"Simulation failed for subweek '{subweek}': {e}"
@@ -3836,6 +3983,7 @@ def build_week_payloads(
                             level_result = future.result()
                             sw_payloads.extend(level_result["payloads"])
                             total_games += len(level_result["payloads"])
+                            deferred_list.append(level_result["deferred"])
                         except Exception as e:
                             # Cancel remaining futures
                             for f in futures:
@@ -3845,11 +3993,61 @@ def build_week_payloads(
                                 f"subweek '{subweek}': {e}"
                             ) from e
 
+            # --- Phase 2: Cross-level writes (sequential, no contention) ---
+            # Process each level's deferred stat accumulation, position
+            # usage, and stamina drain on the main connection one at a time.
+            # This eliminates deadlocks on shared tables like
+            # player_batting_stats and player_fatigue_state.
+            for deferred in deferred_list:
+                d_level = deferred["level"]
+                _p2 = dict(week=season_week, subweek=subweek, level=d_level)
+                try:
+                    with timed_stage("phase2_stat_accum", **_p2,
+                                     detail=f"{len(deferred['results'])} results"):
+                        stat_counts = accumulate_subweek_stats_bulk(
+                            conn, deferred["results"], deferred["league_year_id"],
+                            game_type_by_id=deferred["game_type_by_id"],
+                            is_resim=deferred["is_resim"],
+                        )
+                    with timed_stage("phase2_position_usage", **_p2):
+                        usage_count = record_subweek_position_usage_bulk(
+                            conn, deferred["payloads"], deferred["league_year_id"],
+                        )
+                    with timed_stage("phase2_stamina_injuries", **_p2):
+                        drain_counts = _drain_stamina_and_persist_injuries(
+                            conn, deferred["results"], deferred["league_year_id"],
+                            injury_types=deferred["injury_types"],
+                        )
+                    conn.commit()
+                    logger.info(
+                        "Level %d subweek '%s' phase 2 complete: stats=%s, "
+                        "usage=%d, drain=%s",
+                        d_level, subweek, stat_counts, usage_count, drain_counts,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "Phase 2 (cross-level writes) failed for level %d, "
+                        "subweek '%s': %s", d_level, subweek, e,
+                    )
+                    log_phase2_failure(
+                        subweek=subweek, league_level=d_level,
+                        season_week=season_week, stage="cross-level-writes",
+                        error=str(e),
+                    )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    # Continue to next level — don't abort remaining levels
+                    # or subsequent subweeks for a single level's write failure.
+
             # GLOBAL: Stamina recovery runs ONCE after all levels drain
             try:
-                recovery_count = _apply_global_stamina_recovery(
-                    conn, league_year_id, league_level=league_level,
-                )
+                with timed_stage("global_stamina_recovery",
+                                 week=season_week, subweek=subweek):
+                    recovery_count = _apply_global_stamina_recovery(
+                        conn, league_year_id, league_level=league_level,
+                    )
                 conn.commit()
                 logger.info(
                     "Global stamina recovery for subweek '%s': %d players",
@@ -3866,6 +4064,60 @@ def build_week_payloads(
                     pass
 
         subweek_payloads[subweek] = sw_payloads
+
+        # ---------------------------------------------------------------
+        # Playoff catch-up: after simulating a subweek, newly generated
+        # playoff games (from update_series_after_game → generate_next_
+        # series_game) may have been inserted into gamelist for later
+        # subweeks in this same week.  Re-query and merge them so the
+        # next subweek iteration picks them up.
+        # ---------------------------------------------------------------
+        if simulate:
+            remaining_subweeks = [s for s in subweeks_to_run if s > subweek]
+            if remaining_subweeks:
+                known_ids = set()
+                for sw_key, lvl_dict in games_by_subweek.items():
+                    for g_list in lvl_dict.values():
+                        for g in g_list:
+                            known_ids.add(int(g["id"]))
+
+                new_conditions = [
+                    gamelist.c.season.in_(season_ids),
+                    gamelist.c.season_week == season_week,
+                    gamelist.c.game_type == "playoff",
+                    gamelist.c.season_subweek.in_(remaining_subweeks),
+                ]
+                if league_level is not None:
+                    new_conditions.append(gamelist.c.league_level == league_level)
+
+                new_games = conn.execute(
+                    select(gamelist)
+                    .where(and_(*new_conditions))
+                    .order_by(gamelist.c.season_subweek.asc(), gamelist.c.id.asc())
+                ).mappings().all()
+
+                added = 0
+                for ng in new_games:
+                    gid = int(ng["id"])
+                    if gid in known_ids:
+                        continue
+                    sw_key = str(ng.get("season_subweek") or "a").lower()
+                    lvl = int(ng["league_level"])
+                    games_by_subweek.setdefault(sw_key, {}).setdefault(lvl, []).append(ng)
+
+                    # Ensure the new teams are in the WeekCache
+                    for tid_col in ("home_team", "away_team"):
+                        tid = int(ng[tid_col])
+                        if tid not in all_team_ids:
+                            all_team_ids.add(tid)
+                    added += 1
+
+                if added:
+                    logger.info(
+                        "Playoff catch-up after subweek '%s': merged %d new game(s) "
+                        "into remaining subweeks",
+                        subweek, added,
+                    )
 
     # Determine league level from first game if not provided
     detected_league_level = None

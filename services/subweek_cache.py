@@ -113,6 +113,41 @@ class SubweekCache:
     pitcher_ids_by_team: Dict[int, List[int]] = field(default_factory=dict)
 
     @classmethod
+    def scoped_to_teams(cls, wc: WeekCache, team_ids: Set[int]) -> "WeekCache":
+        """Return a lightweight WeekCache filtered to only the given teams.
+
+        Shares the same underlying dicts where possible (position_weights)
+        but builds new per-team/per-player dicts scoped to the requested
+        teams.  Used to avoid passing 11,000 player IDs into subweek
+        state queries when only one level's ~750 players are needed.
+        """
+        scoped_pids: Set[int] = set()
+        scoped_roster: Dict[int, List[int]] = {}
+        for tid in team_ids:
+            pids = wc.roster_by_team.get(tid, [])
+            scoped_roster[tid] = pids
+            scoped_pids.update(pids)
+
+        return WeekCache(
+            team_meta={t: wc.team_meta[t] for t in team_ids if t in wc.team_meta},
+            roster_by_team=scoped_roster,
+            org_by_team={t: wc.org_by_team[t] for t in team_ids if t in wc.org_by_team},
+            team_strategy_by_team={t: wc.team_strategy_by_team[t] for t in team_ids if t in wc.team_strategy_by_team},
+            bullpen_order_by_team={t: wc.bullpen_order_by_team[t] for t in team_ids if t in wc.bullpen_order_by_team},
+            rotation_by_team={t: wc.rotation_by_team[t] for t in team_ids if t in wc.rotation_by_team},
+            rotation_slots_by_rotation=wc.rotation_slots_by_rotation,  # keyed by rotation_id, shared
+            position_plans_by_team={t: wc.position_plans_by_team[t] for t in team_ids if t in wc.position_plans_by_team},
+            lineup_roles_by_team={t: wc.lineup_roles_by_team[t] for t in team_ids if t in wc.lineup_roles_by_team},
+            player_rows={p: wc.player_rows[p] for p in scoped_pids if p in wc.player_rows},
+            strategy_rows_by_player={p: wc.strategy_rows_by_player[p] for p in scoped_pids if p in wc.strategy_rows_by_player},
+            xp_mods={p: wc.xp_mods[p] for p in scoped_pids if p in wc.xp_mods},
+            pitch_hands={p: wc.pitch_hands[p] for p in scoped_pids if p in wc.pitch_hands},
+            position_weights=wc.position_weights,
+            all_player_ids=scoped_pids,
+            pitcher_ids_by_team={t: wc.pitcher_ids_by_team[t] for t in team_ids if t in wc.pitcher_ids_by_team},
+        )
+
+    @classmethod
     def from_week_and_state(cls, wc: WeekCache, st: SubweekState) -> "SubweekCache":
         """Assemble a full SubweekCache from static WeekCache + mutable SubweekState."""
         return cls(

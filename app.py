@@ -32,7 +32,9 @@ from financials.books import (
     run_year_start_books,
     run_week_books,
     run_year_end_interest,
-    run_full_season_books
+    run_full_season_books,
+    initialize_next_league_year,
+    process_playoff_revenue,
 )
 
 from simulations.fake_season import simulate_fake_season
@@ -242,6 +244,12 @@ def create_app(config_object=Config):
         app.register_blueprint(fa_auction_bp, url_prefix="/api/v1")
     except Exception as e:
         app.logger.exception("Failed to register fa_auction blueprint: %s", e)
+
+    try:
+        from ifa_signing import ifa_signing_bp
+        app.register_blueprint(ifa_signing_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register ifa_signing blueprint: %s", e)
 
     try:
         from player_ops import player_ops_bp
@@ -862,6 +870,92 @@ def create_app(config_object=Config):
             return jsonify(error="database_error", message=str(e)), 500
 
         log.info("admin_run_season_books: completed: %s", result)
+        return jsonify(status="ok", details=result), 200
+
+    @app.post("/admin/initialize-next-league-year")
+    @soft_timeout(app)
+    def admin_initialize_next_league_year():
+        log = logging.getLogger("app")
+        log.info("admin_initialize_next_league_year: endpoint called")
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("admin_initialize_next_league_year: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("admin_initialize_next_league_year: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        league_year = request.args.get("league_year") or (
+            request.get_json(silent=True) or {}
+        ).get("league_year")
+        if not league_year:
+            return jsonify(
+                error="missing_param",
+                message="league_year (current year) is required."
+            ), 400
+
+        try:
+            result = initialize_next_league_year(app.engine, int(league_year))
+        except ValueError as e:
+            return jsonify(error="bad_request", message=str(e)), 400
+        except SQLAlchemyError as e:
+            log.exception("admin_initialize_next_league_year: db error")
+            return jsonify(error="database_error", message=str(e)), 500
+
+        log.info("admin_initialize_next_league_year: completed: %s", result)
+        return jsonify(status="ok", details=result), 200
+
+    @app.post("/admin/run-playoff-revenue")
+    @soft_timeout(app)
+    def admin_run_playoff_revenue():
+        log = logging.getLogger("app")
+        log.info("admin_run_playoff_revenue: endpoint called")
+
+        admin_pw = os.getenv("ADMIN_PASSWORD")
+        if admin_pw:
+            header_pw = request.headers.get("X-Admin-Password")
+            if header_pw != admin_pw:
+                log.info("admin_run_playoff_revenue: invalid admin password")
+                return jsonify(
+                    error="unauthorized",
+                    message="Invalid admin password."
+                ), 401
+
+        if not getattr(app, "engine", None):
+            log.error("admin_run_playoff_revenue: no app.engine")
+            return jsonify(
+                error="no_db_engine",
+                message="Database engine is not initialized on the app."
+            ), 500
+
+        league_year = request.args.get("league_year") or (
+            request.get_json(silent=True) or {}
+        ).get("league_year")
+        if not league_year:
+            return jsonify(
+                error="missing_param",
+                message="league_year is required."
+            ), 400
+
+        try:
+            result = process_playoff_revenue(app.engine, int(league_year))
+        except ValueError as e:
+            return jsonify(error="bad_request", message=str(e)), 400
+        except SQLAlchemyError as e:
+            log.exception("admin_run_playoff_revenue: db error")
+            return jsonify(error="database_error", message=str(e)), 500
+
+        log.info("admin_run_playoff_revenue: completed: %s", result)
         return jsonify(status="ok", details=result), 200
 
 

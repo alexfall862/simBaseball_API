@@ -254,7 +254,8 @@ def _get_pretrade_map(conn, league_year_id: int) -> Dict:
 
 def _populate_eligible_players(conn, league_year_id: int) -> int:
     """
-    Populate draft_eligible_players from college, HS, and INTAM pools.
+    Populate draft_eligible_players from college and HS pools.
+    (INTAM players now bypass the draft via the IFA signing system.)
     Ranks by recruiting_rankings composite_score if available.
     """
     # Insert college players
@@ -280,18 +281,6 @@ def _populate_eligible_players(conn, league_year_id: int) -> int:
         WHERE cts.orgID = :hs_org
         ON DUPLICATE KEY UPDATE source = 'hs'
     """), {"lyid": league_year_id, "hs_org": USHS_ORG_ID})
-
-    # Insert INTAM players
-    conn.execute(text("""
-        INSERT INTO draft_eligible_players (player_id, league_year_id, source)
-        SELECT p.id, :lyid, 'intam'
-        FROM simbbPlayers p
-        JOIN contracts c ON c.playerID = p.id AND c.isFinished = 0
-        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
-        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
-        WHERE cts.orgID = :intam_org
-        ON DUPLICATE KEY UPDATE source = 'intam'
-    """), {"lyid": league_year_id, "intam_org": INTAM_ORG_ID})
 
     # Update ranks from recruiting_rankings if available
     conn.execute(text("""
@@ -680,6 +669,15 @@ def sign_pick(conn, draft_pick_id: int, league_year_id: int,
     years = 3
     per_year = Decimal(str(slot_value)) / years
 
+    # Players age 17 and younger cannot be placed above level 4
+    player_age = conn.execute(
+        text("SELECT age FROM simbbPlayers WHERE id = :pid"),
+        {"pid": player_id},
+    ).scalar()
+    signing_level = DRAFT_TARGET_LEVEL
+    if player_age is not None and int(player_age) <= 17:
+        signing_level = min(signing_level, 4)
+
     # Get current league_year value for signing
     ly_val = conn.execute(text(
         "SELECT league_year FROM league_years WHERE id = :lyid"
@@ -696,7 +694,7 @@ def sign_pick(conn, draft_pick_id: int, league_year_id: int,
             signingOrg=org_id,
             leagueYearSigned=ly_val,
             isFinished=0,
-            current_level=DRAFT_TARGET_LEVEL,
+            current_level=signing_level,
             onIR=0,
         )
     )
@@ -1108,50 +1106,59 @@ def export_draft(conn, league_year_id: int,
     """
     Finalize the draft: for all signed picks, move the player's contract
     from their amateur org to the drafting org's minor league system.
+
+    Uses bulk JOINed queries instead of per-pick lookups (~3 queries total
+    vs ~4N for N signed picks).
     """
+    # Single JOINed query: signed picks + player age + contract year + detail ID
     signed = conn.execute(text("""
         SELECT dp.id AS pick_id, dp.current_org_id, dp.player_id,
-               ds.contract_id, dp.round, dp.pick_in_round
+               ds.contract_id, dp.round, dp.pick_in_round,
+               p.age AS player_age,
+               c.current_year,
+               cd.id AS detail_id
         FROM draft_picks dp
         JOIN draft_signing ds ON ds.draft_pick_id = dp.id
+        JOIN simbbPlayers p ON p.id = dp.player_id
+        JOIN contracts c ON c.id = ds.contract_id
+        LEFT JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
         WHERE dp.league_year_id = :lyid AND ds.status = 'signed'
     """), {"lyid": league_year_id}).mappings().all()
 
-    moved = []
+    if not signed:
+        return {"exported": 0, "players": []}
+
+    # Batch UPDATE contracts — set current_level based on player age
     for row in signed:
-        # Update contract level to minor league
-        t = _t(conn)
-        conn.execute(
-            t["contracts"].update()
-            .where(t["contracts"].c.id == row["contract_id"])
-            .values(current_level=DRAFT_TARGET_LEVEL)
-        )
+        target = DRAFT_TARGET_LEVEL
+        if row["player_age"] is not None and int(row["player_age"]) <= 17:
+            target = min(target, 4)
+        conn.execute(text("""
+            UPDATE contracts SET current_level = :level WHERE id = :cid
+        """), {"level": target, "cid": row["contract_id"]})
 
-        # Update the holder org on the current year's share
-        contract = conn.execute(text("""
-            SELECT current_year FROM contracts WHERE id = :cid
-        """), {"cid": row["contract_id"]}).mappings().first()
+    # Batch UPDATE holder org on contractTeamShare
+    share_params = []
+    for row in signed:
+        if row["detail_id"] is not None:
+            share_params.append({
+                "org_id": row["current_org_id"],
+                "det_id": row["detail_id"],
+            })
+    if share_params:
+        conn.execute(text("""
+            UPDATE contractTeamShare
+            SET orgID = :org_id
+            WHERE contractDetailsID = :det_id AND isHolder = 1
+        """), share_params)
 
-        if contract:
-            det = conn.execute(text("""
-                SELECT id FROM contractDetails
-                WHERE contractID = :cid AND year = :yr
-            """), {"cid": row["contract_id"],
-                   "yr": contract["current_year"]}).first()
-            if det:
-                conn.execute(text("""
-                    UPDATE contractTeamShare
-                    SET orgID = :org_id
-                    WHERE contractDetailsID = :det_id AND isHolder = 1
-                """), {"org_id": row["current_org_id"], "det_id": det[0]})
-
-        moved.append({
-            "player_id": row["player_id"],
-            "org_id": row["current_org_id"],
-            "contract_id": row["contract_id"],
-            "round": row["round"],
-            "pick_in_round": row["pick_in_round"],
-        })
+    moved = [{
+        "player_id": row["player_id"],
+        "org_id": row["current_org_id"],
+        "contract_id": row["contract_id"],
+        "round": row["round"],
+        "pick_in_round": row["pick_in_round"],
+    } for row in signed]
 
     return {
         "exported": len(moved),

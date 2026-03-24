@@ -246,6 +246,18 @@ def promote_player(conn, contract_id: int, target_level_id: int,
     if org_id is None:
         raise ValueError("No holder org found for this contract")
 
+    # Players age 17 and younger cannot be promoted above level 4
+    if target_level_id > 4:
+        age_row = conn.execute(
+            text("SELECT age FROM simbbPlayers WHERE id = :pid"),
+            {"pid": c["playerID"]},
+        ).first()
+        if age_row and int(age_row._mapping["age"]) <= 17:
+            raise ValueError(
+                f"Players age 17 and younger cannot be promoted above level 4 "
+                f"(player age: {age_row._mapping['age']}, target level: {target_level_id})"
+            )
+
     conn.execute(
         update(t["contracts"])
         .where(t["contracts"].c.id == contract_id)

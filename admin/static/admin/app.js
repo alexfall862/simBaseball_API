@@ -109,6 +109,7 @@
     document.getElementById('btn-run-season').addEventListener('click', runSeason);
     document.getElementById('btn-run-all-levels').addEventListener('click', runAllLevels);
     document.getElementById('btn-wipe-season').addEventListener('click', wipeSeason);
+    document.getElementById('btn-rollback-to-week').addEventListener('click', rollbackToWeek);
 
     // Timestamp
     const _tsListeners = {
@@ -324,6 +325,13 @@
     document.getElementById('btn-stam-con-load').addEventListener('click', loadStaminaConsumption);
     document.getElementById('btn-stam-fl-load').addEventListener('click', loadStaminaFlow);
 
+    // Rankings
+    document.getElementById('btn-rank-elo-load').addEventListener('click', loadRankingsElo);
+    document.getElementById('btn-rank-pow-load').addEventListener('click', loadRankingsPower);
+    document.getElementById('btn-rank-rpi-load').addEventListener('click', loadRankingsRpi);
+    document.getElementById('btn-rank-pyth-load').addEventListener('click', loadRankingsPyth);
+    document.getElementById('btn-rank-race-load').addEventListener('click', loadRankingsRace);
+
     // DB Storage
     document.getElementById('btn-db-storage-load').addEventListener('click', loadDbStorage);
 
@@ -520,6 +528,13 @@
       case 'stamina-consumption':
       case 'stamina-flow':
         loadStaminaLeagueYears(section);
+        break;
+      case 'rankings-elo':
+      case 'rankings-power':
+      case 'rankings-rpi':
+      case 'rankings-pyth':
+      case 'rankings-race':
+        loadRankingsLeagueYears(section);
         break;
       case 'playoffs':
         loadSpecialEventLeagueYears('po-lyid');
@@ -1623,6 +1638,43 @@
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        refreshSimState();
+      })
+      .catch(err => {
+        resultBox.textContent = 'Error: ' + err.message;
+      });
+  }
+
+  // Rollback to Week
+  function rollbackToWeek() {
+    const year = document.getElementById('rollback-year').value;
+    const week = document.getElementById('rollback-week').value;
+    const resultBox = document.getElementById('rollback-to-week-result');
+
+    const confirmation = prompt(
+      `This will delete ALL simulation data from week ${week} onward ` +
+      '(game results, stats, finances, injuries, waivers, FA auctions). ' +
+      'Type ROLLBACK to confirm.'
+    );
+    if (confirmation !== 'ROLLBACK') {
+      resultBox.textContent = 'Rollback cancelled.';
+      return;
+    }
+
+    resultBox.textContent = 'Rolling back...';
+
+    fetch(`${API_BASE}/games/rollback-to-week`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_year_id: parseInt(year),
+        target_week: parseInt(week),
+      }),
     })
       .then(r => r.json())
       .then(data => {
@@ -9420,6 +9472,530 @@
     // Populate org dropdown
     populateTxOrgDropdown('fa-auc-org');
   })();
+
+  // -----------------------------------------------------------------------
+  // Rankings
+  // -----------------------------------------------------------------------
+
+  let rankEloChart = null;
+  let rankPowChart = null;
+  let rankPythChart = null;
+
+  function loadRankingsLeagueYears(section) {
+    const prefixMap = {
+      'rankings-elo': 'rank-elo',
+      'rankings-power': 'rank-pow',
+      'rankings-rpi': 'rank-rpi',
+      'rankings-pyth': 'rank-pyth',
+      'rankings-race': 'rank-race',
+    };
+    const prefix = prefixMap[section];
+    if (!prefix) return;
+    const sel = document.getElementById(`${prefix}-lyid`);
+    if (!sel || sel.options.length > 1) return;
+
+    fetch(`${ADMIN_BASE}/analytics/league-years`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) return;
+        sel.innerHTML = '';
+        (data.league_years || []).forEach(ly => {
+          const o = document.createElement('option');
+          o.value = ly.id;
+          o.textContent = ly.league_year;
+          sel.appendChild(o);
+        });
+      });
+  }
+
+  // ---- ELO ----
+  function loadRankingsElo() {
+    const lyid = document.getElementById('rank-elo-lyid').value;
+    const level = document.getElementById('rank-elo-level').value;
+    const k = document.getElementById('rank-elo-k').value;
+    const status = document.getElementById('rank-elo-status');
+    status.textContent = 'Loading...';
+    document.getElementById('rank-elo-results').style.display = 'none';
+
+    fetch(`${ADMIN_BASE}/analytics/rankings-elo?league_year_id=${lyid}&league_level=${level}&k_factor=${k}`,
+      { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.message || data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('rank-elo-results').style.display = '';
+
+        // Table — rows are clickable to highlight team on chart
+        const teams = data.teams || [];
+        let html = '<table class="data-table"><thead><tr>' +
+          '<th>Rank</th><th>Team</th><th>ELO</th><th>W</th><th>L</th><th>Win%</th><th>Trend</th>' +
+          '</tr></thead><tbody>';
+        teams.forEach((t, i) => {
+          const trendColor = t.trend > 0 ? 'var(--success)' : t.trend < 0 ? 'var(--danger)' : 'var(--text-secondary)';
+          const trendArrow = t.trend > 0 ? '&#9650;' : t.trend < 0 ? '&#9660;' : '&#8211;';
+          html += `<tr data-elo-idx="${i}" style="cursor:pointer">
+            <td>${t.rank}</td>
+            <td><strong>${t.team_abbrev || t.team_id}</strong></td>
+            <td><strong>${t.elo}</strong></td>
+            <td>${t.wins}</td><td>${t.losses}</td>
+            <td>${t.win_pct.toFixed(3)}</td>
+            <td style="color:${trendColor}">${trendArrow} ${Math.abs(t.trend).toFixed(1)}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('rank-elo-table').innerHTML = html;
+
+        // Chart: ELO over time — all teams, click to highlight
+        if (rankEloChart) rankEloChart.destroy();
+        const ctx = document.getElementById('rank-elo-chart').getContext('2d');
+        const history = data.history || {};
+        const datasets = [];
+        const palette = [
+          '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899',
+          '#06b6d4','#84cc16','#f97316','#6366f1','#14b8a6','#e11d48',
+          '#a855f7','#22c55e','#eab308','#0ea5e9','#d946ef','#64748b',
+          '#fb923c','#2dd4bf','#c084fc','#fbbf24','#34d399','#f472b6',
+          '#38bdf8','#a3e635','#fb7185','#818cf8','#4ade80','#facc15',
+        ];
+        const DIM_ALPHA = 0.12;
+        const FULL_WIDTH = 3;
+        const DIM_WIDTH = 1;
+
+        // Store original colors per dataset index for highlight toggling
+        const teamColors = [];
+        teams.forEach((t, i) => {
+          const tid = String(t.team_id);
+          const hist = history[tid] || [];
+          if (hist.length === 0) return;
+          const color = t.color_one || palette[i % palette.length];
+          teamColors.push(color);
+          datasets.push({
+            label: t.team_abbrev || tid,
+            data: hist.map(h => ({ x: h.week, y: h.elo })),
+            borderColor: color,
+            backgroundColor: color,
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            borderWidth: 1.5,
+          });
+        });
+
+        const allWeeks = [...new Set(Object.values(history).flatMap(h => h.map(p => p.week)))].sort((a,b) => a-b);
+
+        // Helper: dim a hex color
+        function dimColor(hex, alpha) {
+          const r = parseInt(hex.slice(1,3),16);
+          const g = parseInt(hex.slice(3,5),16);
+          const b = parseInt(hex.slice(5,7),16);
+          return `rgba(${r},${g},${b},${alpha})`;
+        }
+
+        let highlightedIdx = null; // null = no highlight (all normal)
+
+        function applyHighlight(chart, idx) {
+          chart.data.datasets.forEach((ds, i) => {
+            if (idx === null) {
+              // Reset all to normal
+              ds.borderColor = teamColors[i];
+              ds.borderWidth = 1.5;
+              ds.pointRadius = 0;
+              ds.order = 0;
+            } else if (i === idx) {
+              // Highlighted team
+              ds.borderColor = teamColors[i];
+              ds.borderWidth = FULL_WIDTH;
+              ds.pointRadius = 2;
+              ds.order = -1; // draw on top
+            } else {
+              // Dimmed teams
+              ds.borderColor = dimColor(teamColors[i], DIM_ALPHA);
+              ds.borderWidth = DIM_WIDTH;
+              ds.pointRadius = 0;
+              ds.order = 1;
+            }
+          });
+          chart.update();
+        }
+
+        rankEloChart = new Chart(ctx, {
+          type: 'line',
+          data: { labels: allWeeks.map(w => `Wk ${w}`), datasets },
+          options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              title: { display: true, text: 'ELO Rating Over Time — click legend to highlight', color: '#f3f4f6' },
+              legend: {
+                labels: { color: '#9ca3af', boxWidth: 10, font: { size: 10 }, padding: 6 },
+                position: 'right',
+                onClick: function(e, legendItem, legend) {
+                  const idx = legendItem.datasetIndex;
+                  if (highlightedIdx === idx) {
+                    // Clicking same team again: reset
+                    highlightedIdx = null;
+                  } else {
+                    highlightedIdx = idx;
+                  }
+                  applyHighlight(legend.chart, highlightedIdx);
+                },
+              },
+            },
+            scales: {
+              x: { ticks: { color: '#9ca3af', maxRotation: 45 }, grid: { color: '#1f2937' } },
+              y: { ticks: { color: '#9ca3af' }, grid: { color: '#1f2937' },
+                   title: { display: true, text: 'ELO', color: '#9ca3af' } },
+            },
+          },
+        });
+
+        // Wire table row clicks to highlight
+        document.querySelectorAll('#rank-elo-table tr[data-elo-idx]').forEach(row => {
+          row.addEventListener('click', () => {
+            const idx = parseInt(row.dataset.eloIdx, 10);
+            if (highlightedIdx === idx) {
+              highlightedIdx = null;
+            } else {
+              highlightedIdx = idx;
+            }
+            applyHighlight(rankEloChart, highlightedIdx);
+            // Highlight the active row visually
+            document.querySelectorAll('#rank-elo-table tr[data-elo-idx]').forEach(r => {
+              r.style.background = '';
+            });
+            if (highlightedIdx !== null) {
+              row.style.background = 'var(--bg-hover)';
+            }
+          });
+        });
+      })
+      .catch(err => { status.textContent = 'Error: ' + err; });
+  }
+
+  // ---- Power Rankings ----
+  function loadRankingsPower() {
+    const lyid = document.getElementById('rank-pow-lyid').value;
+    const level = document.getElementById('rank-pow-level').value;
+    const weeks = document.getElementById('rank-pow-weeks').value;
+    const status = document.getElementById('rank-pow-status');
+    status.textContent = 'Loading...';
+    document.getElementById('rank-pow-results').style.display = 'none';
+
+    fetch(`${ADMIN_BASE}/analytics/rankings-power?league_year_id=${lyid}&league_level=${level}&recent_weeks=${weeks}`,
+      { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.message || data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('rank-pow-results').style.display = '';
+
+        const teams = data.teams || [];
+        const weights = data.weights || {};
+
+        // Table
+        let html = '<table class="data-table"><thead><tr>' +
+          '<th>Rank</th><th>Team</th><th>Score</th><th>W-L</th>' +
+          '<th>ELO</th><th>Recent</th><th>Run Diff</th><th>Roster OVR</th>' +
+          '</tr></thead><tbody>';
+        teams.forEach(t => {
+          const c = t.components || {};
+          html += `<tr>
+            <td>${t.rank}</td>
+            <td><strong>${t.team_abbrev || t.team_id}</strong></td>
+            <td><strong>${t.composite_score.toFixed(1)}</strong></td>
+            <td>${t.wins}-${t.losses}</td>
+            <td title="Raw: ${c.elo?.raw}">${c.elo?.normalized?.toFixed(1) ?? '-'}</td>
+            <td title="Win%: ${c.recent?.raw?.toFixed(3)}">${c.recent?.normalized?.toFixed(1) ?? '-'}</td>
+            <td title="Per game: ${c.run_diff?.raw}">${c.run_diff?.normalized?.toFixed(1) ?? '-'}</td>
+            <td title="Raw: ${c.roster_ovr?.raw}">${c.roster_ovr?.normalized?.toFixed(1) ?? '-'}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        html += `<div style="margin-top:8px;color:var(--text-muted);font-size:0.85em">` +
+          `Weights: ELO ${(weights.elo*100).toFixed(0)}% | Recent ${(weights.recent*100).toFixed(0)}% | ` +
+          `Run Diff ${(weights.run_diff*100).toFixed(0)}% | Roster OVR ${(weights.roster_ovr*100).toFixed(0)}%</div>`;
+        document.getElementById('rank-pow-table').innerHTML = html;
+
+        // Horizontal bar chart
+        if (rankPowChart) rankPowChart.destroy();
+        const ctx = document.getElementById('rank-pow-chart').getContext('2d');
+        const labels = teams.map(t => t.team_abbrev || t.team_id);
+        rankPowChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: `ELO (${(weights.elo*100).toFixed(0)}%)`,
+                data: teams.map(t => (t.components?.elo?.normalized || 0) * (weights.elo || 0)),
+                backgroundColor: 'rgba(59, 130, 246, 0.8)',
+              },
+              {
+                label: `Recent (${(weights.recent*100).toFixed(0)}%)`,
+                data: teams.map(t => (t.components?.recent?.normalized || 0) * (weights.recent || 0)),
+                backgroundColor: 'rgba(16, 185, 129, 0.8)',
+              },
+              {
+                label: `Run Diff (${(weights.run_diff*100).toFixed(0)}%)`,
+                data: teams.map(t => (t.components?.run_diff?.normalized || 0) * (weights.run_diff || 0)),
+                backgroundColor: 'rgba(245, 158, 11, 0.8)',
+              },
+              {
+                label: `Roster OVR (${(weights.roster_ovr*100).toFixed(0)}%)`,
+                data: teams.map(t => (t.components?.roster_ovr?.normalized || 0) * (weights.roster_ovr || 0)),
+                backgroundColor: 'rgba(139, 92, 246, 0.8)',
+              },
+            ],
+          },
+          options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: {
+              title: { display: true, text: 'Power Rankings Breakdown', color: '#f3f4f6' },
+              legend: { labels: { color: '#9ca3af' } },
+            },
+            scales: {
+              x: { stacked: true, ticks: { color: '#9ca3af' }, grid: { color: '#1f2937' },
+                   title: { display: true, text: 'Composite Score', color: '#9ca3af' } },
+              y: { stacked: true, ticks: { color: '#9ca3af' }, grid: { color: '#1f2937' } },
+            },
+          },
+        });
+      })
+      .catch(err => { status.textContent = 'Error: ' + err; });
+  }
+
+  // ---- RPI ----
+  function loadRankingsRpi() {
+    const lyid = document.getElementById('rank-rpi-lyid').value;
+    const level = document.getElementById('rank-rpi-level').value;
+    const status = document.getElementById('rank-rpi-status');
+    status.textContent = 'Loading...';
+    document.getElementById('rank-rpi-results').style.display = 'none';
+
+    fetch(`${ADMIN_BASE}/analytics/rankings-rpi?league_year_id=${lyid}&league_level=${level}`,
+      { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.message || data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('rank-rpi-results').style.display = '';
+
+        const teams = data.teams || [];
+        let html = '<table class="data-table"><thead><tr>' +
+          '<th>Rank</th><th>Team</th><th>RPI</th><th>Win%</th>' +
+          '<th>OWP</th><th>OOWP</th><th>SOS</th><th>W</th><th>L</th>' +
+          '</tr></thead><tbody>';
+        teams.forEach(t => {
+          html += `<tr>
+            <td>${t.rank}</td>
+            <td><strong>${t.team_abbrev || t.team_id}</strong></td>
+            <td><strong>${t.rpi.toFixed(4)}</strong></td>
+            <td>${t.wp.toFixed(3)}</td>
+            <td>${t.owp.toFixed(3)}</td>
+            <td>${t.oowp.toFixed(3)}</td>
+            <td>${t.sos.toFixed(3)}</td>
+            <td>${t.wins}</td><td>${t.losses}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('rank-rpi-table').innerHTML = html;
+      })
+      .catch(err => { status.textContent = 'Error: ' + err; });
+  }
+
+  // ---- Pythagorean ----
+  function loadRankingsPyth() {
+    const lyid = document.getElementById('rank-pyth-lyid').value;
+    const level = document.getElementById('rank-pyth-level').value;
+    const exp = document.getElementById('rank-pyth-exp').value;
+    const status = document.getElementById('rank-pyth-status');
+    status.textContent = 'Loading...';
+    document.getElementById('rank-pyth-results').style.display = 'none';
+
+    fetch(`${ADMIN_BASE}/analytics/rankings-pythagorean?league_year_id=${lyid}&league_level=${level}&exponent=${exp}`,
+      { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.message || data.error || 'Error'; return; }
+        status.textContent = '';
+        document.getElementById('rank-pyth-results').style.display = '';
+
+        const teams = data.teams || [];
+
+        // Table
+        let html = '<table class="data-table"><thead><tr>' +
+          '<th>Rank</th><th>Team</th><th>W-L</th><th>Win%</th>' +
+          '<th>RS</th><th>RA</th><th>Diff</th><th>R/G</th>' +
+          '<th>Pyth%</th><th>ExpW</th><th>Luck</th>' +
+          '<th>AVG</th><th>OPS</th><th>ERA</th><th>WHIP</th>' +
+          '</tr></thead><tbody>';
+        teams.forEach(t => {
+          const b = t.batting || {};
+          const p = t.pitching || {};
+          const luckColor = t.luck > 0 ? 'var(--success)' : t.luck < 0 ? 'var(--danger)' : 'var(--text-secondary)';
+          const diffColor = t.run_diff > 0 ? 'var(--success)' : t.run_diff < 0 ? 'var(--danger)' : 'var(--text-secondary)';
+          html += `<tr>
+            <td>${t.rank}</td>
+            <td><strong>${t.team_abbrev || t.team_id}</strong></td>
+            <td>${t.wins}-${t.losses}</td>
+            <td>${t.win_pct.toFixed(3)}</td>
+            <td>${t.runs_scored}</td>
+            <td>${t.runs_allowed}</td>
+            <td style="color:${diffColor}">${t.run_diff > 0 ? '+' : ''}${t.run_diff}</td>
+            <td>${t.r_per_g}</td>
+            <td>${t.pyth_pct.toFixed(3)}</td>
+            <td>${t.expected_wins}</td>
+            <td style="color:${luckColor};font-weight:bold">${t.luck > 0 ? '+' : ''}${t.luck}</td>
+            <td>${b.avg?.toFixed(3) ?? '-'}</td>
+            <td>${b.ops?.toFixed(3) ?? '-'}</td>
+            <td>${p.era?.toFixed(2) ?? '-'}</td>
+            <td>${p.whip?.toFixed(3) ?? '-'}</td>
+          </tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('rank-pyth-table').innerHTML = html;
+
+        // Bar chart: actual vs expected wins
+        if (rankPythChart) rankPythChart.destroy();
+        const ctx = document.getElementById('rank-pyth-chart').getContext('2d');
+        // Sort by actual wins for chart
+        const sorted = [...teams].sort((a, b) => b.wins - a.wins);
+        rankPythChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: sorted.map(t => t.team_abbrev || t.team_id),
+            datasets: [
+              {
+                label: 'Actual Wins',
+                data: sorted.map(t => t.wins),
+                backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                borderColor: 'rgba(59, 130, 246, 1)',
+                borderWidth: 1,
+              },
+              {
+                label: 'Expected Wins',
+                data: sorted.map(t => t.expected_wins),
+                backgroundColor: 'rgba(245, 158, 11, 0.6)',
+                borderColor: 'rgba(245, 158, 11, 1)',
+                borderWidth: 1,
+                borderDash: [5, 5],
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              title: { display: true, text: 'Actual vs Pythagorean Expected Wins', color: '#f3f4f6' },
+              legend: { labels: { color: '#9ca3af' } },
+            },
+            scales: {
+              x: { ticks: { color: '#9ca3af' }, grid: { color: '#1f2937' } },
+              y: { ticks: { color: '#9ca3af' }, grid: { color: '#1f2937' },
+                   title: { display: true, text: 'Wins', color: '#9ca3af' } },
+            },
+          },
+        });
+      })
+      .catch(err => { status.textContent = 'Error: ' + err; });
+  }
+
+  // ---- Race Chart ----
+  let raceCharts = [];
+
+  function loadRankingsRace() {
+    const lyid = document.getElementById('rank-race-lyid').value;
+    const level = document.getElementById('rank-race-level').value;
+    const status = document.getElementById('rank-race-status');
+    status.textContent = 'Loading...';
+    const resultsDiv = document.getElementById('rank-race-results');
+    resultsDiv.style.display = 'none';
+    resultsDiv.innerHTML = '';
+    raceCharts.forEach(c => c.destroy());
+    raceCharts = [];
+
+    fetch(`${ADMIN_BASE}/analytics/rankings-race?league_year_id=${lyid}&league_level=${level}`,
+      { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { status.textContent = data.message || data.error || 'Error'; return; }
+        status.textContent = '';
+        resultsDiv.style.display = '';
+
+        const groups = data.groups || {};
+        const weeks = (data.weeks || []);
+        const weekLabels = weeks.map(w => `Wk ${w}`);
+        const palette = [
+          '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6',
+          '#ec4899','#06b6d4','#84cc16','#f97316','#6366f1',
+          '#14b8a6','#e11d48','#a855f7','#22c55e','#eab308',
+          '#0ea5e9','#d946ef','#64748b','#fb923c','#2dd4bf',
+          '#c084fc','#fbbf24','#34d399','#f472b6','#38bdf8',
+          '#a3e635','#fb7185','#818cf8','#4ade80','#facc15',
+        ];
+
+        const groupKeys = Object.keys(groups);
+
+        groupKeys.forEach(groupName => {
+          const teams = groups[groupName];
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.style.marginBottom = '16px';
+
+          const title = document.createElement('h4');
+          title.style.color = 'var(--text-primary)';
+          title.style.marginBottom = '8px';
+          title.textContent = groupName;
+          card.appendChild(title);
+
+          const canvas = document.createElement('canvas');
+          canvas.height = 280;
+          card.appendChild(canvas);
+
+          resultsDiv.appendChild(card);
+
+          const datasets = teams.map((t, i) => {
+            const color = t.color_one || palette[i % palette.length];
+            return {
+              label: t.team_abbrev || String(t.team_id),
+              data: (t.series || []).map(p => p.value),
+              borderColor: color,
+              backgroundColor: color,
+              fill: false,
+              tension: 0.3,
+              pointRadius: 0,
+              borderWidth: 2.5,
+            };
+          });
+
+          const chart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: { labels: weekLabels, datasets },
+            options: {
+              responsive: true,
+              interaction: { mode: 'index', intersect: false },
+              plugins: {
+                legend: {
+                  labels: { color: '#9ca3af', boxWidth: 12, font: { size: 11 } },
+                  position: 'bottom',
+                },
+              },
+              scales: {
+                x: { ticks: { color: '#9ca3af' }, grid: { color: '#1f2937' } },
+                y: {
+                  ticks: { color: '#9ca3af' },
+                  grid: { color: '#1f2937' },
+                  title: { display: true, text: 'Games Above/Below .500', color: '#9ca3af' },
+                },
+              },
+            },
+          });
+          raceCharts.push(chart);
+        });
+      })
+      .catch(err => { status.textContent = 'Error: ' + err; });
+  }
 
   // Expose to global App for inline onclick handlers
   window.App = window.App || {};

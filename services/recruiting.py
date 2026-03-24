@@ -175,6 +175,17 @@ def _compute_composite(m, base_attrs, pot_attrs):
     return base_avg + pot_avg
 
 
+# ── Public aliases for cross-module reuse (IFA signing) ──────────────────
+GRADE_VAL = _GRADE_VAL
+POS_BASE_ATTRS = _POS_BASE_ATTRS
+POS_POT_ATTRS = _POS_POT_ATTRS
+PIT_BASE_ATTRS = _PIT_BASE_ATTRS
+PIT_POT_ATTRS = _PIT_POT_ATTRS
+compute_composite = _compute_composite
+assign_stars = _assign_stars
+STAR_THRESHOLDS = _STAR_THRESHOLDS
+
+
 def compute_star_rankings(conn, league_year_id):
     """
     Compute composite scores for all HS players (org 340) and assign
@@ -252,7 +263,16 @@ def compute_star_rankings(conn, league_year_id):
         {"ly": league_year_id},
     )
 
-    for r in all_ranked:
+    # Batch INSERT rankings + batch UPDATE star ratings (executemany)
+    if all_ranked:
+        ranking_params = [{
+            "pid": r["player_id"],
+            "ly": league_year_id,
+            "comp": round(r["composite"], 4),
+            "star": r["star"],
+            "rank": r["rank_overall"],
+            "rpt": r["rank_by_ptype"],
+        } for r in all_ranked]
         conn.execute(
             text("""
                 INSERT INTO recruiting_rankings
@@ -260,19 +280,13 @@ def compute_star_rankings(conn, league_year_id):
                      star_rating, rank_overall, rank_by_ptype)
                 VALUES (:pid, :ly, :comp, :star, :rank, :rpt)
             """),
-            {
-                "pid": r["player_id"],
-                "ly": league_year_id,
-                "comp": round(r["composite"], 4),
-                "star": r["star"],
-                "rank": r["rank_overall"],
-                "rpt": r["rank_by_ptype"],
-            },
+            ranking_params,
         )
-        # Persist star rating permanently on the player record
+
+        star_params = [{"star": r["star"], "pid": r["player_id"]} for r in all_ranked]
         conn.execute(
             text("UPDATE simbbPlayers SET recruit_stars = :star WHERE id = :pid"),
-            {"star": r["star"], "pid": r["player_id"]},
+            star_params,
         )
 
     return len(all_ranked)
@@ -506,20 +520,49 @@ def resolve_recruiting_week(conn, league_year_id, week, config=None):
         ).all()
         tendency_map = {r[0]: r[1] for r in tend_rows}
 
+    # Pre-fetch star ratings for all invested players (1 query vs N)
+    star_map = {}
+    if invested_players:
+        pids = [r[0] for r in invested_players]
+        ph = ", ".join([f":s{i}" for i in range(len(pids))])
+        sparams = {f"s{i}": pid for i, pid in enumerate(pids)}
+        sparams["ly"] = league_year_id
+        star_rows = conn.execute(
+            text(f"""
+                SELECT player_id, star_rating FROM recruiting_rankings
+                WHERE league_year_id = :ly AND player_id IN ({ph})
+            """),
+            sparams,
+        ).all()
+        star_map = {r[0]: r[1] for r in star_rows}
+
+    # Pre-fetch all investment totals grouped by player+org (1 query vs N)
+    from collections import defaultdict
+    investments_by_player = defaultdict(list)
+    if invested_players:
+        pids = [r[0] for r in invested_players]
+        ph = ", ".join([f":i{i}" for i in range(len(pids))])
+        iparams = {f"i{i}": pid for i, pid in enumerate(pids)}
+        iparams["ly"] = league_year_id
+        inv_rows = conn.execute(
+            text(f"""
+                SELECT player_id, org_id, SUM(points) AS total_pts,
+                       MIN(week) AS first_week
+                FROM recruiting_investments
+                WHERE league_year_id = :ly AND player_id IN ({ph})
+                GROUP BY player_id, org_id
+                ORDER BY player_id, total_pts DESC
+            """),
+            iparams,
+        ).all()
+        for r in inv_rows:
+            investments_by_player[r[0]].append((r[1], r[2], r[3]))
+
     commitments = []
     uncommitted_count = 0
 
     for (player_id,) in invested_players:
-        # Get star rating
-        star_row = conn.execute(
-            text("""
-                SELECT star_rating FROM recruiting_rankings
-                WHERE player_id = :pid AND league_year_id = :ly
-            """),
-            {"pid": player_id, "ly": league_year_id},
-        ).first()
-
-        star = star_row[0] if star_row else 1
+        star = star_map.get(player_id, 1)
         sc = star_config.get(star, star_config[1])
 
         # Apply signing tendency modifier to base threshold
@@ -527,18 +570,8 @@ def resolve_recruiting_week(conn, league_year_id, week, config=None):
         modified_base = sc["base"] * _TENDENCY_MULT.get(tendency, 1.0)
         threshold = max(modified_base - (week * sc["decay"]), 0)
 
-        # Get cumulative investments per org
-        org_totals = conn.execute(
-            text("""
-                SELECT org_id, SUM(points) AS total_pts,
-                       MIN(week) AS first_week
-                FROM recruiting_investments
-                WHERE player_id = :pid AND league_year_id = :ly
-                GROUP BY org_id
-                ORDER BY total_pts DESC
-            """),
-            {"pid": player_id, "ly": league_year_id},
-        ).all()
+        # Use pre-fetched investments
+        org_totals = investments_by_player.get(player_id, [])
 
         if not org_totals:
             continue

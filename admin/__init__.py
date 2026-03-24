@@ -2659,6 +2659,122 @@ def admin_stamina_flow():
         return jsonify(ok=False, error="analytics_error", message=str(e)), 500
 
 
+# ---- Rankings endpoints ----
+
+@admin_bp.get("/analytics/rankings-elo")
+def admin_rankings_elo():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    k_factor = request.args.get("k_factor", 32, type=int)
+    try:
+        from db import get_engine
+        from services.rankings import compute_elo_ratings
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = compute_elo_ratings(conn, league_year_id, league_level, k_factor)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("rankings_elo_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/rankings-rpi")
+def admin_rankings_rpi():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    try:
+        from db import get_engine
+        from services.rankings import compute_rpi
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = compute_rpi(conn, league_year_id, league_level)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("rankings_rpi_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/rankings-pythagorean")
+def admin_rankings_pythagorean():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    exponent = request.args.get("exponent", 1.83, type=float)
+    try:
+        from db import get_engine
+        from services.rankings import compute_pythagorean
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = compute_pythagorean(conn, league_year_id, league_level, exponent)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("rankings_pythagorean_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/rankings-power")
+def admin_rankings_power():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    recent_weeks = request.args.get("recent_weeks", 3, type=int)
+    try:
+        from db import get_engine
+        from services.rankings import compute_power_rankings
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = compute_power_rankings(conn, league_year_id, league_level,
+                                            recent_weeks=recent_weeks)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("rankings_power_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
+@admin_bp.get("/analytics/rankings-race")
+def admin_rankings_race():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    league_level = request.args.get("league_level", type=int)
+    if not league_year_id or not league_level:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id and league_level are required"), 400
+    try:
+        from db import get_engine
+        from services.rankings import compute_race_chart
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = compute_race_chart(conn, league_year_id, league_level)
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("rankings_race_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
 @admin_bp.get("/analytics/contact-breakdown")
 def admin_contact_breakdown():
     guard = _require_admin()

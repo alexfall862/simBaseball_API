@@ -30,6 +30,26 @@ MLB_ROUNDS = ["WC", "DS", "CS", "WS"]
 # Wins needed to clinch by series length
 CLINCH = {3: 2, 5: 3, 7: 4}
 
+# ---------------------------------------------------------------------------
+# CWS double-elimination bracket (8 teams)
+# ---------------------------------------------------------------------------
+CWS_ROUND_ORDER = [
+    "CWS_W1", "CWS_W2", "CWS_L1", "CWS_W3", "CWS_L2",
+    "CWS_L3", "CWS_L4", "CWS_F1", "CWS_F2",
+]
+
+# Each transition: (prerequisite rounds that must ALL be complete, target round)
+CWS_TRANSITIONS = [
+    (["CWS_W1"],            "CWS_W2"),   # W1 winners play W2
+    (["CWS_W1"],            "CWS_L1"),   # W1 losers play L1
+    (["CWS_W2", "CWS_L1"], "CWS_W3"),   # W2 winners play winners final
+    (["CWS_W2", "CWS_L1"], "CWS_L2"),   # CROSSOVER: W2 losers vs L1 winners
+    (["CWS_L2"],            "CWS_L3"),   # L2 winners play each other
+    (["CWS_W3", "CWS_L3"], "CWS_L4"),   # CROSSOVER: W3 loser vs L3 winner
+    (["CWS_L4"],            "CWS_F1"),   # Losers bracket survivor vs W3 winner
+    (["CWS_F1"],            "CWS_F2"),   # If-necessary (conditional)
+]
+
 
 # =====================================================================
 # Helpers — game generation
@@ -420,6 +440,8 @@ def advance_round(conn, league_year_id: int, league_level: int) -> Dict[str, Any
 
     if league_level == 9:
         return _advance_mlb_round(conn, engine, league_year_id, complete_rounds)
+    elif league_level == 3:
+        return advance_cws_round(conn, league_year_id)
     else:
         return _advance_milb_round(conn, engine, league_year_id, league_level, complete_rounds)
 
@@ -1089,186 +1111,427 @@ def create_cws_bracket(
     return {"series_created": created, "bracket_size": len(field)}
 
 
-def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# CWS helpers
+# ---------------------------------------------------------------------------
+
+def _cws_get_series_results(
+    conn, league_year_id: int, round_name: str,
+) -> List[Dict[str, Any]]:
     """
-    Advance the CWS bracket. After each round:
-    - Winners stay in winners bracket
-    - Losers drop to losers bracket (or get eliminated if already there)
-    - When 2 teams remain, play championship (if loser bracket team wins,
-      they play again since the winners bracket team hasn't lost yet).
+    Return winner/loser info for every completed series in *round_name*.
+    Each dict: {winner_id, loser_id, winner_seed, loser_seed, series_number}
     """
-    # Get all CWS series for this league year
-    all_series = conn.execute(sa_text("""
-        SELECT id, round, series_number, team_a_id, team_b_id,
-               winner_team_id, status
+    rows = conn.execute(sa_text("""
+        SELECT series_number, team_a_id, team_b_id, seed_a, seed_b,
+               winner_team_id
         FROM playoff_series
         WHERE league_year_id = :lyid AND league_level = 3
-          AND round LIKE 'CWS_%'
-        ORDER BY round, series_number
-    """), {"lyid": league_year_id}).mappings().all()
+          AND round = :rnd AND status = 'complete'
+        ORDER BY series_number
+    """), {"lyid": league_year_id, "rnd": round_name}).mappings().all()
 
-    # Get bracket state
-    bracket = conn.execute(sa_text("""
-        SELECT team_id, seed, losses, eliminated, bracket_side
-        FROM cws_bracket
-        WHERE league_year_id = :lyid AND eliminated = 0
-        ORDER BY seed
-    """), {"lyid": league_year_id}).mappings().all()
+    results = []
+    for r in rows:
+        winner_id = int(r["winner_team_id"])
+        a_id = int(r["team_a_id"])
+        b_id = int(r["team_b_id"])
+        if winner_id == a_id:
+            loser_id = b_id
+            winner_seed = int(r["seed_a"])
+            loser_seed = int(r["seed_b"])
+        else:
+            loser_id = a_id
+            winner_seed = int(r["seed_b"])
+            loser_seed = int(r["seed_a"])
+        results.append({
+            "winner_id": winner_id,
+            "loser_id": loser_id,
+            "winner_seed": winner_seed,
+            "loser_seed": loser_seed,
+            "series_number": int(r["series_number"]),
+        })
+    return results
 
-    # Find the latest complete round
-    rounds_by_name: Dict[str, List] = {}
-    for s in all_series:
-        rounds_by_name.setdefault(s["round"], []).append(s)
 
-    latest_complete = None
-    for rnd_name in sorted(rounds_by_name.keys()):
-        rnd_series = rounds_by_name[rnd_name]
-        if all(s["status"] == "complete" for s in rnd_series):
-            latest_complete = rnd_name
+def _cws_update_bracket(
+    conn, league_year_id: int, team_ids: List[int], *, eliminate: bool = False,
+) -> None:
+    """
+    Demote teams in cws_bracket.
+    - eliminate=False  → losses += 1, bracket_side = 'losers'
+    - eliminate=True   → losses += 1, bracket_side = 'eliminated', eliminated = 1
+    """
+    if not team_ids:
+        return
+    for tid in team_ids:
+        if eliminate:
+            conn.execute(sa_text("""
+                UPDATE cws_bracket
+                SET losses = losses + 1, bracket_side = 'eliminated', eliminated = 1
+                WHERE league_year_id = :lyid AND team_id = :tid
+            """), {"lyid": league_year_id, "tid": tid})
+        else:
+            conn.execute(sa_text("""
+                UPDATE cws_bracket
+                SET losses = losses + 1, bracket_side = 'losers'
+                WHERE league_year_id = :lyid AND team_id = :tid
+                  AND eliminated = 0
+            """), {"lyid": league_year_id, "tid": tid})
 
-    if not latest_complete:
-        return {"error": "No complete CWS round found"}
 
-    # Process results: update bracket losses
-    for s in rounds_by_name[latest_complete]:
-        if s["status"] != "complete":
-            continue
-        winner_id = int(s["winner_team_id"])
-        loser_id = int(s["team_a_id"]) if winner_id != int(s["team_a_id"]) else int(s["team_b_id"])
+def _cws_create_series_and_game(
+    conn, league_year_id: int, round_name: str, series_number: int,
+    team_a_id: int, team_b_id: int, seed_a: int, seed_b: int,
+    start_week: int,
+) -> Dict[str, Any]:
+    """Insert one CWS playoff_series (Bo1) and schedule the game."""
+    conn.execute(sa_text("""
+        INSERT INTO playoff_series
+            (league_year_id, league_level, round, series_number,
+             team_a_id, team_b_id, seed_a, seed_b,
+             series_length, status, start_week, conference)
+        VALUES
+            (:lyid, 3, :rnd, :snum,
+             :team_a, :team_b, :seed_a, :seed_b,
+             1, 'pending', :week, NULL)
+    """), {
+        "lyid": league_year_id, "rnd": round_name, "snum": series_number,
+        "team_a": team_a_id, "team_b": team_b_id,
+        "seed_a": seed_a, "seed_b": seed_b,
+        "week": start_week,
+    })
 
-        # Increment loser's losses
-        conn.execute(sa_text("""
-            UPDATE cws_bracket
-            SET losses = losses + 1,
-                bracket_side = CASE WHEN losses + 1 >= 2 THEN 'eliminated' ELSE 'losers' END,
-                eliminated = CASE WHEN losses + 1 >= 2 THEN 1 ELSE 0 END
-            WHERE league_year_id = :lyid AND team_id = :tid
-        """), {"lyid": league_year_id, "tid": loser_id})
+    w, sw = _next_available_subweek(
+        conn, league_year_id, 3, team_a_id, team_b_id, start_week,
+    )
+    _insert_single_playoff_game(conn, league_year_id, 3, team_a_id, team_b_id, w, sw)
 
-    # Refresh bracket state after updates
-    bracket = conn.execute(sa_text("""
-        SELECT team_id, seed, losses, eliminated, bracket_side
-        FROM cws_bracket
-        WHERE league_year_id = :lyid AND eliminated = 0
-        ORDER BY seed
-    """), {"lyid": league_year_id}).mappings().all()
+    return {"round": round_name, "matchup": f"#{seed_a} vs #{seed_b}"}
 
-    remaining = [dict(b) for b in bracket]
 
-    if len(remaining) <= 1:
-        winner = remaining[0] if remaining else None
-        return {
-            "status": "complete",
-            "champion": winner["team_id"] if winner else None,
-        }
-
-    # Determine next round name
-    round_num = int(latest_complete.split("_")[-1].replace("W", "").replace("L", "").replace("F", "99"))
-    winners_teams = [t for t in remaining if t["bracket_side"] == "winners"]
-    losers_teams = [t for t in remaining if t["bracket_side"] == "losers"]
-
-    # Get the last week used
-    last_week_row = conn.execute(sa_text("""
-        SELECT MAX(start_week) AS last_week FROM playoff_series
+def _cws_next_week(conn, league_year_id: int, prereq_rounds: List[str]) -> int:
+    """Determine the start_week for a new CWS round (max prereq week + 1)."""
+    placeholders = ", ".join(f":r{i}" for i in range(len(prereq_rounds)))
+    params: Dict[str, Any] = {"lyid": league_year_id}
+    for i, rnd in enumerate(prereq_rounds):
+        params[f"r{i}"] = rnd
+    row = conn.execute(sa_text(f"""
+        SELECT MAX(start_week) AS mw FROM playoff_series
         WHERE league_year_id = :lyid AND league_level = 3
-    """), {"lyid": league_year_id}).mappings().first()
-    next_week = int(last_week_row["last_week"]) + 1
+          AND round IN ({placeholders})
+    """), params).mappings().first()
+    return int(row["mw"]) + 1 if row and row["mw"] is not None else 35
+
+
+def _cws_pair_by_seed(teams: List[Dict]) -> List[Tuple[Dict, Dict]]:
+    """Sort teams by seed and pair best-vs-worst."""
+    teams.sort(key=lambda t: t["seed"])
+    pairs = []
+    lo, hi = 0, len(teams) - 1
+    while lo < hi:
+        pairs.append((teams[lo], teams[hi]))
+        lo += 1
+        hi -= 1
+    return pairs
+
+
+# ---------------------------------------------------------------------------
+# CWS builder functions (one per target round)
+# ---------------------------------------------------------------------------
+
+def _cws_build_w2(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """W1 winners → W2 matchups.  Demote W1 losers to losers bracket."""
+    results = _cws_get_series_results(conn, lyid, "CWS_W1")
+    week = _cws_next_week(conn, lyid, prereqs)
+
+    # Demote W1 losers
+    _cws_update_bracket(conn, lyid, [r["loser_id"] for r in results])
+
+    # W1 winners play W2
+    winners = [{"team_id": r["winner_id"], "seed": r["winner_seed"]} for r in results]
+    pairs = _cws_pair_by_seed(winners)
 
     created = []
+    for snum, (t1, t2) in enumerate(pairs, start=1):
+        info = _cws_create_series_and_game(
+            conn, lyid, "CWS_W2", snum,
+            t1["team_id"], t2["team_id"], t1["seed"], t2["seed"], week,
+        )
+        created.append(info)
+    return created
 
-    # Championship: if only 2 teams remain
-    if len(remaining) == 2:
-        t1, t2 = remaining[0], remaining[1]
-        # Higher seed is team_a
-        if t1["seed"] > t2["seed"]:
-            t1, t2 = t2, t1
 
-        next_round = "CWS_F1"
-        conn.execute(sa_text("""
-            INSERT INTO playoff_series
-                (league_year_id, league_level, round, series_number,
-                 team_a_id, team_b_id, seed_a, seed_b,
-                 series_length, status, start_week, conference)
-            VALUES
-                (:lyid, 3, :rnd, 1,
-                 :team_a, :team_b, :seed_a, :seed_b,
-                 1, 'pending', :week, NULL)
-        """), {
-            "lyid": league_year_id, "rnd": next_round,
-            "team_a": t1["team_id"], "team_b": t2["team_id"],
-            "seed_a": t1["seed"], "seed_b": t2["seed"],
-            "week": next_week,
-        })
+def _cws_build_l1(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """W1 losers (now in losers bracket) → L1 matchups."""
+    results = _cws_get_series_results(conn, lyid, "CWS_W1")
+    week = _cws_next_week(conn, lyid, prereqs)
 
-        w, sw = _next_available_subweek(conn, league_year_id, 3, t1["team_id"], t2["team_id"], next_week)
-        _insert_single_playoff_game(conn, league_year_id, 3, t1["team_id"], t2["team_id"], w, sw)
+    losers = [{"team_id": r["loser_id"], "seed": r["loser_seed"]} for r in results]
+    pairs = _cws_pair_by_seed(losers)
 
-        created.append({"round": next_round, "matchup": f"#{t1['seed']} vs #{t2['seed']}"})
-        return {"round_advanced": next_round, "series_created": created, "week": next_week}
+    created = []
+    for snum, (t1, t2) in enumerate(pairs, start=1):
+        info = _cws_create_series_and_game(
+            conn, lyid, "CWS_L1", snum,
+            t1["team_id"], t2["team_id"], t1["seed"], t2["seed"], week,
+        )
+        created.append(info)
+    return created
 
-    # Generate next winners bracket round
-    if len(winners_teams) >= 2:
-        next_w_round = f"CWS_W{round_num + 1}"
-        winners_teams.sort(key=lambda x: x["seed"])
-        for i in range(0, len(winners_teams), 2):
-            if i + 1 >= len(winners_teams):
-                break
-            t1 = winners_teams[i]
-            t2 = winners_teams[i + 1]
-            snum = (i // 2) + 1
 
-            conn.execute(sa_text("""
-                INSERT INTO playoff_series
-                    (league_year_id, league_level, round, series_number,
-                     team_a_id, team_b_id, seed_a, seed_b,
-                     series_length, status, start_week, conference)
-                VALUES
-                    (:lyid, 3, :rnd, :snum,
-                     :team_a, :team_b, :seed_a, :seed_b,
-                     1, 'pending', :week, NULL)
-            """), {
-                "lyid": league_year_id, "rnd": next_w_round, "snum": snum,
-                "team_a": t1["team_id"], "team_b": t2["team_id"],
-                "seed_a": t1["seed"], "seed_b": t2["seed"],
-                "week": next_week,
-            })
+def _cws_build_w3(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """W2 winners → winners bracket final."""
+    results = _cws_get_series_results(conn, lyid, "CWS_W2")
+    week = _cws_next_week(conn, lyid, prereqs)
 
-            w, sw = _next_available_subweek(conn, league_year_id, 3, t1["team_id"], t2["team_id"], next_week)
-            _insert_single_playoff_game(conn, league_year_id, 3, t1["team_id"], t2["team_id"], w, sw)
-            created.append({"round": next_w_round, "matchup": f"#{t1['seed']} vs #{t2['seed']}"})
+    winners = [{"team_id": r["winner_id"], "seed": r["winner_seed"]} for r in results]
+    winners.sort(key=lambda t: t["seed"])
+    t1, t2 = winners[0], winners[1]
 
-    # Generate next losers bracket round
-    if len(losers_teams) >= 2:
-        next_l_round = f"CWS_L{round_num + 1}"
-        losers_teams.sort(key=lambda x: x["seed"])
-        for i in range(0, len(losers_teams), 2):
-            if i + 1 >= len(losers_teams):
-                break
-            t1 = losers_teams[i]
-            t2 = losers_teams[i + 1]
-            snum = (i // 2) + 1
+    return [_cws_create_series_and_game(
+        conn, lyid, "CWS_W3", 1,
+        t1["team_id"], t2["team_id"], t1["seed"], t2["seed"], week,
+    )]
 
-            conn.execute(sa_text("""
-                INSERT INTO playoff_series
-                    (league_year_id, league_level, round, series_number,
-                     team_a_id, team_b_id, seed_a, seed_b,
-                     series_length, status, start_week, conference)
-                VALUES
-                    (:lyid, 3, :rnd, :snum,
-                     :team_a, :team_b, :seed_a, :seed_b,
-                     1, 'pending', :week, NULL)
-            """), {
-                "lyid": league_year_id, "rnd": next_l_round, "snum": snum,
-                "team_a": t1["team_id"], "team_b": t2["team_id"],
-                "seed_a": t1["seed"], "seed_b": t2["seed"],
-                "week": next_week,
-            })
 
-            w, sw = _next_available_subweek(conn, league_year_id, 3, t1["team_id"], t2["team_id"], next_week)
-            _insert_single_playoff_game(conn, league_year_id, 3, t1["team_id"], t2["team_id"], w, sw)
-            created.append({"round": next_l_round, "matchup": f"#{t1['seed']} vs #{t2['seed']}"})
+def _cws_build_l2(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """CROSSOVER: W2 losers (dropping down) vs L1 winners."""
+    w2_results = _cws_get_series_results(conn, lyid, "CWS_W2")
+    l1_results = _cws_get_series_results(conn, lyid, "CWS_L1")
+    week = _cws_next_week(conn, lyid, prereqs)
 
-    return {"round_advanced": f"W{round_num+1}/L{round_num+1}", "series_created": created, "week": next_week}
+    # Demote W2 losers to losers bracket
+    _cws_update_bracket(conn, lyid, [r["loser_id"] for r in w2_results])
+    # Eliminate L1 losers (second loss)
+    _cws_update_bracket(conn, lyid, [r["loser_id"] for r in l1_results], eliminate=True)
+
+    # Crossover pairing: W2 losers vs L1 winners, matched by seed
+    w2_losers = [{"team_id": r["loser_id"], "seed": r["loser_seed"]} for r in w2_results]
+    l1_winners = [{"team_id": r["winner_id"], "seed": r["winner_seed"]} for r in l1_results]
+    w2_losers.sort(key=lambda t: t["seed"])
+    l1_winners.sort(key=lambda t: t["seed"], reverse=True)
+
+    created = []
+    for snum, (drop, surv) in enumerate(zip(w2_losers, l1_winners), start=1):
+        # Higher seed (lower number) is team_a
+        if drop["seed"] < surv["seed"]:
+            a, b = drop, surv
+        else:
+            a, b = surv, drop
+        info = _cws_create_series_and_game(
+            conn, lyid, "CWS_L2", snum,
+            a["team_id"], b["team_id"], a["seed"], b["seed"], week,
+        )
+        created.append(info)
+    return created
+
+
+def _cws_build_l3(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """L2 winners play each other.  Eliminate L2 losers."""
+    results = _cws_get_series_results(conn, lyid, "CWS_L2")
+    week = _cws_next_week(conn, lyid, prereqs)
+
+    # Eliminate L2 losers (second loss)
+    _cws_update_bracket(conn, lyid, [r["loser_id"] for r in results], eliminate=True)
+
+    winners = [{"team_id": r["winner_id"], "seed": r["winner_seed"]} for r in results]
+    winners.sort(key=lambda t: t["seed"])
+    t1, t2 = winners[0], winners[1]
+
+    return [_cws_create_series_and_game(
+        conn, lyid, "CWS_L3", 1,
+        t1["team_id"], t2["team_id"], t1["seed"], t2["seed"], week,
+    )]
+
+
+def _cws_build_l4(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """CROSSOVER: W3 loser (dropping down) vs L3 winner."""
+    w3_results = _cws_get_series_results(conn, lyid, "CWS_W3")
+    l3_results = _cws_get_series_results(conn, lyid, "CWS_L3")
+    week = _cws_next_week(conn, lyid, prereqs)
+
+    # Demote W3 loser to losers bracket
+    _cws_update_bracket(conn, lyid, [r["loser_id"] for r in w3_results])
+    # Eliminate L3 loser (second loss)
+    _cws_update_bracket(conn, lyid, [r["loser_id"] for r in l3_results], eliminate=True)
+
+    w3_loser = w3_results[0]
+    l3_winner = l3_results[0]
+    drop = {"team_id": w3_loser["loser_id"], "seed": w3_loser["loser_seed"]}
+    surv = {"team_id": l3_winner["winner_id"], "seed": l3_winner["winner_seed"]}
+
+    if drop["seed"] < surv["seed"]:
+        a, b = drop, surv
+    else:
+        a, b = surv, drop
+
+    return [_cws_create_series_and_game(
+        conn, lyid, "CWS_L4", 1,
+        a["team_id"], b["team_id"], a["seed"], b["seed"], week,
+    )]
+
+
+def _cws_build_f1(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """Championship: W3 winner (undefeated) vs L4 winner (losers bracket survivor).
+    Convention: team_a = W3 winner so F2 conditional can check easily."""
+    w3_results = _cws_get_series_results(conn, lyid, "CWS_W3")
+    l4_results = _cws_get_series_results(conn, lyid, "CWS_L4")
+    week = _cws_next_week(conn, lyid, prereqs)
+
+    # Eliminate L4 loser (second loss)
+    _cws_update_bracket(conn, lyid, [r["loser_id"] for r in l4_results], eliminate=True)
+
+    undefeated = w3_results[0]
+    survivor = l4_results[0]
+    team_a = {"team_id": undefeated["winner_id"], "seed": undefeated["winner_seed"]}
+    team_b = {"team_id": survivor["winner_id"], "seed": survivor["winner_seed"]}
+
+    # team_a is always the undefeated side (for F2 conditional check)
+    return [_cws_create_series_and_game(
+        conn, lyid, "CWS_F1", 1,
+        team_a["team_id"], team_b["team_id"],
+        team_a["seed"], team_b["seed"], week,
+    )]
+
+
+def _cws_build_f2(conn, lyid: int, prereqs: List[str]) -> List[Dict]:
+    """If-necessary game: only created if the losers bracket team won F1."""
+    f1_series = conn.execute(sa_text("""
+        SELECT team_a_id, team_b_id, winner_team_id
+        FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 3
+          AND round = 'CWS_F1' AND status = 'complete'
+        LIMIT 1
+    """), {"lyid": lyid}).mappings().first()
+
+    if not f1_series:
+        return []
+
+    winner_id = int(f1_series["winner_team_id"])
+    team_a_id = int(f1_series["team_a_id"])  # the undefeated side
+
+    if winner_id == team_a_id:
+        # Undefeated team won — tournament is complete, no F2 needed
+        # Eliminate the loser
+        loser_id = int(f1_series["team_b_id"])
+        _cws_update_bracket(conn, lyid, [loser_id], eliminate=True)
+        return []
+
+    # Losers bracket team won F1 — need an if-necessary game
+    # The undefeated team just got its first loss
+    _cws_update_bracket(conn, lyid, [team_a_id])
+
+    week = _cws_next_week(conn, lyid, prereqs)
+    # Get seeds from cws_bracket
+    seeds = {}
+    for tid in [team_a_id, winner_id]:
+        row = conn.execute(sa_text("""
+            SELECT seed FROM cws_bracket
+            WHERE league_year_id = :lyid AND team_id = :tid
+        """), {"lyid": lyid, "tid": tid}).first()
+        seeds[tid] = int(row[0]) if row else 0
+
+    return [_cws_create_series_and_game(
+        conn, lyid, "CWS_F2", 1,
+        team_a_id, winner_id,
+        seeds[team_a_id], seeds[winner_id], week,
+    )]
+
+
+# Map target round → builder function
+_CWS_BUILDERS: Dict[str, Any] = {
+    "CWS_W2": _cws_build_w2,
+    "CWS_L1": _cws_build_l1,
+    "CWS_W3": _cws_build_w3,
+    "CWS_L2": _cws_build_l2,
+    "CWS_L3": _cws_build_l3,
+    "CWS_L4": _cws_build_l4,
+    "CWS_F1": _cws_build_f1,
+    "CWS_F2": _cws_build_f2,
+}
+
+
+# ---------------------------------------------------------------------------
+# CWS state-machine advancement
+# ---------------------------------------------------------------------------
+
+def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
+    """
+    Advance the CWS double-elimination bracket.
+
+    Uses a state-machine approach: iterates CWS_TRANSITIONS, checks whether
+    all prerequisite rounds are complete and the target round doesn't already
+    exist, then fires all actionable transitions in a single call.
+
+    Idempotency: if the target round already has playoff_series rows, the
+    transition is skipped (safe to call repeatedly).
+    """
+    # Load all existing CWS rounds and their completion status
+    all_series = conn.execute(sa_text("""
+        SELECT round, status FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 3
+          AND round LIKE 'CWS_%%'
+    """), {"lyid": league_year_id}).mappings().all()
+
+    if not all_series:
+        return {"error": "No CWS series found"}
+
+    # Build {round_name: {total, complete}} map
+    round_status: Dict[str, Dict[str, int]] = {}
+    for s in all_series:
+        rnd = s["round"]
+        round_status.setdefault(rnd, {"total": 0, "complete": 0})
+        round_status[rnd]["total"] += 1
+        if s["status"] == "complete":
+            round_status[rnd]["complete"] += 1
+
+    def _round_complete(rnd: str) -> bool:
+        info = round_status.get(rnd)
+        return info is not None and info["total"] == info["complete"]
+
+    created_all: List[Dict] = []
+
+    for prereqs, target in CWS_TRANSITIONS:
+        # Skip if target round already exists (idempotency)
+        if target in round_status:
+            continue
+        # Skip if any prerequisite is missing or incomplete
+        if not all(_round_complete(p) for p in prereqs):
+            continue
+
+        # Fire this transition
+        builder = _CWS_BUILDERS[target]
+        created = builder(conn, league_year_id, prereqs)
+        created_all.extend(created)
+
+        # Register the new round so later transitions can see it
+        # (even if empty, e.g. F2 not needed — marks the transition as processed)
+        round_status[target] = {"total": len(created), "complete": 0}
+
+        log.info(
+            "CWS advance: created %d series for %s (prereqs: %s)",
+            len(created), target, prereqs,
+        )
+
+    if not created_all:
+        # Check if tournament is complete (1 or fewer non-eliminated teams)
+        remaining = conn.execute(sa_text("""
+            SELECT COUNT(*) AS cnt FROM cws_bracket
+            WHERE league_year_id = :lyid AND eliminated = 0
+        """), {"lyid": league_year_id}).scalar()
+
+        if remaining <= 1:
+            champion = conn.execute(sa_text("""
+                SELECT team_id FROM cws_bracket
+                WHERE league_year_id = :lyid AND eliminated = 0
+                LIMIT 1
+            """), {"lyid": league_year_id}).scalar()
+            return {"status": "complete", "champion": int(champion) if champion else None}
+
+        return {"error": "No actionable transitions — rounds may still be in progress"}
+
+    return {"series_created": created_all, "rounds_advanced": list({c["round"] for c in created_all})}
 
 
 # =====================================================================
@@ -1286,7 +1549,8 @@ def get_bracket(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
         LEFT JOIN teams tw ON tw.id = ps.winner_team_id
         WHERE ps.league_year_id = :lyid AND ps.league_level = :level
         ORDER BY FIELD(ps.round, 'WC','DS','CS','WS','QF','SF','F',
-                       'CWS_W1','CWS_W2','CWS_W3','CWS_L1','CWS_L2','CWS_L3',
+                       'CWS_W1','CWS_W2','CWS_W3',
+                       'CWS_L1','CWS_L2','CWS_L3','CWS_L4',
                        'CWS_F1','CWS_F2'),
                  ps.conference, ps.series_number
     """), {"lyid": league_year_id, "level": league_level}).mappings().all()
@@ -1544,13 +1808,12 @@ def _next_available_subweek(
     these two teams, starting from start_week.  Checks gamelist for existing
     entries to avoid collisions.
     """
-    # Get all occupied subweeks for these teams from start_week onward
+    # Get all occupied subweeks where EITHER team already has a playoff game
     occupied = conn.execute(sa_text("""
         SELECT season_week, season_subweek
         FROM gamelist
         WHERE game_type = 'playoff' AND league_level = :level
-          AND ((home_team = :ta AND away_team = :tb)
-            OR (home_team = :tb AND away_team = :ta))
+          AND (home_team IN (:ta, :tb) OR away_team IN (:ta, :tb))
           AND season_week >= :sw
         ORDER BY season_week, season_subweek
     """), {

@@ -177,6 +177,25 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Rankings</div>
+      <a href="#" class="nav-item" data-section="rankings-elo">
+        <span class="nav-icon">&#9812;</span> ELO Ratings
+      </a>
+      <a href="#" class="nav-item" data-section="rankings-power">
+        <span class="nav-icon">&#9876;</span> Power Rankings
+      </a>
+      <a href="#" class="nav-item" data-section="rankings-rpi">
+        <span class="nav-icon">&#128202;</span> RPI
+      </a>
+      <a href="#" class="nav-item" data-section="rankings-pyth">
+        <span class="nav-icon">&#128203;</span> Pythagorean
+      </a>
+      <a href="#" class="nav-item" data-section="rankings-race">
+        <span class="nav-icon">&#127937;</span> Race Chart
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Special Events</div>
       <a href="#" class="nav-item" data-section="playoffs">
         <span class="nav-icon">&#127942;</span> Playoffs
@@ -526,6 +545,28 @@
           </div>
 
           <pre id="wipe-result" class="result-box" style="margin-top: 16px"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Rollback to Week</h3>
+          <p class="text-muted">Roll back all simulation output from a target week onward. Undoes game results, stats, finances, injuries, waivers, and FA auctions. Preserves data from prior weeks.</p>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="rollback-year">League Year ID</label>
+              <input type="number" id="rollback-year" value="1" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="rollback-week">Target Week</label>
+              <input type="number" id="rollback-week" value="1" min="1" />
+            </div>
+          </div>
+
+          <div class="button-group">
+            <button class="btn btn-danger" id="btn-rollback-to-week">Rollback to Week</button>
+          </div>
+
+          <pre id="rollback-to-week-result" class="result-box" style="margin-top: 16px"></pre>
         </div>
       </section>
 
@@ -3310,6 +3351,167 @@
           <canvas id="stam-fl-chart" height="300"></canvas>
           <div id="stam-fl-table" style="margin-top:16px"></div>
         </div>
+      </section>
+
+      <!-- ==================== Rankings ==================== -->
+
+      <section id="section-rankings-elo" class="section">
+        <div class="card">
+          <h3>ELO Ratings</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="rank-elo-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="rank-elo-level">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">High-A (6)</option>
+                <option value="5">A (5)</option>
+                <option value="4">Scraps (4)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <div>
+              <label>K-Factor</label>
+              <input id="rank-elo-k" type="number" value="32" min="10" max="64" style="width:70px">
+            </div>
+            <button id="btn-rank-elo-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="rank-elo-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="rank-elo-results" style="display:none">
+          <canvas id="rank-elo-chart" height="350"></canvas>
+          <div id="rank-elo-table" style="margin-top:16px"></div>
+        </div>
+      </section>
+
+      <section id="section-rankings-power" class="section">
+        <div class="card">
+          <h3>Power Rankings</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="rank-pow-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="rank-pow-level">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">High-A (6)</option>
+                <option value="5">A (5)</option>
+                <option value="4">Scraps (4)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <div>
+              <label>Recent Weeks</label>
+              <input id="rank-pow-weeks" type="number" value="3" min="1" max="8" style="width:70px">
+            </div>
+            <button id="btn-rank-pow-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="rank-pow-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="rank-pow-results" style="display:none">
+          <canvas id="rank-pow-chart" height="400"></canvas>
+          <div id="rank-pow-table" style="margin-top:16px"></div>
+        </div>
+      </section>
+
+      <section id="section-rankings-rpi" class="section">
+        <div class="card">
+          <h3>RPI (Rating Percentage Index)</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="rank-rpi-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="rank-rpi-level">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">High-A (6)</option>
+                <option value="5">A (5)</option>
+                <option value="4">Scraps (4)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <button id="btn-rank-rpi-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="rank-rpi-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="rank-rpi-results" style="display:none">
+          <div id="rank-rpi-table"></div>
+        </div>
+      </section>
+
+      <section id="section-rankings-pyth" class="section">
+        <div class="card">
+          <h3>Pythagorean W-L</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="rank-pyth-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="rank-pyth-level">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">High-A (6)</option>
+                <option value="5">A (5)</option>
+                <option value="4">Scraps (4)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <div>
+              <label>Exponent</label>
+              <input id="rank-pyth-exp" type="number" value="1.83" step="0.01" min="1.0" max="3.0" style="width:80px">
+            </div>
+            <button id="btn-rank-pyth-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="rank-pyth-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="rank-pyth-results" style="display:none">
+          <canvas id="rank-pyth-chart" height="400"></canvas>
+          <div id="rank-pyth-table" style="margin-top:16px"></div>
+        </div>
+      </section>
+
+      <section id="section-rankings-race" class="section">
+        <div class="card">
+          <h3>Race Chart</h3>
+          <p style="color:var(--text-secondary);margin:0 0 12px">Cumulative W-L distance from .500 over the season. MLB: by division. College: by conference. MiLB: all teams.</p>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="rank-race-lyid"></select>
+            </div>
+            <div>
+              <label>Level</label>
+              <select id="rank-race-level">
+                <option value="9">MLB (9)</option>
+                <option value="8">AAA (8)</option>
+                <option value="7">AA (7)</option>
+                <option value="6">High-A (6)</option>
+                <option value="5">A (5)</option>
+                <option value="4">Scraps (4)</option>
+                <option value="3">College (3)</option>
+              </select>
+            </div>
+            <button id="btn-rank-race-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="rank-race-status" class="status-msg"></div>
+        </div>
+        <div id="rank-race-results" style="display:none"></div>
       </section>
 
       <!-- ==================== Special Events ==================== -->

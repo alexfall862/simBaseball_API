@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(grep -l \"stats\\\\|stat_\\\\|accumulated\\\\|cumulative\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB/Dump20251121/*.sql)",
-      "Bash(python -c \"import py_compile; py_compile.compile\\(''services/allstar.py'', doraise=True\\); py_compile.compile\\(''allstar/__init__.py'', doraise=True\\); print\\(''OK''\\)\")"
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''services/allstar.py'', doraise=True\\); py_compile.compile\\(''allstar/__init__.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(grep -l \"game_results\\\\|gamelist\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB_structure/*.sql)"
     ]
   }
 }

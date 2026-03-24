@@ -1,6 +1,7 @@
 # financials/books.py
 
-from decimal import Decimal
+import random
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List
 
 from sqlalchemy import (
@@ -10,9 +11,10 @@ from sqlalchemy import (
     and_,
     func,
     literal,
+    desc,
+    text,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func
 
 
 INTEREST_RATE = Decimal("0.05")  # 5% annual
@@ -43,6 +45,7 @@ def _get_tables(engine):
         "gamelist": Table("gamelist", md, autoload_with=engine),
         "teams": Table("teams", md, autoload_with=engine),
         "seasons": Table("seasons", md, autoload_with=engine),
+        "financial_config": Table("financial_config", md, autoload_with=engine),
     }
 
 
@@ -291,6 +294,7 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
                 .where(
                     and_(
                         league_year_expr == league_year,
+                        contracts.c.isFinished == 0,
                         shares.c.salary_share > 0,
                     )
                 )
@@ -427,7 +431,11 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
                             (org_home_week,   gl.c.home_team, True),
                             (org_away_week,   gl.c.away_team, True),
                         ]:
-                            conditions = [gl.c.season.in_(season_ids)]
+                            conditions = [
+                                gl.c.season.in_(season_ids),
+                                gl.c.league_level == 9,
+                                gl.c.game_type == "regular",
+                            ]
                             if week_filter:
                                 conditions.append(gl.c.season_week == week_index)
                             qrows = conn.execute(
@@ -739,6 +747,11 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int) -> Dict
             for k, v in year_level_totals.items()
             if k in ("media", "bonus", "buyout")
         }
+        playoff_events = {
+            k: v
+            for k, v in year_level_totals.items()
+            if k in ("playoff_gate", "playoff_media")
+        }
         interest_events = {
             k: v
             for k, v in year_level_totals.items()
@@ -746,10 +759,11 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int) -> Dict
         }
 
         year_start_net = sum(year_start_events.values())
+        playoff_net = sum(playoff_events.values())
         interest_net = sum(interest_events.values())
 
-        # balance immediately after year-start events
-        balance_after_year_start = float(starting_balance) + year_start_net
+        # balance immediately after year-start events (playoff revenue is also year-level)
+        balance_after_year_start = float(starting_balance) + year_start_net + playoff_net
 
         # --- Weekly entries (grouped by week_index + entry_type) ---
         weekly_rows = conn.execute(
@@ -820,8 +834,386 @@ def get_org_financial_summary(engine, org_abbrev: str, league_year: int) -> Dict
         "league_year": league_year,
         "starting_balance": float(starting_balance),
         "year_start_events": year_start_events,
+        "playoff_events": playoff_events,
         "weeks": weeks_summary,
         "interest_events": interest_events,
         "ending_balance_before_interest": ending_balance_before_interest,
         "ending_balance": ending_balance,
+    }
+
+
+# --------------------------------------------------------
+# League year initialization with inflation
+# --------------------------------------------------------
+
+def initialize_next_league_year(engine, current_league_year: int) -> Dict[str, Any]:
+    """
+    Create the next league_years row by applying inflation to the current
+    year's performance_budget and media_total.
+
+    Reads inflation bounds from financial_config, samples a rate using a
+    triangular distribution (min, max, mode=mean), and multiplies the
+    current year's budgets.  Also creates the game_weeks rows for the
+    new year.
+
+    Returns summary dict with the new year's values and applied rate.
+    Idempotent: raises ValueError if the next year already exists.
+    """
+    tables = _get_tables(engine)
+    ly_tbl = tables["league_years"]
+    gw_tbl = tables["game_weeks"]
+    fc_tbl = tables["financial_config"]
+
+    with engine.begin() as conn:
+        # ---- Current year ----
+        cur = _get_league_year_row(conn, tables, current_league_year)
+        next_year = current_league_year + 1
+
+        # ---- Guard: next year must not exist ----
+        existing = conn.execute(
+            select(ly_tbl.c.id).where(ly_tbl.c.league_year == next_year)
+        ).first()
+        if existing:
+            raise ValueError(
+                f"league_year {next_year} already exists (id={existing._mapping['id']})"
+            )
+
+        # ---- Read financial_config ----
+        fc_row = conn.execute(select(fc_tbl)).first()
+        if not fc_row:
+            raise ValueError("financial_config table is empty — seed it first")
+        fc = fc_row._mapping
+
+        inf_min = float(fc["inflation_min"])
+        inf_max = float(fc["inflation_max"])
+        inf_mean = float(fc["inflation_mean"])
+
+        # ---- Sample inflation rate (triangular distribution) ----
+        inflation_rate = random.triangular(inf_min, inf_max, inf_mean)
+        # Clamp to configured bounds (triangular already does this, but be safe)
+        inflation_rate = max(inf_min, min(inf_max, inflation_rate))
+        inflation_factor = Decimal(str(round(inflation_rate, 4)))
+        multiplier = Decimal("1") + inflation_factor
+
+        # ---- Compute new budgets ----
+        prev_perf = Decimal(str(cur["performance_budget"]))
+        prev_media = Decimal(str(cur["media_total"]))
+        weeks_in_season = int(cur["weeks_in_season"])
+
+        new_perf = (prev_perf * multiplier).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        new_media = (prev_media * multiplier).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        # ---- Insert new league_years row ----
+        result = conn.execute(
+            ly_tbl.insert().values(
+                league_year=next_year,
+                performance_budget=new_perf,
+                media_total=new_media,
+                inflation_factor=inflation_factor,
+                weeks_in_season=weeks_in_season,
+            )
+        )
+        new_ly_id = result.lastrowid
+
+        # ---- Create game_weeks for the new year ----
+        gw_inserts = [
+            {
+                "league_year_id": new_ly_id,
+                "week_index": w,
+                "label": f"Week {w}",
+            }
+            for w in range(1, weeks_in_season + 1)
+        ]
+        if gw_inserts:
+            conn.execute(gw_tbl.insert(), gw_inserts)
+
+    return {
+        "league_year": next_year,
+        "league_year_id": new_ly_id,
+        "previous_year": current_league_year,
+        "inflation_rate": float(inflation_factor),
+        "inflation_bounds": {
+            "min": inf_min,
+            "max": inf_max,
+            "mean": inf_mean,
+        },
+        "performance_budget": {
+            "previous": float(prev_perf),
+            "new": float(new_perf),
+        },
+        "media_total": {
+            "previous": float(prev_media),
+            "new": float(new_media),
+        },
+        "weeks_in_season": weeks_in_season,
+        "game_weeks_created": len(gw_inserts),
+    }
+
+
+# --------------------------------------------------------
+# Playoff revenue: gate + media
+# --------------------------------------------------------
+
+PLAYOFF_LEVEL = 9  # MLB only
+
+
+def process_playoff_revenue(engine, league_year: int) -> Dict[str, Any]:
+    """
+    Generate playoff revenue ledger entries for a completed postseason.
+
+    Two revenue streams, both anchored to existing economy baselines:
+
+    1. **Playoff gate** — each playoff home game earns the org
+       `regular_per_home_game_value × playoff_gate_multiplier`.
+       The regular per-home-game value is derived from the org's
+       performance_budget share (win-weighted) and the 65% home weight,
+       the same formula used in weekly books.
+
+    2. **Playoff media** — each org earns a flat payout per series
+       appearance, derived from `media_total × playoff_media_fraction`
+       divided by total team-series slots.
+
+    Idempotent: skips if playoff_gate or playoff_media entries already
+    exist for this league_year.
+    """
+    tables = _get_tables(engine)
+    ly_tbl = tables["league_years"]
+    orgs_tbl = tables["organizations"]
+    ledger = tables["ledger"]
+    weekly = tables["weekly_record"]
+    gl = tables["gamelist"]
+    teams_tbl = tables["teams"]
+    seasons_tbl = tables["seasons"]
+    fc_tbl = tables["financial_config"]
+
+    with engine.begin() as conn:
+        ly_row = _get_league_year_row(conn, tables, league_year)
+        league_year_id = ly_row["id"]
+        performance_budget = Decimal(ly_row["performance_budget"])
+        media_total = Decimal(ly_row["media_total"])
+
+        # ---- Guard: already processed? ----
+        existing = conn.execute(
+            select(func.count(ledger.c.id)).where(
+                and_(
+                    ledger.c.league_year_id == league_year_id,
+                    ledger.c.entry_type.in_(("playoff_gate", "playoff_media")),
+                )
+            )
+        ).scalar_one()
+        if existing and existing > 0:
+            return {
+                "league_year": league_year,
+                "status": "already_processed",
+                "existing_entries": int(existing),
+            }
+
+        # ---- Read config ----
+        fc_row = conn.execute(select(fc_tbl)).first()
+        if not fc_row:
+            raise ValueError("financial_config table is empty")
+        fc = fc_row._mapping
+
+        gate_mult = Decimal(str(fc.get("playoff_gate_multiplier", 5)))
+        media_frac = Decimal(str(fc.get("playoff_media_fraction", "0.10")))
+
+        # ==================================================================
+        # 1. PLAYOFF GATE REVENUE
+        # ==================================================================
+
+        # ---- Compute each org's regular per-home-game value ----
+        # Same rolling 3-year win share as weekly books
+        ly_rows = conn.execute(
+            select(ly_tbl.c.id, ly_tbl.c.league_year)
+        ).all()
+        year_to_id = {r._mapping["league_year"]: r._mapping["id"] for r in ly_rows}
+
+        years_to_consider = [
+            y for y in (league_year - 2, league_year - 1, league_year)
+            if y in year_to_id
+        ]
+        relevant_year_ids = [year_to_id[y] for y in years_to_consider]
+
+        org_rows = conn.execute(select(orgs_tbl.c.id)).all()
+        org_ids = [r._mapping["id"] for r in org_rows]
+        org_wins: Dict[int, int] = {oid: 0 for oid in org_ids}
+
+        if relevant_year_ids:
+            gw_tbl = tables["game_weeks"]
+            rec_rows = conn.execute(
+                select(weekly.c.org_id, weekly.c.wins)
+                .where(weekly.c.league_year_id.in_(relevant_year_ids))
+            ).all()
+            for r in rec_rows:
+                m = r._mapping
+                oid = m["org_id"]
+                if oid in org_wins:
+                    org_wins[oid] += int(m["wins"])
+
+        total_wins = sum(org_wins.values())
+
+        # Regular-season home game counts per org (full season)
+        season_rows = conn.execute(
+            select(seasons_tbl.c.id).where(seasons_tbl.c.year == league_year)
+        ).all()
+        season_ids = [r._mapping["id"] for r in season_rows]
+
+        org_home_season: Dict[int, int] = {}
+        if season_ids:
+            home_rows = conn.execute(
+                select(
+                    teams_tbl.c.orgID.label("org_id"),
+                    func.count().label("cnt"),
+                )
+                .select_from(gl.join(teams_tbl, gl.c.home_team == teams_tbl.c.id))
+                .where(and_(
+                    gl.c.season.in_(season_ids),
+                    gl.c.league_level == PLAYOFF_LEVEL,
+                    gl.c.game_type == "regular",
+                ))
+                .group_by(teams_tbl.c.orgID)
+            ).all()
+            for r in home_rows:
+                org_home_season[r._mapping["org_id"]] = int(r._mapping["cnt"])
+
+        # Compute per-org regular home game value
+        org_per_home: Dict[int, Decimal] = {}
+        if total_wins > 0:
+            for oid in org_ids:
+                w = org_wins.get(oid, 0)
+                homes = org_home_season.get(oid, 0)
+                if w == 0 or homes == 0:
+                    continue
+                win_share = Decimal(w) / Decimal(total_wins)
+                org_season_share = performance_budget * win_share
+                # Home-attributed portion / number of home games
+                org_per_home[oid] = (
+                    org_season_share * HOME_REVENUE_WEIGHT / Decimal(homes)
+                )
+
+        # ---- Count playoff home games per org ----
+        playoff_home: Dict[int, int] = {}
+        if season_ids:
+            ph_rows = conn.execute(
+                select(
+                    teams_tbl.c.orgID.label("org_id"),
+                    func.count().label("cnt"),
+                )
+                .select_from(gl.join(teams_tbl, gl.c.home_team == teams_tbl.c.id))
+                .where(and_(
+                    gl.c.season.in_(season_ids),
+                    gl.c.league_level == PLAYOFF_LEVEL,
+                    gl.c.game_type == "playoff",
+                ))
+                .group_by(teams_tbl.c.orgID)
+            ).all()
+            for r in ph_rows:
+                playoff_home[r._mapping["org_id"]] = int(r._mapping["cnt"])
+
+        # ---- Create gate entries ----
+        gate_inserts = []
+        total_gate = Decimal("0")
+        for oid, home_games in playoff_home.items():
+            base_val = org_per_home.get(oid)
+            if not base_val:
+                continue
+            amount = base_val * gate_mult * Decimal(home_games)
+            gate_inserts.append({
+                "org_id": oid,
+                "league_year_id": league_year_id,
+                "game_week_id": None,
+                "entry_type": "playoff_gate",
+                "amount": amount,
+                "contract_id": None,
+                "player_id": None,
+                "note": (
+                    f"Playoff gate revenue: {home_games} home game(s) "
+                    f"× {float(base_val * gate_mult):.2f}/game "
+                    f"(league_year={league_year})"
+                ),
+            })
+            total_gate += amount
+
+        if gate_inserts:
+            conn.execute(ledger.insert(), gate_inserts)
+
+        # ==================================================================
+        # 2. PLAYOFF MEDIA REVENUE
+        # ==================================================================
+
+        # Series appearances per org: count team_a + team_b from playoff_series
+        series_app: Dict[int, int] = {}
+
+        app_rows = conn.execute(text("""
+            SELECT t.orgID AS org_id, COUNT(*) AS cnt
+            FROM playoff_series ps
+            JOIN teams t ON t.id = ps.team_a_id
+            WHERE ps.league_year_id = :lyid
+              AND ps.league_level = :lvl
+            GROUP BY t.orgID
+            UNION ALL
+            SELECT t.orgID AS org_id, COUNT(*) AS cnt
+            FROM playoff_series ps
+            JOIN teams t ON t.id = ps.team_b_id
+            WHERE ps.league_year_id = :lyid
+              AND ps.league_level = :lvl
+            GROUP BY t.orgID
+        """), {"lyid": league_year_id, "lvl": PLAYOFF_LEVEL}).all()
+
+        for r in app_rows:
+            oid = r._mapping["org_id"]
+            series_app[oid] = series_app.get(oid, 0) + int(r._mapping["cnt"])
+
+        total_team_series_slots = sum(series_app.values())
+
+        media_inserts = []
+        total_media = Decimal("0")
+
+        if total_team_series_slots > 0:
+            playoff_media_pool = media_total * media_frac
+            per_team_per_series = playoff_media_pool / Decimal(total_team_series_slots)
+
+            for oid, appearances in series_app.items():
+                amount = per_team_per_series * Decimal(appearances)
+                media_inserts.append({
+                    "org_id": oid,
+                    "league_year_id": league_year_id,
+                    "game_week_id": None,
+                    "entry_type": "playoff_media",
+                    "amount": amount,
+                    "contract_id": None,
+                    "player_id": None,
+                    "note": (
+                        f"Playoff media revenue: {appearances} series "
+                        f"× {float(per_team_per_series):.2f}/series "
+                        f"(league_year={league_year})"
+                    ),
+                })
+                total_media += amount
+
+        if media_inserts:
+            conn.execute(ledger.insert(), media_inserts)
+
+    return {
+        "league_year": league_year,
+        "status": "processed",
+        "config": {
+            "gate_multiplier": float(gate_mult),
+            "media_fraction": float(media_frac),
+        },
+        "gate": {
+            "entries_created": len(gate_inserts),
+            "total_amount": float(total_gate),
+            "orgs_with_home_games": len(playoff_home),
+        },
+        "media": {
+            "entries_created": len(media_inserts),
+            "total_amount": float(total_media),
+            "total_team_series_slots": total_team_series_slots,
+            "per_team_per_series": float(per_team_per_series) if total_team_series_slots > 0 else 0,
+        },
     }

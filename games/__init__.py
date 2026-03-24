@@ -18,6 +18,7 @@ from services.timestamp import (
     update_timestamp,
     advance_week,
     reset_week_games,
+    _tick_injuries,
 )
 from services.task_store import get_task_store, TaskStatus
 
@@ -630,6 +631,376 @@ def rollback_week():
         return jsonify(error="database_error", message=str(e)), 500
     except Exception as e:
         current_app.logger.exception("rollback_week: unexpected error")
+        return jsonify(error="unexpected_error", message=str(e)), 500
+
+
+@games_bp.post("/games/rollback-to-week")
+def rollback_to_week():
+    """
+    Roll back all simulation output from target_week onward.
+
+    Undoes game results, per-game lines, season stat accumulation,
+    injuries, fatigue, financials, waivers, FA auctions, position
+    usage, and transaction log from target_week through the latest
+    simulated week.  Resets the timestamp to the start of target_week.
+
+    Request body:
+    {
+        "league_year_id": 1,
+        "target_week": 10
+    }
+    """
+    from sqlalchemy import text as sa_text
+
+    body = request.get_json(force=True, silent=True) or {}
+    league_year_id = body.get("league_year_id")
+    target_week = body.get("target_week")
+
+    if league_year_id is None or target_week is None:
+        return jsonify(error="missing_field",
+                       message="league_year_id and target_week are required"), 400
+
+    try:
+        league_year_id = int(league_year_id)
+        target_week = int(target_week)
+    except (TypeError, ValueError) as e:
+        return jsonify(error="invalid_type", message=str(e)), 400
+
+    if target_week < 1:
+        return jsonify(error="invalid_value",
+                       message="target_week must be >= 1"), 400
+
+    engine = get_engine()
+
+    try:
+        with engine.begin() as conn:
+            deleted = {}
+
+            # ── 1. Find all game_ids for weeks >= target_week ──
+            game_rows = conn.execute(sa_text(
+                "SELECT game_id FROM game_results "
+                "WHERE season = :lyid AND season_week >= :tw"
+            ), {"lyid": league_year_id, "tw": target_week}).all()
+            game_ids = [int(r[0]) for r in game_rows]
+
+            if not game_ids:
+                # Nothing simulated from target_week onward — just reset timestamp
+                conn.execute(sa_text(
+                    "UPDATE timestamp_state SET "
+                    "week = :tw, games_a_ran = 0, games_b_ran = 0, "
+                    "games_c_ran = 0, games_d_ran = 0, run_games = 0 "
+                    "WHERE id = 1"
+                ), {"tw": target_week})
+
+                from services.websocket_manager import ws_manager
+                ws_manager.broadcast_timestamp()
+
+                return jsonify(
+                    ok=True, message="No games found from target_week onward",
+                    deleted={}, games_found=0, timestamp_reset_to=target_week,
+                ), 200
+
+            # Build parameterised placeholder list for game_ids
+            gid_ph = ", ".join(f":g{i}" for i in range(len(game_ids)))
+            gid_params = {f"g{i}": gid for i, gid in enumerate(game_ids)}
+            base_params = {"lyid": league_year_id, "tw": target_week}
+            all_params = {**gid_params, **base_params}
+
+            # Capture the earliest game_results timestamp for the target week
+            # (used later for time-based deletes; must be read before we delete
+            # game_results rows).
+            cutoff_row = conn.execute(sa_text(
+                "SELECT MIN(created_at) FROM game_results "
+                "WHERE season = :lyid AND season_week = :tw"
+            ), base_params).first()
+            rollback_cutoff = cutoff_row[0] if cutoff_row and cutoff_row[0] else None
+
+            # ── 2. Subtract per-game BATTING lines from season stats ──
+            r = conn.execute(sa_text(f"""
+                UPDATE player_batting_stats pbs
+                JOIN (
+                    SELECT player_id, team_id,
+                        SUM(at_bats) AS at_bats, SUM(runs) AS runs,
+                        SUM(hits) AS hits, SUM(doubles_hit) AS doubles_hit,
+                        SUM(triples) AS triples, SUM(home_runs) AS home_runs,
+                        SUM(rbi) AS rbi, SUM(walks) AS walks,
+                        SUM(strikeouts) AS strikeouts,
+                        SUM(stolen_bases) AS stolen_bases,
+                        SUM(caught_stealing) AS caught_stealing
+                    FROM game_batting_lines
+                    WHERE game_id IN ({gid_ph}) AND league_year_id = :lyid
+                    GROUP BY player_id, team_id
+                ) gbl ON pbs.player_id = gbl.player_id
+                    AND pbs.team_id = gbl.team_id
+                    AND pbs.league_year_id = :lyid
+                SET pbs.at_bats = GREATEST(0, pbs.at_bats - gbl.at_bats),
+                    pbs.runs = GREATEST(0, pbs.runs - gbl.runs),
+                    pbs.hits = GREATEST(0, pbs.hits - gbl.hits),
+                    pbs.doubles_hit = GREATEST(0, pbs.doubles_hit - gbl.doubles_hit),
+                    pbs.triples = GREATEST(0, pbs.triples - gbl.triples),
+                    pbs.home_runs = GREATEST(0, pbs.home_runs - gbl.home_runs),
+                    pbs.rbi = GREATEST(0, pbs.rbi - gbl.rbi),
+                    pbs.walks = GREATEST(0, pbs.walks - gbl.walks),
+                    pbs.strikeouts = GREATEST(0, pbs.strikeouts - gbl.strikeouts),
+                    pbs.stolen_bases = GREATEST(0, pbs.stolen_bases - gbl.stolen_bases),
+                    pbs.caught_stealing = GREATEST(0, pbs.caught_stealing - gbl.caught_stealing)
+            """), all_params)
+            deleted["batting_stats_decremented"] = r.rowcount
+
+            # ── 3. Subtract per-game PITCHING lines from season stats ──
+            r = conn.execute(sa_text(f"""
+                UPDATE player_pitching_stats pps
+                JOIN (
+                    SELECT player_id, team_id,
+                        SUM(games_started) AS games_started,
+                        SUM(win) AS win, SUM(loss) AS loss,
+                        SUM(save_recorded) AS save_recorded,
+                        SUM(innings_pitched_outs) AS innings_pitched_outs,
+                        SUM(hits_allowed) AS hits_allowed,
+                        SUM(runs_allowed) AS runs_allowed,
+                        SUM(earned_runs) AS earned_runs,
+                        SUM(walks) AS walks, SUM(strikeouts) AS strikeouts,
+                        SUM(home_runs_allowed) AS home_runs_allowed
+                    FROM game_pitching_lines
+                    WHERE game_id IN ({gid_ph}) AND league_year_id = :lyid
+                    GROUP BY player_id, team_id
+                ) gpl ON pps.player_id = gpl.player_id
+                    AND pps.team_id = gpl.team_id
+                    AND pps.league_year_id = :lyid
+                SET pps.games = GREATEST(0, pps.games - 1),
+                    pps.games_started = GREATEST(0, pps.games_started - gpl.games_started),
+                    pps.wins = GREATEST(0, pps.wins - gpl.win),
+                    pps.losses = GREATEST(0, pps.losses - gpl.loss),
+                    pps.saves = GREATEST(0, pps.saves - gpl.save_recorded),
+                    pps.innings_pitched_outs = GREATEST(0, pps.innings_pitched_outs - gpl.innings_pitched_outs),
+                    pps.hits_allowed = GREATEST(0, pps.hits_allowed - gpl.hits_allowed),
+                    pps.runs_allowed = GREATEST(0, pps.runs_allowed - gpl.runs_allowed),
+                    pps.earned_runs = GREATEST(0, pps.earned_runs - gpl.earned_runs),
+                    pps.walks = GREATEST(0, pps.walks - gpl.walks),
+                    pps.strikeouts = GREATEST(0, pps.strikeouts - gpl.strikeouts),
+                    pps.home_runs_allowed = GREATEST(0, pps.home_runs_allowed - gpl.home_runs_allowed)
+            """), all_params)
+            deleted["pitching_stats_decremented"] = r.rowcount
+
+            # ── 4. Subtract per-game FIELDING lines from season stats ──
+            r = conn.execute(sa_text(f"""
+                UPDATE player_fielding_stats pfs
+                JOIN (
+                    SELECT player_id, team_id, position_code,
+                        SUM(innings) AS innings,
+                        SUM(putouts) AS putouts,
+                        SUM(assists) AS assists,
+                        SUM(errors) AS errors,
+                        COUNT(*) AS game_count
+                    FROM game_fielding_lines
+                    WHERE game_id IN ({gid_ph}) AND league_year_id = :lyid
+                    GROUP BY player_id, team_id, position_code
+                ) gfl ON pfs.player_id = gfl.player_id
+                    AND pfs.team_id = gfl.team_id
+                    AND pfs.position_code = gfl.position_code
+                    AND pfs.league_year_id = :lyid
+                SET pfs.games = GREATEST(0, pfs.games - gfl.game_count),
+                    pfs.innings = GREATEST(0, pfs.innings - gfl.innings),
+                    pfs.putouts = GREATEST(0, pfs.putouts - gfl.putouts),
+                    pfs.assists = GREATEST(0, pfs.assists - gfl.assists),
+                    pfs.errors = GREATEST(0, pfs.errors - gfl.errors)
+            """), all_params)
+            deleted["fielding_stats_decremented"] = r.rowcount
+
+            # ── 5. Delete per-game line tables ──
+            for tbl in ("game_batting_lines", "game_pitching_lines",
+                        "game_fielding_lines", "game_substitutions"):
+                r = conn.execute(sa_text(
+                    f"DELETE FROM {tbl} WHERE game_id IN ({gid_ph})"
+                ), gid_params)
+                deleted[tbl] = r.rowcount
+
+            # ── 6. Delete game results ──
+            r = conn.execute(sa_text(
+                f"DELETE FROM game_results WHERE game_id IN ({gid_ph})"
+            ), gid_params)
+            deleted["game_results"] = r.rowcount
+
+            # ── 7. Delete position usage for rolled-back weeks ──
+            r = conn.execute(sa_text(
+                "DELETE FROM player_position_usage_week "
+                "WHERE league_year_id = :lyid AND season_week >= :tw"
+            ), base_params)
+            deleted["position_usage"] = r.rowcount
+
+            # ── 8. Delete injuries from rolled-back games ──
+            # In-game injuries (linked to gamelist_id)
+            r = conn.execute(sa_text(
+                f"DELETE FROM player_injury_events "
+                f"WHERE gamelist_id IN ({gid_ph})"
+            ), gid_params)
+            deleted["injury_events_ingame"] = r.rowcount
+
+            # Pregame injuries (gamelist_id IS NULL) created during the
+            # rolled-back period — use the cutoff timestamp captured earlier
+            if rollback_cutoff is not None:
+                r = conn.execute(sa_text(
+                    "DELETE FROM player_injury_events "
+                    "WHERE league_year_id = :lyid AND gamelist_id IS NULL "
+                    "AND created_at >= :cutoff"
+                ), {"lyid": league_year_id, "cutoff": rollback_cutoff})
+                deleted["injury_events_pregame"] = r.rowcount
+            else:
+                deleted["injury_events_pregame"] = 0
+
+            # career_injuries are auto-cascade-deleted via FK on origin_event_id
+
+            # Rebuild injury state: update to longest remaining event or delete
+            conn.execute(sa_text("""
+                UPDATE player_injury_state pis
+                JOIN (
+                    SELECT pie.player_id,
+                           MAX(pie.id) AS best_event_id,
+                           bw.max_weeks AS best_weeks
+                    FROM player_injury_events pie
+                    INNER JOIN (
+                        SELECT player_id, MAX(weeks_remaining) AS max_weeks
+                        FROM player_injury_events
+                        WHERE weeks_remaining > 0
+                        GROUP BY player_id
+                    ) bw ON bw.player_id = pie.player_id
+                        AND pie.weeks_remaining = bw.max_weeks
+                    GROUP BY pie.player_id, bw.max_weeks
+                ) best ON best.player_id = pis.player_id
+                SET pis.current_event_id = best.best_event_id,
+                    pis.weeks_remaining  = best.best_weeks
+                WHERE pis.status = 'injured'
+            """))
+
+            # Delete state rows with no remaining active events
+            r = conn.execute(sa_text("""
+                DELETE pis FROM player_injury_state pis
+                LEFT JOIN player_injury_events pie
+                    ON pie.player_id = pis.player_id AND pie.weeks_remaining > 0
+                WHERE pis.status = 'injured' AND pie.id IS NULL
+            """))
+            deleted["injury_states_cleaned"] = r.rowcount
+
+            # ── 9. Delete financial ledger entries for rolled-back weeks ──
+            gw_rows = conn.execute(sa_text(
+                "SELECT id FROM game_weeks "
+                "WHERE league_year_id = :lyid AND week_index >= :tw"
+            ), base_params).all()
+            gw_ids = [int(r[0]) for r in gw_rows]
+
+            if gw_ids:
+                gw_ph = ", ".join(f":gw{i}" for i in range(len(gw_ids)))
+                gw_params = {f"gw{i}": gid for i, gid in enumerate(gw_ids)}
+                r = conn.execute(sa_text(
+                    f"DELETE FROM org_ledger_entries "
+                    f"WHERE game_week_id IN ({gw_ph})"
+                ), gw_params)
+                deleted["org_ledger_entries"] = r.rowcount
+            else:
+                deleted["org_ledger_entries"] = 0
+
+            # ── 10. Delete waiver claims from rolled-back weeks ──
+            r = conn.execute(sa_text(
+                "DELETE FROM waiver_claims "
+                "WHERE league_year_id = :lyid AND placed_week >= :tw"
+            ), base_params)
+            deleted["waiver_claims"] = r.rowcount
+
+            # ── 11. Delete FA auctions entered during rolled-back weeks ──
+            # Offers first (FK), then auctions
+            r = conn.execute(sa_text(
+                "DELETE ao FROM fa_auction_offers ao "
+                "JOIN fa_auction a ON a.id = ao.auction_id "
+                "WHERE a.league_year_id = :lyid AND a.entered_week >= :tw"
+            ), base_params)
+            deleted["fa_auction_offers"] = r.rowcount
+
+            r = conn.execute(sa_text(
+                "DELETE FROM fa_auction "
+                "WHERE league_year_id = :lyid AND entered_week >= :tw"
+            ), base_params)
+            deleted["fa_auction"] = r.rowcount
+
+            # Player demands and market history created during the period
+            if rollback_cutoff is not None:
+                r = conn.execute(sa_text(
+                    "DELETE FROM player_demands "
+                    "WHERE league_year_id = :lyid AND computed_at >= :cutoff"
+                ), {"lyid": league_year_id, "cutoff": rollback_cutoff})
+                deleted["player_demands"] = r.rowcount
+
+                r = conn.execute(sa_text(
+                    "DELETE FROM fa_market_history "
+                    "WHERE league_year_id = :lyid AND created_at >= :cutoff"
+                ), {"lyid": league_year_id, "cutoff": rollback_cutoff})
+                deleted["fa_market_history"] = r.rowcount
+            else:
+                deleted["player_demands"] = 0
+                deleted["fa_market_history"] = 0
+
+            # ── 12. Delete transaction log entries from rolled-back period ──
+            if rollback_cutoff is not None:
+                r = conn.execute(sa_text(
+                    "DELETE FROM transaction_log "
+                    "WHERE league_year_id = :lyid AND executed_at >= :cutoff"
+                ), {"lyid": league_year_id, "cutoff": rollback_cutoff})
+                deleted["transaction_log"] = r.rowcount
+            else:
+                deleted["transaction_log"] = 0
+
+            # ── 13. Reset fatigue (cumulative — not reversible per-week) ──
+            r = conn.execute(sa_text(
+                "DELETE FROM player_fatigue_state "
+                "WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id})
+            deleted["fatigue_reset"] = r.rowcount
+
+            # ── 14. Reset rotation state ──
+            conn.execute(sa_text(
+                "UPDATE team_rotation_state SET current_slot = 0, "
+                "last_game_id = NULL, last_updated_at = NOW()"
+            ))
+
+            # ── 15. Reset timestamp to start of target_week ──
+            conn.execute(sa_text(
+                "UPDATE timestamp_state SET "
+                "week = :tw, games_a_ran = 0, games_b_ran = 0, "
+                "games_c_ran = 0, games_d_ran = 0, run_games = 0 "
+                "WHERE id = 1"
+            ), {"tw": target_week})
+
+            # ── 16. Refresh listed positions based on post-rollback state ──
+            try:
+                from services.listed_position import refresh_all_teams
+                refresh_all_teams(conn, league_year_id)
+                deleted["listed_positions_refreshed"] = True
+            except Exception:
+                current_app.logger.exception(
+                    "rollback_to_week: listed position refresh failed"
+                )
+                deleted["listed_positions_refreshed"] = False
+
+        # Broadcast updated timestamp
+        from services.websocket_manager import ws_manager
+        ws_manager.broadcast_timestamp()
+
+        current_app.logger.info(
+            f"Rolled back to week {target_week} for "
+            f"league_year_id={league_year_id}: {deleted}"
+        )
+
+        return jsonify(
+            ok=True,
+            deleted=deleted,
+            games_rolled_back=len(game_ids),
+            timestamp_reset_to=target_week,
+        ), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("rollback_to_week: database error")
+        return jsonify(error="database_error", message=str(e)), 500
+    except Exception as e:
+        current_app.logger.exception("rollback_to_week: unexpected error")
         return jsonify(error="unexpected_error", message=str(e)), 500
 
 
@@ -2049,16 +2420,18 @@ def run_season():
 def _run_all_levels_task(task_id: str, league_year_id: int,
                          start_week: int, end_week: int):
     """
-    Background worker: simulate every week for ALL league levels in sequence.
+    Background worker: simulate every week for ALL league levels.
 
-    Iterates level-by-level (9,8,7,6,5,4,3), running each level's full
-    week range. Does NOT advance the timestamp/season state — purely runs
-    simulations for testing statistical and financial models.
+    Processes all levels in a single build_week_payloads() call per week,
+    which parallelises engine calls across levels via ThreadPoolExecutor.
+    After all levels complete, runs weekly processing (injuries, finances,
+    waivers, FA auction, position refresh).
     """
     import logging
+    from sqlalchemy import text as _sa_text
+
     logger = logging.getLogger(__name__)
 
-    ALL_LEVELS = [9, 8, 7, 6, 5, 4, 3]
     LEVEL_NAMES = {9: "MLB", 8: "AAA", 7: "AA", 6: "High-A",
                    5: "A", 4: "Scraps", 3: "College"}
 
@@ -2067,88 +2440,135 @@ def _run_all_levels_task(task_id: str, league_year_id: int,
 
     engine = get_engine()
     total_games = 0
-    steps_completed = 0
-    total_weeks = end_week - start_week + 1
+    weeks_completed = 0
 
-    level_summaries = {}
+    # Resolve league_year (the year number) from league_year_id
+    with engine.connect() as _conn:
+        _ly_row = _conn.execute(
+            _sa_text("SELECT league_year FROM league_years WHERE id = :id"),
+            {"id": league_year_id},
+        ).first()
+    league_year = int(_ly_row[0]) if _ly_row else None
 
     try:
-        for level in ALL_LEVELS:
-            level_games = 0
-            level_name = LEVEL_NAMES.get(level, str(level))
-            logger.info(
-                f"run_all_levels task {task_id}: starting level {level_name}"
-            )
+        for week in range(start_week, end_week + 1):
+            # Update timestamp to current week
+            update_timestamp({"week": week, "run_games": True}, broadcast=True)
 
-            for week in range(start_week, end_week + 1):
-                # Update timestamp to current week
-                update_timestamp({"week": week, "run_games": True}, broadcast=True)
+            # --- Run ALL levels for this week in one call ---
+            from services.timing_log import timed_stage, log_timing
+            import time as _time
 
-                try:
+            try:
+                with timed_stage("build_week_payloads", week=week,
+                                 detail="all levels"):
                     with engine.connect() as conn:
                         result = build_week_payloads(
                             conn=conn,
                             league_year_id=league_year_id,
                             season_week=week,
-                            league_level=level,
+                            league_level=None,
                             simulate=True,
                         )
 
-                    week_games = result.get("total_games", 0)
-                    level_games += week_games
-                    total_games += week_games
+                week_games = result.get("total_games", 0)
+                total_games += week_games
 
-                    subweeks = result.get("subweeks", {})
-                    for sw_key in ["a", "b", "c", "d"]:
-                        if subweeks.get(sw_key):
-                            set_subweek_completed(sw_key, broadcast=False)
-                except ValueError as ve:
-                    # No games for this level/week — skip but log
-                    logger.debug(
-                        "run_all_levels: no games for level %d week %d: %s",
-                        level, week, ve,
-                    )
-                except Exception as ex:
-                    # Unexpected error — log but continue to next week
-                    logger.exception(
-                        "run_all_levels: error at level %d week %d: %s",
-                        level, week, ex,
-                    )
+                subweeks = result.get("subweeks", {})
+                for sw_key in ["a", "b", "c", "d"]:
+                    if subweeks.get(sw_key):
+                        set_subweek_completed(sw_key, broadcast=False)
+            except ValueError as ve:
+                logger.debug(
+                    "run_all_levels: no games for week %d: %s",
+                    week, ve,
+                )
+            except Exception as ex:
+                logger.exception(
+                    "run_all_levels: error at week %d: %s",
+                    week, ex,
+                )
+                raise
 
-                set_run_games(False, broadcast=False)
+            weeks_completed += 1
+            store.set_progress(task_id, weeks_completed)
 
-                # Tick injuries (decrement weeks_remaining, heal players)
-                # but do NOT call full advance_week() which triggers waivers,
-                # auction phases, and timestamp increment — those should only
-                # happen once per real game week, not per level-week.
+            set_run_games(False, broadcast=False)
+
+            # --- Weekly processing (once per week, after all levels) ---
+            _wp_t0 = _time.monotonic()
+
+            try:
+                from bootstrap import invalidate_season_context
+                invalidate_season_context()
+            except Exception:
+                pass
+
+            with timed_stage("weekly_tick_injuries", week=week):
                 try:
                     healed = _tick_injuries(engine)
-                    if healed:
-                        logger.debug(
-                            "run_all_levels: %d players healed at level %d week %d",
-                            healed, level, week,
-                        )
                 except Exception as inj_err:
                     logger.warning(
-                        "run_all_levels: injury tick failed at level %d week %d: %s",
-                        level, week, inj_err,
+                        "run_all_levels: injury tick failed at week %d: %s",
+                        week, inj_err,
                     )
 
-                steps_completed += 1
-                store.set_progress(task_id, steps_completed)
+            if league_year is not None:
+                with timed_stage("weekly_books", week=week):
+                    try:
+                        from financials.books import run_week_books
+                        run_week_books(engine, league_year, week)
+                    except Exception as books_err:
+                        logger.warning(
+                            "run_all_levels: week books failed at week %d: %s",
+                            week, books_err,
+                        )
 
-            level_summaries[level_name] = level_games
+            with timed_stage("weekly_waivers", week=week):
+                try:
+                    from services.waivers import process_expired_waivers
+                    with engine.begin() as conn:
+                        process_expired_waivers(conn, week, league_year_id)
+                except Exception as waiver_err:
+                    logger.warning(
+                        "run_all_levels: waiver processing failed at week %d: %s",
+                        week, waiver_err,
+                    )
+
+            with timed_stage("weekly_fa_auction", week=week):
+                try:
+                    from services.fa_auction import advance_auction_phases
+                    with engine.begin() as conn:
+                        advance_auction_phases(conn, week, league_year_id)
+                except Exception as auc_err:
+                    logger.warning(
+                        "run_all_levels: FA auction failed at week %d: %s",
+                        week, auc_err,
+                    )
+
+            with timed_stage("weekly_listed_positions", week=week):
+                try:
+                    from services.listed_position import refresh_all_teams
+                    with engine.begin() as conn:
+                        refresh_all_teams(conn, league_year_id)
+                except Exception:
+                    logger.exception(
+                        "run_all_levels: listed position refresh failed at week %d",
+                        week,
+                    )
+
+            log_timing("weekly_processing_total",
+                       _time.monotonic() - _wp_t0, week=week)
+
             logger.info(
-                f"run_all_levels task {task_id}: level {level_name} done — "
-                f"{level_games} games"
+                f"run_all_levels task {task_id}: week {week} complete — "
+                f"{total_games} total games so far"
             )
 
         summary = {
             "league_year_id": league_year_id,
-            "levels_completed": len(ALL_LEVELS),
-            "weeks_per_level": total_weeks,
+            "weeks_simulated": end_week - start_week + 1,
             "total_games": total_games,
-            "by_level": level_summaries,
             "start_week": start_week,
             "end_week": end_week,
         }
@@ -2161,7 +2581,8 @@ def _run_all_levels_task(task_id: str, league_year_id: int,
         except Exception:
             pass
         logger.exception(
-            f"run_all_levels task {task_id} failed at step {steps_completed}"
+            f"run_all_levels task {task_id} failed at week "
+            f"{start_week + weeks_completed}"
         )
         store.set_failed(task_id, str(e))
 
@@ -2171,8 +2592,8 @@ def run_season_all():
     """
     Start a background task to simulate ALL league levels for a season.
 
-    Runs levels 9,8,7,6,5,4,3 sequentially, each through the full
-    week range. Does not change season state — for testing only.
+    Iterates week-by-week, running all levels (9→3) per week with full
+    weekly processing (injuries, finances, waivers, FA auction, positions).
 
     Request body:
     {
@@ -2206,15 +2627,13 @@ def run_season_all():
                        message="start_week must be >= 1 and end_week >= start_week"), 400
 
     total_weeks = end_week - start_week + 1
-    num_levels = 7  # levels 9 through 3
-    total_steps = total_weeks * num_levels
 
     store = get_task_store()
-    task_data = store.create_task("run_all_levels", total=total_steps, metadata={
+    task_data = store.create_task("run_all_levels", total=total_weeks, metadata={
         "league_year_id": league_year_id,
         "start_week": start_week,
         "end_week": end_week,
-        "levels": "9,8,7,6,5,4,3",
+        "levels": "all (parallel)",
     })
     task_id = task_data["task_id"]
 
@@ -2233,7 +2652,7 @@ def run_season_all():
     return jsonify(
         task_id=task_id,
         status="pending",
-        total=total_steps,
+        total=total_weeks,
         poll_url=f"/api/v1/games/tasks/{task_id}",
     ), 202
 

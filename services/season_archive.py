@@ -280,6 +280,76 @@ def _clean_trade_proposals(engine, conn, ly_id: int, dry_run: bool,
     return {"counted": counted, "deleted": deleted}
 
 
+def _clean_game_fielding_lines(engine, conn, ly_id: int, dry_run: bool,
+                               batch_size: int) -> Dict[str, int]:
+    where = "league_year_id = :ly"
+    params = {"ly": ly_id}
+    counted = _count(conn, "game_fielding_lines", where, params)
+    deleted = 0 if dry_run else _batch_delete(
+        engine, "game_fielding_lines", where, params, batch_size)
+    return {"counted": counted, "deleted": deleted}
+
+
+def _clean_engine_diagnostic_log(engine, conn, ly_id: int, dry_run: bool,
+                                 batch_size: int) -> Dict[str, int]:
+    where = "league_year_id = :ly"
+    params = {"ly": ly_id}
+    counted = _count(conn, "engine_diagnostic_log", where, params)
+    deleted = 0 if dry_run else _batch_delete(
+        engine, "engine_diagnostic_log", where, params, batch_size)
+    return {"counted": counted, "deleted": deleted}
+
+
+def _clean_simulation_runs(engine, conn, ly_id: int, season_id: int,
+                           dry_run: bool, batch_size: int) -> Dict[str, int]:
+    """Delete simulation_runs whose gamelist_id belongs to this season."""
+    where = ("gamelist_id IN "
+             "(SELECT id FROM gamelist WHERE season = :sid)")
+    params = {"sid": season_id}
+    counted = _count(conn, "simulation_runs", where, params)
+    deleted = 0 if dry_run else _batch_delete(
+        engine, "simulation_runs", where, params, batch_size)
+    return {"counted": counted, "deleted": deleted}
+
+
+def _clean_background_tasks(engine, conn, dry_run: bool,
+                            batch_size: int) -> Dict[str, int]:
+    """Delete completed/failed background_tasks older than 24 hours."""
+    where = "updated_at < UNIX_TIMESTAMP() - 86400"
+    params: dict = {}
+    counted = _count(conn, "background_tasks", where, params)
+    deleted = 0 if dry_run else _batch_delete(
+        engine, "background_tasks", where, params, batch_size)
+    return {"counted": counted, "deleted": deleted}
+
+
+def _reset_injury_state(engine, conn, ly_id: int,
+                        dry_run: bool) -> Dict[str, int]:
+    """Reset player_injury_state to healthy for season end.
+
+    player_injury_state has no league_year_id — it's a current-state
+    snapshot keyed by player_id.  At season end, all injuries expire.
+    The FK to player_injury_events uses ON DELETE SET NULL, so this
+    is safe to run before or after event cleanup.
+    """
+    counted = conn.execute(text(
+        "SELECT COUNT(*) FROM player_injury_state WHERE status = 'injured'"
+    )).first()[0]
+
+    updated = 0
+    if not dry_run:
+        r = conn.execute(text("""
+            UPDATE player_injury_state
+            SET status = 'healthy',
+                current_event_id = NULL,
+                weeks_remaining = 0
+            WHERE status = 'injured'
+        """))
+        updated = r.rowcount
+
+    return {"counted": counted, "updated": updated}
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -415,6 +485,51 @@ def archive_season(
     except Exception as e:
         logger.warning("archive: trade_proposals failed: %s", e)
         warnings.append(f"trade_proposals: {e}")
+
+    # 12. game_fielding_lines
+    try:
+        with engine.connect() as conn:
+            tables["game_fielding_lines"] = _clean_game_fielding_lines(
+                engine, conn, league_year_id, dry_run, batch_size)
+    except Exception as e:
+        logger.warning("archive: game_fielding_lines failed: %s", e)
+        warnings.append(f"game_fielding_lines: {e}")
+
+    # 13. engine_diagnostic_log
+    try:
+        with engine.connect() as conn:
+            tables["engine_diagnostic_log"] = _clean_engine_diagnostic_log(
+                engine, conn, league_year_id, dry_run, batch_size)
+    except Exception as e:
+        logger.warning("archive: engine_diagnostic_log failed: %s", e)
+        warnings.append(f"engine_diagnostic_log: {e}")
+
+    # 14. simulation_runs (joined to gamelist by season)
+    try:
+        with engine.connect() as conn:
+            tables["simulation_runs"] = _clean_simulation_runs(
+                engine, conn, league_year_id, season_id, dry_run, batch_size)
+    except Exception as e:
+        logger.warning("archive: simulation_runs failed: %s", e)
+        warnings.append(f"simulation_runs: {e}")
+
+    # 15. background_tasks (not season-scoped, just stale data)
+    try:
+        with engine.connect() as conn:
+            tables["background_tasks"] = _clean_background_tasks(
+                engine, conn, dry_run, batch_size)
+    except Exception as e:
+        logger.warning("archive: background_tasks failed: %s", e)
+        warnings.append(f"background_tasks: {e}")
+
+    # 16. player_injury_state (reset to healthy for season end)
+    try:
+        with engine.begin() as conn:
+            tables["player_injury_state"] = _reset_injury_state(
+                engine, conn, league_year_id, dry_run)
+    except Exception as e:
+        logger.warning("archive: player_injury_state failed: %s", e)
+        warnings.append(f"player_injury_state: {e}")
 
     return {
         "league_year_id": league_year_id,

@@ -37,9 +37,14 @@ def _fk_checks_disabled(conn):
         except Exception:
             logger.exception("_fk_checks_disabled: failed to re-enable FK checks")
 
-# Chunk size for executemany batching — keeps SQL statement size reasonable
-# and reduces lock hold time on InnoDB.
+# Chunk size for season stat UPSERTs — smaller to reduce lock hold time
+# on shared rows (cross-level contention risk).
 _BULK_CHUNK_SIZE = 100
+
+# Larger chunk size for per-game line INSERTs — these target rows with
+# unique game_ids (no cross-level contention), so bigger batches reduce
+# Railway roundtrips without lock risk.
+_INSERT_CHUNK_SIZE = 500
 
 # MySQL error codes worth retrying at a smaller granularity
 _LOCK_WAIT_TIMEOUT = 1205
@@ -89,6 +94,119 @@ def _row_by_row_fallback(conn, stmt, rows: list) -> int:
                 row.get("player_id", "?"), mysql_errno,
             )
     return inserted
+
+
+# ---------------------------------------------------------------------------
+# Multi-row INSERT builder — sends ONE SQL per chunk instead of N individual
+# statements, reducing Railway DB round-trips from ~100 to 1 per chunk.
+# ---------------------------------------------------------------------------
+
+def _build_multi_row_sql(insert_into: str, value_tpl: str, on_dup: str,
+                         param_keys: list, rows: list) -> tuple:
+    """Build a single multi-row INSERT with numbered params.
+
+    Returns (sql_string, merged_params_dict).
+    """
+    value_parts = []
+    merged = {}
+    for i, row in enumerate(rows):
+        numbered = value_tpl
+        for key in param_keys:
+            numbered = numbered.replace(f":{key}", f":r{i}_{key}")
+            merged[f"r{i}_{key}"] = row[key]
+        value_parts.append(numbered)
+    sql = f"{insert_into}\n    VALUES\n        {', '.join(value_parts)}\n    {on_dup}"
+    return sql, merged
+
+
+def _multi_row_chunked_execute(
+    conn, insert_into: str, value_tpl: str, on_dup: str,
+    param_keys: list, params: list,
+    chunk_size: int = _BULK_CHUNK_SIZE,
+) -> int:
+    """Multi-row INSERT in chunks.  1 SQL per chunk instead of N.
+
+    Falls back to _chunked_execute (executemany) on failure.
+    """
+    if not params:
+        return 0
+    total = 0
+    for i in range(0, len(params), chunk_size):
+        chunk = params[i:i + chunk_size]
+        try:
+            sql, merged = _build_multi_row_sql(
+                insert_into, value_tpl, on_dup, param_keys, chunk)
+            with conn.begin_nested():
+                conn.execute(text(sql), merged)
+            total += len(chunk)
+        except Exception as exc:
+            mysql_errno = _extract_mysql_errno(exc)
+            if mysql_errno in (_LOCK_WAIT_TIMEOUT, _DEADLOCK):
+                logger.warning(
+                    "_multi_row_chunked_execute: lock error %d on chunk of %d, "
+                    "retrying row-by-row", mysql_errno, len(chunk),
+                )
+                total += _row_by_row_fallback(conn, _fallback_stmt_cache.get(insert_into, text(f"{insert_into} VALUES {value_tpl} {on_dup}")), chunk)
+            else:
+                raise
+    return total
+
+
+# --- Multi-row definitions for each UPSERT type ---
+
+_BAT_SEASON_INSERT = "INSERT INTO player_batting_stats (player_id, league_year_id, team_id, games, at_bats, runs, hits, doubles_hit, triples, home_runs, inside_the_park_hr, rbi, walks, strikeouts, stolen_bases, caught_stealing)"
+_BAT_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :at_bats, :runs, :hits, :doubles, :triples, :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing)"
+_BAT_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
+        games              = player_batting_stats.games + 1,
+        at_bats            = player_batting_stats.at_bats + new_row.at_bats,
+        runs               = player_batting_stats.runs + new_row.runs,
+        hits               = player_batting_stats.hits + new_row.hits,
+        doubles_hit        = player_batting_stats.doubles_hit + new_row.doubles_hit,
+        triples            = player_batting_stats.triples + new_row.triples,
+        home_runs          = player_batting_stats.home_runs + new_row.home_runs,
+        inside_the_park_hr = player_batting_stats.inside_the_park_hr + new_row.inside_the_park_hr,
+        rbi                = player_batting_stats.rbi + new_row.rbi,
+        walks              = player_batting_stats.walks + new_row.walks,
+        strikeouts         = player_batting_stats.strikeouts + new_row.strikeouts,
+        stolen_bases       = player_batting_stats.stolen_bases + new_row.stolen_bases,
+        caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing"""
+_BAT_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "at_bats", "runs", "hits", "doubles", "triples", "home_runs", "inside_the_park_hr", "rbi", "walks", "strikeouts", "stolen_bases", "caught_stealing"]
+
+_PITCH_SEASON_INSERT = "INSERT INTO player_pitching_stats (player_id, league_year_id, team_id, games, games_started, wins, losses, saves, holds, blown_saves, quality_starts, innings_pitched_outs, hits_allowed, runs_allowed, earned_runs, walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed)"
+_PITCH_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :games_started, :win, :loss, :save, :hold, :blown_save, :quality_start, :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs, :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)"
+_PITCH_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
+        games                       = player_pitching_stats.games + 1,
+        games_started               = player_pitching_stats.games_started + new_row.games_started,
+        wins                        = player_pitching_stats.wins + new_row.wins,
+        losses                      = player_pitching_stats.losses + new_row.losses,
+        saves                       = player_pitching_stats.saves + new_row.saves,
+        holds                       = player_pitching_stats.holds + new_row.holds,
+        blown_saves                 = player_pitching_stats.blown_saves + new_row.blown_saves,
+        quality_starts              = player_pitching_stats.quality_starts + new_row.quality_starts,
+        innings_pitched_outs        = player_pitching_stats.innings_pitched_outs + new_row.innings_pitched_outs,
+        hits_allowed                = player_pitching_stats.hits_allowed + new_row.hits_allowed,
+        runs_allowed                = player_pitching_stats.runs_allowed + new_row.runs_allowed,
+        earned_runs                 = player_pitching_stats.earned_runs + new_row.earned_runs,
+        walks                       = player_pitching_stats.walks + new_row.walks,
+        strikeouts                  = player_pitching_stats.strikeouts + new_row.strikeouts,
+        home_runs_allowed           = player_pitching_stats.home_runs_allowed + new_row.home_runs_allowed,
+        inside_the_park_hr_allowed  = player_pitching_stats.inside_the_park_hr_allowed + new_row.inside_the_park_hr_allowed"""
+_PITCH_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "games_started", "win", "loss", "save", "hold", "blown_save", "quality_start", "innings_pitched_outs", "hits_allowed", "runs_allowed", "earned_runs", "walks", "strikeouts", "home_runs_allowed", "inside_the_park_hr_allowed"]
+
+_FIELD_SEASON_INSERT = "INSERT INTO player_fielding_stats (player_id, league_year_id, team_id, position_code, games, innings, putouts, assists, errors)"
+_FIELD_SEASON_VALS = "(:player_id, :league_year_id, :team_id, :position_code, 1, :innings, :putouts, :assists, :errors)"
+_FIELD_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
+        games   = player_fielding_stats.games + 1,
+        innings = player_fielding_stats.innings + new_row.innings,
+        putouts = player_fielding_stats.putouts + new_row.putouts,
+        assists = player_fielding_stats.assists + new_row.assists,
+        errors  = player_fielding_stats.errors + new_row.errors"""
+_FIELD_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "position_code", "innings", "putouts", "assists", "errors"]
+
+_USAGE_INSERT = "INSERT INTO player_position_usage_week (league_year_id, season_week, team_id, player_id, position_code, vs_hand, starts_this_week)"
+_USAGE_VALS = "(:league_year_id, :season_week, :team_id, :player_id, :position_code, :vs_hand, 1)"
+_USAGE_ONDUP = "ON DUPLICATE KEY UPDATE starts_this_week = starts_this_week + 1"
+_USAGE_KEYS = ["league_year_id", "season_week", "team_id", "player_id", "position_code", "vs_hand"]
 
 
 def _extract_mysql_errno(exc: Exception) -> int | None:
@@ -783,6 +901,63 @@ _GAME_SUBSTITUTION_INSERT = text("""
          :entry_outs, :entry_is_save_situation)
 """)
 
+# --- Game line multi-row definitions (must be after _GAME_*_COLS/_VALS) ---
+
+_GBAT_INSERT = f"INSERT INTO game_batting_lines {_GAME_BATTING_COLS}"
+_GBAT_VALS = _GAME_BATTING_VALS
+_GBAT_ONDUP_FRESH = ""
+_GBAT_ONDUP_RESIM = """AS new_row ON DUPLICATE KEY UPDATE
+        position_code = new_row.position_code, batting_order = new_row.batting_order,
+        at_bats = new_row.at_bats, runs = new_row.runs, hits = new_row.hits,
+        doubles_hit = new_row.doubles_hit, triples = new_row.triples,
+        home_runs = new_row.home_runs, inside_the_park_hr = new_row.inside_the_park_hr,
+        rbi = new_row.rbi, walks = new_row.walks, strikeouts = new_row.strikeouts,
+        stolen_bases = new_row.stolen_bases, caught_stealing = new_row.caught_stealing,
+        plate_appearances = new_row.plate_appearances, hbp = new_row.hbp"""
+_GBAT_KEYS = ["game_id", "player_id", "team_id", "league_year_id", "position_code",
+              "batting_order", "at_bats", "runs", "hits", "doubles", "triples",
+              "home_runs", "inside_the_park_hr", "rbi", "walks", "strikeouts",
+              "stolen_bases", "caught_stealing", "plate_appearances", "hbp"]
+
+_GPIT_INSERT = f"INSERT INTO game_pitching_lines {_GAME_PITCHING_COLS}"
+_GPIT_VALS = _GAME_PITCHING_VALS
+_GPIT_ONDUP_FRESH = ""
+_GPIT_ONDUP_RESIM = """AS new_row ON DUPLICATE KEY UPDATE
+        pitch_appearance_order = new_row.pitch_appearance_order,
+        games_started = new_row.games_started, win = new_row.win,
+        loss = new_row.loss, save_recorded = new_row.save_recorded,
+        hold = new_row.hold, blown_save = new_row.blown_save,
+        quality_start = new_row.quality_start,
+        innings_pitched_outs = new_row.innings_pitched_outs,
+        hits_allowed = new_row.hits_allowed, runs_allowed = new_row.runs_allowed,
+        earned_runs = new_row.earned_runs, walks = new_row.walks,
+        strikeouts = new_row.strikeouts, home_runs_allowed = new_row.home_runs_allowed,
+        inside_the_park_hr_allowed = new_row.inside_the_park_hr_allowed,
+        pitches_thrown = new_row.pitches_thrown, balls = new_row.balls,
+        strikes = new_row.strikes, hbp = new_row.hbp, wildpitches = new_row.wildpitches"""
+_GPIT_KEYS = ["game_id", "player_id", "team_id", "league_year_id",
+              "pitch_appearance_order", "games_started", "win", "loss", "save",
+              "hold", "blown_save", "quality_start", "innings_pitched_outs",
+              "hits_allowed", "runs_allowed", "earned_runs", "walks", "strikeouts",
+              "home_runs_allowed", "inside_the_park_hr_allowed",
+              "pitches_thrown", "balls", "strikes", "hbp", "wildpitches"]
+
+_GFLD_INSERT = "INSERT INTO game_fielding_lines (game_id, player_id, team_id, league_year_id, position_code, innings, putouts, assists, errors)"
+_GFLD_VALS = "(:game_id, :player_id, :team_id, :league_year_id, :position_code, :innings, :putouts, :assists, :errors)"
+_GFLD_ONDUP_FRESH = ""
+_GFLD_ONDUP_RESIM = """AS new_row ON DUPLICATE KEY UPDATE
+        innings = new_row.innings, putouts = new_row.putouts,
+        assists = new_row.assists, errors = new_row.errors"""
+_GFLD_KEYS = ["game_id", "player_id", "team_id", "league_year_id", "position_code",
+              "innings", "putouts", "assists", "errors"]
+
+_GSUB_INSERT = "INSERT INTO game_substitutions (game_id, league_year_id, inning, half, sub_type, player_in_id, player_out_id, new_position, entry_score_diff, entry_runners_on, entry_inning, entry_outs, entry_is_save_situation)"
+_GSUB_VALS = "(:game_id, :league_year_id, :inning, :half, :sub_type, :player_in_id, :player_out_id, :new_position, :entry_score_diff, :entry_runners_on, :entry_inning, :entry_outs, :entry_is_save_situation)"
+_GSUB_KEYS = ["game_id", "league_year_id", "inning", "half", "sub_type",
+              "player_in_id", "player_out_id", "new_position",
+              "entry_score_diff", "entry_runners_on", "entry_inning",
+              "entry_outs", "entry_is_save_situation"]
+
 
 def _insert_game_substitutions(
     conn, game_id: int, substitutions: list, league_year_id: int
@@ -1022,37 +1197,48 @@ def accumulate_subweek_stats_bulk(
     totals = {"batters": 0, "pitchers": 0, "fielders": 0}
 
     with _fk_checks_disabled(conn):
-        # --- Season accumulation UPSERTs (chunked) ---
+        # --- Season accumulation UPSERTs (multi-row: 1 SQL per chunk) ---
         if batting_params:
             try:
-                totals["batters"] = _chunked_execute(conn, _BATTING_UPSERT, batting_params)
+                totals["batters"] = _multi_row_chunked_execute(
+                    conn, _BAT_SEASON_INSERT, _BAT_SEASON_VALS,
+                    _BAT_SEASON_ONDUP, _BAT_SEASON_KEYS, batting_params)
             except Exception:
                 logger.exception("stat_accumulator bulk: batting upsert failed (%d rows)", len(batting_params))
 
         if pitching_params:
             try:
-                totals["pitchers"] = _chunked_execute(conn, _PITCHING_UPSERT, pitching_params)
+                totals["pitchers"] = _multi_row_chunked_execute(
+                    conn, _PITCH_SEASON_INSERT, _PITCH_SEASON_VALS,
+                    _PITCH_SEASON_ONDUP, _PITCH_SEASON_KEYS, pitching_params)
             except Exception:
                 logger.exception("stat_accumulator bulk: pitching upsert failed (%d rows)", len(pitching_params))
 
         if fielding_params:
             try:
-                totals["fielders"] = _chunked_execute(conn, _FIELDING_UPSERT, fielding_params)
+                totals["fielders"] = _multi_row_chunked_execute(
+                    conn, _FIELD_SEASON_INSERT, _FIELD_SEASON_VALS,
+                    _FIELD_SEASON_ONDUP, _FIELD_SEASON_KEYS, fielding_params)
             except Exception:
                 logger.exception("stat_accumulator bulk: fielding upsert failed (%d rows)", len(fielding_params))
 
-        # --- Per-game lines: use fresh INSERT when possible, UPSERT for re-sims ---
-        game_bat_stmt = _GAME_BATTING_INSERT if is_resim else _GAME_BATTING_INSERT_FRESH
-        game_pitch_stmt = _GAME_PITCHING_INSERT if is_resim else _GAME_PITCHING_INSERT_FRESH
+        # --- Per-game lines: multi-row INSERT (1 SQL per chunk) ---
+        gbat_ondup = _GBAT_ONDUP_RESIM if is_resim else _GBAT_ONDUP_FRESH
+        gpit_ondup = _GPIT_ONDUP_RESIM if is_resim else _GPIT_ONDUP_FRESH
+        gfld_ondup = _GFLD_ONDUP_RESIM if is_resim else _GFLD_ONDUP_FRESH
 
         if game_batting_params:
             try:
-                _chunked_execute(conn, game_bat_stmt, game_batting_params)
+                _multi_row_chunked_execute(
+                    conn, _GBAT_INSERT, _GBAT_VALS, gbat_ondup,
+                    _GBAT_KEYS, game_batting_params, _INSERT_CHUNK_SIZE)
             except Exception:
                 if not is_resim:
                     logger.warning("stat_accumulator bulk: fresh batting insert failed, retrying with upsert")
                     try:
-                        _chunked_execute(conn, _GAME_BATTING_INSERT, game_batting_params)
+                        _multi_row_chunked_execute(
+                            conn, _GBAT_INSERT, _GBAT_VALS, _GBAT_ONDUP_RESIM,
+                            _GBAT_KEYS, game_batting_params, _INSERT_CHUNK_SIZE)
                     except Exception:
                         logger.exception("stat_accumulator bulk: game batting upsert also failed (%d rows)", len(game_batting_params))
                 else:
@@ -1060,25 +1246,32 @@ def accumulate_subweek_stats_bulk(
 
         if game_pitching_params:
             try:
-                _chunked_execute(conn, game_pitch_stmt, game_pitching_params)
+                _multi_row_chunked_execute(
+                    conn, _GPIT_INSERT, _GPIT_VALS, gpit_ondup,
+                    _GPIT_KEYS, game_pitching_params, _INSERT_CHUNK_SIZE)
             except Exception:
                 if not is_resim:
                     logger.warning("stat_accumulator bulk: fresh pitching insert failed, retrying with upsert")
                     try:
-                        _chunked_execute(conn, _GAME_PITCHING_INSERT, game_pitching_params)
+                        _multi_row_chunked_execute(
+                            conn, _GPIT_INSERT, _GPIT_VALS, _GPIT_ONDUP_RESIM,
+                            _GPIT_KEYS, game_pitching_params, _INSERT_CHUNK_SIZE)
                     except Exception:
                         logger.exception("stat_accumulator bulk: game pitching upsert also failed (%d rows)", len(game_pitching_params))
                 else:
                     logger.exception("stat_accumulator bulk: game pitching insert failed (%d rows)", len(game_pitching_params))
 
         if game_fielding_params:
-            game_field_stmt = _GAME_FIELDING_INSERT if is_resim else _GAME_FIELDING_INSERT_FRESH
             try:
-                _chunked_execute(conn, game_field_stmt, game_fielding_params)
+                _multi_row_chunked_execute(
+                    conn, _GFLD_INSERT, _GFLD_VALS, gfld_ondup,
+                    _GFLD_KEYS, game_fielding_params, _INSERT_CHUNK_SIZE)
             except Exception:
                 if not is_resim:
                     try:
-                        _chunked_execute(conn, _GAME_FIELDING_INSERT, game_fielding_params)
+                        _multi_row_chunked_execute(
+                            conn, _GFLD_INSERT, _GFLD_VALS, _GFLD_ONDUP_RESIM,
+                            _GFLD_KEYS, game_fielding_params, _INSERT_CHUNK_SIZE)
                     except Exception:
                         logger.exception("stat_accumulator bulk: game fielding upsert also failed (%d rows)", len(game_fielding_params))
                 else:
@@ -1086,7 +1279,9 @@ def accumulate_subweek_stats_bulk(
 
         if substitution_params:
             try:
-                _chunked_execute(conn, _GAME_SUBSTITUTION_INSERT, substitution_params)
+                _multi_row_chunked_execute(
+                    conn, _GSUB_INSERT, _GSUB_VALS, "",
+                    _GSUB_KEYS, substitution_params, _INSERT_CHUNK_SIZE)
             except Exception:
                 logger.exception("stat_accumulator bulk: substitution insert failed (%d rows)", len(substitution_params))
 
@@ -1143,7 +1338,9 @@ def record_subweek_position_usage_bulk(
 
     try:
         with _fk_checks_disabled(conn):
-            total = _chunked_execute(conn, _USAGE_UPSERT, usage_params)
+            total = _multi_row_chunked_execute(
+                conn, _USAGE_INSERT, _USAGE_VALS, _USAGE_ONDUP,
+                _USAGE_KEYS, usage_params)
         logger.info("stat_accumulator bulk: %d position usage rows upserted", total)
         return total
     except Exception:

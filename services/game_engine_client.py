@@ -9,6 +9,7 @@ import requests
 from requests.exceptions import RequestException, Timeout
 
 logger = logging.getLogger(__name__)
+from services.sim_failure_log import log_engine_failure, log_missing_games
 
 # Read game engine URL from environment variable
 # In production: https://simbaseball-engine.railway.app
@@ -165,6 +166,22 @@ def simulate_games_batch(
             logger.warning(
                 f"Engine returned {len(results)} results for {len(games)} games"
             )
+            # Identify which game_ids are missing
+            sent_gids = [g.get("game_id") for g in games]
+            recv_gids = set()
+            for r in results:
+                gid = r.get("game_id") or (r.get("result") or {}).get("game_id")
+                if gid is not None:
+                    recv_gids.add(int(gid))
+            missing = [gid for gid in sent_gids if gid and int(gid) not in recv_gids]
+            if missing:
+                log_missing_games(
+                    subweek=subweek,
+                    league_level=league_level or 0,
+                    season_week=season_week or 0,
+                    sent_ids=sent_gids,
+                    missing_ids=missing,
+                )
 
         logger.info(
             f"Successfully received {len(results)} game results from engine "
@@ -178,6 +195,11 @@ def simulate_games_batch(
             f"Game engine timeout after {timeout}s for subweek '{subweek}' "
             f"({len(games)} games)"
         )
+        log_engine_failure(
+            subweek=subweek, league_level=league_level,
+            season_week=season_week, game_count=len(games),
+            error=f"Timeout after {timeout}s",
+        )
         raise ValueError(
             f"Game engine timeout for subweek '{subweek}'. "
             f"The simulation took longer than {timeout} seconds."
@@ -185,6 +207,11 @@ def simulate_games_batch(
 
     except RequestException as e:
         logger.exception(f"Failed to communicate with game engine: {e}")
+        log_engine_failure(
+            subweek=subweek, league_level=league_level,
+            season_week=season_week, game_count=len(games),
+            error=f"RequestException: {e}",
+        )
         raise ValueError(
             f"Failed to reach game engine at {GAME_ENGINE_URL}. "
             f"Is the engine service running? Error: {e}"
@@ -192,6 +219,11 @@ def simulate_games_batch(
 
     except Exception as e:
         logger.exception(f"Unexpected error during engine communication: {e}")
+        log_engine_failure(
+            subweek=subweek, league_level=league_level,
+            season_week=season_week, game_count=len(games),
+            error=f"{type(e).__name__}: {e}",
+        )
         raise
 
 

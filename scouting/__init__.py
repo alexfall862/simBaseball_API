@@ -467,9 +467,9 @@ def api_pro_pool():
             shares.c.isHolder == 1,
         ]
 
-        # Pool filter: INTAM 18+ OR College any age
+        # Pool filter: INTAM 16+ (IFA eligible) OR College any age
         pool_condition = or_(
-            and_(shares.c.orgID == INTAM_ORG_ID, players.c.age >= 18),
+            and_(shares.c.orgID == INTAM_ORG_ID, players.c.age >= 16),
             and_(
                 or_(
                     and_(shares.c.orgID >= COLLEGE_ORG_MIN,
@@ -543,7 +543,7 @@ def api_pro_pool():
                 .where(and_(
                     *pool_conditions,
                     shares.c.orgID == INTAM_ORG_ID,
-                    players.c.age >= 18,
+                    players.c.age >= 16,
                 ))
             )
             college_count = conn.execute(college_count_stmt).scalar()
@@ -814,7 +814,7 @@ def api_intam_pool():
             contracts.c.isActive == 1,
             shares.c.isHolder == 1,
             shares.c.orgID == INTAM_ORG_ID,
-            players.c.age >= 18,
+            players.c.age >= 16,
         ]
 
         _apply_common_filters(conditions, tables)

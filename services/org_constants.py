@@ -13,6 +13,7 @@ COLLEGE_ORG_MIN = 31
 COLLEGE_ORG_MAX = 342
 INTAM_ORG_ID = 339
 USHS_ORG_ID = 340
+IFA_TARGET_LEVEL = 4
 
 # Non-college orgs inside the college min/max range
 _NON_COLLEGE_IN_RANGE = frozenset({INTAM_ORG_ID, USHS_ORG_ID})
