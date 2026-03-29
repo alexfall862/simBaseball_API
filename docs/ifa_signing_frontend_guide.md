@@ -709,6 +709,98 @@ Consider adding a "Scout" button on the IFA board or auction detail modal that l
 
 ---
 
+## Admin: All Bonus Pools
+
+View every org's bonus pool status at once (admin overview).
+
+### Loading All Pools
+
+```
+GET /api/v1/ifa/pools?league_year_id={leagueYearId}
+```
+
+### Response
+
+```json
+[
+  {
+    "org_id": 12,
+    "team_abbrev": "PIT",
+    "total_pool": 7500000.00,
+    "spent": 1200000.00,
+    "committed": 500000.00,
+    "remaining": 5800000.00,
+    "standing_rank": 1
+  },
+  {
+    "org_id": 5,
+    "team_abbrev": "NYY",
+    "total_pool": 3333333.33,
+    "spent": 3000000.00,
+    "committed": 0.00,
+    "remaining": 333333.33,
+    "standing_rank": 30
+  }
+]
+```
+
+Sorted by `standing_rank` ascending (worst team first = largest pool). Includes `committed` (sum of active unsettled offers) for each org.
+
+---
+
+## Admin: Auction History
+
+View completed signings and expired (unsigned) auctions.
+
+### Loading History
+
+```
+GET /api/v1/ifa/history?league_year_id={leagueYearId}
+```
+
+### Response
+
+```json
+[
+  {
+    "auction_id": 101,
+    "player_id": 5432,
+    "firstName": "Carlos",
+    "lastName": "Martinez",
+    "age": 16,
+    "ptype": "Pitcher",
+    "phase": "completed",
+    "star_rating": 5,
+    "slot_value": 5000000.00,
+    "winner_abbrev": "NYY",
+    "winning_bonus": 5500000.00
+  },
+  {
+    "auction_id": 104,
+    "player_id": 5450,
+    "firstName": "Luis",
+    "lastName": "Garcia",
+    "age": 17,
+    "ptype": "Position",
+    "phase": "expired",
+    "star_rating": 2,
+    "slot_value": 300000.00,
+    "winner_abbrev": null,
+    "winning_bonus": null
+  }
+]
+```
+
+| Field | Description |
+|-------|-------------|
+| `phase` | `"completed"` (signed) or `"expired"` (unsigned) |
+| `winner_abbrev` | Signing org abbreviation, or `null` if expired |
+| `winning_bonus` | Actual signing bonus paid, or `null` if expired |
+
+Sorted by most recent first (`updated_at DESC`).
+
+---
+
 ## Admin: Advance Week
 
 The IFA window advances independently from game simulation, triggered by admin action.
@@ -824,6 +916,8 @@ Players age 17 and younger cannot be promoted above level 4, regardless of how t
 | GET | `/ifa/offers/{orgId}?league_year_id` | Any | Org's active IFA offers |
 | GET | `/ifa/auction/{auctionId}?org_id` | Any | Single auction detail |
 | GET | `/ifa/eligible?league_year_id` | Any | Eligible INTAM players list |
+| GET | `/ifa/pools?league_year_id` | Admin | All orgs' bonus pool status |
+| GET | `/ifa/history?league_year_id` | Admin | Completed & expired auctions |
 | POST | `/ifa/auction/start` | MLB org | Start auction for a player |
 | POST | `/ifa/auction/{auctionId}/offer` | MLB org | Submit or update offer |
 | DELETE | `/ifa/auction/{auctionId}/offer/{orgId}` | MLB org | Withdraw offer (open phase only) |

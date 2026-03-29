@@ -219,6 +219,13 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">IFA Signing</div>
+      <a href="#" class="nav-item" data-section="ifa-admin">
+        <span class="nav-icon">&#127758;</span> IFA Admin
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Testing</div>
       <a href="#" class="nav-item" data-section="batting-lab">
         <span class="nav-icon">&#9879;</span> Batting Lab
@@ -3774,6 +3781,68 @@
           </div>
           <h5>All Invested Players</h5>
           <div id="radm-orgdetail-players" style="max-height:400px;overflow-y:auto"></div>
+        </div>
+      </section>
+
+      <!-- IFA Admin -->
+      <section id="section-ifa-admin" class="section">
+        <!-- Controls Card -->
+        <div class="card">
+          <h3>IFA Signing Administration</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="ifa-lyid"></select>
+            </div>
+            <button id="btn-ifa-refresh" class="btn btn-secondary">Refresh</button>
+          </div>
+          <div id="ifa-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+
+        <!-- State & Week Controls -->
+        <div class="card" id="ifa-state-card" style="display:none">
+          <h4>Window State</h4>
+          <div id="ifa-state-info" style="margin-bottom:12px"></div>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <button id="btn-ifa-advance-week" class="btn btn-warning">Advance Week</button>
+          </div>
+        </div>
+
+        <!-- Bonus Pools -->
+        <div class="card" id="ifa-pools-card" style="display:none">
+          <h4>Bonus Pools</h4>
+          <div id="ifa-pools-table" style="max-height:500px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Active Auctions -->
+        <div class="card" id="ifa-auctions-card" style="display:none">
+          <h4>Active Auctions</h4>
+          <div id="ifa-auctions-table" style="max-height:600px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Eligible Players -->
+        <div class="card" id="ifa-eligible-card" style="display:none">
+          <h4>Eligible Players (no active auction)</h4>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:8px">
+            <div>
+              <label>Star Filter</label>
+              <select id="ifa-star-filter">
+                <option value="">All</option>
+                <option value="5">5-Star</option>
+                <option value="4">4-Star</option>
+                <option value="3">3-Star</option>
+                <option value="2">2-Star</option>
+                <option value="1">1-Star</option>
+              </select>
+            </div>
+          </div>
+          <div id="ifa-eligible-table" style="max-height:600px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Completed / Expired Auctions -->
+        <div class="card" id="ifa-history-card" style="display:none">
+          <h4>Completed &amp; Expired Auctions</h4>
+          <div id="ifa-history-table" style="max-height:500px;overflow-y:auto"></div>
         </div>
       </section>
 

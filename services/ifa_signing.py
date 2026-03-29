@@ -352,6 +352,73 @@ def get_ifa_pool_status(conn, league_year_id: int, org_id: int) -> Optional[Dict
     }
 
 
+def get_all_ifa_pools(conn, league_year_id: int) -> List[Dict[str, Any]]:
+    """Return all bonus pools for a league year with committed amounts (admin view)."""
+    rows = conn.execute(text("""
+        SELECT bp.org_id, bp.total_pool, bp.spent, bp.standing_rank,
+               org.team_abbrev
+        FROM ifa_bonus_pools bp
+        JOIN organizations org ON org.id = bp.org_id
+        WHERE bp.league_year_id = :ly
+        ORDER BY bp.standing_rank ASC
+    """), {"ly": league_year_id}).all()
+
+    result = []
+    for r in rows:
+        m = r._mapping
+        total = Decimal(str(m["total_pool"]))
+        spent = Decimal(str(m["spent"]))
+
+        committed = conn.execute(text("""
+            SELECT COALESCE(SUM(o.bonus), 0)
+            FROM ifa_auction_offers o
+            JOIN ifa_auction a ON a.id = o.auction_id
+            WHERE o.org_id = :org AND o.status = 'active'
+              AND a.league_year_id = :ly
+        """), {"org": m["org_id"], "ly": league_year_id}).scalar()
+        committed = Decimal(str(committed))
+
+        result.append({
+            "org_id": int(m["org_id"]),
+            "team_abbrev": m["team_abbrev"],
+            "total_pool": float(total),
+            "spent": float(spent),
+            "committed": float(committed),
+            "remaining": float(total - spent - committed),
+            "standing_rank": int(m["standing_rank"]),
+        })
+    return result
+
+
+def get_ifa_auction_history(conn, league_year_id: int) -> List[Dict[str, Any]]:
+    """Return completed and expired auctions for a league year (admin view)."""
+    rows = conn.execute(text("""
+        SELECT ia.*, p.firstName, p.lastName, p.age, p.ptype,
+               wo.org_id AS winner_org_id, wo.bonus AS winning_bonus,
+               worg.team_abbrev AS winner_abbrev
+        FROM ifa_auction ia
+        JOIN simbbPlayers p ON p.id = ia.player_id
+        LEFT JOIN ifa_auction_offers wo ON wo.id = ia.winning_offer_id
+        LEFT JOIN organizations worg ON worg.id = wo.org_id
+        WHERE ia.league_year_id = :ly AND ia.phase IN ('completed', 'expired')
+        ORDER BY ia.updated_at DESC
+    """), {"ly": league_year_id}).all()
+
+    return [{
+        "auction_id": int(r._mapping["id"]),
+        "player_id": int(r._mapping["player_id"]),
+        "firstName": r._mapping["firstName"],
+        "lastName": r._mapping["lastName"],
+        "age": int(r._mapping["age"]),
+        "ptype": r._mapping["ptype"],
+        "phase": r._mapping["phase"],
+        "star_rating": int(r._mapping["star_rating"]),
+        "slot_value": float(r._mapping["slot_value"]),
+        "winner_abbrev": r._mapping["winner_abbrev"],
+        "winning_bonus": float(r._mapping["winning_bonus"]) if r._mapping["winning_bonus"] else None,
+    } for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Eligible players
 # ---------------------------------------------------------------------------
@@ -373,7 +440,7 @@ def get_ifa_eligible_players(conn, league_year_id: int) -> List[Dict[str, Any]]:
         WHERE cts.orgID = :intam AND p.age >= :min_age
           AND p.id NOT IN (
               SELECT ia.player_id FROM ifa_auction ia
-              WHERE ia.league_year_id = :ly AND ia.phase = 'completed'
+              WHERE ia.league_year_id = :ly AND ia.phase IN ('completed', 'expired')
           )
         ORDER BY COALESCE(p.recruit_stars, 0) DESC, p.lastName
     """), {"intam": INTAM_ORG_ID, "min_age": min_age, "ly": league_year_id}).all()
@@ -561,6 +628,36 @@ def submit_ifa_offer(
             "bonus": float(bonus),
             "phase": a["phase"],
         }
+    elif existing_offer and existing_offer._mapping["status"] == "withdrawn":
+        # Reactivate a previously withdrawn offer with the new bonus
+        conn.execute(text("""
+            UPDATE ifa_auction_offers
+            SET bonus = :bonus, status = 'active', last_updated_week = :week
+            WHERE id = :oid
+        """), {"bonus": bonus, "week": current_week, "oid": existing_offer._mapping["id"]})
+
+        offer_id = int(existing_offer._mapping["id"])
+        _log_transaction(
+            conn,
+            transaction_type="ifa_offer",
+            league_year_id=league_year_id,
+            primary_org_id=org_id,
+            player_id=int(a["player_id"]),
+            details={
+                "auction_id": auction_id,
+                "offer_id": offer_id,
+                "bonus": float(bonus),
+                "reactivated": True,
+            },
+            executed_by=executed_by,
+        )
+
+        return {
+            "offer_id": offer_id,
+            "is_update": False,
+            "bonus": float(bonus),
+            "phase": a["phase"],
+        }
     else:
         # New offer
         result = conn.execute(text("""
@@ -701,7 +798,7 @@ def advance_ifa_week(conn, league_year_id: int) -> Dict[str, Any]:
         new_status = "active"
         if new_week >= total_weeks:
             # Final week: expire remaining auctions
-            expired = _expire_remaining_auctions(conn, league_year_id)
+            expired = _expire_remaining_auctions(conn, league_year_id, current_week=new_week)
             new_status = "complete"
             phase_result["expired"] = expired
 
@@ -824,7 +921,7 @@ def _advance_ifa_auction_phases(
     return summary
 
 
-def _expire_remaining_auctions(conn, league_year_id: int) -> int:
+def _expire_remaining_auctions(conn, league_year_id: int, current_week: int = 0) -> int:
     """
     At window close: force-complete finalize auctions that have active
     offers (highest bidder wins), then expire everything else.
@@ -846,7 +943,7 @@ def _expire_remaining_auctions(conn, league_year_id: int) -> int:
         if winner:
             _execute_ifa_signing(
                 conn, aid, int(winner._mapping["id"]),
-                league_year_id, current_week=0,
+                league_year_id, current_week=current_week,
             )
             log.info("IFA window close: force-completed finalize auction %d", aid)
 
@@ -1049,9 +1146,11 @@ def get_ifa_board(
 
         # Count active offers + get viewer's offer
         offers = conn.execute(text("""
-            SELECT org_id, bonus, status FROM ifa_auction_offers
-            WHERE auction_id = :aid AND status = 'active'
-            ORDER BY bonus DESC
+            SELECT o.org_id, o.bonus, o.status, org.team_abbrev
+            FROM ifa_auction_offers o
+            JOIN organizations org ON org.id = o.org_id
+            WHERE o.auction_id = :aid AND o.status = 'active'
+            ORDER BY o.bonus DESC
         """), {"aid": auction_id}).all()
 
         active_count = len(offers)
@@ -1063,12 +1162,8 @@ def get_ifa_board(
             if viewer_org_id and int(om["org_id"]) == viewer_org_id:
                 my_offer = {"bonus": float(om["bonus"])}
             else:
-                # Get org abbreviation for anonymised competitor list
-                abbrev = conn.execute(text("""
-                    SELECT team_abbrev FROM organizations WHERE id = :oid
-                """), {"oid": om["org_id"]}).scalar()
-                if abbrev:
-                    competitor_orgs.append(abbrev)
+                if om["team_abbrev"]:
+                    competitor_orgs.append(om["team_abbrev"])
 
         competitor_orgs.sort()
 

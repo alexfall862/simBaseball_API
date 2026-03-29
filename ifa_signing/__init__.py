@@ -96,6 +96,38 @@ def ifa_auction_detail(auction_id):
     return jsonify(detail)
 
 
+# ── All pools (admin) ────────────────────────────────────────────────
+
+@ifa_signing_bp.route("/ifa/pools", methods=["GET"])
+def ifa_all_pools():
+    """GET /ifa/pools?league_year_id=X"""
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify({"error": "league_year_id required"}), 400
+
+    engine = get_engine()
+    from services.ifa_signing import get_all_ifa_pools
+    with engine.connect() as conn:
+        pools = get_all_ifa_pools(conn, league_year_id)
+    return jsonify(pools)
+
+
+# ── Auction history (admin) ──────────────────────────────────────────
+
+@ifa_signing_bp.route("/ifa/history", methods=["GET"])
+def ifa_history():
+    """GET /ifa/history?league_year_id=X"""
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify({"error": "league_year_id required"}), 400
+
+    engine = get_engine()
+    from services.ifa_signing import get_ifa_auction_history
+    with engine.connect() as conn:
+        history = get_ifa_auction_history(conn, league_year_id)
+    return jsonify(history)
+
+
 # ── Eligible players ──────────────────────────────────────────────────
 
 @ifa_signing_bp.route("/ifa/eligible", methods=["GET"])

@@ -444,6 +444,7 @@
       'db-storage': 'DB Storage',
       'batting-lab': 'Batting Lab',
       'recruiting-admin': 'Recruiting Admin',
+      'ifa-admin': 'IFA Administration',
       'gameplan-audit': 'Gameplan Audit',
     };
     elements.pageTitle.textContent = titles[section] || section;
@@ -552,6 +553,10 @@
       case 'recruiting-admin':
         loadSpecialEventLeagueYears('radm-lyid');
         loadRecruitingAdmin();
+        break;
+      case 'ifa-admin':
+        loadSpecialEventLeagueYears('ifa-lyid');
+        loadIfaAdmin();
         break;
       case 'batting-lab':
         loadBlabHistory();
@@ -7906,6 +7911,187 @@
   // Re-filter demand on filter change
   document.getElementById('radm-demand-star')?.addEventListener('change', loadRadmDemand);
   document.getElementById('radm-demand-limit')?.addEventListener('change', loadRadmDemand);
+
+  // ======================================================================
+  // IFA Administration
+  // ======================================================================
+
+  function ifaLyid() { return document.getElementById('ifa-lyid')?.value; }
+
+  function loadIfaAdmin() {
+    const lyid = ifaLyid();
+    if (!lyid) return;
+    const status = document.getElementById('ifa-status');
+    status.textContent = 'Loading\u2026';
+    status.className = 'status-msg info';
+
+    // Load state first, then conditionally load the rest
+    fetch(`${API_BASE}/ifa/state?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(state => {
+        if (state.error) { status.textContent = state.error; status.className = 'status-msg error'; return; }
+        status.textContent = '';
+        status.className = '';
+
+        // State card
+        const stateCard = document.getElementById('ifa-state-card');
+        stateCard.style.display = '';
+        const badgeClass = state.status === 'active' ? 'success' : state.status === 'complete' ? 'info' : 'warning';
+        const advBtn = document.getElementById('btn-ifa-advance-week');
+        advBtn.disabled = state.status === 'complete';
+        advBtn.textContent = state.current_week === 0 ? 'Initialize Window (Week 0 \u2192 1)' : `Advance to Week ${state.current_week + 1}`;
+        if (state.status === 'complete') advBtn.textContent = 'Window Complete';
+
+        document.getElementById('ifa-state-info').innerHTML =
+          `<span class="badge badge-${badgeClass}">${state.status}</span> ` +
+          `Week <strong>${state.current_week}</strong> / ${state.total_weeks}`;
+
+        // Load pools, board, eligible, and history
+        loadIfaPools(lyid);
+        loadIfaActiveAuctions(lyid);
+        loadIfaEligible(lyid);
+        loadIfaHistory(lyid);
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  }
+
+  function loadIfaPools(lyid) {
+    fetch(`${API_BASE}/ifa/pools?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(pools => {
+        const card = document.getElementById('ifa-pools-card');
+        if (!pools || !pools.length) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        const container = document.getElementById('ifa-pools-table');
+        const fmt = v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+        let html = '<table class="data-table"><thead><tr><th>Rank</th><th>Org</th><th>Total Pool</th><th>Spent</th><th>Committed</th><th>Remaining</th></tr></thead><tbody>';
+        pools.forEach(p => {
+          const pct = p.total_pool > 0 ? Math.round((p.spent + p.committed) / p.total_pool * 100) : 0;
+          const rowClass = pct >= 90 ? 'style="color:var(--danger)"' : pct >= 70 ? 'style="color:var(--warning)"' : '';
+          html += `<tr ${rowClass}><td>${p.standing_rank}</td><td>${p.team_abbrev}</td><td>${fmt(p.total_pool)}</td><td>${fmt(p.spent)}</td><td>${fmt(p.committed)}</td><td>${fmt(p.remaining)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(() => {});
+  }
+
+  function loadIfaActiveAuctions(lyid) {
+    fetch(`${API_BASE}/ifa/board?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const card = document.getElementById('ifa-auctions-card');
+        const auctions = data.auctions || [];
+        if (!auctions.length) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        const container = document.getElementById('ifa-auctions-table');
+        const fmt = v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+        const phaseColor = p => p === 'open' ? 'success' : p === 'listening' ? 'warning' : 'danger';
+        let html = '<table class="data-table"><thead><tr><th>Player</th><th>Type</th><th>Age</th><th>Stars</th><th>Slot</th><th>Phase</th><th>Entered Wk</th><th>Offers</th><th>Competitors</th></tr></thead><tbody>';
+        auctions.forEach(a => {
+          html += `<tr>
+            <td>${a.firstName} ${a.lastName}</td><td>${a.ptype}</td><td>${a.age}</td>
+            <td>${'\u2605'.repeat(a.star_rating)}</td><td>${fmt(a.slot_value)}</td>
+            <td><span class="badge badge-${phaseColor(a.phase)}">${a.phase}</span></td>
+            <td>${a.entered_week}</td><td>${a.active_offers}</td>
+            <td>${a.competitors.length ? a.competitors.join(', ') : '\u2014'}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(() => {});
+  }
+
+  function loadIfaEligible(lyid) {
+    fetch(`${API_BASE}/ifa/eligible?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(players => {
+        const card = document.getElementById('ifa-eligible-card');
+        if (!players || !players.length) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        const container = document.getElementById('ifa-eligible-table');
+        const starFilter = document.getElementById('ifa-star-filter')?.value;
+        const filtered = starFilter ? players.filter(p => p.star_rating === parseInt(starFilter)) : players;
+        const fmt = v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+        let html = `<p style="color:var(--text-secondary);margin-bottom:8px">${filtered.length} of ${players.length} players shown</p>`;
+        html += '<table class="data-table"><thead><tr><th>Player</th><th>Type</th><th>Age</th><th>Area</th><th>Stars</th><th>Slot Value</th></tr></thead><tbody>';
+        filtered.forEach(p => {
+          html += `<tr><td>${p.firstName} ${p.lastName}</td><td>${p.ptype}</td><td>${p.age}</td><td>${p.area || '\u2014'}</td><td>${'\u2605'.repeat(p.star_rating)}</td><td>${fmt(p.slot_value)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(() => {});
+  }
+
+  function loadIfaHistory(lyid) {
+    fetch(`${API_BASE}/ifa/history?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(history => {
+        const card = document.getElementById('ifa-history-card');
+        if (!history || !history.length) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        const container = document.getElementById('ifa-history-table');
+        const fmt = v => v != null ? '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : '\u2014';
+        let html = '<table class="data-table"><thead><tr><th>Player</th><th>Type</th><th>Stars</th><th>Slot</th><th>Result</th><th>Winner</th><th>Bonus</th></tr></thead><tbody>';
+        history.forEach(h => {
+          const resultBadge = h.phase === 'completed'
+            ? '<span class="badge badge-success">Signed</span>'
+            : '<span class="badge badge-secondary">Expired</span>';
+          html += `<tr><td>${h.firstName} ${h.lastName}</td><td>${h.ptype}</td><td>${'\u2605'.repeat(h.star_rating)}</td><td>${fmt(h.slot_value)}</td><td>${resultBadge}</td><td>${h.winner_abbrev || '\u2014'}</td><td>${fmt(h.winning_bonus)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(() => {});
+  }
+
+  // IFA button handlers
+  document.getElementById('btn-ifa-refresh')?.addEventListener('click', loadIfaAdmin);
+  document.getElementById('ifa-lyid')?.addEventListener('change', loadIfaAdmin);
+  document.getElementById('ifa-star-filter')?.addEventListener('change', () => {
+    const lyid = ifaLyid();
+    if (lyid) loadIfaEligible(lyid);
+  });
+
+  document.getElementById('btn-ifa-advance-week')?.addEventListener('click', () => {
+    const lyid = ifaLyid();
+    if (!lyid) return;
+    if (!confirm('Advance the IFA signing window by one week? This will process phase transitions.')) return;
+    const status = document.getElementById('ifa-status');
+    status.textContent = 'Advancing week\u2026';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/ifa/advance-week`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.error;
+          status.className = 'status-msg error';
+          return;
+        }
+        let msg = `Advanced to week ${data.new_week} (${data.status})`;
+        if (data.players_ranked) msg += ` \u2014 ${data.players_ranked} players ranked`;
+        if (data.pools_allocated) msg += `, ${data.pools_allocated} pools allocated`;
+        if (data.phase_transitions) {
+          const pt = data.phase_transitions;
+          const parts = [];
+          if (pt.open_to_listening) parts.push(`${pt.open_to_listening} \u2192 listening`);
+          if (pt.listening_to_finalize) parts.push(`${pt.listening_to_finalize} \u2192 finalize`);
+          if (pt.finalize_to_completed) parts.push(`${pt.finalize_to_completed} signed`);
+          if (pt.expired) parts.push(`${pt.expired} expired`);
+          if (parts.length) msg += ` \u2014 ${parts.join(', ')}`;
+        }
+        status.textContent = msg;
+        status.className = 'status-msg success';
+        loadIfaAdmin();
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  });
 
   // ======================================================================
   // Batting Lab
