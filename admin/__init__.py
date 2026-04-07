@@ -3499,7 +3499,7 @@ def admin_fa_orphan_scan():
         with engine.connect() as conn:
             # Get current league_year_id from timestamp
             ts_row = conn.execute(text(
-                "SELECT league_year_id FROM timestamp_state LIMIT 1"
+                "SELECT season_id FROM timestamp_state LIMIT 1"
             )).first()
             if not ts_row:
                 return jsonify(ok=False, error="no_timestamp"), 400
