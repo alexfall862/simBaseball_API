@@ -3492,6 +3492,7 @@ def admin_fa_orphan_scan():
 
     try:
         from sqlalchemy import text
+        from db import get_engine
         engine = get_engine()
         FA_THRESHOLD = 6
 
