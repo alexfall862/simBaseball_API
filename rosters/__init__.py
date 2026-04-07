@@ -78,9 +78,7 @@ def _get_tables():
 
 def _get_player_column_categories():
     """Categorize simbbPlayers columns. Delegates to shared service."""
-    tables = _get_tables()
-    engine = tables["players"].metadata.bind or get_engine()
-    return _get_player_column_categories_shared(engine)
+    return _get_player_column_categories_shared(get_engine())
 
 def _load_stamina_for_players(conn, player_ids):
     """
