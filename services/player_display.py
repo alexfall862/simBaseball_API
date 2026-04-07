@@ -89,6 +89,27 @@ _DEFAULT_POSITION_WEIGHTS = {
     },
 }
 
+# ── Level ID → name mapping ─────────────────────────────────────────
+# Distribution config is keyed by level name ("mlb", "aaa", etc.)
+# but many queries produce numeric level IDs. This maps between them.
+_LEVEL_ID_TO_NAME = {
+    1: "high school", 2: "intam", 3: "college", 4: "scraps",
+    5: "a", 6: "higha", 7: "aa", 8: "aaa", 9: "mlb", 99: "wbc",
+}
+
+
+def _resolve_level_key(raw_level):
+    """Convert a numeric level ID to the string name used in distribution config."""
+    if raw_level is None:
+        return None
+    if isinstance(raw_level, str):
+        return raw_level
+    try:
+        return _LEVEL_ID_TO_NAME.get(int(raw_level), raw_level)
+    except (TypeError, ValueError):
+        return raw_level
+
+
 # ── Column category cache ───────────────────────────────────────────
 
 _col_cats_cache: Optional[Dict[str, List[str]]] = None
@@ -307,11 +328,12 @@ def build_player_display(
     pot_cols = col_cats["pot"]
     bio_cols = col_cats["bio"]
 
-    level_key = (
+    raw_level = (
         mapping.get("league_level")
         or mapping.get("current_level")
         or mapping.get("last_level")
     )
+    level_key = _resolve_level_key(raw_level)
     ptype = (mapping.get("ptype") or "").strip()
 
     # Distribution lookup: ptype → level → attr → {mean, std}
