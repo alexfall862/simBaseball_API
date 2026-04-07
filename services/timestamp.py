@@ -707,6 +707,23 @@ def start_new_season(league_year_id: int) -> Dict[str, Any]:
         },
         broadcast=True,
     )
+    # Sync league_state to new league year + week 1
+    try:
+        from sqlalchemy import text as _text
+        with engine.begin() as conn:
+            gw_row_new = conn.execute(
+                _text("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = 1"),
+                {"lyid": league_year_id},
+            ).first()
+            if gw_row_new:
+                conn.execute(
+                    _text("UPDATE league_state SET current_league_year_id = :lyid, current_game_week_id = :gwid WHERE id = 1"),
+                    {"lyid": league_year_id, "gwid": int(gw_row_new[0])},
+                )
+                logger.info(f"Synced league_state to league_year_id={league_year_id}, week 1")
+    except Exception as e:
+        logger.warning(f"Failed to sync league_state for new season: {e}")
+
     summary["new_season"] = new_season
     summary["timestamp_updated"] = True
 
@@ -869,6 +886,28 @@ def advance_week(broadcast: bool = True) -> bool:
                 )
             )
             conn.execute(stmt)
+
+            # Sync league_state.current_game_week_id so bootstrap/frontend
+            # reads the same week as the admin panel
+            try:
+                from sqlalchemy import text as _text
+                ly_row_sync = conn.execute(
+                    _text("SELECT id FROM league_years WHERE league_year = :yr"),
+                    {"yr": league_year},
+                ).first()
+                if ly_row_sync:
+                    gw_row_sync = conn.execute(
+                        _text("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = :w"),
+                        {"lyid": int(ly_row_sync[0]), "w": new_week},
+                    ).first()
+                    if gw_row_sync:
+                        conn.execute(
+                            _text("UPDATE league_state SET current_game_week_id = :gwid WHERE id = 1"),
+                            {"gwid": int(gw_row_sync[0])},
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to sync league_state game week: {e}")
+
             conn.commit()
 
             logger.info(f"Advanced from week {current_week} to week {new_week}")

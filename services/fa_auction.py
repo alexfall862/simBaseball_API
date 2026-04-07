@@ -32,6 +32,10 @@ _AGE_OFFER_WEIGHTS = [
     (999, 0.85, 0.15),   # late career — almost pure AAV chasing
 ]
 
+# Bonus premium: immediate cash is worth slightly more than future salary.
+# A $1M bonus counts as $1.05M in the attractiveness calculation.
+_BONUS_PREMIUM = 0.05
+
 
 def _offer_attractiveness(
     age: int,
@@ -39,11 +43,12 @@ def _offer_attractiveness(
 ) -> list[dict]:
     """
     Score each offer using an age-weighted blend of normalised AAV and
-    normalised total_value.  Returns the input dicts with an added
-    ``_score`` key, sorted best-first.
+    normalised effective total value.  Returns the input dicts with an
+    added ``_score`` key, sorted best-first.
 
-    Each offer dict must contain at least ``aav`` and ``total_value``
-    (as float/Decimal) and ``id``.
+    Each offer dict must contain ``aav``, ``total_value``, ``bonus``,
+    and ``id``.  Bonus receives a 5% premium — immediate cash is worth
+    more to the player than future salary payments.
     """
     if len(offers) <= 1:
         for o in offers:
@@ -57,19 +62,24 @@ def _offer_attractiveness(
             aav_w, tv_w = aw, tw
             break
 
+    # Effective total value: bonus counts at a premium
+    def _effective_tv(o):
+        bonus = float(o.get("bonus", 0))
+        return float(o["total_value"]) + bonus * _BONUS_PREMIUM
+
     aavs = [float(o["aav"]) for o in offers]
-    tvs  = [float(o["total_value"]) for o in offers]
+    etvs = [_effective_tv(o) for o in offers]
 
     aav_min, aav_max = min(aavs), max(aavs)
-    tv_min,  tv_max  = min(tvs),  max(tvs)
+    etv_min, etv_max = min(etvs), max(etvs)
 
     aav_range = aav_max - aav_min if aav_max != aav_min else 1.0
-    tv_range  = tv_max  - tv_min  if tv_max  != tv_min  else 1.0
+    etv_range = etv_max - etv_min if etv_max != etv_min else 1.0
 
-    for o in offers:
+    for o, etv in zip(offers, etvs):
         norm_aav = (float(o["aav"]) - aav_min) / aav_range
-        norm_tv  = (float(o["total_value"]) - tv_min) / tv_range
-        o["_score"] = aav_w * norm_aav + tv_w * norm_tv
+        norm_etv = (etv - etv_min) / etv_range
+        o["_score"] = aav_w * norm_aav + tv_w * norm_etv
 
     offers.sort(key=lambda o: o["_score"], reverse=True)
     return offers
@@ -471,7 +481,7 @@ def advance_auction_phases(
         elif phase == "listening":
             # Eliminate non-top-3 offers using age-weighted scoring
             active_offers = conn.execute(
-                select(offers.c.id, offers.c.total_value, offers.c.aav)
+                select(offers.c.id, offers.c.total_value, offers.c.aav, offers.c.bonus)
                 .where(and_(
                     offers.c.auction_id == auction_id,
                     offers.c.status == "active",
@@ -482,7 +492,8 @@ def advance_auction_phases(
                 offer_dicts = [
                     {"id": int(r._mapping["id"]),
                      "aav": r._mapping["aav"],
-                     "total_value": r._mapping["total_value"]}
+                     "total_value": r._mapping["total_value"],
+                     "bonus": r._mapping["bonus"]}
                     for r in active_offers
                 ]
                 scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
@@ -524,7 +535,8 @@ def advance_auction_phases(
             offer_dicts = [
                 {"id": int(r._mapping["id"]),
                  "aav": r._mapping["aav"],
-                 "total_value": r._mapping["total_value"]}
+                 "total_value": r._mapping["total_value"],
+                 "bonus": r._mapping["bonus"]}
                 for r in final_offers
             ]
             scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
