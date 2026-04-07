@@ -1031,7 +1031,7 @@ def get_free_agent_pool(
     lp_map = {}
     try:
         from services.listed_position import POSITION_DISPLAY
-        lp_rows = conn.execute(text(
+        lp_rows = conn.execute(sa_text(
             "SELECT player_id, position_code FROM player_listed_position "
             "WHERE player_id IN :pids"
         ), {"pids": tuple(player_ids)}).all()
