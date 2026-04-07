@@ -314,7 +314,7 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
                 salary = Decimal(m["salary"])
                 share = Decimal(m["salary_share"])
 
-                weekly_salary = (salary * share) / weeks_dec
+                weekly_salary = ((salary * share) / weeks_dec).quantize(Decimal("0.01"))
                 if weekly_salary == 0:
                     continue
 
@@ -479,7 +479,7 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
                             # Bye week for this org — no revenue
                             continue
                         else:
-                            amount = org_season_share * (week_weight / season_weight)
+                            amount = (org_season_share * (week_weight / season_weight)).quantize(Decimal("0.01"))
 
                         if amount == 0:
                             continue
@@ -1121,7 +1121,7 @@ def process_playoff_revenue(engine, league_year: int) -> Dict[str, Any]:
             base_val = org_per_home.get(oid)
             if not base_val:
                 continue
-            amount = base_val * gate_mult * Decimal(home_games)
+            amount = (base_val * gate_mult * Decimal(home_games)).quantize(Decimal("0.01"))
             gate_inserts.append({
                 "org_id": oid,
                 "league_year_id": league_year_id,
@@ -1178,7 +1178,7 @@ def process_playoff_revenue(engine, league_year: int) -> Dict[str, Any]:
             per_team_per_series = playoff_media_pool / Decimal(total_team_series_slots)
 
             for oid, appearances in series_app.items():
-                amount = per_team_per_series * Decimal(appearances)
+                amount = (per_team_per_series * Decimal(appearances)).quantize(Decimal("0.01"))
                 media_inserts.append({
                     "org_id": oid,
                     "league_year_id": league_year_id,

@@ -39,6 +39,16 @@ CREATE TABLE `contact_types` (
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=8 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `contact_types`
+--
+
+LOCK TABLES `contact_types` WRITE;
+/*!40000 ALTER TABLE `contact_types` DISABLE KEYS */;
+INSERT INTO `contact_types` VALUES (1,'barrel','Barrel',1),(2,'solid','Solid',2),(3,'flare','Flare',3),(4,'burner','Burner',4),(5,'under','Under',5),(6,'topped','Topped',6),(7,'weak','Weak',7);
+/*!40000 ALTER TABLE `contact_types` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -50,4 +60,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:44
+-- Dump completed on 2026-03-29  0:08:38

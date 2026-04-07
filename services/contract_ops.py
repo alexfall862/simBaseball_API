@@ -526,6 +526,61 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
         except Exception as e:
             log.warning("Failed to enter player %d into auction: %s", pid, e)
 
+    # ── Step 5: Sweep for orphaned FA-eligible players ──────────────
+    # Catches players whose contracts were already finished (e.g. mid-season
+    # release, waiver clearance, or season wipe/re-sim) but who never
+    # entered the auction.  Without this, they stay in limbo forever.
+    orphaned_fas = conn.execute(text("""
+        SELECT DISTINCT st.player_id
+        FROM player_service_time st
+        WHERE st.mlb_service_years >= :fa_threshold
+          AND NOT EXISTS (
+              SELECT 1 FROM contracts c2
+              JOIN contractDetails cd2 ON cd2.contractID = c2.id
+              JOIN contractTeamShare cts2 ON cts2.contractDetailsID = cd2.id
+              WHERE c2.playerID = st.player_id
+                AND c2.isFinished = 0
+                AND cts2.isHolder = 1
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM fa_auction fa
+              WHERE fa.player_id = st.player_id
+                AND fa.league_year_id = :lyid
+                AND fa.phase IN ('open', 'listening', 'finalize')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM waiver_claims wc
+              WHERE wc.player_id = st.player_id
+                AND wc.status = 'active'
+          )
+          AND st.player_id NOT IN :already_entered
+    """), {
+        "fa_threshold": FA_THRESHOLD,
+        "lyid": league_year_id,
+        "already_entered": tuple(fa_player_ids) if fa_player_ids else (0,),
+    }).all()
+
+    summary["orphan_sweep"] = 0
+    for row in orphaned_fas:
+        pid = row[0]
+        # Verify the player actually exists and has had a contract before
+        # (excludes pure amateurs who were never signed)
+        had_contract = conn.execute(text(
+            "SELECT 1 FROM contracts WHERE playerID = :pid LIMIT 1"
+        ), {"pid": pid}).first()
+        if not had_contract:
+            continue
+        try:
+            from services.fa_auction import enter_auction
+            enter_auction(conn, pid, league_year_id, current_week=0)
+            summary["orphan_sweep"] += 1
+            summary["auction_entries"] += 1
+        except Exception as e:
+            log.warning("Orphan FA sweep: failed player %d: %s", pid, e)
+
+    if summary["orphan_sweep"]:
+        log.info("orphan_sweep: entered %d stranded FAs into auction", summary["orphan_sweep"])
+
     log.info(
         "end_of_season: year=%d credited=%d advanced=%d expired=%d "
         "renewed_minor=%d renewed_prearb=%d arb=%d fa=%d ext=%d auction=%d",

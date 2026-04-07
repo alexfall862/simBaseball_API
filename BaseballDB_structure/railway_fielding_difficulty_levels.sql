@@ -40,6 +40,16 @@ CREATE TABLE `fielding_difficulty_levels` (
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `fielding_difficulty_levels`
+--
+
+LOCK TABLES `fielding_difficulty_levels` WRITE;
+/*!40000 ALTER TABLE `fielding_difficulty_levels` DISABLE KEYS */;
+INSERT INTO `fielding_difficulty_levels` VALUES (1,'directlyat','Directly At',1,1),(2,'onestepaway','One Step Away',0.9,2),(3,'twostepaway','Two Steps Away',0.75,3),(4,'threestepaway','Three Steps Away',0.5,4),(5,'homerun','Home Run (Uncatchable)',0,5);
+/*!40000 ALTER TABLE `fielding_difficulty_levels` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -51,4 +61,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:11
+-- Dump completed on 2026-03-29  0:10:48

@@ -43,6 +43,16 @@ CREATE TABLE `level_batting_config` (
   KEY `idx_level` (`league_level`)
 ) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `level_batting_config`
+--
+
+LOCK TABLES `level_batting_config` WRITE;
+/*!40000 ALTER TABLE `level_batting_config` DISABLE KEYS */;
+INSERT INTO `level_batting_config` VALUES (1,9,0.58,0.3,0.82,0.66,2),(2,8,0.58,0.3,0.82,0.66,2),(3,7,0.58,0.3,0.82,0.66,2),(4,6,0.58,0.3,0.82,0.66,2),(5,5,0.58,0.3,0.82,0.66,2),(6,4,0.58,0.3,0.82,0.66,2),(7,3,0.58,0.3,0.82,0.66,2),(8,2,0.58,0.3,0.82,0.66,2),(9,1,0.58,0.3,0.82,0.666,2);
+/*!40000 ALTER TABLE `level_batting_config` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -54,4 +64,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:49
+-- Dump completed on 2026-03-29  0:04:17

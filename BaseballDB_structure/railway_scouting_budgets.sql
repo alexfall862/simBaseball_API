@@ -42,8 +42,18 @@ CREATE TABLE `scouting_budgets` (
   KEY `fk_sb_ly` (`league_year_id`),
   CONSTRAINT `fk_sb_ly` FOREIGN KEY (`league_year_id`) REFERENCES `league_years` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_sb_org` FOREIGN KEY (`org_id`) REFERENCES `organizations` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=145 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=272 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `scouting_budgets`
+--
+
+LOCK TABLES `scouting_budgets` WRITE;
+/*!40000 ALTER TABLE `scouting_budgets` DISABLE KEYS */;
+INSERT INTO `scouting_budgets` VALUES (264,342,1,500,0,'2026-03-24 23:42:39'),(265,4,1,1000,0,'2026-03-24 23:43:16'),(266,154,1,500,0,'2026-03-25 01:15:14'),(267,20,1,1000,0,'2026-03-25 01:15:20'),(268,29,1,1000,0,'2026-03-25 12:26:35'),(269,341,1,500,0,'2026-03-25 15:30:44'),(270,18,1,1000,0,'2026-03-27 21:18:17'),(271,275,1,500,0,'2026-03-27 23:10:15');
+/*!40000 ALTER TABLE `scouting_budgets` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -55,4 +65,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:13
+-- Dump completed on 2026-03-29  0:10:00

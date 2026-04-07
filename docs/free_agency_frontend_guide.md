@@ -58,6 +58,24 @@ When a player becomes a free agent (end of season or mid-season release), they e
 
 Phases advance automatically when the simulation processes `advance_week()`.
 
+### How the Winner Is Chosen (Age-Weighted Scoring)
+
+The auction winner is **not** simply the highest total value. Players evaluate offers using an age-based blend of **AAV** (per-year money) and **total value** (overall guaranteed money). Younger players favor long-term security; older players chase per-year maximization.
+
+| Player Age | AAV Weight | Total Value Weight | Player Mindset |
+|-----------|-----------|-------------------|----------------|
+| ≤ 28 | 30% | 70% | Wants the big long-term deal |
+| 29–31 | 50% | 50% | Balanced — values both |
+| 32–33 | 70% | 30% | Leans toward per-year money |
+| 34+ | 85% | 15% | Almost pure AAV chasing |
+
+**What this means for owners:**
+- Offering a 35-year-old a 4yr/$20M deal ($5M AAV) will lose to a 2yr/$14M offer ($7M AAV) — the player prefers the higher annual salary.
+- Offering a 25-year-old the same two deals: the 4yr/$20M wins because the young player values total guaranteed money.
+- This scoring also determines the **top-3 cutoff** at the listening → finalize transition.
+
+**Frontend implication:** You cannot tell the user exactly where their offer ranks (competitor amounts are hidden), but you can display the player's age alongside a hint like _"Younger players value total guaranteed money; older players prioritize annual salary."_ to help guide their strategy.
+
 ### Fog of War
 
 Player attributes on the free agency page are **fuzzed** (shown as shifted letter grades) unless the viewing org has spent scouting points to unlock precise values. The fuzz is deterministic per (org, player, attribute) — the same org always sees the same fuzz for a given player.
@@ -475,6 +493,12 @@ Show a live-computed AAV and total value as the user fills in salaries:
 AAV = (sum(salaries) + bonus) / years
 Total Value = sum(salaries) + bonus
 ```
+
+**Strategy hint:** Display a contextual tip based on the player's age:
+- Age ≤ 28: _"This player values total guaranteed money — consider more years."_
+- Age 29–31: _"This player weighs annual salary and total value equally."_
+- Age 32–33: _"This player prioritizes annual salary over total years."_
+- Age 34+: _"This player is focused on maximizing per-year pay."_
 
 ### Withdraw Offer
 

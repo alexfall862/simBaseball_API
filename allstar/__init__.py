@@ -6,7 +6,6 @@ from db import get_engine
 from services.allstar import (
     create_allstar_event,
     simulate_allstar_game,
-    update_roster,
     get_event_rosters,
     get_allstar_results,
 )
@@ -17,17 +16,25 @@ allstar_bp = Blueprint("allstar", __name__)
 @allstar_bp.post("/allstar/create")
 def create_event():
     """
-    Create an All-Star event with auto-generated rosters.
-    Body: {league_year_id, league_level?}
+    Create an All-Star event with manually specified rosters.
+    Body: {
+      league_year_id, league_level?,
+      home: {label, starting_pitchers[], relief_pitchers[], lineup[{player_id,position}], bench[]},
+      away: {label, starting_pitchers[], relief_pitchers[], lineup[{player_id,position}], bench[]}
+    }
     """
     data = request.get_json(force=True)
     league_year_id = int(data["league_year_id"])
     league_level = int(data.get("league_level", 9))
+    home = data["home"]
+    away = data["away"]
 
     engine = get_engine()
     try:
         with engine.begin() as conn:
-            result = create_allstar_event(conn, league_year_id, league_level)
+            result = create_allstar_event(
+                conn, league_year_id, league_level, home, away,
+            )
         return jsonify(result), 201
     except ValueError as e:
         return jsonify(error="validation_error", message=str(e)), 400
@@ -39,8 +46,6 @@ def create_event():
 def simulate_event(event_id: int):
     """
     Simulate the All-Star game ad-hoc (not part of the weekly schedule).
-    Builds payloads from special_event_rosters, sends to engine, stores
-    result in metadata_json.
     """
     engine = get_engine()
     try:
@@ -60,24 +65,6 @@ def get_rosters(event_id: int):
     try:
         with engine.connect() as conn:
             result = get_event_rosters(conn, event_id)
-        return jsonify(result), 200
-    except SQLAlchemyError as e:
-        return jsonify(error="database_error", message=str(e)), 500
-
-
-@allstar_bp.put("/allstar/<int:event_id>/rosters")
-def modify_rosters(event_id: int):
-    """
-    Admin roster overrides.
-    Body: {changes: [{action: "add"/"remove", player_id, team_label?, position_code?}]}
-    """
-    data = request.get_json(force=True)
-    changes = data.get("changes", [])
-
-    engine = get_engine()
-    try:
-        with engine.begin() as conn:
-            result = update_roster(conn, event_id, changes)
         return jsonify(result), 200
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500

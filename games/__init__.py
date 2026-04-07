@@ -1177,7 +1177,13 @@ def wipe_season():
 
         # 8l. WBC teams — cascade-deleted by special_events FK, no explicit wipe needed
 
-        # 8m. Transaction log
+        # 8m. Transaction log + trade data (draft_pick_trades first due to FK)
+        _wipe("draft_pick_trades",
+              "DELETE FROM draft_pick_trades WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
+        _wipe("trade_proposals",
+              "DELETE FROM trade_proposals WHERE league_year_id = :lyid",
+              {"lyid": league_year_id})
         _wipe_chunked("transaction_log", "transaction_log",
                       "league_year_id = :lyid", {"lyid": league_year_id})
 
@@ -1226,7 +1232,7 @@ def wipe_season():
             "player_listed_position",
             "playoff_series", "cws_bracket",
             "special_events", "special_event_rosters",
-            "transaction_log",
+            "draft_pick_trades", "trade_proposals", "transaction_log",
             "fa_auction_offers", "fa_auction", "player_demands",
             "fa_market_history", "waiver_claims",
         ]

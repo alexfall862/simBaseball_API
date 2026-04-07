@@ -39,6 +39,16 @@ CREATE TABLE `recruiting_config` (
   UNIQUE KEY `uq_rc_key` (`config_key`)
 ) ENGINE=InnoDB AUTO_INCREMENT=18 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `recruiting_config`
+--
+
+LOCK TABLES `recruiting_config` WRITE;
+/*!40000 ALTER TABLE `recruiting_config` DISABLE KEYS */;
+INSERT INTO `recruiting_config` VALUES (1,'points_per_week','100','Recruiting points each school gets per week'),(2,'max_points_per_player_per_week','20','Maximum points investable in one player per week'),(3,'recruiting_weeks','20','Total weeks in recruiting window'),(4,'lottery_exponent','1.3','Superlinear exponent for lottery weighting'),(5,'snipe_threshold_pct','0.80','New school must reach this % of leader to trigger anti-snipe'),(6,'snipe_cooldown_weeks','2','Weeks a new contender must wait before commitment can fire'),(7,'snipe_threshold_mult','1.3','Threshold multiplier when anti-snipe triggers'),(8,'star5_base','300','Base commitment threshold for 5-star'),(9,'star5_decay','12','Weekly threshold decay for 5-star'),(10,'star4_base','200','Base commitment threshold for 4-star'),(11,'star4_decay','8','Weekly threshold decay for 4-star'),(12,'star3_base','120','Base commitment threshold for 3-star'),(13,'star3_decay','5','Weekly threshold decay for 3-star'),(14,'star2_base','60','Base commitment threshold for 2-star'),(15,'star2_decay','2.5','Weekly threshold decay for 2-star'),(16,'star1_base','20','Base commitment threshold for 1-star'),(17,'star1_decay','1','Weekly threshold decay for 1-star');
+/*!40000 ALTER TABLE `recruiting_config` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -50,4 +60,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:13
+-- Dump completed on 2026-03-29  0:10:17

@@ -53,6 +53,16 @@ CREATE TABLE `playerStrategies` (
   CONSTRAINT `fk_player_strategy` FOREIGN KEY (`playerID`) REFERENCES `simbbPlayers` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=52 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `playerStrategies`
+--
+
+LOCK TABLES `playerStrategies` WRITE;
+/*!40000 ALTER TABLE `playerStrategies` DISABLE KEYS */;
+INSERT INTO `playerStrategies` VALUES (19,48535,4,NULL,'normal','normal','normal','normal',1.37,1.00,'[3, 0, 3, 3, 3]',NULL,NULL),(20,48535,4,NULL,'normal','normal','normal','normal',1.37,1.00,'[3, 0, 3, 3, 3]',NULL,NULL),(21,48535,4,NULL,'normal','normal','normal','normal',1.37,1.00,'[3, 0, 3, 3, 3]',NULL,NULL),(22,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(23,46212,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(24,62666,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(25,61577,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(26,52896,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(27,68025,4,NULL,'patient','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(28,54560,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(29,46040,4,NULL,'normal','normal','normal','normal',100.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(30,58328,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(31,62087,4,NULL,'power','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(32,51563,4,NULL,'power','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(33,55343,4,NULL,'patient','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(34,62951,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(35,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(36,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(37,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(38,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(39,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(40,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(41,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(42,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(43,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(44,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(45,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(46,44651,4,NULL,'normal','normal','normal','normal',0.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(47,54561,4,NULL,'normal','normal','normal','normal',1.87,1.00,'[0, 0, 0, 3, 3]',NULL,'long'),(48,62191,20,NULL,'normal','normal','aggressive','normal',4.00,1.00,'[3, 3, 3, 3, 3]',NULL,NULL),(49,56416,20,NULL,'normal','normal','normal','normal',1.87,1.00,'[3, 8, 5, 1, 3]',NULL,NULL),(50,51028,20,NULL,'normal','normal','normal','normal',1.87,1.00,'[0, 0, 0, 0, 10]',NULL,NULL),(51,58888,20,NULL,'normal','normal','normal','normal',1.87,1.00,'[10, 0, 0, 0, 10]',NULL,NULL);
+/*!40000 ALTER TABLE `playerStrategies` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -64,4 +74,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:22
+-- Dump completed on 2026-03-29  0:03:53

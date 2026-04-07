@@ -356,7 +356,7 @@ def get_all_ifa_pools(conn, league_year_id: int) -> List[Dict[str, Any]]:
     """Return all bonus pools for a league year with committed amounts (admin view)."""
     rows = conn.execute(text("""
         SELECT bp.org_id, bp.total_pool, bp.spent, bp.standing_rank,
-               org.team_abbrev
+               org.org_abbrev AS team_abbrev
         FROM ifa_bonus_pools bp
         JOIN organizations org ON org.id = bp.org_id
         WHERE bp.league_year_id = :ly
@@ -395,7 +395,7 @@ def get_ifa_auction_history(conn, league_year_id: int) -> List[Dict[str, Any]]:
     rows = conn.execute(text("""
         SELECT ia.*, p.firstName, p.lastName, p.age, p.ptype,
                wo.org_id AS winner_org_id, wo.bonus AS winning_bonus,
-               worg.team_abbrev AS winner_abbrev
+               worg.org_abbrev AS winner_abbrev
         FROM ifa_auction ia
         JOIN simbbPlayers p ON p.id = ia.player_id
         LEFT JOIN ifa_auction_offers wo ON wo.id = ia.winning_offer_id
@@ -423,16 +423,18 @@ def get_ifa_auction_history(conn, league_year_id: int) -> List[Dict[str, Any]]:
 # Eligible players
 # ---------------------------------------------------------------------------
 
-def get_ifa_eligible_players(conn, league_year_id: int) -> List[Dict[str, Any]]:
+def get_ifa_eligible_players(
+    conn, league_year_id: int, viewing_org_id: int = None,
+) -> List[Dict[str, Any]]:
     """
     INTAM players age >= min_age who don't have a completed/expired auction this year.
+    Optionally enriched with fuzzed attributes when viewing_org_id is provided.
     """
     config = get_ifa_config(conn)
     min_age = _cfg_int(config, "min_age", 16)
 
     rows = conn.execute(text("""
-        SELECT p.id, p.firstName, p.lastName, p.age, p.ptype,
-               p.recruit_stars, p.area
+        SELECT p.*
         FROM simbbPlayers p
         JOIN contracts c ON c.playerID = p.id AND c.isFinished = 0
         JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
@@ -450,18 +452,115 @@ def get_ifa_eligible_players(conn, league_year_id: int) -> List[Dict[str, Any]]:
     for r in rows:
         m = r._mapping
         star = int(m["recruit_stars"]) if m["recruit_stars"] else 1
-        result.append({
+        entry = {
             "player_id": int(m["id"]),
-            "firstName": m["firstName"],
-            "lastName": m["lastName"],
+            "firstName": m["firstname"],
+            "lastName": m["lastname"],
             "age": int(m["age"]),
             "ptype": m["ptype"],
             "area": m["area"],
             "star_rating": star,
             "slot_value": float(_slot_value_for_star(config_for_slots, star)),
+            "arm_angle": m.get("arm_angle"),
+        }
+        # Include raw attribute / potential / pitch fields for fuzzing below
+        for key in m.keys():
+            if key.endswith("_base") or key.endswith("_pot"):
+                entry[key] = m[key]
+            elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
+                entry[key] = m[key]
+        result.append(entry)
+
+    # Apply fog-of-war and enrich with scouting/positions
+    result = _enrich_ifa_players(conn, result, viewing_org_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# IFA attribute enrichment (shared by eligible + board)
+# ---------------------------------------------------------------------------
+
+def _enrich_ifa_players(
+    conn, players: List[Dict[str, Any]], viewing_org_id: int = None,
+) -> List[Dict[str, Any]]:
+    """
+    Apply fog-of-war fuzz, listed positions, and scouting metadata to a list
+    of IFA player dicts that already contain raw _base/_pot fields.
+    """
+    if not players:
+        return players
+
+    player_ids = [p["player_id"] for p in players]
+
+    # Apply fog-of-war fuzz (INTAM = "intam" pool context)
+    if viewing_org_id:
+        # _apply_pool_fuzz expects dicts with "id" key
+        for p in players:
+            p["id"] = p["player_id"]
+        try:
+            from scouting import _apply_pool_fuzz
+            _apply_pool_fuzz(players, viewing_org_id, "intam")
+        except Exception as e:
+            log.warning("IFA pool fuzz failed: %s", e)
+        for p in players:
+            del p["id"]
+
+    # Batch-load listed positions
+    lp_map = {}
+    try:
+        from services.listed_position import POSITION_DISPLAY
+        lp_rows = conn.execute(text(
+            "SELECT player_id, position_code FROM player_listed_position "
+            "WHERE player_id IN :pids"
+        ), {"pids": tuple(player_ids)}).all()
+        for r in lp_rows:
+            m = r._mapping
+            lp_map[int(m["player_id"])] = POSITION_DISPLAY.get(
+                m["position_code"], m["position_code"])
+    except Exception:
+        pass
+
+    # Batch-load scouting actions
+    scouting_map = {}
+    if viewing_org_id:
+        try:
+            from services.attribute_visibility import _load_scouting_actions_batch
+            actions = _load_scouting_actions_batch(conn, viewing_org_id, player_ids)
+            for pid, acts in actions.items():
+                act_types = set(acts) if isinstance(acts, (list, set)) else set()
+                available = []
+                if "draft_attrs_fuzzed" not in act_types:
+                    available.append("draft_attrs_fuzzed")
+                if "draft_attrs_precise" not in act_types:
+                    available.append("draft_attrs_precise")
+                if "draft_potential_precise" not in act_types:
+                    available.append("draft_potential_precise")
+                scouting_map[pid] = {
+                    "unlocked": sorted(act_types),
+                    "attrs_precise": "draft_attrs_precise" in act_types,
+                    "pots_precise": "draft_potential_precise" in act_types,
+                    "available_actions": available,
+                }
+        except Exception as e:
+            log.warning("IFA scouting load failed: %s", e)
+
+    # Attach enrichment to each player
+    for p in players:
+        pid = p["player_id"]
+        p["listed_position"] = lp_map.get(pid)
+        p["display_format"] = "letter_grade"
+        p["scouting"] = scouting_map.get(pid, {
+            "unlocked": [],
+            "attrs_precise": False,
+            "pots_precise": False,
+            "available_actions": [
+                "draft_attrs_fuzzed",
+                "draft_attrs_precise",
+                "draft_potential_precise",
+            ],
         })
 
-    return result
+    return players
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +919,105 @@ def advance_ifa_week(conn, league_year_id: int) -> Dict[str, Any]:
     return result
 
 
+def reset_ifa_window(conn, league_year_id: int) -> Dict[str, Any]:
+    """
+    Reset the IFA signing window back to week 0 for a given league year.
+    Reverses all signings (deletes new contracts, reactivates INTAM contracts),
+    clears auctions, offers, bonus pools, rankings, and state.
+    """
+    summary = {
+        "contracts_reversed": 0,
+        "auctions_deleted": 0,
+        "offers_deleted": 0,
+        "pools_deleted": 0,
+        "rankings_cleared": 0,
+        "tx_logs_deleted": 0,
+    }
+
+    # 1. Find completed auctions that created contracts (via transaction_log)
+    signed = conn.execute(text("""
+        SELECT tl.player_id, tl.contract_id, tl.primary_org_id
+        FROM transaction_log tl
+        WHERE tl.league_year_id = :ly AND tl.transaction_type = 'ifa_signing'
+    """), {"ly": league_year_id}).all()
+
+    for row in signed:
+        s = row._mapping
+        contract_id = int(s["contract_id"])
+        player_id = int(s["player_id"])
+
+        # Delete new contract's shares, details, then contract
+        conn.execute(text("""
+            DELETE cts FROM contractTeamShare cts
+            JOIN contractDetails cd ON cd.id = cts.contractDetailsID
+            WHERE cd.contractID = :cid
+        """), {"cid": contract_id})
+        conn.execute(text(
+            "DELETE FROM contractDetails WHERE contractID = :cid"
+        ), {"cid": contract_id})
+        conn.execute(text(
+            "DELETE FROM contracts WHERE id = :cid"
+        ), {"cid": contract_id})
+
+        # Reactivate old INTAM contract (the most recent finished one for this player held by INTAM)
+        conn.execute(text("""
+            UPDATE contracts c
+            JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+            SET c.isFinished = 0
+            WHERE c.playerID = :pid AND cts.orgID = :intam AND c.isFinished = 1
+            ORDER BY c.id DESC LIMIT 1
+        """), {"pid": player_id, "intam": INTAM_ORG_ID})
+
+        summary["contracts_reversed"] += 1
+
+    # 2. Delete transaction log entries
+    result = conn.execute(text("""
+        DELETE FROM transaction_log
+        WHERE league_year_id = :ly AND transaction_type = 'ifa_signing'
+    """), {"ly": league_year_id})
+    summary["tx_logs_deleted"] = result.rowcount
+
+    # 3. Delete all offers for this year's auctions
+    result = conn.execute(text("""
+        DELETE o FROM ifa_auction_offers o
+        JOIN ifa_auction a ON a.id = o.auction_id
+        WHERE a.league_year_id = :ly
+    """), {"ly": league_year_id})
+    summary["offers_deleted"] = result.rowcount
+
+    # 4. Delete all auctions
+    result = conn.execute(text(
+        "DELETE FROM ifa_auction WHERE league_year_id = :ly"
+    ), {"ly": league_year_id})
+    summary["auctions_deleted"] = result.rowcount
+
+    # 5. Delete bonus pools
+    result = conn.execute(text(
+        "DELETE FROM ifa_bonus_pools WHERE league_year_id = :ly"
+    ), {"ly": league_year_id})
+    summary["pools_deleted"] = result.rowcount
+
+    # 6. Clear INTAM recruiting rankings for this year
+    result = conn.execute(text("""
+        DELETE rr FROM recruiting_rankings rr
+        JOIN simbbPlayers p ON p.id = rr.player_id
+        JOIN contracts c ON c.playerID = p.id AND c.isFinished = 0
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        WHERE rr.league_year_id = :ly AND cts.orgID = :intam
+    """), {"ly": league_year_id, "intam": INTAM_ORG_ID})
+    summary["rankings_cleared"] = result.rowcount
+
+    # 7. Delete IFA state (resets to week 0 / pending)
+    conn.execute(text(
+        "DELETE FROM ifa_state WHERE league_year_id = :ly"
+    ), {"ly": league_year_id})
+
+    log.info("IFA window reset for league_year_id=%d: %s", league_year_id, summary)
+    return summary
+
+
 def _advance_ifa_auction_phases(
     conn, current_week: int, league_year_id: int, config: dict,
 ) -> Dict[str, int]:
@@ -1129,9 +1327,11 @@ def get_ifa_board(
     if viewer_org_id:
         pool_status = get_ifa_pool_status(conn, league_year_id, viewer_org_id)
 
-    # Active auctions
+    # Active auctions — load full player row for attribute enrichment
     auctions_raw = conn.execute(text("""
-        SELECT ia.*, p.firstName, p.lastName, p.age, p.ptype, p.area
+        SELECT ia.id AS auction_id, ia.player_id, ia.phase,
+               ia.star_rating, ia.slot_value, ia.entered_week,
+               p.*
         FROM ifa_auction ia
         JOIN simbbPlayers p ON p.id = ia.player_id
         WHERE ia.league_year_id = :ly
@@ -1142,11 +1342,11 @@ def get_ifa_board(
     auctions = []
     for row in auctions_raw:
         m = row._mapping
-        auction_id = int(m["id"])
+        auction_id = int(m["auction_id"])
 
         # Count active offers + get viewer's offer
         offers = conn.execute(text("""
-            SELECT o.org_id, o.bonus, o.status, org.team_abbrev
+            SELECT o.org_id, o.bonus, o.status, org.org_abbrev AS team_abbrev
             FROM ifa_auction_offers o
             JOIN organizations org ON org.id = o.org_id
             WHERE o.auction_id = :aid AND o.status = 'active'
@@ -1167,14 +1367,15 @@ def get_ifa_board(
 
         competitor_orgs.sort()
 
-        auctions.append({
+        entry = {
             "auction_id": auction_id,
             "player_id": int(m["player_id"]),
-            "firstName": m["firstName"],
-            "lastName": m["lastName"],
+            "firstName": m["firstname"],
+            "lastName": m["lastname"],
             "age": int(m["age"]),
             "ptype": m["ptype"],
             "area": m["area"],
+            "arm_angle": m.get("arm_angle"),
             "phase": m["phase"],
             "star_rating": int(m["star_rating"]),
             "slot_value": float(m["slot_value"]),
@@ -1182,7 +1383,17 @@ def get_ifa_board(
             "active_offers": active_count,
             "competitors": competitor_orgs,
             "my_offer": my_offer,
-        })
+        }
+        # Include raw attribute / potential / pitch fields for fuzzing
+        for key in m.keys():
+            if key.endswith("_base") or key.endswith("_pot"):
+                entry[key] = m[key]
+            elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
+                entry[key] = m[key]
+        auctions.append(entry)
+
+    # Apply fog-of-war and enrich with scouting/positions
+    auctions = _enrich_ifa_players(conn, auctions, viewer_org_id)
 
     return {
         "state": state,
@@ -1207,7 +1418,7 @@ def get_ifa_auction_detail(
 
     m = row._mapping
     offers_raw = conn.execute(text("""
-        SELECT o.*, org.team_abbrev
+        SELECT o.*, org.org_abbrev AS team_abbrev
         FROM ifa_auction_offers o
         JOIN organizations org ON org.id = o.org_id
         WHERE o.auction_id = :aid

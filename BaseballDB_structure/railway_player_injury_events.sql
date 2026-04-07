@@ -43,9 +43,19 @@ CREATE TABLE `player_injury_events` (
   PRIMARY KEY (`id`),
   KEY `idx_injury_events_player` (`player_id`),
   KEY `idx_injury_events_type` (`injury_type_id`),
+  KEY `idx_pie_weeks_type` (`weeks_remaining`,`injury_type_id`),
   CONSTRAINT `fk_injury_events_type` FOREIGN KEY (`injury_type_id`) REFERENCES `injury_types` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=29817 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=107514 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `player_injury_events`
+--
+
+LOCK TABLES `player_injury_events` WRITE;
+/*!40000 ALTER TABLE `player_injury_events` DISABLE KEYS */;
+/*!40000 ALTER TABLE `player_injury_events` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -57,4 +67,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:32
+-- Dump completed on 2026-03-29  0:08:32

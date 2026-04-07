@@ -44,6 +44,15 @@ CREATE TABLE `defense_xp_config` (
   UNIQUE KEY `idx_defxp_level_pos` (`league_level`,`position_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `defense_xp_config`
+--
+
+LOCK TABLES `defense_xp_config` WRITE;
+/*!40000 ALTER TABLE `defense_xp_config` DISABLE KEYS */;
+/*!40000 ALTER TABLE `defense_xp_config` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -55,4 +64,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:41
+-- Dump completed on 2026-03-29  0:14:57

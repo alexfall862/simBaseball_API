@@ -42,6 +42,16 @@ CREATE TABLE `weight_profiles` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `weight_profiles`
+--
+
+LOCK TABLES `weight_profiles` WRITE;
+/*!40000 ALTER TABLE `weight_profiles` DISABLE KEYS */;
+INSERT INTO `weight_profiles` VALUES (1,'Test Calibration','OLS regression calibration from league_year 1, level 9','calibrated',0,1,9,'2026-03-16 05:50:32'),(2,'Test Calibration 2','OLS regression calibration from league_year 1, level 9','calibrated',1,1,9,'2026-03-16 14:18:35');
+/*!40000 ALTER TABLE `weight_profiles` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -53,4 +63,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:43
+-- Dump completed on 2026-03-29  0:05:40

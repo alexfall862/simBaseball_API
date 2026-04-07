@@ -52,12 +52,23 @@ CREATE TABLE `game_batting_lines` (
   `plate_appearances` int NOT NULL DEFAULT '0',
   `hbp` int NOT NULL DEFAULT '0',
   `inside_the_park_hr` int NOT NULL DEFAULT '0',
+  `stamina_cost` int DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_game_batting` (`game_id`,`player_id`),
   KEY `idx_gbl_player` (`player_id`,`league_year_id`),
+  KEY `idx_gbl_ly_game` (`league_year_id`,`game_id`),
   CONSTRAINT `fk_gbl_game` FOREIGN KEY (`game_id`) REFERENCES `gamelist` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=840944 DEFAULT CHARSET=utf8mb3;
+) ENGINE=InnoDB AUTO_INCREMENT=2313506 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `game_batting_lines`
+--
+
+LOCK TABLES `game_batting_lines` WRITE;
+/*!40000 ALTER TABLE `game_batting_lines` DISABLE KEYS */;
+/*!40000 ALTER TABLE `game_batting_lines` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -69,4 +80,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:21
+-- Dump completed on 2026-03-29  0:18:34

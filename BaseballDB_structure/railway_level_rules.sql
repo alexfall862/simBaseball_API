@@ -40,6 +40,16 @@ CREATE TABLE `level_rules` (
   PRIMARY KEY (`league_level`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `level_rules`
+--
+
+LOCK TABLES `level_rules` WRITE;
+/*!40000 ALTER TABLE `level_rules` DISABLE KEYS */;
+INSERT INTO `level_rules` VALUES (1,9,3,4,3,0),(2,9,3,4,3,0),(3,9,3,4,3,1),(4,9,3,4,3,1),(5,9,3,4,3,1),(6,9,3,4,3,1),(7,9,3,4,3,1),(8,9,3,4,3,1),(9,9,3,4,3,1);
+/*!40000 ALTER TABLE `level_rules` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -51,4 +61,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:18:24
+-- Dump completed on 2026-03-29  0:18:51

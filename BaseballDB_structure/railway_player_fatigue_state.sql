@@ -38,9 +38,19 @@ CREATE TABLE `player_fatigue_state` (
   `last_week_id` bigint unsigned DEFAULT NULL,
   `last_updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`player_id`,`league_year_id`),
-  KEY `idx_fatigue_player_year` (`player_id`,`league_year_id`)
+  KEY `idx_fatigue_player_year` (`player_id`,`league_year_id`),
+  KEY `idx_pfs_ly_stamina` (`league_year_id`,`stamina`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `player_fatigue_state`
+--
+
+LOCK TABLES `player_fatigue_state` WRITE;
+/*!40000 ALTER TABLE `player_fatigue_state` DISABLE KEYS */;
+/*!40000 ALTER TABLE `player_fatigue_state` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -52,4 +62,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:18:01
+-- Dump completed on 2026-03-29  0:14:01

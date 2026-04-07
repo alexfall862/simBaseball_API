@@ -324,6 +324,15 @@ def _resolve_waiver_cleared(
         .values(isFinished=1)
     )
 
+    # Update waiver claim record FIRST — ensures the player is never stuck
+    # with an "active" waiver if the auction entry fails below
+    conn.execute(
+        update(wc).where(wc.c.id == waiver_id).values(
+            status="cleared",
+            resolved_at=datetime.utcnow(),
+        )
+    )
+
     # Generate demand and optionally enter auction
     if service_years >= FA_THRESHOLD:
         # Full FA — use existing auction system
@@ -332,14 +341,6 @@ def _resolve_waiver_cleared(
     else:
         # Lower-tier FA — insert demand directly, no auction needed
         _insert_tier_demand(conn, player_id, league_year_id, last_level, service_years)
-
-    # Update waiver claim record
-    conn.execute(
-        update(wc).where(wc.c.id == waiver_id).values(
-            status="cleared",
-            resolved_at=datetime.utcnow(),
-        )
-    )
 
     fa_type = _derive_fa_type(last_level, service_years)
     log.info(

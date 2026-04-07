@@ -37,6 +37,16 @@ CREATE TABLE `face_gen_config` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `face_gen_config`
+--
+
+LOCK TABLES `face_gen_config` WRITE;
+/*!40000 ALTER TABLE `face_gen_config` DISABLE KEYS */;
+INSERT INTO `face_gen_config` VALUES (1,'{\"hairBg_pct\": 0.1, \"eyeLine_pct\": 0.75, \"glasses_pct\": 0.1, \"miscLine_pct\": 0.5, \"smileLine_pct\": 0.75, \"facialHair_pct\": 0.5, \"accessories_pct\": 0.2}','2026-03-01 07:28:12');
+/*!40000 ALTER TABLE `face_gen_config` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -48,4 +58,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:15:58
+-- Dump completed on 2026-03-29  0:08:25

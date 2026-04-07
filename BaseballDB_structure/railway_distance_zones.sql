@@ -39,6 +39,16 @@ CREATE TABLE `distance_zones` (
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `distance_zones`
+--
+
+LOCK TABLES `distance_zones` WRITE;
+/*!40000 ALTER TABLE `distance_zones` DISABLE KEYS */;
+INSERT INTO `distance_zones` VALUES (1,'homerun','Home Run',1),(2,'deep_of','Deep Outfield',2),(3,'middle_of','Middle Outfield',3),(4,'shallow_of','Shallow Outfield',4),(5,'deep_if','Deep Infield',5),(6,'middle_if','Middle Infield',6),(7,'shallow_if','Shallow Infield',7),(8,'mound','Mound',8),(9,'catcher','Catcher',9);
+/*!40000 ALTER TABLE `distance_zones` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -50,4 +60,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:18:27
+-- Dump completed on 2026-03-29  0:12:12

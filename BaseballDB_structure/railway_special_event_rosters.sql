@@ -44,6 +44,15 @@ CREATE TABLE `special_event_rosters` (
   CONSTRAINT `fk_ser_event` FOREIGN KEY (`event_id`) REFERENCES `special_events` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1015 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `special_event_rosters`
+--
+
+LOCK TABLES `special_event_rosters` WRITE;
+/*!40000 ALTER TABLE `special_event_rosters` DISABLE KEYS */;
+/*!40000 ALTER TABLE `special_event_rosters` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -55,4 +64,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:08
+-- Dump completed on 2026-03-29  0:13:14

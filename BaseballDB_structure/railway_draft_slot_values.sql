@@ -39,6 +39,15 @@ CREATE TABLE `draft_slot_values` (
   UNIQUE KEY `uq_dsv` (`round`,`pick_in_round`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `draft_slot_values`
+--
+
+LOCK TABLES `draft_slot_values` WRITE;
+/*!40000 ALTER TABLE `draft_slot_values` DISABLE KEYS */;
+/*!40000 ALTER TABLE `draft_slot_values` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -50,4 +59,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:31
+-- Dump completed on 2026-03-29  0:06:16

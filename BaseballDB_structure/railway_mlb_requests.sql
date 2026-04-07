@@ -45,8 +45,18 @@ CREATE TABLE `mlb_requests` (
   PRIMARY KEY (`id`),
   KEY `fk_mlb_requests_org` (`org_id`),
   CONSTRAINT `fk_mlb_requests_org` FOREIGN KEY (`org_id`) REFERENCES `organizations` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=21 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=25 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `mlb_requests`
+--
+
+LOCK TABLES `mlb_requests` WRITE;
+/*!40000 ALTER TABLE `mlb_requests` DISABLE KEYS */;
+INSERT INTO `mlb_requests` VALUES (2,'alexfall862',4,'o',1,0,0,0,1,'2026-02-28 20:12:05','2026-02-28 20:12:18'),(3,'TuscanSota',25,'mgr',0,0,1,0,1,'2026-03-14 17:26:29','2026-03-14 20:48:15'),(4,'Ezaco',29,'o',1,0,0,0,1,'2026-03-14 17:34:04','2026-03-14 20:48:08'),(5,'Fireballer34',1,'o',1,0,0,0,1,'2026-03-14 18:14:14','2026-03-14 20:48:11'),(6,'Bellwood',15,'o',1,0,0,0,0,'2026-03-14 19:44:16','2026-03-14 19:44:16'),(7,'LordLittlebutt',16,'o',1,0,0,0,0,'2026-03-14 20:11:46','2026-03-14 20:11:46'),(8,'kgreene829',6,'o',1,0,0,0,0,'2026-03-14 20:40:17','2026-03-14 20:40:17'),(9,'Rocketcan',23,'o',1,0,0,0,1,'2026-03-14 20:42:25','2026-03-18 03:46:56'),(10,'jmjacobs',1,'o',1,0,0,0,0,'2026-03-14 20:46:33','2026-03-14 20:46:33'),(11,'Jieret',25,'o',1,0,0,0,0,'2026-03-14 20:50:50','2026-03-14 20:50:50'),(12,'bundy',19,'o',1,0,0,0,1,'2026-03-14 20:56:26','2026-03-15 21:18:06'),(13,'anonemuss',2,'o',1,0,0,0,0,'2026-03-14 21:02:49','2026-03-14 21:02:49'),(14,'nemolee.exe',22,'o',1,0,0,0,0,'2026-03-14 21:13:04','2026-03-14 21:13:04'),(15,'Dr_Novella',14,'o',1,0,0,0,0,'2026-03-14 21:35:55','2026-03-14 21:35:55'),(16,'Spoof',18,'mgr',0,0,1,0,1,'2026-03-14 21:52:50','2026-03-14 21:53:53'),(17,'Minnow',19,'gm',0,1,0,0,0,'2026-03-14 22:17:25','2026-03-14 22:17:25'),(18,'Dearden',27,'o',1,0,0,0,0,'2026-03-14 22:19:48','2026-03-14 22:19:48'),(19,'Newkbomb',10,'o',1,0,0,0,0,'2026-03-14 22:54:46','2026-03-14 22:54:46'),(20,'tsweezy',9,'o',1,0,0,0,1,'2026-03-16 00:43:00','2026-03-16 00:43:49'),(21,'Matty460',11,'o',1,0,0,0,0,'2026-03-21 15:21:56','2026-03-21 15:21:56'),(22,'Jitters',3,'o',1,0,0,0,0,'2026-03-21 15:22:11','2026-03-21 15:22:11'),(23,'SandyToez',30,'o',1,0,0,0,0,'2026-03-21 20:29:50','2026-03-21 20:29:50'),(24,'chaserck',14,'o',1,0,0,0,0,'2026-03-27 02:40:10','2026-03-27 02:40:10');
+/*!40000 ALTER TABLE `mlb_requests` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -58,4 +68,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:16
+-- Dump completed on 2026-03-29  0:05:32

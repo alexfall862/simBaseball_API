@@ -41,6 +41,16 @@ CREATE TABLE `defensive_positions` (
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `defensive_positions`
+--
+
+LOCK TABLES `defensive_positions` WRITE;
+/*!40000 ALTER TABLE `defensive_positions` DISABLE KEYS */;
+INSERT INTO `defensive_positions` VALUES (1,'pitcher','P',1,0,1),(2,'catcher','C',1,0,2),(3,'firstbase','1B',1,0,3),(4,'secondbase','2B',1,0,4),(5,'thirdbase','3B',1,0,5),(6,'shortstop','SS',1,0,6),(7,'leftfield','LF',0,1,7),(8,'centerfield','CF',0,1,8),(9,'rightfield','RF',0,1,9);
+/*!40000 ALTER TABLE `defensive_positions` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -52,4 +62,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:37
+-- Dump completed on 2026-03-29  0:18:27

@@ -39,9 +39,20 @@ CREATE TABLE `financial_config` (
   `inflation_mean` decimal(6,4) NOT NULL,
   `interest_rate` decimal(6,4) NOT NULL,
   `weeks_per_season` int NOT NULL,
+  `playoff_gate_multiplier` decimal(6,2) NOT NULL DEFAULT '5.00',
+  `playoff_media_fraction` decimal(6,4) NOT NULL DEFAULT '0.1000',
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `financial_config`
+--
+
+LOCK TABLES `financial_config` WRITE;
+/*!40000 ALTER TABLE `financial_config` DISABLE KEYS */;
+/*!40000 ALTER TABLE `financial_config` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -53,4 +64,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:58
+-- Dump completed on 2026-03-29  0:11:42

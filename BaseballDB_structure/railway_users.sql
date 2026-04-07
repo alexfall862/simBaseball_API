@@ -42,6 +42,16 @@ CREATE TABLE `users` (
   CONSTRAINT `fk_user_role` FOREIGN KEY (`rolesID`) REFERENCES `roles` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=31 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `users`
+--
+
+LOCK TABLES `users` WRITE;
+/*!40000 ALTER TABLE `users` DISABLE KEYS */;
+INSERT INTO `users` VALUES (1,'testuser',5,1),(2,'testuser',5,2),(3,'testuser',5,3),(4,'testuser',5,4),(5,'testuser',5,5),(6,'testuser',5,6),(7,'testuser',5,7),(8,'testuser',5,8),(9,'testuser',5,9),(10,'testuser',5,10),(11,'testuser',5,11),(12,'testuser',5,12),(13,'testuser',5,13),(14,'testuser',5,14),(15,'testuser',5,15),(16,'testuser',5,16),(17,'testuser',5,17),(18,'testuser',5,18),(19,'testuser',5,19),(20,'testuser',5,20),(21,'testuser',5,21),(22,'testuser',5,22),(23,'testuser',5,23),(24,'testuser',5,24),(25,'testuser',5,25),(26,'testuser',5,26),(27,'testuser',5,27),(28,'testuser',5,28),(29,'testuser',5,29),(30,'testuser',5,30);
+/*!40000 ALTER TABLE `users` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -53,4 +63,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:50
+-- Dump completed on 2026-03-29  0:07:02

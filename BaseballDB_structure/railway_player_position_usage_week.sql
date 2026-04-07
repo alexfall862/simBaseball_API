@@ -44,8 +44,17 @@ CREATE TABLE `player_position_usage_week` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `idx_ppuw_unique` (`league_year_id`,`season_week`,`team_id`,`player_id`,`position_code`,`vs_hand`),
   KEY `idx_usage_week_lookup` (`league_year_id`,`season_week`,`team_id`,`position_code`,`vs_hand`)
-) ENGINE=InnoDB AUTO_INCREMENT=955037 DEFAULT CHARSET=utf8mb3;
+) ENGINE=InnoDB AUTO_INCREMENT=2591096 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `player_position_usage_week`
+--
+
+LOCK TABLES `player_position_usage_week` WRITE;
+/*!40000 ALTER TABLE `player_position_usage_week` DISABLE KEYS */;
+/*!40000 ALTER TABLE `player_position_usage_week` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -57,4 +66,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:16
+-- Dump completed on 2026-03-29  0:08:59

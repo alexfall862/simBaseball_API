@@ -21,6 +21,60 @@ from sqlalchemy import MetaData, Table, and_, func, select, text as sa_text, upd
 
 log = logging.getLogger(__name__)
 
+# ── Age-based offer attractiveness weights ──────────────────────────
+# Younger players prefer total guaranteed money (longer deals);
+# older players prefer maximizing annual salary (AAV).
+# Format: (max_age, aav_weight, total_value_weight)
+_AGE_OFFER_WEIGHTS = [
+    (28,  0.30, 0.70),   # young — wants the big long-term deal
+    (31,  0.50, 0.50),   # prime — balanced
+    (33,  0.70, 0.30),   # aging — leans toward per-year money
+    (999, 0.85, 0.15),   # late career — almost pure AAV chasing
+]
+
+
+def _offer_attractiveness(
+    age: int,
+    offers: list[dict],
+) -> list[dict]:
+    """
+    Score each offer using an age-weighted blend of normalised AAV and
+    normalised total_value.  Returns the input dicts with an added
+    ``_score`` key, sorted best-first.
+
+    Each offer dict must contain at least ``aav`` and ``total_value``
+    (as float/Decimal) and ``id``.
+    """
+    if len(offers) <= 1:
+        for o in offers:
+            o["_score"] = 1.0
+        return offers
+
+    # Resolve weights for this age bracket
+    aav_w, tv_w = 0.50, 0.50
+    for max_age, aw, tw in _AGE_OFFER_WEIGHTS:
+        if age <= max_age:
+            aav_w, tv_w = aw, tw
+            break
+
+    aavs = [float(o["aav"]) for o in offers]
+    tvs  = [float(o["total_value"]) for o in offers]
+
+    aav_min, aav_max = min(aavs), max(aavs)
+    tv_min,  tv_max  = min(tvs),  max(tvs)
+
+    aav_range = aav_max - aav_min if aav_max != aav_min else 1.0
+    tv_range  = tv_max  - tv_min  if tv_max  != tv_min  else 1.0
+
+    for o in offers:
+        norm_aav = (float(o["aav"]) - aav_min) / aav_range
+        norm_tv  = (float(o["total_value"]) - tv_min) / tv_range
+        o["_score"] = aav_w * norm_aav + tv_w * norm_tv
+
+    offers.sort(key=lambda o: o["_score"], reverse=True)
+    return offers
+
+
 # ── Table reflection cache ───────────────────────────────────────────
 
 _table_cache: Dict[int, Dict[str, Table]] = {}
@@ -66,14 +120,23 @@ def enter_auction(
 
     # Check not already in an active auction
     existing = conn.execute(
-        select(auc.c.id).where(and_(
+        select(auc.c.id, auc.c.phase).where(and_(
             auc.c.player_id == player_id,
             auc.c.league_year_id == league_year_id,
-            auc.c.phase.in_(["open", "listening", "finalize"]),
         ))
     ).first()
     if existing:
-        return {"auction_id": existing._mapping["id"], "already_active": True}
+        ex = existing._mapping
+        if ex["phase"] in ("open", "listening", "finalize"):
+            return {"auction_id": ex["id"], "already_active": True}
+        # Previous auction was completed/withdrawn — reopen for re-entry
+        log.info(
+            "enter_auction: player=%d reopening previous %s auction %d",
+            player_id, ex["phase"], ex["id"],
+        )
+        reopen_id = int(ex["id"])
+    else:
+        reopen_id = None
 
     # Compute demands
     from services.player_demands import compute_fa_demand
@@ -90,9 +153,7 @@ def enter_auction(
     ).first()
     service_years = int(svc_row._mapping["mlb_service_years"]) if svc_row else 0
 
-    result = conn.execute(auc.insert().values(
-        player_id=player_id,
-        league_year_id=league_year_id,
+    auction_values = dict(
         phase="open",
         phase_started_week=current_week,
         entered_week=current_week,
@@ -103,8 +164,21 @@ def enter_auction(
         war_at_entry=Decimal(str(demand["war"])),
         age_at_entry=age,
         service_years=service_years,
-    ))
-    auction_id = result.lastrowid
+        winning_offer_id=None,
+    )
+
+    if reopen_id:
+        conn.execute(
+            update(auc).where(auc.c.id == reopen_id).values(**auction_values)
+        )
+        auction_id = reopen_id
+    else:
+        result = conn.execute(auc.insert().values(
+            player_id=player_id,
+            league_year_id=league_year_id,
+            **auction_values,
+        ))
+        auction_id = result.lastrowid
 
     log.info(
         "enter_auction: player=%d auction=%d min_aav=%s phase=open",
@@ -395,22 +469,28 @@ def advance_auction_phases(
             log.info("auction %d: open -> listening (week %d)", auction_id, current_week)
 
         elif phase == "listening":
-            # Eliminate non-top-3 offers
+            # Eliminate non-top-3 offers using age-weighted scoring
             active_offers = conn.execute(
-                select(offers.c.id, offers.c.total_value)
+                select(offers.c.id, offers.c.total_value, offers.c.aav)
                 .where(and_(
                     offers.c.auction_id == auction_id,
                     offers.c.status == "active",
                 ))
-                .order_by(offers.c.total_value.desc())
             ).all()
 
             if len(active_offers) > 3:
-                keep_ids = {r._mapping["id"] for r in active_offers[:3]}
-                for r in active_offers[3:]:
+                offer_dicts = [
+                    {"id": int(r._mapping["id"]),
+                     "aav": r._mapping["aav"],
+                     "total_value": r._mapping["total_value"]}
+                    for r in active_offers
+                ]
+                scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
+                keep_ids = {o["id"] for o in scored[:3]}
+                for o in scored[3:]:
                     conn.execute(
                         update(offers)
-                        .where(offers.c.id == r._mapping["id"])
+                        .where(offers.c.id == o["id"])
                         .values(status="outbid")
                     )
 
@@ -423,18 +503,16 @@ def advance_auction_phases(
             log.info("auction %d: listening -> finalize (week %d)", auction_id, current_week)
 
         elif phase == "finalize":
-            # Winner = highest total_value among active offers
-            winner = conn.execute(
+            # Winner = highest age-weighted attractiveness score
+            final_offers = conn.execute(
                 select(offers)
                 .where(and_(
                     offers.c.auction_id == auction_id,
                     offers.c.status == "active",
                 ))
-                .order_by(offers.c.total_value.desc())
-                .limit(1)
-            ).first()
+            ).all()
 
-            if not winner:
+            if not final_offers:
                 log.warning("auction %d: finalize with no active offers", auction_id)
                 conn.execute(
                     update(auc)
@@ -443,8 +521,23 @@ def advance_auction_phases(
                 )
                 continue
 
+            offer_dicts = [
+                {"id": int(r._mapping["id"]),
+                 "aav": r._mapping["aav"],
+                 "total_value": r._mapping["total_value"]}
+                for r in final_offers
+            ]
+            scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
+            winning_id = scored[0]["id"]
+
+            log.info(
+                "auction %d: winner=%d score=%.3f (age=%d)",
+                auction_id, winning_id, scored[0]["_score"],
+                int(a["age_at_entry"]),
+            )
+
             _execute_auction_signing(
-                conn, auction_id, int(winner._mapping["id"]),
+                conn, auction_id, winning_id,
                 league_year_id, current_week,
             )
             summary["finalize_to_completed"] += 1
@@ -687,23 +780,39 @@ def get_auction_board(
                 select(players).where(players.c.id.in_(player_ids))
             ).all()
             attr_map = {}
+            pot_map = {}
+            bio_extra_map = {}
             for r in attr_rows:
                 m = dict(r._mapping)
                 pid = m["id"]
                 ratings = {}
+                potentials = {}
                 for key, val in m.items():
-                    if key.endswith("_base") or key.endswith("_pot"):
+                    if key.endswith("_base"):
+                        ratings[key] = val
+                    elif key.endswith("_pot"):
+                        potentials[key] = val
+                    elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
                         ratings[key] = val
                 attr_map[pid] = ratings
+                pot_map[pid] = potentials
+                bio_extra_map[pid] = {"arm_angle": m.get("arm_angle")}
 
-            # Apply fog-of-war fuzz
-            rating_dicts = [{"id": pid, **attrs} for pid, attrs in attr_map.items()]
+            # Apply fog-of-war fuzz (combine for fuzzing, then re-separate)
+            combined = [{"id": pid, **attr_map[pid], **pot_map[pid]} for pid in attr_map]
             try:
                 from scouting import _apply_pool_fuzz
-                _apply_pool_fuzz(rating_dicts, viewer_org_id, "pro")
+                _apply_pool_fuzz(combined, viewer_org_id, "pro")
             except Exception:
                 pass
-            fuzzed_map = {d["id"]: {k: v for k, v in d.items() if k != "id"} for d in rating_dicts}
+            fuzzed_ratings = {}
+            fuzzed_pots = {}
+            for d in combined:
+                pid = d["id"]
+                fuzzed_ratings[pid] = {k: v for k, v in d.items()
+                                       if k != "id" and (k.endswith("_base") or (k.startswith("pitch") and (k.endswith("_name") or k.endswith("_ovr"))))}
+                fuzzed_pots[pid] = {k: v for k, v in d.items()
+                                    if k != "id" and k.endswith("_pot")}
 
             # Load scouting actions
             scouting_map = {}
@@ -720,11 +829,28 @@ def get_auction_board(
             except Exception:
                 pass
 
+            # Batch-load listed positions
+            lp_map = {}
+            try:
+                from services.listed_position import POSITION_DISPLAY
+                lp_rows = conn.execute(text(
+                    "SELECT player_id, position_code FROM player_listed_position "
+                    "WHERE player_id IN :pids"
+                ), {"pids": tuple(player_ids)}).all()
+                for r in lp_rows:
+                    m = r._mapping
+                    lp_map[int(m["player_id"])] = POSITION_DISPLAY.get(m["position_code"], m["position_code"])
+            except Exception:
+                pass
+
             # Attach to entries
             for entry in result:
                 pid = entry["player_id"]
-                entry["ratings"] = fuzzed_map.get(pid, {})
+                entry["ratings"] = fuzzed_ratings.get(pid, {})
+                entry["potentials"] = fuzzed_pots.get(pid, {})
                 entry["display_format"] = "letter_grade"
+                entry["listed_position"] = lp_map.get(pid)
+                entry["arm_angle"] = bio_extra_map.get(pid, {}).get("arm_angle")
                 entry["scouting"] = scouting_map.get(pid, {
                     "attrs_precise": False,
                     "pots_precise": False,
@@ -907,6 +1033,22 @@ def get_free_agent_pool(
         pages = 0 if total == 0 else (total + per_page - 1) // per_page
         return {"total": total, "page": page, "per_page": per_page, "pages": pages, "players": []}
 
+    # Batch-load listed positions
+    lp_map = {}
+    try:
+        from services.listed_position import POSITION_DISPLAY
+        lp_rows = conn.execute(text(
+            "SELECT player_id, position_code FROM player_listed_position "
+            "WHERE player_id IN :pids"
+        ), {"pids": tuple(player_ids)}).all()
+        for r in lp_rows:
+            m = r._mapping if hasattr(r, '_mapping') else r
+            code = m["position_code"] if hasattr(m, '__getitem__') else r[1]
+            pid = m["player_id"] if hasattr(m, '__getitem__') else r[0]
+            lp_map[int(pid)] = POSITION_DISPLAY.get(code, code)
+    except Exception as e:
+        log.warning("Listed position load failed: %s", e)
+
     # Build player dicts, keeping only relevant columns
     bio_keys = {
         "id", "firstname", "lastname", "age", "ptype",
@@ -1033,6 +1175,7 @@ def get_free_agent_pool(
         # Derive fa_type
         from services.waivers import _derive_fa_type
         p["fa_type"] = _derive_fa_type(last_lvl, svc)
+        p["listed_position"] = lp_map.get(pid)
 
         auc_data = auction_map.get(pid)
         auction_info = None

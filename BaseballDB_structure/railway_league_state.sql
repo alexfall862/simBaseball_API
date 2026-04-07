@@ -43,6 +43,16 @@ CREATE TABLE `league_state` (
   CONSTRAINT `fk_league_state_league_years` FOREIGN KEY (`current_league_year_id`) REFERENCES `league_years` (`id`) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `league_state`
+--
+
+LOCK TABLES `league_state` WRITE;
+/*!40000 ALTER TABLE `league_state` DISABLE KEYS */;
+INSERT INTO `league_state` VALUES (1,1,1,NULL,NULL);
+/*!40000 ALTER TABLE `league_state` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -54,4 +64,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:18
+-- Dump completed on 2026-03-29  0:09:29

@@ -7182,19 +7182,63 @@
   }
 
   // --- All-Star ---
+  function collectAllStarSide(prefix) {
+    const label = document.getElementById(`as-${prefix}-label`).value.trim();
+    const spInputs = document.querySelectorAll(`.as-${prefix}-sp`);
+    const rpInputs = document.querySelectorAll(`.as-${prefix}-rp`);
+    const lineupInputs = document.querySelectorAll(`.as-${prefix}-lineup`);
+    const benchInputs = document.querySelectorAll(`.as-${prefix}-bench`);
+
+    const starting_pitchers = Array.from(spInputs).map(el => parseInt(el.value)).filter(v => !isNaN(v));
+    const relief_pitchers = Array.from(rpInputs).map(el => parseInt(el.value)).filter(v => !isNaN(v));
+    const lineup = Array.from(lineupInputs).map(el => {
+      const pid = parseInt(el.value);
+      return isNaN(pid) ? null : { player_id: pid, position: el.dataset.pos };
+    }).filter(Boolean);
+    const bench = Array.from(benchInputs).map(el => parseInt(el.value)).filter(v => !isNaN(v));
+
+    return { label, starting_pitchers, relief_pitchers, lineup, bench };
+  }
+
   document.getElementById('btn-as-create')?.addEventListener('click', () => {
     const lyid = document.getElementById('as-lyid').value;
     const level = document.getElementById('as-level').value;
     const status = document.getElementById('as-status');
+
+    const home = collectAllStarSide('home');
+    const away = collectAllStarSide('away');
+
+    // Quick validation
+    const errors = [];
+    if (!home.label) errors.push('Home team label required');
+    if (!away.label) errors.push('Away team label required');
+    if (home.starting_pitchers.length !== 12) errors.push(`Home: need 12 SP, got ${home.starting_pitchers.length}`);
+    if (away.starting_pitchers.length !== 12) errors.push(`Away: need 12 SP, got ${away.starting_pitchers.length}`);
+    if (home.relief_pitchers.length !== 4) errors.push(`Home: need 4 RP, got ${home.relief_pitchers.length}`);
+    if (away.relief_pitchers.length !== 4) errors.push(`Away: need 4 RP, got ${away.relief_pitchers.length}`);
+    if (home.lineup.length !== 9) errors.push(`Home: need 9 lineup, got ${home.lineup.length}`);
+    if (away.lineup.length !== 9) errors.push(`Away: need 9 lineup, got ${away.lineup.length}`);
+    if (home.bench.length !== 11) errors.push(`Home: need 11 bench, got ${home.bench.length}`);
+    if (away.bench.length !== 11) errors.push(`Away: need 11 bench, got ${away.bench.length}`);
+
+    if (errors.length) {
+      status.textContent = errors.join('; ');
+      return;
+    }
+
     status.textContent = 'Creating All-Star event...';
     fetch(`${API_BASE}/allstar/create`, {
       method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: parseInt(level) }),
+      body: JSON.stringify({
+        league_year_id: parseInt(lyid),
+        league_level: parseInt(level),
+        home, away,
+      }),
     }).then(r => r.json()).then(data => {
       if (data.error) { status.textContent = `Error: ${data.message}`; return; }
       document.getElementById('as-eid').value = data.event_id;
-      status.textContent = `Event ${data.event_id} created (level ${data.league_level})`;
+      status.textContent = `Event ${data.event_id} created (level ${data.league_level}). Ready to simulate.`;
       loadAllStarRosters(data.event_id);
     }).catch(e => status.textContent = e.message);
   });
@@ -7232,11 +7276,10 @@
         let html = '';
         for (const [label, players] of Object.entries(data.rosters)) {
           html += `<h5>${label} (${players.length} players)</h5>`;
-          html += '<table class="data-table"><thead><tr><th>Name</th><th>Team</th><th>Pos</th><th>Starter</th><th>Source</th></tr></thead><tbody>';
+          html += '<table class="data-table"><thead><tr><th>Name</th><th>Team</th><th>Pos</th><th>Starter</th></tr></thead><tbody>';
           players.forEach(p => {
             html += `<tr><td>${p.name}</td><td>${p.team || '-'}</td><td>${p.position}</td>
-              <td>${p.is_starter ? '<span class="badge badge-success">Yes</span>' : ''}</td>
-              <td>${p.source}</td></tr>`;
+              <td>${p.is_starter ? '<span class="badge badge-success">Yes</span>' : ''}</td></tr>`;
           });
           html += '</tbody></table>';
         }
@@ -8087,6 +8130,40 @@
           if (parts.length) msg += ` \u2014 ${parts.join(', ')}`;
         }
         status.textContent = msg;
+        status.className = 'status-msg success';
+        loadIfaAdmin();
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  });
+
+  document.getElementById('btn-ifa-reset')?.addEventListener('click', () => {
+    const lyid = ifaLyid();
+    if (!lyid) return;
+    if (!confirm('RESET the entire IFA window? This will reverse all signings, delete all auctions/offers/pools, and return to week 0.')) return;
+    if (!confirm('Are you sure? This cannot be undone.')) return;
+    const status = document.getElementById('ifa-status');
+    status.textContent = 'Resetting IFA window\u2026';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/ifa/reset`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.error;
+          status.className = 'status-msg error';
+          return;
+        }
+        const parts = [];
+        if (data.contracts_reversed) parts.push(`${data.contracts_reversed} signings reversed`);
+        if (data.auctions_deleted) parts.push(`${data.auctions_deleted} auctions deleted`);
+        if (data.offers_deleted) parts.push(`${data.offers_deleted} offers deleted`);
+        if (data.pools_deleted) parts.push(`${data.pools_deleted} pools deleted`);
+        if (data.rankings_cleared) parts.push(`${data.rankings_cleared} rankings cleared`);
+        status.textContent = `IFA window reset. ${parts.join(', ') || 'Nothing to clean up.'}`;
         status.className = 'status-msg success';
         loadIfaAdmin();
       })

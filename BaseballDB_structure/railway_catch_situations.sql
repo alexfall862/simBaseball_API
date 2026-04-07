@@ -40,6 +40,16 @@ CREATE TABLE `catch_situations` (
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB AUTO_INCREMENT=8 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `catch_situations`
+--
+
+LOCK TABLES `catch_situations` WRITE;
+/*!40000 ALTER TABLE `catch_situations` DISABLE KEYS */;
+INSERT INTO `catch_situations` VALUES (1,'deep_gap','Deep Gap','Deep outfield + gap direction (hardest to catch)',1),(2,'gap','Gap','Non-deep outfield + gap direction',2),(3,'deep_line','Deep Line','Deep outfield + down the line',3),(4,'line','Line','Non-deep outfield + down the line',4),(5,'deep','Deep','Deep outfield + straight-away',5),(6,'routine_of','Routine OF','Shallow/middle outfield + straight-away',6),(7,'routine_if','Routine IF','Infield fly ball',7);
+/*!40000 ALTER TABLE `catch_situations` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -51,4 +61,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:17:25
+-- Dump completed on 2026-03-29  0:05:09

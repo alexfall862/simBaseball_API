@@ -132,15 +132,16 @@ def ifa_history():
 
 @ifa_signing_bp.route("/ifa/eligible", methods=["GET"])
 def ifa_eligible():
-    """GET /ifa/eligible?league_year_id=X"""
+    """GET /ifa/eligible?league_year_id=X&viewing_org_id=Y"""
     league_year_id = request.args.get("league_year_id", type=int)
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
     if not league_year_id:
         return jsonify({"error": "league_year_id required"}), 400
 
     engine = get_engine()
     from services.ifa_signing import get_ifa_eligible_players
     with engine.connect() as conn:
-        players = get_ifa_eligible_players(conn, league_year_id)
+        players = get_ifa_eligible_players(conn, league_year_id, viewing_org_id)
     return jsonify(players)
 
 
@@ -237,3 +238,22 @@ def ifa_advance_week():
         return jsonify(result)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+
+
+# ── Reset window (admin) ──────────────────────────────────────────────
+
+@ifa_signing_bp.route("/ifa/reset", methods=["POST"])
+def ifa_reset():
+    """POST /ifa/reset {league_year_id}
+    Reset the IFA window back to week 0, reversing all signings."""
+    data = request.get_json(force=True)
+    league_year_id = data.get("league_year_id")
+    if not league_year_id:
+        return jsonify({"error": "league_year_id required"}), 400
+
+    engine = get_engine()
+    from services.ifa_signing import reset_ifa_window
+
+    with engine.begin() as conn:
+        result = reset_ifa_window(conn, league_year_id)
+    return jsonify(result)

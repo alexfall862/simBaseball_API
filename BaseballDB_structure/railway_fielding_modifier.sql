@@ -42,6 +42,16 @@ CREATE TABLE `fielding_modifier` (
   CONSTRAINT `fielding_modifier_ibfk_1` FOREIGN KEY (`fielding_outcome_id`) REFERENCES `fielding_outcomes` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=17 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `fielding_modifier`
+--
+
+LOCK TABLES `fielding_modifier` WRITE;
+/*!40000 ALTER TABLE `fielding_modifier` DISABLE KEYS */;
+INSERT INTO `fielding_modifier` VALUES (1,'air','infield',1,2),(2,'air','infield',2,2),(3,'air','infield',3,3),(4,'air','infield',4,0),(5,'air','outfield',1,3),(6,'air','outfield',2,1),(7,'air','outfield',3,5),(8,'air','outfield',4,2),(9,'ground','infield',1,1),(10,'ground','infield',2,5),(11,'ground','infield',3,1),(12,'ground','infield',4,1),(13,'ground','outfield',1,2),(14,'ground','outfield',2,2),(15,'ground','outfield',3,3),(16,'ground','outfield',4,3);
+/*!40000 ALTER TABLE `fielding_modifier` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -53,4 +63,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:59
+-- Dump completed on 2026-03-29  0:06:40

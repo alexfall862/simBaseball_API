@@ -49,6 +49,15 @@ CREATE TABLE `trade_proposals` (
   KEY `idx_tp_receiving` (`receiving_org_id`,`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `trade_proposals`
+--
+
+LOCK TABLES `trade_proposals` WRITE;
+/*!40000 ALTER TABLE `trade_proposals` DISABLE KEYS */;
+/*!40000 ALTER TABLE `trade_proposals` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -60,4 +69,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:15:49
+-- Dump completed on 2026-03-29  0:16:32

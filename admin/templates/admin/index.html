@@ -3593,6 +3593,132 @@
             <input id="as-eid" type="number" placeholder="Event ID" style="width:100px" />
           </div>
         </div>
+
+        <!-- Roster Entry: two teams side by side -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <!-- HOME TEAM -->
+          <div class="card">
+            <h4>Home Team</h4>
+            <div style="margin-bottom:8px">
+              <label>Team Label</label>
+              <input id="as-home-label" type="text" value="AL" style="width:80px" />
+            </div>
+
+            <h5>Starting Lineup (9)</h5>
+            <table class="data-table"><thead><tr><th>Position</th><th>Player ID</th></tr></thead><tbody>
+              <tr><td>C</td><td><input type="number" class="as-home-lineup" data-pos="C" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>1B</td><td><input type="number" class="as-home-lineup" data-pos="1B" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>2B</td><td><input type="number" class="as-home-lineup" data-pos="2B" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>3B</td><td><input type="number" class="as-home-lineup" data-pos="3B" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>SS</td><td><input type="number" class="as-home-lineup" data-pos="SS" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>LF</td><td><input type="number" class="as-home-lineup" data-pos="LF" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>CF</td><td><input type="number" class="as-home-lineup" data-pos="CF" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>RF</td><td><input type="number" class="as-home-lineup" data-pos="RF" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>DH</td><td><input type="number" class="as-home-lineup" data-pos="DH" placeholder="Player ID" style="width:100px" /></td></tr>
+            </tbody></table>
+
+            <h5>Starting Pitchers (12)</h5>
+            <div class="as-home-sp-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+              <input type="number" class="as-home-sp" placeholder="SP 1 (starter)" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 2" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 3" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 4" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 5" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 6" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 7" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 8" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 9" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 10" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 11" style="width:100%" />
+              <input type="number" class="as-home-sp" placeholder="SP 12" style="width:100%" />
+            </div>
+
+            <h5>Relief Pitchers (4)</h5>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+              <input type="number" class="as-home-rp" placeholder="RP 1" style="width:100%" />
+              <input type="number" class="as-home-rp" placeholder="RP 2" style="width:100%" />
+              <input type="number" class="as-home-rp" placeholder="RP 3" style="width:100%" />
+              <input type="number" class="as-home-rp" placeholder="RP 4" style="width:100%" />
+            </div>
+
+            <h5>Bench (11)</h5>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+              <input type="number" class="as-home-bench" placeholder="Bench 1" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 2" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 3" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 4" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 5" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 6" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 7" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 8" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 9" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 10" style="width:100%" />
+              <input type="number" class="as-home-bench" placeholder="Bench 11" style="width:100%" />
+            </div>
+          </div>
+
+          <!-- AWAY TEAM -->
+          <div class="card">
+            <h4>Away Team</h4>
+            <div style="margin-bottom:8px">
+              <label>Team Label</label>
+              <input id="as-away-label" type="text" value="NL" style="width:80px" />
+            </div>
+
+            <h5>Starting Lineup (9)</h5>
+            <table class="data-table"><thead><tr><th>Position</th><th>Player ID</th></tr></thead><tbody>
+              <tr><td>C</td><td><input type="number" class="as-away-lineup" data-pos="C" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>1B</td><td><input type="number" class="as-away-lineup" data-pos="1B" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>2B</td><td><input type="number" class="as-away-lineup" data-pos="2B" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>3B</td><td><input type="number" class="as-away-lineup" data-pos="3B" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>SS</td><td><input type="number" class="as-away-lineup" data-pos="SS" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>LF</td><td><input type="number" class="as-away-lineup" data-pos="LF" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>CF</td><td><input type="number" class="as-away-lineup" data-pos="CF" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>RF</td><td><input type="number" class="as-away-lineup" data-pos="RF" placeholder="Player ID" style="width:100px" /></td></tr>
+              <tr><td>DH</td><td><input type="number" class="as-away-lineup" data-pos="DH" placeholder="Player ID" style="width:100px" /></td></tr>
+            </tbody></table>
+
+            <h5>Starting Pitchers (12)</h5>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+              <input type="number" class="as-away-sp" placeholder="SP 1 (starter)" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 2" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 3" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 4" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 5" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 6" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 7" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 8" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 9" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 10" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 11" style="width:100%" />
+              <input type="number" class="as-away-sp" placeholder="SP 12" style="width:100%" />
+            </div>
+
+            <h5>Relief Pitchers (4)</h5>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+              <input type="number" class="as-away-rp" placeholder="RP 1" style="width:100%" />
+              <input type="number" class="as-away-rp" placeholder="RP 2" style="width:100%" />
+              <input type="number" class="as-away-rp" placeholder="RP 3" style="width:100%" />
+              <input type="number" class="as-away-rp" placeholder="RP 4" style="width:100%" />
+            </div>
+
+            <h5>Bench (11)</h5>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+              <input type="number" class="as-away-bench" placeholder="Bench 1" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 2" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 3" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 4" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 5" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 6" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 7" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 8" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 9" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 10" style="width:100%" />
+              <input type="number" class="as-away-bench" placeholder="Bench 11" style="width:100%" />
+            </div>
+          </div>
+        </div>
+
         <div class="card" id="as-result-card" style="display:none">
           <h4>Game Result</h4>
           <div id="as-result"></div>
@@ -3805,6 +3931,7 @@
           <div id="ifa-state-info" style="margin-bottom:12px"></div>
           <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
             <button id="btn-ifa-advance-week" class="btn btn-warning">Advance Week</button>
+            <button id="btn-ifa-reset" class="btn btn-danger">Reset Window</button>
           </div>
         </div>
 

@@ -43,6 +43,16 @@ CREATE TABLE `time_to_ground` (
   CONSTRAINT `time_to_ground_ibfk_2` FOREIGN KEY (`distance_zone_id`) REFERENCES `distance_zones` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=31 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `time_to_ground`
+--
+
+LOCK TABLES `time_to_ground` WRITE;
+/*!40000 ALTER TABLE `time_to_ground` DISABLE KEYS */;
+INSERT INTO `time_to_ground` VALUES (1,1,2,2),(2,1,3,1),(3,1,4,1),(4,2,2,3),(5,2,3,2),(6,2,4,1),(7,2,5,1),(8,2,6,1),(9,3,3,3),(10,3,4,2),(11,3,5,2),(12,3,6,1),(13,3,7,1),(14,4,4,3),(15,4,5,2),(16,4,6,1),(17,4,7,1),(18,5,4,4),(19,5,5,3),(20,5,6,2),(21,5,7,1),(22,5,8,1),(23,5,9,1),(24,6,6,1),(25,6,7,1),(26,6,8,1),(27,6,9,1),(28,7,7,1),(29,7,8,1),(30,7,9,1);
+/*!40000 ALTER TABLE `time_to_ground` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -54,4 +64,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:18:28
+-- Dump completed on 2026-03-29  0:12:21

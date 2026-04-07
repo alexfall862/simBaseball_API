@@ -32,7 +32,7 @@ DROP TABLE IF EXISTS `transaction_log`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `transaction_log` (
   `id` int NOT NULL AUTO_INCREMENT,
-  `transaction_type` enum('trade','release','signing','extension','buyout','promote','demote','ir_place','ir_activate','renewal','draft_sign','draft_pick_trade') NOT NULL,
+  `transaction_type` enum('trade','release','signing','extension','buyout','promote','demote','ir_place','ir_activate','renewal','draft_sign','draft_pick_trade','fa_offer','fa_offer_update','fa_auction_sign','arb_renewal','waiver_place','waiver_claim','ifa_offer','ifa_offer_update','ifa_signing') NOT NULL,
   `league_year_id` int NOT NULL,
   `primary_org_id` int NOT NULL,
   `secondary_org_id` int DEFAULT NULL,
@@ -46,8 +46,17 @@ CREATE TABLE `transaction_log` (
   KEY `idx_txlog_org` (`primary_org_id`,`league_year_id`),
   KEY `idx_txlog_type` (`transaction_type`),
   KEY `idx_txlog_player` (`player_id`)
-) ENGINE=InnoDB AUTO_INCREMENT=47 DEFAULT CHARSET=utf8mb3;
+) ENGINE=InnoDB AUTO_INCREMENT=70 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `transaction_log`
+--
+
+LOCK TABLES `transaction_log` WRITE;
+/*!40000 ALTER TABLE `transaction_log` DISABLE KEYS */;
+/*!40000 ALTER TABLE `transaction_log` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -59,4 +68,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:16:07
+-- Dump completed on 2026-03-29  0:07:10

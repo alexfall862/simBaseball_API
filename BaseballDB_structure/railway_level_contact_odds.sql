@@ -41,8 +41,18 @@ CREATE TABLE `level_contact_odds` (
   KEY `contact_type_id` (`contact_type_id`),
   KEY `idx_level_contact_odds_full` (`league_level`,`contact_type_id`),
   CONSTRAINT `level_contact_odds_ibfk_1` FOREIGN KEY (`contact_type_id`) REFERENCES `contact_types` (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=8 DEFAULT CHARSET=utf8mb3;
+) ENGINE=InnoDB AUTO_INCREMENT=64 DEFAULT CHARSET=utf8mb3;
 /*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `level_contact_odds`
+--
+
+LOCK TABLES `level_contact_odds` WRITE;
+/*!40000 ALTER TABLE `level_contact_odds` DISABLE KEYS */;
+INSERT INTO `level_contact_odds` VALUES (1,9,1,7),(2,9,2,11),(3,9,3,12),(4,9,4,16),(5,9,5,20),(6,9,6,30),(7,9,7,4),(8,8,1,7),(9,8,2,11),(10,8,3,12),(11,8,4,16),(12,8,5,20),(13,8,6,30),(14,8,7,4),(15,7,1,7),(16,7,2,11),(17,7,3,12),(18,7,4,16),(19,7,5,20),(20,7,6,30),(21,7,7,4),(22,6,1,7),(23,6,2,11),(24,6,3,12),(25,6,4,16),(26,6,5,20),(27,6,6,30),(28,6,7,4),(29,5,1,7),(30,5,2,11),(31,5,3,12),(32,5,4,16),(33,5,5,20),(34,5,6,30),(35,5,7,4),(36,4,1,7),(37,4,2,11),(38,4,3,12),(39,4,4,16),(40,4,5,20),(41,4,6,30),(42,4,7,4),(43,3,1,7),(44,3,2,11),(45,3,3,12),(46,3,4,16),(47,3,5,20),(48,3,6,30),(49,3,7,4),(50,2,1,7),(51,2,2,11),(52,2,3,12),(53,2,4,16),(54,2,5,20),(55,2,6,30),(56,2,7,4),(57,1,1,7),(58,1,2,11),(59,1,3,12),(60,1,4,16),(61,1,5,20),(62,1,6,30),(63,1,7,4);
+/*!40000 ALTER TABLE `level_contact_odds` ENABLE KEYS */;
+UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -54,4 +64,4 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-17 10:18:10
+-- Dump completed on 2026-03-29  0:18:59

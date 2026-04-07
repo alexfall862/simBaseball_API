@@ -3,7 +3,13 @@
     "allow": [
       "Bash(grep -l \"stats\\\\|stat_\\\\|accumulated\\\\|cumulative\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB/Dump20251121/*.sql)",
       "Bash(python -c \"import py_compile; py_compile.compile\\(''services/allstar.py'', doraise=True\\); py_compile.compile\\(''allstar/__init__.py'', doraise=True\\); print\\(''OK''\\)\")",
-      "Bash(grep -l \"game_results\\\\|gamelist\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB_structure/*.sql)"
+      "Bash(grep -l \"game_results\\\\|gamelist\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB_structure/*.sql)",
+      "Bash(xargs grep:*)",
+      "Bash(ls /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB_structure/*.sql)",
+      "Bash(xargs -I {} basename {})",
+      "Bash(grep -rn \"FROM users\\\\|FROM \\\\`users\\\\`\" /c/Users/Alex/source/repos/simMLB/simBaseball_API --include=\"*.py\")",
+      "Bash(grep -A 20 \"CREATE TABLE \\\\`users\\\\`\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/BaseballDB_structure/railway_users.sql)",
+      "Bash(grep -rn \"users\" /c/Users/Alex/source/repos/simMLB/simBaseball_API/app.py /c/Users/Alex/source/repos/simMLB/simBaseball_API/*/\\\\_\\\\_init\\\\_\\\\_.py)"
     ]
   }
 }
