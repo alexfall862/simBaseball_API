@@ -12,7 +12,20 @@ from services.attribute_visibility import get_visible_players_batch
 logger = logging.getLogger(__name__)
 
 rosters_bp = Blueprint("rosters", __name__)
-PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+
+# Re-export from shared player_display for backward compat
+# (bootstrap, admin, game_payload all import from rosters)
+from services.player_display import (  # noqa: F401, E402
+    PITCH_COMPONENT_RE,
+    _DEFAULT_POSITION_WEIGHTS,
+    compute_derived_raw_ratings as _compute_derived_raw_ratings_plain,
+    to_20_80 as _to_20_80,
+    get_player_column_categories as _get_player_column_categories_shared,
+    load_position_weights,
+    load_dist_by_level,
+    build_player_display,
+    load_display_context,
+)
 
 
 def clear_rosters_caches() -> Dict[str, bool]:
@@ -22,6 +35,7 @@ def clear_rosters_caches() -> Dict[str, bool]:
     Returns:
         Dict with cache names and whether they were cleared (had data).
     """
+    from services.player_display import clear_column_cache
     cleared = {}
 
     # Tables cache (stored on blueprint)
@@ -29,10 +43,9 @@ def clear_rosters_caches() -> Dict[str, bool]:
     if hasattr(rosters_bp, "_tables"):
         delattr(rosters_bp, "_tables")
 
-    # Player column categories cache
-    cleared["player_col_cats"] = hasattr(rosters_bp, "_player_col_cats")
-    if hasattr(rosters_bp, "_player_col_cats"):
-        delattr(rosters_bp, "_player_col_cats")
+    # Player column categories cache (shared service)
+    clear_column_cache()
+    cleared["player_col_cats"] = True
 
     return cleared
 
@@ -64,47 +77,10 @@ def _get_tables():
     return rosters_bp._tables
 
 def _get_player_column_categories():
-    """
-    Categorize simbbPlayers columns into:
-      - rating_cols: numeric attributes to be 20–80 masked directly
-                     (endswith _base)
-      - derived_rating_cols: attributes we will *derive* from other columns
-                             (position _rating, pitchN_ovr)
-      - pot_cols: potential grade columns (endswith _pot)
-      - bio_cols: everything else (id, names, biographical stuff, pitchN_name, etc.)
-
-    """
-    if hasattr(rosters_bp, "_player_col_cats"):
-        return rosters_bp._player_col_cats
-
+    """Categorize simbbPlayers columns. Delegates to shared service."""
     tables = _get_tables()
-    players = tables["players"]
-
-    rating_cols = []
-    derived_cols = []
-    pot_cols = []
-    bio_cols = []
-
-    for col in players.c:
-        name = col.name
-
-        if name.endswith("_pot"):
-            pot_cols.append(name)
-        elif name.endswith("_base"):
-            rating_cols.append(name)
-        elif name.endswith("_rating") or re.match(r"^pitch\d+_ovr$", name):
-            # Position and pitch overall ratings will be *derived*, not used as raw inputs
-            derived_cols.append(name)
-        else:
-            bio_cols.append(name)
-
-    rosters_bp._player_col_cats = {
-        "rating": rating_cols,
-        "derived": derived_cols,
-        "pot": pot_cols,
-        "bio": bio_cols,
-    }
-    return rosters_bp._player_col_cats
+    engine = tables["players"].metadata.bind or get_engine()
+    return _get_player_column_categories_shared(engine)
 
 def _load_stamina_for_players(conn, player_ids):
     """
@@ -273,132 +249,15 @@ def _attach_injury_and_stamina_to_players(conn, players_out):
         p["injury_details"] = inj.get("injury_details", [])
 
 
-_DEFAULT_POSITION_WEIGHTS = {
-    "c_rating": {
-        "power_base": 0.025, "contact_base": 0.025, "eye_base": 0.025, "discipline_base": 0.025,
-        "basereaction_base": 0.025, "baserunning_base": 0.025,
-        "throwacc_base": 0.05, "throwpower_base": 0.05,
-        "catchframe_base": 0.25, "catchsequence_base": 0.25,
-        "fieldcatch_base": 0.05, "fieldreact_base": 0.15, "fieldspot_base": 0.05,
-    },
-    "fb_rating": {
-        "power_base": 0.175, "contact_base": 0.175, "eye_base": 0.175, "discipline_base": 0.175,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.025,
-        "throwacc_base": 0.025,
-        "fieldcatch_base": 0.05, "fieldreact_base": 0.10, "fieldspot_base": 0.05,
-    },
-    "sb_rating": {
-        "power_base": 0.1, "contact_base": 0.1, "eye_base": 0.1, "discipline_base": 0.1,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.050,
-        "throwacc_base": 0.15, "throwpower_base": 0.05,
-        "fieldcatch_base": 0.10, "fieldreact_base": 0.15, "fieldspot_base": 0.05,
-    },
-    "tb_rating": {
-        "power_base": 0.125, "contact_base": 0.125, "eye_base": 0.125, "discipline_base": 0.125,
-        "basereaction_base": 0.025, "baserunning_base": 0.025,
-        "throwacc_base": 0.10, "throwpower_base": 0.10,
-        "fieldcatch_base": 0.05, "fieldreact_base": 0.15, "fieldspot_base": 0.05,
-    },
-    "ss_rating": {
-        "power_base": 0.0375, "contact_base": 0.0375, "eye_base": 0.0375, "discipline_base": 0.0375,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.10,
-        "throwacc_base": 0.15, "throwpower_base": 0.15,
-        "fieldcatch_base": 0.15, "fieldreact_base": 0.25, "fieldspot_base": 0.10,
-    },
-    "lf_rating": {
-        "power_base": 0.1, "contact_base": 0.1, "eye_base": 0.1, "discipline_base": 0.1,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.10,
-        "throwacc_base": 0.10, "throwpower_base": 0.05,
-        "fieldcatch_base": 0.10, "fieldreact_base": 0.05, "fieldspot_base": 0.15,
-    },
-    "cf_rating": {
-        "power_base": 0.025, "contact_base": 0.025, "eye_base": 0.025, "discipline_base": 0.025,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.15,
-        "throwacc_base": 0.10, "throwpower_base": 0.15,
-        "fieldcatch_base": 0.15, "fieldreact_base": 0.20, "fieldspot_base": 0.15,
-    },
-    "rf_rating": {
-        "power_base": 0.1, "contact_base": 0.1, "eye_base": 0.1, "discipline_base": 0.1,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.10,
-        "throwacc_base": 0.05, "throwpower_base": 0.10,
-        "fieldcatch_base": 0.10, "fieldreact_base": 0.05, "fieldspot_base": 0.15,
-    },
-    "dh_rating": {
-        "power_base": 0.10, "contact_base": 0.10, "eye_base": 0.10, "discipline_base": 0.10,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.025,
-    },
-    "sp_rating": {
-        "fieldcatch_base": 0.025, "fieldreact_base": 0.05, "fieldspot_base": 0.025,
-        "pendurance_base": 0.20, "pgencontrol_base": 0.10, "psequencing_base": 0.20,
-        "pthrowpower_base": 0.05, "pickoff_base": 0.05,
-        "pitch1_ovr": 0.10, "pitch2_ovr": 0.10, "pitch3_ovr": 0.10,
-        "pitch4_ovr": 0.05, "pitch5_ovr": 0.05,
-    },
-    "rp_rating": {
-        "fieldcatch_base": 0.025, "fieldreact_base": 0.05, "fieldspot_base": 0.025,
-        "pendurance_base": 0.05, "pgencontrol_base": 0.10, "psequencing_base": 0.025,
-        "pthrowpower_base": 0.05, "pickoff_base": 0.025,
-        "pitch1_ovr": 0.25, "pitch2_ovr": 0.20, "pitch3_ovr": 0.15,
-        "pitch4_ovr": 0.10, "pitch5_ovr": 0.05,
-    },
-}
 
-
+# Backward-compat wrapper: accepts SQLAlchemy Row (extracts ._mapping)
 def _compute_derived_raw_ratings(row, position_weights=None):
-    """
-    Compute raw (0–100-ish) derived ratings for:
-      - pitch1_ovr ... pitch5_ovr  (hardcoded equal-weight)
-      - c_rating, fb_rating, etc.  (from position_weights or _DEFAULT_POSITION_WEIGHTS)
-
-    position_weights: optional dict { rating_type: { attr_key: weight } }
-                      loaded from rating_overall_weights table.
-    """
-    m = row._mapping
-    derived = {}
-
-    def _w_avg(components):
-        """Weighted average from a dict {column_name: weight}, pulling values from m and derived."""
-        total_w = 0.0
-        total_v = 0.0
-        for col, w in components.items():
-            if w <= 0:
-                continue
-            v = derived.get(col)  # check derived first (for pitch_ovr refs)
-            if v is None:
-                v = m.get(col)
-            if v is None:
-                continue
-            try:
-                num = float(v)
-            except (TypeError, ValueError):
-                continue
-            total_v += num * w
-            total_w += w
-        if total_w <= 0:
-            return None
-        return total_v / total_w
-
-    # --- Pitch overalls (pitch1_ovr ... pitch5_ovr) ---
-    # Simple equal-weight average of consist / accuracy / break / control.
-    for i in range(1, 6):
-        prefix = f"pitch{i}_"
-        if m.get(prefix + "name") is None:
-            continue
-        raw = _w_avg({
-            prefix + "consist_base": 0.25,
-            prefix + "pacc_base":    0.25,
-            prefix + "pbrk_base":    0.25,
-            prefix + "pcntrl_base":  0.25,
-        })
-        if raw is not None:
-            derived[f"pitch{i}_ovr"] = raw
-
-    # --- Position ratings from configurable weights ---
-    weights = position_weights or _DEFAULT_POSITION_WEIGHTS
-    for rating_type, wt_map in weights.items():
-        derived[rating_type] = _w_avg(wt_map)
-
-    return derived
+    """Compute derived ratings. Accepts SQLAlchemy Row or plain dict."""
+    if hasattr(row, "_mapping"):
+        mapping = dict(row._mapping)
+    else:
+        mapping = row
+    return _compute_derived_raw_ratings_plain(mapping, position_weights)
 
 def _row_to_player_dict(row):
     """
@@ -705,70 +564,26 @@ def _compute_distributions_by_level(rows, rating_cols, include_derived=False, po
 
     return dist
 
-def _to_20_80(raw_val, mean, std):
-    """
-    Map a raw numeric value into a 20–80 scouting scale, clamped and rounded to nearest 5.
-      - 50 at mean
-      - 80 at +3 std
-      - 20 at -3 std
-      - intermediate values in between.
-    """
-    if raw_val is None or mean is None:
-        return None
 
-    try:
-        x = float(raw_val)
-    except (TypeError, ValueError):
-        return None
-
-    if std is None or std <= 0:
-        z = 0.0
-    else:
-        z = (x - mean) / std
-
-    # Clamp z between -3 and 3
-    if z < -3.0:
-        z = -3.0
-    elif z > 3.0:
-        z = 3.0
-
-    raw_score = 50.0 + (z / 3.0) * 30.0  # -3σ→20, 0→50, +3σ→80
-    raw_score = max(20.0, min(80.0, raw_score))
-
-    # Round to nearest 5
-    score = int(round(raw_score / 5.0) * 5)
-    score = max(20, min(80, score))
-    return score
+# _to_20_80 is imported from services.player_display above
 
 
 def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=None):
     """
-    Convert a row into a structured player dict with:
-      - bio
-      - 20–80 ratings:
-          * for *_base columns (output key: *_display)
-          * for derived ratings (c_rating, fb_rating, pitchN_ovr)
-      - potentials (_pot) as raw strings
-      - contract: current active holding contract metadata
-
-    dist_by_level is keyed by ptype → level → attr → {mean, std}.
-    We select the distribution matching this player's ptype and level.
+    Convert a row into a structured player dict.
+    Delegates core bio/ratings/potentials to shared build_player_display(),
+    then appends roster-specific fields (contract, org, team, level).
     """
     m = row._mapping
-    level_key = m.get("league_level") or m.get("current_level")
-    org_abbrev = m.get("org_abbrev")
-    team_abbrev = m.get("team_abbrev")
-    ptype = (m.get("ptype") or "").strip()
 
-    rating_cols = col_cats["rating"]
-    pot_cols = col_cats["pot"]
-    bio_cols = col_cats["bio"]
+    ctx = {
+        "col_cats": col_cats,
+        "dist_by_level": dist_by_level,
+        "position_weights": position_weights,
+    }
+    player = build_player_display(dict(m), ctx)
 
-    # Look up distribution for this player's ptype, then level.
-    # Fallback chain: exact ptype → "all" (legacy fallback) → empty.
-    ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
-    dist_for_level = ptype_dist.get(level_key, {})
-
+    # --- Contract metadata (roster-specific) ---
     def _num_or_none(val):
         if val is None:
             return None
@@ -777,64 +592,13 @@ def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=No
         except (TypeError, ValueError):
             return None
 
-    # --- Bio fields ---
-    bio = {}
-    for name in bio_cols:
-        bio[name] = m.get(name)
-
-    # --- Base 20–80 ratings (from *_base columns, output as *_display) ---
-    ratings = {}
-    for col in rating_cols:
-        val = m.get(col)
-
-        # Use pooled pitch distribution for pitch components, otherwise per-column
-        m_pitch = PITCH_COMPONENT_RE.match(col)
-        if m_pitch:
-            component = m_pitch.group(1)  # pacc / pbrk / pcntrl / consist
-            dist_key = f"pitch_{component}"
-        else:
-            dist_key = col
-
-        d = dist_for_level.get(dist_key)
-        if not d or d["mean"] is None:
-            scaled = None
-        else:
-            scaled = _to_20_80(val, d["mean"], d["std"])
-
-        out_name = col.replace("_base", "_display")
-        ratings[out_name] = scaled
-
-    # --- Derived 20–80 ratings (position ratings & pitch overalls) ---
-    # Use percentile-based scaling when available (full 20-80 spread);
-    # fall back to z-score for base attributes or missing percentile data.
-    from services.rating_config import is_derived_rating, to_20_80_percentile
-
-    raw_derived = _compute_derived_raw_ratings(row, position_weights)
-    for attr_name, raw_val in raw_derived.items():
-        d = dist_for_level.get(attr_name)
-        if not d or d.get("mean") is None:
-            scaled = None
-        elif is_derived_rating(attr_name) and d.get("percentiles"):
-            scaled = to_20_80_percentile(raw_val, d["percentiles"])
-        else:
-            scaled = _to_20_80(raw_val, d["mean"], d["std"])
-
-        # Keep derived names as-is: c_rating, fb_rating, pitch1_ovr, etc.
-        ratings[attr_name] = scaled
-
-    # --- Potentials ---
-    potentials = {}
-    for col in pot_cols:
-        potentials[col] = m.get(col)
-
-    # --- Contract metadata (current active holding contract) ---
     base_salary = _num_or_none(m.get("contractDetails_salary"))
     share = _num_or_none(m.get("contractTeam_salary_share"))
     salary_for_org = None
     if base_salary is not None and share is not None:
         salary_for_org = base_salary * share
 
-    contract = {
+    player["contract"] = {
         "id": m.get("contract_id"),
         "years": m.get("contract_years"),
         "current_year": m.get("contract_current_year"),
@@ -852,19 +616,12 @@ def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=No
             "salary_for_org": salary_for_org,
         },
     }
+    player["org_abbrev"] = m.get("org_abbrev")
+    player["league_level"] = m.get("league_level")
+    player["current_level"] = m.get("current_level")
+    player["team_abbrev"] = m.get("team_abbrev")
 
-    return {
-        "id": m.get("id"),
-        "org_abbrev": org_abbrev,
-        "league_level": m.get("league_level"),
-        "current_level": m.get("current_level"),
-        "team_abbrev": team_abbrev,
-        "bio": bio,
-        "ratings": ratings,
-        "potentials": potentials,
-        "contract": contract,
-        "displayovr": m.get("displayovr"),
-    }
+    return player
 
 # -------------------------------------------------------------------
 # Roster Display Endpoints
@@ -872,36 +629,19 @@ def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=No
 
 def _load_position_weights(conn):
     """Load position rating weights from DB, or None to use defaults."""
-    try:
-        from services.rating_config import get_overall_weights, POSITION_RATING_TYPES
-        all_weights = get_overall_weights(conn)
-        pos = {k: v for k, v in all_weights.items() if k in POSITION_RATING_TYPES}
-        return pos or None
-    except Exception:
-        return None
+    return load_position_weights(conn)
 
 
 def _load_dist_by_level(conn, col_cats):
     """
-    Try to load pre-computed distributions from rating_scale_config.
-    Falls back to on-the-fly computation if the config table is empty.
-
-    Returns:
-        (dist_by_level dict, source string "config" | "computed")
-
-    The returned dict is keyed by ptype then level:
-        { ptype: { league_level: { attr: { "mean", "std" } } } }
+    Load distributions. Delegates to shared service, with local fallback
+    for on-the-fly computation from active players.
     """
-    try:
-        from services.rating_config import get_rating_config_by_level_name
-        config = get_rating_config_by_level_name(conn)
-        if config:
-            return config, "config"
-    except Exception:
-        # Table may not exist yet; fall through to on-the-fly
-        pass
+    result, source = load_dist_by_level(conn, col_cats)
+    if result:
+        return result, source
 
-    # Fallback: compute from all active players (original behavior, not ptype-split)
+    # Fallback: compute from all active players (original behavior)
     all_stmt = _build_ratings_base_stmt(level_filter=(1, 9))
     all_rows = conn.execute(all_stmt).all()
     if not all_rows:
@@ -910,7 +650,6 @@ def _load_dist_by_level(conn, col_cats):
     dist = _compute_distributions_by_level(
         all_rows, col_cats["rating"], include_derived=True,
     )
-    # Wrap in a ptype-agnostic "all" key for backward compat
     dist = {"all": dist}
     return dist, "computed"
 

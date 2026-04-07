@@ -100,11 +100,17 @@ def _check_roster_availability(cache, season_week: int, subweek: str, level: int
     raise RosterDepletionError(msg)
 
 from db import get_engine
-from rosters import (
-    _get_tables as _get_roster_tables,
-    _get_player_column_categories,
-    _compute_derived_raw_ratings,
+from rosters import _get_tables as _get_roster_tables
+from services.player_display import (
+    get_player_column_categories as _get_player_column_categories_raw,
+    compute_derived_raw_ratings as _compute_derived_raw_ratings,
+    load_position_weights as _load_position_weights_shared,
 )
+
+
+def _get_player_column_categories():
+    """Wrapper that auto-provides engine."""
+    return _get_player_column_categories_raw(get_engine())
 
 from services.rotation import pick_starting_pitcher
 from services.defense_xp import (
@@ -157,24 +163,9 @@ def _trim_play_by_play(pbp_raw):
     ]
 
 
-class _DummyRow:
-    """
-    Lightweight stand-in so _compute_derived_raw_ratings can work with a dict
-    instead of a real Row object.
-    """
-    def __init__(self, mapping: Dict[str, Any]):
-        self._mapping = mapping
-
-
 def _load_position_weights(conn):
     """Load position rating weights from DB, or None to use defaults."""
-    try:
-        from services.rating_config import get_overall_weights, POSITION_RATING_TYPES
-        all_weights = get_overall_weights(conn)
-        pos = {k: v for k, v in all_weights.items() if k in POSITION_RATING_TYPES}
-        return pos or None
-    except Exception:
-        return None
+    return _load_position_weights_shared(conn)
 
 
 def _build_engine_player_view_from_mapping(mapping: Dict[str, Any], position_weights=None) -> Dict[str, Any]:
@@ -188,9 +179,8 @@ def _build_engine_player_view_from_mapping(mapping: Dict[str, Any], position_wei
     rating_cols = col_cats["rating"]
     derived_cols = col_cats["derived"]
 
-    # Let the existing rating logic operate on this adjusted mapping
-    dummy_row = _DummyRow(mapping)
-    derived = _compute_derived_raw_ratings(dummy_row, position_weights) or {}
+    # Compute derived ratings (position ratings, pitch overalls)
+    derived = _compute_derived_raw_ratings(mapping, position_weights) or {}
 
     engine_player: Dict[str, Any] = {}
 

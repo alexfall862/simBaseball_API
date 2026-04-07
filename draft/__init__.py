@@ -131,6 +131,7 @@ def api_draft_eligible():
                 available_only=request.args.get("available_only", "true").lower() != "false",
                 limit=request.args.get("limit", 100, type=int),
                 offset=request.args.get("offset", 0, type=int),
+                viewing_org_id=request.args.get("viewing_org_id", type=int),
             )
         return jsonify(result), 200
     except ValueError as e:

@@ -771,69 +771,63 @@ def get_auction_board(
         }
         result.append(entry)
 
-    # Enrich with fuzzed player attributes and scouting status
-    if result and viewer_org_id:
+    # Enrich with structured ratings, fog-of-war, and scouting status
+    if result:
         try:
             player_ids = [e["player_id"] for e in result]
-            # Load player attributes
+
+            # Load full player rows for display building
             attr_rows = conn.execute(
                 select(players).where(players.c.id.in_(player_ids))
             ).all()
-            attr_map = {}
-            pot_map = {}
-            bio_extra_map = {}
+
+            from services.player_display import load_display_context, build_player_display
+            display_ctx = load_display_context(conn)
+
+            # Build display dicts for each player
+            display_map = {}
             for r in attr_rows:
                 m = dict(r._mapping)
-                pid = m["id"]
-                ratings = {}
-                potentials = {}
-                for key, val in m.items():
-                    if key.endswith("_base"):
-                        ratings[key] = val
-                    elif key.endswith("_pot"):
-                        potentials[key] = val
-                    elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
-                        ratings[key] = val
-                attr_map[pid] = ratings
-                pot_map[pid] = potentials
-                bio_extra_map[pid] = {"arm_angle": m.get("arm_angle")}
+                m["current_level"] = 9  # FA players — use MLB scale
+                pd = build_player_display(m, display_ctx)
+                display_map[int(m["id"])] = pd
 
-            # Apply fog-of-war fuzz (combine for fuzzing, then re-separate)
-            combined = [{"id": pid, **attr_map[pid], **pot_map[pid]} for pid in attr_map]
-            try:
-                from scouting import _apply_pool_fuzz
-                _apply_pool_fuzz(combined, viewer_org_id, "pro")
-            except Exception:
-                pass
-            fuzzed_ratings = {}
-            fuzzed_pots = {}
-            for d in combined:
-                pid = d["id"]
-                fuzzed_ratings[pid] = {k: v for k, v in d.items()
-                                       if k != "id" and (k.endswith("_base") or (k.startswith("pitch") and (k.endswith("_name") or k.endswith("_ovr"))))}
-                fuzzed_pots[pid] = {k: v for k, v in d.items()
-                                    if k != "id" and k.endswith("_pot")}
+            # Apply fog-of-war if viewing as a specific org
+            if viewer_org_id:
+                display_list = [display_map[pid] for pid in player_ids if pid in display_map]
+                if display_list:
+                    from services.attribute_visibility import get_visible_players_batch
+                    holding_org_ids = {pid: 0 for pid in player_ids}
+                    player_levels = {pid: 9 for pid in player_ids}
+                    visible = get_visible_players_batch(
+                        conn, display_list, viewer_org_id,
+                        holding_org_ids, player_levels,
+                        display_ctx["dist_by_level"], display_ctx["col_cats"],
+                        display_ctx["position_weights"],
+                    )
+                    display_map = {p["id"]: p for p in visible}
 
             # Load scouting actions
             scouting_map = {}
-            try:
-                from services.attribute_visibility import _load_scouting_actions_batch
-                actions = _load_scouting_actions_batch(conn, viewer_org_id, player_ids)
-                for pid, acts in actions.items():
-                    act_types = set(acts) if isinstance(acts, (list, set)) else set()
-                    scouting_map[pid] = {
-                        "attrs_precise": "pro_attrs_precise" in act_types,
-                        "pots_precise": "pro_potential_precise" in act_types,
-                        "available_actions": _available_pro_actions(act_types),
-                    }
-            except Exception:
-                pass
+            if viewer_org_id:
+                try:
+                    from services.attribute_visibility import _load_scouting_actions_batch
+                    actions = _load_scouting_actions_batch(conn, viewer_org_id, player_ids)
+                    for pid, acts in actions.items():
+                        act_types = set(acts) if isinstance(acts, (list, set)) else set()
+                        scouting_map[pid] = {
+                            "attrs_precise": "pro_attrs_precise" in act_types,
+                            "pots_precise": "pro_potential_precise" in act_types,
+                            "available_actions": _available_pro_actions(act_types),
+                        }
+                except Exception:
+                    pass
 
             # Batch-load listed positions
             lp_map = {}
             try:
                 from services.listed_position import POSITION_DISPLAY
-                lp_rows = conn.execute(text(
+                lp_rows = conn.execute(sa_text(
                     "SELECT player_id, position_code FROM player_listed_position "
                     "WHERE player_id IN :pids"
                 ), {"pids": tuple(player_ids)}).all()
@@ -846,11 +840,11 @@ def get_auction_board(
             # Attach to entries
             for entry in result:
                 pid = entry["player_id"]
-                entry["ratings"] = fuzzed_ratings.get(pid, {})
-                entry["potentials"] = fuzzed_pots.get(pid, {})
-                entry["display_format"] = "letter_grade"
+                pd = display_map.get(pid, {})
+                entry["bio"] = pd.get("bio", {})
+                entry["ratings"] = pd.get("ratings", {})
+                entry["potentials"] = pd.get("potentials", {})
                 entry["listed_position"] = lp_map.get(pid)
-                entry["arm_angle"] = bio_extra_map.get(pid, {}).get("arm_angle")
                 entry["scouting"] = scouting_map.get(pid, {
                     "attrs_precise": False,
                     "pots_precise": False,
@@ -1049,32 +1043,34 @@ def get_free_agent_pool(
     except Exception as e:
         log.warning("Listed position load failed: %s", e)
 
-    # Build player dicts, keeping only relevant columns
-    bio_keys = {
-        "id", "firstname", "lastname", "age", "ptype",
-        "area", "height", "weight", "bat_hand", "pitch_hand",
-        "arm_angle", "durability", "injury_risk", "displayovr",
-        "last_level", "last_org_abbrev",
-    }
+    # Build structured player dicts via shared display builder
+    from services.player_display import load_display_context, build_player_display
+    display_ctx = load_display_context(conn)
+
     filtered_list = []
     for r in rows:
         m = dict(r)
-        p = {}
-        for key, val in m.items():
-            if key in bio_keys or key.endswith("_base") or key.endswith("_pot"):
-                p[key] = val
-            elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
-                p[key] = val
+        # Use last_level for distribution lookup (FA players have no active level)
+        m["current_level"] = m.get("last_level") or 9
+        p = build_player_display(m, display_ctx)
         p["last_level"] = int(m["last_level"]) if m.get("last_level") else None
         p["last_org_abbrev"] = m.get("last_org_abbrev")
         filtered_list.append(p)
 
-    # Apply fog-of-war fuzz
-    try:
-        from scouting import _apply_pool_fuzz
-        _apply_pool_fuzz(filtered_list, viewing_org_id, "pro")
-    except Exception as e:
-        log.warning("Pool fuzz failed, serving unfuzzed: %s", e)
+    # Apply fog-of-war via roster's visibility system
+    if viewing_org_id:
+        try:
+            from services.attribute_visibility import get_visible_players_batch
+            holding_org_ids = {p["id"]: 0 for p in filtered_list}
+            player_levels = {p["id"]: (p.get("last_level") or 9) for p in filtered_list}
+            filtered_list = get_visible_players_batch(
+                conn, filtered_list, viewing_org_id,
+                holding_org_ids, player_levels,
+                display_ctx["dist_by_level"], display_ctx["col_cats"],
+                display_ctx["position_weights"],
+            )
+        except Exception as e:
+            log.warning("FA pool visibility failed, serving unfuzzed: %s", e)
 
     # Attach auction data
     auction_rows = conn.execute(
@@ -1276,33 +1272,35 @@ def get_free_agent_detail(
 
     pm = dict(player._mapping)
 
-    # Bio
-    bio = {
-        k: pm.get(k) for k in (
-            "id", "firstname", "lastname", "age", "ptype", "area",
-            "height", "weight", "bat_hand", "pitch_hand", "arm_angle",
-            "durability", "injury_risk", "displayovr",
-        )
-    }
+    # Build structured display using shared service
+    from services.player_display import load_display_context, build_player_display
+    display_ctx = load_display_context(conn)
+    pm["current_level"] = pm.get("current_level") or 9  # FA players — use MLB scale
+    player_display = build_player_display(pm, display_ctx)
 
-    # Attributes (fuzzed or precise based on scouting)
-    attributes = {}
-    potentials = {}
-    for key, val in pm.items():
-        if key.endswith("_base"):
-            attributes[key] = val
-        elif key.endswith("_pot"):
-            potentials[key] = val
-        elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
-            attributes[key] = val
+    bio = player_display["bio"]
+    ratings = player_display["ratings"]
+    potentials = player_display["potentials"]
 
-    # Scouting visibility
+    # Apply fog-of-war via visibility system
     scouting_info = {"unlocked": [], "attrs_precise": False, "pots_precise": False,
                      "available_actions": ["pro_attrs_precise", "pro_potential_precise"]}
-    display_format = "letter_grade"
     try:
-        from services.attribute_visibility import _load_scouting_actions_batch, fuzz_letter_grade
-        from services.scouting_service import base_to_letter_grade
+        from services.attribute_visibility import get_visible_players_batch
+        holding_org_ids = {player_id: 0}
+        player_levels = {player_id: 9}
+        visible = get_visible_players_batch(
+            conn, [player_display], viewing_org_id,
+            holding_org_ids, player_levels,
+            display_ctx["dist_by_level"], display_ctx["col_cats"],
+            display_ctx["position_weights"],
+        )
+        if visible:
+            player_display = visible[0]
+            ratings = player_display["ratings"]
+            potentials = player_display["potentials"]
+
+        from services.attribute_visibility import _load_scouting_actions_batch
         actions = _load_scouting_actions_batch(conn, viewing_org_id, [player_id])
         act_types = set(actions.get(player_id, []))
         scouting_info = {
@@ -1311,32 +1309,6 @@ def get_free_agent_detail(
             "pots_precise": "pro_potential_precise" in act_types,
             "available_actions": _available_pro_actions(act_types),
         }
-
-        if "pro_attrs_precise" in act_types:
-            display_format = "20-80"
-            # Keep raw numeric values
-        else:
-            display_format = "letter_grade"
-            # Fuzz base attrs to letter grades
-            for key in list(attributes.keys()):
-                if key.endswith("_base"):
-                    raw = attributes[key]
-                    true_grade = base_to_letter_grade(raw)
-                    attributes[key] = fuzz_letter_grade(
-                        true_grade, viewing_org_id, player_id, key
-                    )
-
-        if "pro_potential_precise" in act_types:
-            pass  # keep precise potentials
-        else:
-            for key in list(potentials.keys()):
-                true_pot = potentials[key]
-                if true_pot:
-                    potentials[key] = fuzz_letter_grade(
-                        true_pot, viewing_org_id, player_id, key
-                    )
-                else:
-                    potentials[key] = "?"
     except Exception as e:
         log.warning("Scouting visibility failed for player %d: %s", player_id, e)
 
@@ -1442,10 +1414,11 @@ def get_free_agent_detail(
         log.warning("Stats summary failed for player %d: %s", player_id, e)
 
     return {
+        "id": player_id,
+        "displayovr": player_display.get("displayovr"),
         "bio": bio,
-        "attributes": attributes,
+        "ratings": ratings,
         "potentials": potentials,
-        "display_format": display_format,
         "contract_history": contract_history,
         "demand": demand_info,
         "auction": auction_info,

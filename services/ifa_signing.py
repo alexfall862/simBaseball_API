@@ -447,32 +447,23 @@ def get_ifa_eligible_players(
         ORDER BY COALESCE(p.recruit_stars, 0) DESC, p.lastName
     """), {"intam": INTAM_ORG_ID, "min_age": min_age, "ly": league_year_id}).all()
 
+    from services.player_display import load_display_context, build_player_display
+    display_ctx = load_display_context(conn)
+
     config_for_slots = config
     result = []
     for r in rows:
-        m = r._mapping
+        m = dict(r._mapping)
+        m["current_level"] = 2  # IFA prospects — use amateur level scale
         star = int(m["recruit_stars"]) if m["recruit_stars"] else 1
-        entry = {
-            "player_id": int(m["id"]),
-            "firstName": m["firstname"],
-            "lastName": m["lastname"],
-            "age": int(m["age"]),
-            "ptype": m["ptype"],
-            "area": m["area"],
-            "star_rating": star,
-            "slot_value": float(_slot_value_for_star(config_for_slots, star)),
-            "arm_angle": m.get("arm_angle"),
-        }
-        # Include raw attribute / potential / pitch fields for fuzzing below
-        for key in m.keys():
-            if key.endswith("_base") or key.endswith("_pot"):
-                entry[key] = m[key]
-            elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
-                entry[key] = m[key]
-        result.append(entry)
+        pd = build_player_display(m, display_ctx)
+        pd["player_id"] = int(m["id"])
+        pd["star_rating"] = star
+        pd["slot_value"] = float(_slot_value_for_star(config_for_slots, star))
+        result.append(pd)
 
     # Apply fog-of-war and enrich with scouting/positions
-    result = _enrich_ifa_players(conn, result, viewing_org_id)
+    result = _enrich_ifa_players(conn, result, viewing_org_id, display_ctx)
     return result
 
 
@@ -482,28 +473,32 @@ def get_ifa_eligible_players(
 
 def _enrich_ifa_players(
     conn, players: List[Dict[str, Any]], viewing_org_id: int = None,
+    display_ctx: Dict[str, Any] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Apply fog-of-war fuzz, listed positions, and scouting metadata to a list
-    of IFA player dicts that already contain raw _base/_pot fields.
+    Apply fog-of-war via attribute_visibility, listed positions, and scouting
+    metadata to a list of IFA player dicts produced by build_player_display().
     """
     if not players:
         return players
 
     player_ids = [p["player_id"] for p in players]
 
-    # Apply fog-of-war fuzz (INTAM = "intam" pool context)
-    if viewing_org_id:
-        # _apply_pool_fuzz expects dicts with "id" key
-        for p in players:
-            p["id"] = p["player_id"]
+    # Apply fog-of-war via shared visibility system
+    if viewing_org_id and display_ctx:
         try:
-            from scouting import _apply_pool_fuzz
-            _apply_pool_fuzz(players, viewing_org_id, "intam")
+            from services.attribute_visibility import get_visible_players_batch
+            # All IFA players are held by INTAM (org 339) → routes to pro_draft context
+            holding_org_ids = {p["id"]: INTAM_ORG_ID for p in players}
+            player_levels = {p["id"]: 2 for p in players}
+            players = get_visible_players_batch(
+                conn, players, viewing_org_id,
+                holding_org_ids, player_levels,
+                display_ctx["dist_by_level"], display_ctx["col_cats"],
+                display_ctx["position_weights"],
+            )
         except Exception as e:
-            log.warning("IFA pool fuzz failed: %s", e)
-        for p in players:
-            del p["id"]
+            log.warning("IFA pool visibility failed, serving unfuzzed: %s", e)
 
     # Batch-load listed positions
     lp_map = {}
@@ -520,45 +515,10 @@ def _enrich_ifa_players(
     except Exception:
         pass
 
-    # Batch-load scouting actions
-    scouting_map = {}
-    if viewing_org_id:
-        try:
-            from services.attribute_visibility import _load_scouting_actions_batch
-            actions = _load_scouting_actions_batch(conn, viewing_org_id, player_ids)
-            for pid, acts in actions.items():
-                act_types = set(acts) if isinstance(acts, (list, set)) else set()
-                available = []
-                if "draft_attrs_fuzzed" not in act_types:
-                    available.append("draft_attrs_fuzzed")
-                if "draft_attrs_precise" not in act_types:
-                    available.append("draft_attrs_precise")
-                if "draft_potential_precise" not in act_types:
-                    available.append("draft_potential_precise")
-                scouting_map[pid] = {
-                    "unlocked": sorted(act_types),
-                    "attrs_precise": "draft_attrs_precise" in act_types,
-                    "pots_precise": "draft_potential_precise" in act_types,
-                    "available_actions": available,
-                }
-        except Exception as e:
-            log.warning("IFA scouting load failed: %s", e)
-
-    # Attach enrichment to each player
+    # Attach listed position to each player
     for p in players:
-        pid = p["player_id"]
+        pid = p.get("player_id") or p.get("id")
         p["listed_position"] = lp_map.get(pid)
-        p["display_format"] = "letter_grade"
-        p["scouting"] = scouting_map.get(pid, {
-            "unlocked": [],
-            "attrs_precise": False,
-            "pots_precise": False,
-            "available_actions": [
-                "draft_attrs_fuzzed",
-                "draft_attrs_precise",
-                "draft_potential_precise",
-            ],
-        })
 
     return players
 
@@ -1339,9 +1299,12 @@ def get_ifa_board(
         ORDER BY ia.star_rating DESC, ia.slot_value DESC
     """), {"ly": league_year_id}).all()
 
+    from services.player_display import load_display_context, build_player_display
+    display_ctx = load_display_context(conn)
+
     auctions = []
     for row in auctions_raw:
-        m = row._mapping
+        m = dict(row._mapping)
         auction_id = int(m["auction_id"])
 
         # Count active offers + get viewer's offer
@@ -1367,33 +1330,21 @@ def get_ifa_board(
 
         competitor_orgs.sort()
 
-        entry = {
-            "auction_id": auction_id,
-            "player_id": int(m["player_id"]),
-            "firstName": m["firstname"],
-            "lastName": m["lastname"],
-            "age": int(m["age"]),
-            "ptype": m["ptype"],
-            "area": m["area"],
-            "arm_angle": m.get("arm_angle"),
-            "phase": m["phase"],
-            "star_rating": int(m["star_rating"]),
-            "slot_value": float(m["slot_value"]),
-            "entered_week": int(m["entered_week"]),
-            "active_offers": active_count,
-            "competitors": competitor_orgs,
-            "my_offer": my_offer,
-        }
-        # Include raw attribute / potential / pitch fields for fuzzing
-        for key in m.keys():
-            if key.endswith("_base") or key.endswith("_pot"):
-                entry[key] = m[key]
-            elif key.startswith("pitch") and (key.endswith("_name") or key.endswith("_ovr")):
-                entry[key] = m[key]
-        auctions.append(entry)
+        m["current_level"] = 2  # IFA prospects — use amateur level scale
+        pd = build_player_display(m, display_ctx)
+        pd["auction_id"] = auction_id
+        pd["player_id"] = int(m["player_id"])
+        pd["phase"] = m["phase"]
+        pd["star_rating"] = int(m["star_rating"])
+        pd["slot_value"] = float(m["slot_value"])
+        pd["entered_week"] = int(m["entered_week"])
+        pd["active_offers"] = active_count
+        pd["competitors"] = competitor_orgs
+        pd["my_offer"] = my_offer
+        auctions.append(pd)
 
     # Apply fog-of-war and enrich with scouting/positions
-    auctions = _enrich_ifa_players(conn, auctions, viewer_org_id)
+    auctions = _enrich_ifa_players(conn, auctions, viewer_org_id, display_ctx)
 
     return {
         "state": state,

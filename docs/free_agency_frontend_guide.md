@@ -134,31 +134,62 @@ GET /api/v1/fa-auction/free-agent-pool
 
 ### Player Object in Pool
 
+The response shape now matches the roster endpoint — attributes are nested under `ratings` (with `_display` suffix, 20-80 scaled) and `potentials`, plus derived position ratings (`c_rating`, `ss_rating`, `sp_rating`, etc.) and pitch overalls.
+
 ```json
 {
   "id": 12345,
-  "firstname": "Aaron",
-  "lastname": "Judge",
-  "age": 34,
-  "ptype": "Position",
-  "area": "US",
   "displayovr": 72,
-  "height": 79,
-  "weight": 282,
-  "bat_hand": "R",
-  "pitch_hand": "R",
-  "durability": 65,
-  "injury_risk": 30,
-
-  "contact_base": "A-",
-  "power_base": "A",
-  "discipline_base": "B+",
-  "speed_base": "C+",
-  "contact_pot": "A",
-  "power_pot": "A+",
+  "bio": {
+    "firstname": "Aaron",
+    "lastname": "Judge",
+    "age": 34,
+    "ptype": "Position",
+    "area": "US",
+    "height": 79,
+    "weight": 282,
+    "bat_hand": "R",
+    "pitch_hand": "R",
+    "arm_angle": null,
+    "durability": 65,
+    "injury_risk": 30,
+    "pitch1_name": null,
+    "pitch2_name": null
+  },
+  "ratings": {
+    "contact_display": 65,
+    "power_display": 75,
+    "eye_display": 60,
+    "discipline_display": 55,
+    "speed_display": 45,
+    "baserunning_display": 40,
+    "fieldcatch_display": 55,
+    "fieldreact_display": 60,
+    "fieldspot_display": 50,
+    "throwacc_display": 65,
+    "throwpower_display": 70,
+    "catchframe_display": null,
+    "catchsequence_display": null,
+    "pendurance_display": null,
+    "pgencontrol_display": null,
+    "c_rating": 20,
+    "fb_rating": 55,
+    "ss_rating": 30,
+    "rf_rating": 72,
+    "dh_rating": 65,
+    "sp_rating": null,
+    "rp_rating": null,
+    "pitch1_ovr": null
+  },
+  "potentials": {
+    "contact_pot": "A",
+    "power_pot": "A+",
+    "speed_pot": "C+"
+  },
 
   "last_level": 9,
   "last_org_abbrev": "NYY",
+  "listed_position": "RF",
 
   "auction": {
     "auction_id": 42,
@@ -192,11 +223,13 @@ GET /api/v1/fa-auction/free-agent-pool
 ```
 
 **Notes:**
-- `_base` fields are **fuzzed letter grades** (e.g., `"A-"`, `"B+"`) unless `scouting.attrs_precise` is true, in which case they may be numeric 20-80 values.
-- `_pot` fields are fuzzed letter grades or `"?"` if completely unknown. Precise if `scouting.pots_precise` is true.
+- Bio fields are nested under `bio` — matching the roster endpoint shape.
+- `ratings` contains 20-80 scaled values with `_display` suffix for base attributes, plus position ratings (`c_rating`, `fb_rating`, etc.) and pitch overalls (`pitch1_ovr`, etc.). These are **fuzzed** by default and become precise when `scouting.attrs_precise` is true.
+- `potentials` contains `_pot` fields as fuzzed letter grades or `"?"` if unknown. Precise if `scouting.pots_precise` is true.
 - `auction` is `null` if the player is not currently in an active auction.
 - `demand` is `null` if no FA demand has been computed for this player yet.
 - `my_offer` inside `auction` is `null` if the viewing org has not submitted an offer.
+- **This shape is identical to the roster endpoint** for the `bio`, `ratings`, and `potentials` fields, allowing frontend component reuse.
 
 ### Suggested UI Layout
 
@@ -255,14 +288,21 @@ Array of auction entries:
   "competing_teams": ["BOS", "LAD", "NYY"],
   "my_offer": { /* same shape as pool */ },
   "entered_week": 12,
+  "listed_position": "RF",
 
+  "bio": { /* same shape as pool bio */ },
   "ratings": {
-    "contact_base": "A-",
-    "power_base": "A",
+    "contact_display": 65,
+    "power_display": 75,
+    "c_rating": 20,
+    "rf_rating": 72,
+    "sp_rating": null,
+    "pitch1_ovr": null
+  },
+  "potentials": {
     "contact_pot": "A",
     "power_pot": "A+"
   },
-  "display_format": "letter_grade",
   "scouting": {
     "attrs_precise": false,
     "pots_precise": false,
@@ -294,8 +334,9 @@ GET /api/v1/fa-auction/player-detail/{playerId}
 
 ```json
 {
+  "id": 12345,
+  "displayovr": 72,
   "bio": {
-    "id": 12345,
     "firstname": "Aaron",
     "lastname": "Judge",
     "age": 34,
@@ -308,14 +349,21 @@ GET /api/v1/fa-auction/player-detail/{playerId}
     "arm_angle": null,
     "durability": 65,
     "injury_risk": 30,
-    "displayovr": 72
+    "pitch1_name": null
   },
 
-  "attributes": {
-    "contact_base": "A-",
-    "power_base": "A",
-    "discipline_base": "B+",
-    "speed_base": "C+"
+  "ratings": {
+    "contact_display": 65,
+    "power_display": 75,
+    "eye_display": 60,
+    "discipline_display": 55,
+    "speed_display": 45,
+    "c_rating": 20,
+    "ss_rating": 30,
+    "rf_rating": 72,
+    "sp_rating": null,
+    "rp_rating": null,
+    "pitch1_ovr": null
   },
 
   "potentials": {
@@ -323,8 +371,6 @@ GET /api/v1/fa-auction/player-detail/{playerId}
     "power_pot": "A+",
     "speed_pot": "?"
   },
-
-  "display_format": "letter_grade",
 
   "contract_history": [
     {
@@ -378,10 +424,10 @@ GET /api/v1/fa-auction/player-detail/{playerId}
 
 ### Attribute Display Logic
 
-| `display_format` | `scouting.attrs_precise` | How to Show Attributes |
-|-------------------|--------------------------|------------------------|
-| `"letter_grade"` | `false` | Show as letter grade badges (e.g., "A-", "B+"). These are FUZZED. |
-| `"20-80"` | `true` | Show as numeric ratings (e.g., 65, 72). These are PRECISE. |
+| `scouting.attrs_precise` | How to Show Ratings |
+|--------------------------|---------------------|
+| `false` | Values are **fuzzed** 20-80 numbers — shifted from true value |
+| `true` | Values are **precise** 20-80 numbers |
 
 | `scouting.pots_precise` | How to Show Potentials |
 |--------------------------|------------------------|
@@ -396,7 +442,7 @@ GET /api/v1/fa-auction/player-detail/{playerId}
 │  OVR: 72  ·  WAR: 4.2  ·  Last: NYY (MLB)                  │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
-│  ATTRIBUTES (fuzzed)         POTENTIALS (fuzzed)             │
+│  RATINGS (20-80 fuzzed)      POTENTIALS (fuzzed)             │
 │  Contact: A-                 Contact: A                      │
 │  Power:   A                  Power:   A+                     │
 │  Speed:   C+                 Speed:   ?                      │
@@ -559,9 +605,9 @@ POST /api/v1/fa-auction/scout-player
 ```
 
 After scouting, the `player` object in the response will have:
-- `display_format` changed from `"letter_grade"` to `"20-80"` (if attrs were scouted)
-- `attributes` will contain numeric values instead of letter grades
-- `scouting.attrs_precise` will be `true`
+- `ratings` values become **precise** 20-80 numbers (if attrs were scouted)
+- `potentials` values become **precise** letter grades (if potentials were scouted)
+- `scouting.attrs_precise` / `scouting.pots_precise` will be `true`
 
 **Update the UI in-place** with the returned `player` object — no need for a second API call.
 

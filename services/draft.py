@@ -915,13 +915,21 @@ def get_draft_board(conn, league_year_id: int) -> List[Dict[str, Any]]:
     } for r in rows]
 
 
+_SOURCE_LEVEL_MAP = {"college": 3, "hs": 1, "intam": 2}
+_SOURCE_ORG_MAP = {"hs": 340, "intam": 339}
+
+
 def get_eligible_players(conn, league_year_id: int,
                          source: str = None,
                          search: str = None,
                          available_only: bool = True,
                          limit: int = 100,
-                         offset: int = 0) -> Dict[str, Any]:
-    """Get draft-eligible players with optional filters."""
+                         offset: int = 0,
+                         viewing_org_id: int = None) -> Dict[str, Any]:
+    """Get draft-eligible players with optional filters and full attributes."""
+    from services.player_display import load_display_context, build_player_display
+    from services.attribute_visibility import get_visible_players_batch
+
     conditions = ["dep.league_year_id = :lyid"]
     params: Dict[str, Any] = {"lyid": league_year_id, "lim": limit, "off": offset}
 
@@ -942,15 +950,13 @@ def get_eligible_players(conn, league_year_id: int,
 
     rows = conn.execute(text(f"""
         SELECT
-            dep.player_id,
+            p.*,
             dep.source,
             dep.draft_rank,
-            p.firstName,
-            p.lastName,
-            p.age,
-            p.pitcherRole,
             rr.composite_score,
-            rr.star_rating
+            rr.star_rating,
+            cts_hold.orgID AS holding_org_id,
+            c_hold.current_level
         FROM draft_eligible_players dep
         JOIN simbbPlayers p ON p.id = dep.player_id
         LEFT JOIN recruiting_rankings rr
@@ -959,6 +965,12 @@ def get_eligible_players(conn, league_year_id: int,
             ON dp_picked.player_id = dep.player_id
             AND dp_picked.league_year_id = dep.league_year_id
             AND dp_picked.player_id IS NOT NULL
+        LEFT JOIN contracts c_hold
+            ON c_hold.playerID = p.id AND c_hold.isFinished = 0
+        LEFT JOIN contractDetails cd_hold
+            ON cd_hold.contractID = c_hold.id AND cd_hold.year = 1
+        LEFT JOIN contractTeamShare cts_hold
+            ON cts_hold.contractDetailsID = cd_hold.id AND cts_hold.isHolder = 1
         WHERE {where}
         ORDER BY dep.draft_rank ASC, dep.player_id ASC
         LIMIT :lim OFFSET :off
@@ -977,19 +989,59 @@ def get_eligible_players(conn, league_year_id: int,
         WHERE {where}
     """), params).scalar()
 
+    # -- Build display dicts with full attributes --
+    ctx = load_display_context(conn)
+    players = []
+    holding_org_ids = {}
+    player_levels = {}
+
+    for r in rows:
+        row_dict = dict(r)
+        pid = row_dict["id"]
+
+        # Determine current_level from contract join or source default
+        level = row_dict.get("current_level")
+        if level is None:
+            level = _SOURCE_LEVEL_MAP.get(row_dict.get("source"), 3)
+        row_dict["current_level"] = level
+
+        # Holding org from contract join, or source-based default
+        hold_org = row_dict.get("holding_org_id")
+        if hold_org is None:
+            hold_org = _SOURCE_ORG_MAP.get(row_dict.get("source"))
+        if hold_org is not None:
+            holding_org_ids[pid] = hold_org
+        player_levels[pid] = level
+
+        display = build_player_display(row_dict, ctx)
+        display["source"] = row_dict.get("source")
+        display["draft_rank"] = row_dict.get("draft_rank")
+        display["composite_score"] = (float(row_dict["composite_score"])
+                                      if row_dict.get("composite_score") else None)
+        display["star_rating"] = row_dict.get("star_rating")
+        # Backward compat fields
+        display["player_id"] = pid
+        display["first_name"] = row_dict.get("firstName")
+        display["last_name"] = row_dict.get("lastName")
+        display["age"] = row_dict.get("age")
+        display["pitcher_role"] = row_dict.get("pitcherRole")
+        players.append(display)
+
+    # -- Apply fog-of-war if viewing_org_id provided --
+    if viewing_org_id is not None and players:
+        players = get_visible_players_batch(
+            conn,
+            players,
+            viewing_org_id,
+            holding_org_ids,
+            player_levels,
+            ctx["dist_by_level"],
+            ctx["col_cats"],
+            position_weights=ctx["position_weights"],
+        )
+
     return {
-        "players": [{
-            "player_id": r["player_id"],
-            "first_name": r["firstName"],
-            "last_name": r["lastName"],
-            "age": r["age"],
-            "pitcher_role": r["pitcherRole"],
-            "source": r["source"],
-            "draft_rank": r["draft_rank"],
-            "composite_score": (float(r["composite_score"])
-                                if r["composite_score"] else None),
-            "star_rating": r["star_rating"],
-        } for r in rows],
+        "players": players,
         "total": total,
         "limit": limit,
         "offset": offset,
