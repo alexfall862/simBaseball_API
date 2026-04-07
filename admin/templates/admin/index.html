@@ -249,6 +249,9 @@
       <a href="#" class="nav-item" data-section="db-storage">
         <span class="nav-icon">&#128230;</span> DB Storage
       </a>
+      <a href="#" class="nav-item" data-section="orphan-sweep">
+        <span class="nav-icon">&#128269;</span> FA Orphan Sweep
+      </a>
     </div>
     </div>
 
@@ -1179,6 +1182,60 @@
         <div class="card" id="db-storage-table-card" style="display: none;">
           <h3>Tables</h3>
           <div class="table-container" id="db-storage-table" style="max-height: 600px; overflow-y: auto;"></div>
+        </div>
+      </section>
+
+      <!-- FA Orphan Sweep Section -->
+      <section id="section-orphan-sweep" class="section">
+        <div class="card">
+          <h3>FA Orphan Sweep</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Find FA-eligible players (6+ MLB service years) who have no active contract,
+            no active auction, and no active waiver claim. These players are stuck in limbo
+            and should be entered into the FA auction pool.
+          </p>
+          <div class="grid-3" id="orphan-sweep-stats" style="margin-bottom: 16px;">
+            <div class="stat-card">
+              <div class="stat-label">Orphans Found</div>
+              <div class="stat-value" id="orphan-found-count">--</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Entered into Auction</div>
+              <div class="stat-value" id="orphan-entered-count">--</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Errors</div>
+              <div class="stat-value" id="orphan-error-count">--</div>
+            </div>
+          </div>
+          <div class="form-row" style="margin-bottom: 12px; align-items: center;">
+            <button class="btn btn-primary" id="btn-orphan-scan">Scan for Orphans</button>
+            <button class="btn btn-warning" id="btn-orphan-fix" disabled>Fix All Orphans</button>
+          </div>
+          <div id="orphan-sweep-status" class="text-muted" style="margin-bottom: 8px;"></div>
+        </div>
+        <div class="card" id="orphan-results-card" style="display: none;">
+          <h3>Orphaned Players</h3>
+          <div class="table-container" style="max-height: 500px; overflow-y: auto;">
+            <table class="data-table" id="orphan-results-table">
+              <thead>
+                <tr>
+                  <th>Player ID</th>
+                  <th>Name</th>
+                  <th>Age</th>
+                  <th>Type</th>
+                  <th>Service Yrs</th>
+                  <th>Last Level</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="orphan-results-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card" id="orphan-fix-results-card" style="display: none;">
+          <h3>Fix Results</h3>
+          <pre id="orphan-fix-result" class="result-box"></pre>
         </div>
       </section>
 

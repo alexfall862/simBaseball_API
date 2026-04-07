@@ -3476,3 +3476,83 @@ def admin_calibration_create_manual():
     except Exception as e:
         logging.exception("admin_calibration_create_manual failed")
         return jsonify(ok=False, error="create_failed", message=str(e)), 500
+
+
+# ── FA Orphan Sweep ──────────────────────────────────────────────────
+
+@admin_bp.get("/fa-orphan-scan")
+def admin_fa_orphan_scan():
+    """
+    Scan for FA-eligible players stuck without an active contract,
+    auction, or waiver claim.  Returns the list for preview (no changes made).
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from sqlalchemy import text
+        engine = get_engine()
+        FA_THRESHOLD = 6
+
+        with engine.connect() as conn:
+            # Get current league_year_id from timestamp
+            ts_row = conn.execute(text(
+                "SELECT league_year_id FROM timestamp_state LIMIT 1"
+            )).first()
+            if not ts_row:
+                return jsonify(ok=False, error="no_timestamp"), 400
+            league_year_id = ts_row[0]
+
+            orphans = conn.execute(text("""
+                SELECT st.player_id, p.firstName, p.lastName, p.age, p.ptype,
+                       st.mlb_service_years,
+                       (SELECT MAX(c.current_level) FROM contracts c
+                        WHERE c.playerID = st.player_id) AS last_level
+                FROM player_service_time st
+                JOIN simbbPlayers p ON p.id = st.player_id
+                WHERE st.mlb_service_years >= :fa_threshold
+                  AND EXISTS (
+                      SELECT 1 FROM contracts c_any WHERE c_any.playerID = st.player_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM contracts c2
+                      JOIN contractDetails cd2 ON cd2.contractID = c2.id
+                      JOIN contractTeamShare cts2 ON cts2.contractDetailsID = cd2.id
+                      WHERE c2.playerID = st.player_id
+                        AND c2.isFinished = 0 AND cts2.isHolder = 1
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM fa_auction fa
+                      WHERE fa.player_id = st.player_id
+                        AND fa.league_year_id = :lyid
+                        AND fa.phase IN ('open', 'listening', 'finalize')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM waiver_claims wc
+                      WHERE wc.player_id = st.player_id
+                        AND wc.status = 'active'
+                  )
+                ORDER BY st.mlb_service_years DESC, p.lastName ASC
+            """), {"fa_threshold": FA_THRESHOLD, "lyid": league_year_id}).mappings().all()
+
+        return jsonify(
+            ok=True,
+            league_year_id=league_year_id,
+            count=len(orphans),
+            players=[
+                {
+                    "player_id": int(r["player_id"]),
+                    "name": f"{r['firstName']} {r['lastName']}".strip(),
+                    "age": int(r["age"]) if r["age"] else None,
+                    "ptype": r["ptype"],
+                    "service_years": int(r["mlb_service_years"]),
+                    "last_level": int(r["last_level"]) if r["last_level"] else None,
+                }
+                for r in orphans
+            ],
+        )
+
+    except Exception as e:
+        logging.exception("admin_fa_orphan_scan failed")
+        return jsonify(ok=False, error="scan_failed", message=str(e)), 500

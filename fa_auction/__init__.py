@@ -132,6 +132,103 @@ def advance_phases_endpoint():
     return jsonify(result)
 
 
+# ── Admin: manual auction entry ────────────────────────────────────
+
+@fa_auction_bp.route("/fa-auction/admin/enter-player", methods=["POST"])
+def admin_enter_player():
+    """
+    POST /fa-auction/admin/enter-player
+    Manually enter a player into the FA auction. Fixes orphaned players
+    who cleared waivers or had contracts finished but never entered auction.
+
+    Body: { "player_id": int, "league_year_id": int, "current_week": int (optional) }
+    """
+    data = request.get_json(force=True)
+    player_id = data.get("player_id")
+    league_year_id = data.get("league_year_id")
+    current_week = data.get("current_week", 0)
+
+    if not player_id or not league_year_id:
+        return jsonify({"error": "player_id and league_year_id required"}), 400
+
+    engine = get_engine()
+    from services.fa_auction import enter_auction
+    try:
+        with engine.begin() as conn:
+            result = enter_auction(conn, player_id, league_year_id, current_week)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@fa_auction_bp.route("/fa-auction/admin/orphan-sweep", methods=["POST"])
+def admin_orphan_sweep():
+    """
+    POST /fa-auction/admin/orphan-sweep
+    Scan for FA-eligible players with no active contract, no active auction,
+    and no active waiver — enter them all into auction.
+
+    Body: { "league_year_id": int }
+    """
+    data = request.get_json(force=True)
+    league_year_id = data.get("league_year_id")
+    if not league_year_id:
+        return jsonify({"error": "league_year_id required"}), 400
+
+    engine = get_engine()
+    from sqlalchemy import text
+    from services.fa_auction import enter_auction
+
+    FA_THRESHOLD = 6
+    with engine.begin() as conn:
+        orphaned = conn.execute(text("""
+            SELECT DISTINCT st.player_id
+            FROM player_service_time st
+            WHERE st.mlb_service_years >= :fa_threshold
+              AND NOT EXISTS (
+                  SELECT 1 FROM contracts c2
+                  JOIN contractDetails cd2 ON cd2.contractID = c2.id
+                  JOIN contractTeamShare cts2 ON cts2.contractDetailsID = cd2.id
+                  WHERE c2.playerID = st.player_id
+                    AND c2.isFinished = 0
+                    AND cts2.isHolder = 1
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM fa_auction fa
+                  WHERE fa.player_id = st.player_id
+                    AND fa.league_year_id = :lyid
+                    AND fa.phase IN ('open', 'listening', 'finalize')
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM waiver_claims wc
+                  WHERE wc.player_id = st.player_id
+                    AND wc.status = 'active'
+              )
+        """), {"fa_threshold": FA_THRESHOLD, "lyid": league_year_id}).all()
+
+        entered = []
+        errors = []
+        for row in orphaned:
+            pid = row[0]
+            had_contract = conn.execute(text(
+                "SELECT 1 FROM contracts WHERE playerID = :pid LIMIT 1"
+            ), {"pid": pid}).first()
+            if not had_contract:
+                continue
+            try:
+                result = enter_auction(conn, pid, league_year_id, current_week=0)
+                entered.append({"player_id": pid, **result})
+            except Exception as e:
+                errors.append({"player_id": pid, "error": str(e)})
+
+    return jsonify({
+        "entered": len(entered),
+        "errors": len(errors),
+        "players": entered,
+        "error_details": errors,
+    })
+
+
 # ── Player demands ──────────────────────────────────────────────────
 
 @fa_auction_bp.route("/fa-auction/player-demand/<int:player_id>", methods=["GET"])

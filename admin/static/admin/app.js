@@ -335,6 +335,12 @@
     // DB Storage
     document.getElementById('btn-db-storage-load').addEventListener('click', loadDbStorage);
 
+    // FA Orphan Sweep
+    const btnOrphanScan = document.getElementById('btn-orphan-scan');
+    if (btnOrphanScan) btnOrphanScan.addEventListener('click', scanForOrphans);
+    const btnOrphanFix = document.getElementById('btn-orphan-fix');
+    if (btnOrphanFix) btnOrphanFix.addEventListener('click', fixOrphans);
+
     // Schedule Generator
     document.getElementById('btn-sched-report').addEventListener('click', loadScheduleReport);
     document.getElementById('btn-sched-validate').addEventListener('click', validateSchedule);
@@ -6498,6 +6504,108 @@
         html += '</tbody></table>';
         document.getElementById('db-storage-table').innerHTML = html;
         document.getElementById('db-storage-table-card').style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  // ---------------------------------------------------------------------------
+  // FA Orphan Sweep
+  // ---------------------------------------------------------------------------
+
+  let _orphanScanData = null;
+
+  function scanForOrphans() {
+    const status = document.getElementById('orphan-sweep-status');
+    status.textContent = 'Scanning...';
+    document.getElementById('orphan-found-count').textContent = '--';
+    document.getElementById('orphan-entered-count').textContent = '--';
+    document.getElementById('orphan-error-count').textContent = '--';
+    document.getElementById('orphan-results-card').style.display = 'none';
+    document.getElementById('orphan-fix-results-card').style.display = 'none';
+    document.getElementById('btn-orphan-fix').disabled = true;
+
+    fetch(`${ADMIN_BASE}/fa-orphan-scan`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) {
+          status.textContent = 'Error: ' + (data.error || data.message);
+          return;
+        }
+        _orphanScanData = data;
+        document.getElementById('orphan-found-count').textContent = data.count;
+        status.textContent = data.count === 0
+          ? 'No orphaned players found.'
+          : `Found ${data.count} orphaned player(s). Review below, then click "Fix All Orphans" to enter them into the FA auction.`;
+
+        if (data.count > 0) {
+          document.getElementById('btn-orphan-fix').disabled = false;
+
+          const levelNames = {
+            1: 'HS', 2: 'INTAM', 3: 'College', 4: 'Scraps',
+            5: 'A', 6: 'High-A', 7: 'AA', 8: 'AAA', 9: 'MLB',
+          };
+          const tbody = document.getElementById('orphan-results-body');
+          tbody.innerHTML = data.players.map(p => `
+            <tr>
+              <td>${p.player_id}</td>
+              <td style="font-weight:600">${p.name}</td>
+              <td>${p.age || '--'}</td>
+              <td>${p.ptype || '--'}</td>
+              <td>${p.service_years}</td>
+              <td>${levelNames[p.last_level] || p.last_level || '--'}</td>
+              <td><span class="badge badge-warning">Orphaned</span></td>
+            </tr>
+          `).join('');
+          document.getElementById('orphan-results-card').style.display = '';
+        }
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function fixOrphans() {
+    if (!_orphanScanData || !_orphanScanData.league_year_id) {
+      alert('Run a scan first.');
+      return;
+    }
+    if (!confirm(`This will enter ${_orphanScanData.count} player(s) into the FA auction. Continue?`)) {
+      return;
+    }
+
+    const status = document.getElementById('orphan-sweep-status');
+    status.textContent = 'Fixing orphans...';
+    document.getElementById('btn-orphan-fix').disabled = true;
+
+    fetch(`${API_BASE}/fa-auction/admin/orphan-sweep`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: _orphanScanData.league_year_id }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = 'Error: ' + data.error;
+          return;
+        }
+        document.getElementById('orphan-entered-count').textContent = data.entered;
+        document.getElementById('orphan-error-count').textContent = data.errors;
+        status.textContent = `Done. Entered ${data.entered} player(s) into auction.` +
+          (data.errors > 0 ? ` ${data.errors} error(s).` : '');
+
+        const resultBox = document.getElementById('orphan-fix-result');
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        document.getElementById('orphan-fix-results-card').style.display = '';
+
+        // Update table badges
+        if (data.players) {
+          const enteredIds = new Set(data.players.map(p => p.player_id));
+          document.querySelectorAll('#orphan-results-body tr').forEach(row => {
+            const pid = parseInt(row.cells[0].textContent);
+            if (enteredIds.has(pid)) {
+              row.cells[6].innerHTML = '<span class="badge badge-success">Entered</span>';
+            }
+          });
+        }
       })
       .catch(err => { status.textContent = 'Error: ' + err.message; });
   }
