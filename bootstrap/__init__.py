@@ -228,8 +228,8 @@ def get_landing_all():
             for oid in org_ids:
                 roster_map = batch_rosters.get(oid, {})
                 if roster_map:
-                    _attach_visibility_context(conn, oid, roster_map)
-                    _apply_visibility_fuzz(roster_map, oid)
+                    _apply_fog_of_war_to_roster_map(
+                        conn, roster_map, oid, {}, [], [], None)
 
             # ── Assemble per-org output ──────────────────────────
             orgs_map = {}
@@ -761,14 +761,21 @@ def _get_org_team_ids(org):
     return ids
 
 
-def _attach_visibility_context(conn, org_id, roster_map):
+def _apply_fog_of_war_to_roster_map(conn, roster_map, viewing_org_id,
+                                    dist_by_level, rating_cols, pot_cols,
+                                    position_weights):
     """
-    Add a ``visibility_context`` dict to every player in *roster_map* so the
-    frontend knows the fuzz/precision state without per-player scouting calls.
+    Apply the shared fog-of-war visibility pipeline to a bootstrap roster_map.
 
-    Single bulk query against ``scouting_actions`` — no N+1.
+    Routes through ``get_visible_players_batch`` in attribute_visibility.py
+    so that all fuzzing, derived-rating recomputation, and displayovr
+    derivation use a single code path.
+
+    ``roster_map``: {team_id: [player_dict, ...]} — mutated in place.
     """
-    # Collect every player id across all teams
+    from services.attribute_visibility import get_visible_players_batch
+
+    # Flatten roster_map to a list for batch processing
     all_players = []
     for team_players in roster_map.values():
         all_players.extend(team_players)
@@ -776,131 +783,53 @@ def _attach_visibility_context(conn, org_id, roster_map):
     if not all_players:
         return
 
-    player_ids = [p["id"] for p in all_players]
-
-    # Bulk-load unlocked scouting actions for this org + these players
-    unlocked_map: dict[int, set[str]] = {}
-    if player_ids:
-        placeholders = ", ".join(f":pid{i}" for i in range(len(player_ids)))
-        params = {"org_id": org_id}
-        params.update({f"pid{i}": pid for i, pid in enumerate(player_ids)})
-        rows = conn.execute(
-            text(
-                f"SELECT player_id, action_type FROM scouting_actions "
-                f"WHERE org_id = :org_id AND player_id IN ({placeholders})"
-            ),
-            params,
-        ).all()
-        for r in rows:
-            unlocked_map.setdefault(r[0], set()).add(r[1])
-
+    # Build holding_org_ids and player_levels dicts
+    # Bootstrap rosters are the org's own players, so holding org = viewing org
+    # for the purpose of context determination. But determine_player_context
+    # uses holding_org to classify the relationship, so we pass viewing_org_id.
+    holding_org_ids = {}
+    player_levels = {}
     for p in all_players:
-        pid = p["id"]
-        level = p.get("current_level")
-        unlocked = unlocked_map.get(pid, set())
+        pid = p.get("id")
+        if pid is None:
+            continue
+        holding_org_ids[pid] = viewing_org_id
+        player_levels[pid] = p.get("current_level", 0)
 
-        # Determine pool from level
-        if level == 1:
-            pool = "hs"
-        elif level in (2, 3):
-            pool = "college"
-        else:
-            pool = "pro"
+    # Build col_cats from available data if not provided
+    if not rating_cols:
+        # Infer from the first player's ratings keys
+        sample_ratings = all_players[0].get("ratings", {}) if all_players else {}
+        rating_cols = [k.replace("_display", "_base") for k in sample_ratings
+                       if k.endswith("_display")]
+        pot_cols = list(all_players[0].get("potentials", {}).keys()) if all_players else []
 
-        # Determine display format and precision flags
-        if pool == "pro":
-            p["visibility_context"] = {
-                "context": "pro_roster",
-                "display_format": "20-80",
-                "attributes_precise": "pro_attrs_precise" in unlocked,
-                "potentials_precise": "pro_potential_precise" in unlocked,
-            }
-        elif pool == "college":
-            p["visibility_context"] = {
-                "context": "college_roster",
-                "display_format": "letter_grade",
-                "attributes_precise": "draft_attrs_precise" in unlocked,
-                "potentials_precise": "college_potential_precise" in unlocked,
-            }
-        else:
-            # HS — attributes always hidden
-            p["visibility_context"] = {
-                "context": "hs_roster",
-                "display_format": "hidden",
-                "attributes_precise": False,
-                "potentials_precise": "recruit_potential_precise" in unlocked,
-            }
+    col_cats = {"rating": rating_cols, "pot": pot_cols, "bio": [], "derived": []}
 
+    # Load distributions if not provided
+    if not dist_by_level:
+        try:
+            from services.rating_config import get_rating_config_by_level_name
+            dist_by_level = get_rating_config_by_level_name(conn) or {}
+        except Exception:
+            dist_by_level = {}
 
-def _apply_visibility_fuzz(roster_map, org_id):
-    """
-    Apply fog-of-war fuzzing to ratings/potentials based on each player's
-    ``visibility_context``.  Must be called AFTER ``_attach_visibility_context``.
+    # Load position weights if not provided
+    if position_weights is None:
+        try:
+            from rosters import _load_position_weights
+            position_weights = _load_position_weights(conn)
+        except Exception:
+            position_weights = None
 
-    Mutations are in-place:
-      - Pro (20-80): fuzz_20_80 on ratings if not precise; fuzz_letter_grade on
-        potentials if not precise.
-      - College (letter_grade): convert ratings to letter grades, then
-        fuzz_letter_grade if not precise; fuzz potentials if not precise.
-      - HS (hidden): null out ratings and potentials entirely.
-    """
-    from services.attribute_visibility import (
-        fuzz_20_80,
-        fuzz_letter_grade,
-        _score_to_letter,
+    # Apply shared visibility pipeline (handles scouting actions, fuzz,
+    # derived rating recomputation, and displayovr derivation)
+    get_visible_players_batch(
+        conn, all_players, viewing_org_id,
+        holding_org_ids, player_levels,
+        dist_by_level, col_cats, position_weights,
     )
-
-    for players in roster_map.values():
-        for p in players:
-            vis = p.get("visibility_context")
-            if not vis:
-                continue
-
-            pid = p["id"]
-            fmt = vis.get("display_format")
-            attrs_precise = vis.get("attributes_precise", False)
-            pots_precise = vis.get("potentials_precise", False)
-
-            if fmt == "hidden":
-                # HS — null out everything
-                p["ratings"] = {k: None for k in p.get("ratings", {})}
-                p["potentials"] = {k: None for k in p.get("potentials", {})}
-
-            elif fmt == "letter_grade":
-                # College — convert 20-80 ratings to letter grades, fuzz if not precise
-                ratings = p.get("ratings", {})
-                converted = {}
-                for attr, score in ratings.items():
-                    grade = _score_to_letter(score)
-                    if not attrs_precise:
-                        grade = fuzz_letter_grade(grade, org_id, pid, attr)
-                    converted[attr] = grade
-                p["ratings"] = converted
-
-                # Potentials are already letter grades
-                if not pots_precise:
-                    pots = p.get("potentials", {})
-                    p["potentials"] = {
-                        k: fuzz_letter_grade(v, org_id, pid, k) if v else v
-                        for k, v in pots.items()
-                    }
-
-            elif fmt == "20-80":
-                # Pro — fuzz 20-80 ratings if not precise
-                if not attrs_precise:
-                    ratings = p.get("ratings", {})
-                    p["ratings"] = {
-                        k: fuzz_20_80(v, org_id, pid, k)
-                        for k, v in ratings.items()
-                    }
-
-                # Potentials are letter grades — fuzz if not precise
-                if not pots_precise:
-                    pots = p.get("potentials", {})
-                    p["potentials"] = {
-                        k: fuzz_letter_grade(v, org_id, pid, k) if v else v
-                        for k, v in pots.items()
-                    }
+    # all_players are mutated in place; roster_map references the same dicts
 
 
 def _get_roster_map(conn, tables, org_id):
@@ -1093,9 +1022,9 @@ def _get_roster_map(conn, tables, org_id):
         }
         roster_map.setdefault(team_id, []).append(player)
 
-    # --- Visibility context: bulk-load scouting unlocks for this org ---
-    _attach_visibility_context(conn, org_id, roster_map)
-    _apply_visibility_fuzz(roster_map, org_id)
+    # --- Apply fog-of-war via shared visibility pipeline ---
+    _apply_fog_of_war_to_roster_map(conn, roster_map, org_id, dist_by_level,
+                                    base_cols, pot_cols, position_weights)
 
     return roster_map
 

@@ -472,7 +472,8 @@ def _apply_visibility(
     ratings = player_dict.get("ratings", {})
     potentials = player_dict.get("potentials", {})
     bio = player_dict.get("bio", {})
-    ptype = (bio.get("ptype") or "").strip()
+    # Support both nested-bio shape (build_player_display) and flat shape (bootstrap)
+    ptype = (bio.get("ptype") or player_dict.get("ptype") or "").strip()
     rating_cols = col_cats.get("rating", [])
     pot_cols = col_cats.get("pot", [])
 
