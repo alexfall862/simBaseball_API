@@ -121,6 +121,10 @@ _GRADE_VAL = {
     "F": -6,
 }
 
+# A/A+ premium — these grades virtually guarantee MLB-level ability,
+# so they get extra weight in recruiting composite scoring.
+_GRADE_PREMIUM = {"A+": 1.5, "A": 1.25}
+
 # Position player attributes for composite scoring
 _POS_BASE_ATTRS = [
     "contact_base", "power_base", "discipline_base",
@@ -148,9 +152,48 @@ _PIT_POT_ATTRS = [
     "psequencing_pot",
 ]
 
+# -- Weighted attribute groups for recruiting composite --
+# Position players: 60% batting tools, 40% speed/defense
+_POS_GROUPS = [
+    {
+        "weight": 0.60,
+        "base": ["contact_base", "power_base", "discipline_base", "eye_base"],
+        "pot":  ["contact_pot", "power_pot", "discipline_pot", "eye_pot"],
+    },
+    {
+        "weight": 0.40,
+        "base": ["speed_base", "baserunning_base", "throwpower_base",
+                 "throwacc_base", "fieldcatch_base", "fieldreact_base",
+                 "fieldspot_base"],
+        "pot":  ["speed_pot"],
+    },
+]
+
+# Pitchers: 65% core arm talent, 35% pitch-specific stuff
+_PIT_GROUPS = [
+    {
+        "weight": 0.65,
+        "base": ["pendurance_base", "pgencontrol_base", "pthrowpower_base",
+                 "psequencing_base", "throwpower_base", "throwacc_base"],
+        "pot":  ["pendurance_pot", "pgencontrol_pot", "pthrowpower_pot",
+                 "psequencing_pot"],
+    },
+    {
+        "weight": 0.35,
+        "base": ["pitch1_pacc_base", "pitch1_pbrk_base",
+                 "pitch1_pcntrl_base", "pitch1_consist_base",
+                 "pitch2_pacc_base", "pitch2_pbrk_base",
+                 "pitch2_pcntrl_base", "pitch2_consist_base"],
+        "pot":  [],
+    },
+]
+
 
 def _compute_composite(m, base_attrs, pot_attrs):
-    """Compute composite score from base attributes + pot bonus."""
+    """Compute composite score from base attributes + pot bonus.
+
+    Legacy flat-weighted version kept for IFA signing compatibility.
+    """
     base_sum = 0.0
     base_count = 0
     for key in base_attrs:
@@ -173,6 +216,48 @@ def _compute_composite(m, base_attrs, pot_attrs):
     pot_avg = (pot_bonus / max(pot_count, 1)) * 2
 
     return base_avg + pot_avg
+
+
+def _group_avg(m, keys):
+    """Average of non-None float values for a list of attribute keys."""
+    total = 0.0
+    count = 0
+    for key in keys:
+        val = m.get(key)
+        if val is not None:
+            try:
+                total += float(val)
+                count += 1
+            except (TypeError, ValueError):
+                pass
+    return total / max(count, 1)
+
+
+def _group_pot_avg(m, keys):
+    """Average potential grade value with A/A+ premium applied."""
+    total = 0.0
+    count = 0
+    for key in keys:
+        g = m.get(key)
+        if g and g in _GRADE_VAL:
+            val = _GRADE_VAL[g] * _GRADE_PREMIUM.get(g, 1.0)
+            total += val
+            count += 1
+    return total / max(count, 1)
+
+
+def _compute_recruiting_composite(m, groups):
+    """Weighted composite for recruiting star rankings.
+
+    Each group contributes (base_avg + pot_avg * 2) * weight.
+    A/A+ potential grades receive a premium multiplier.
+    """
+    composite = 0.0
+    for grp in groups:
+        base_avg = _group_avg(m, grp["base"])
+        pot_avg = _group_pot_avg(m, grp["pot"]) * 2 if grp["pot"] else 0.0
+        composite += (base_avg + pot_avg) * grp["weight"]
+    return composite
 
 
 # ── Public aliases for cross-module reuse (IFA signing) ──────────────────
@@ -225,17 +310,17 @@ def compute_star_rankings(conn, league_year_id):
     if not rows:
         return 0
 
-    # Split by ptype, score with ptype-appropriate attributes
+    # Split by ptype, score with position-appropriate weighted groups
     pos_scored = []
     pit_scored = []
     for r in rows:
         m = r._mapping
         ptype = m["ptype"] or "Position"
         if ptype == "Pitcher":
-            comp = _compute_composite(m, _PIT_BASE_ATTRS, _PIT_POT_ATTRS)
+            comp = _compute_recruiting_composite(m, _PIT_GROUPS)
             pit_scored.append((m["id"], ptype, comp))
         else:
-            comp = _compute_composite(m, _POS_BASE_ATTRS, _POS_POT_ATTRS)
+            comp = _compute_recruiting_composite(m, _POS_GROUPS)
             pos_scored.append((m["id"], ptype, comp))
 
     # Sort each group by composite descending, assign stars independently

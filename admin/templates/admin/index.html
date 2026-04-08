@@ -222,6 +222,13 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Draft</div>
+      <a href="#" class="nav-item" data-section="draft-admin">
+        <span class="nav-icon">&#127942;</span> Draft Admin
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">IFA Signing</div>
       <a href="#" class="nav-item" data-section="ifa-admin">
         <span class="nav-icon">&#127758;</span> IFA Admin
@@ -4028,6 +4035,147 @@
       </section>
 
       <!-- IFA Admin -->
+      <!-- ==================== DRAFT ADMIN ==================== -->
+      <section id="section-draft-admin" class="section">
+
+        <!-- Controls Card -->
+        <div class="card">
+          <h3>Draft Administration</h3>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>League Year</label>
+              <select id="dft-lyid"></select>
+            </div>
+            <button id="btn-dft-refresh" class="btn btn-secondary">Refresh</button>
+          </div>
+          <div id="dft-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Draft State Card -->
+        <div class="card" id="dft-state-card" style="display:none">
+          <h4>Draft State</h4>
+          <div id="dft-state-info" style="margin-bottom:12px"></div>
+
+          <!-- Round Mode Strip -->
+          <div id="dft-round-strip" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px"></div>
+
+          <!-- Phase-Dependent Action Buttons -->
+          <div id="dft-actions" class="button-group"></div>
+        </div>
+
+        <!-- Initialize Card (shown when no draft exists) -->
+        <div class="card" id="dft-init-card" style="display:none">
+          <h4>Initialize New Draft</h4>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="dft-total-rounds">Total Rounds</label>
+              <input type="number" id="dft-total-rounds" value="20" min="1" max="40">
+            </div>
+            <div class="form-group">
+              <label for="dft-seconds-per-pick">Seconds per Pick</label>
+              <input type="number" id="dft-seconds-per-pick" value="60" min="10" max="600">
+            </div>
+            <div class="form-group">
+              <label for="dft-live-rounds">Live Rounds (comma-separated)</label>
+              <input type="text" id="dft-live-rounds" value="1,2,3" placeholder="1,2,3">
+            </div>
+            <div class="form-group">
+              <label for="dft-snake">Snake Draft</label>
+              <select id="dft-snake">
+                <option value="false">No</option>
+                <option value="true">Yes</option>
+              </select>
+            </div>
+          </div>
+          <div class="button-group">
+            <button id="btn-dft-initialize" class="btn btn-primary">Initialize Draft</button>
+          </div>
+        </div>
+
+        <!-- Round Mode Editor (SETUP only) -->
+        <div class="card" id="dft-round-mode-card" style="display:none">
+          <h4>Round Mode Configuration</h4>
+          <p style="color:var(--text-secondary);margin-bottom:12px;font-size:0.85rem">
+            Click rounds to toggle between <span class="badge badge-primary">LIVE</span> and <span class="badge badge-pending">AUTO</span>. Changes saved automatically.
+          </p>
+          <div id="dft-round-mode-grid" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px"></div>
+          <div id="dft-round-mode-status" class="status-msg"></div>
+        </div>
+
+        <!-- Draft Board Card -->
+        <div class="card" id="dft-board-card" style="display:none">
+          <h4>Draft Board</h4>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:8px">
+            <div>
+              <label>Round Filter</label>
+              <select id="dft-board-round-filter">
+                <option value="">All Rounds</option>
+              </select>
+            </div>
+          </div>
+          <div id="dft-board-table" style="max-height:600px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Admin Pick Override Card -->
+        <div class="card" id="dft-override-card" style="display:none">
+          <h4>Pick Overrides</h4>
+          <p style="color:var(--text-secondary);margin-bottom:12px;font-size:0.85rem">
+            Manually assign or rollback draft picks.
+          </p>
+
+          <!-- Assign Pick -->
+          <div style="margin-bottom:16px">
+            <h5 style="margin-bottom:8px">Assign Pick</h5>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="dft-set-round">Round</label>
+                <input type="number" id="dft-set-round" min="1" placeholder="Round">
+              </div>
+              <div class="form-group">
+                <label for="dft-set-pick">Pick in Round</label>
+                <input type="number" id="dft-set-pick" min="1" placeholder="Pick #">
+              </div>
+              <div class="form-group">
+                <label for="dft-set-player">Player ID</label>
+                <input type="number" id="dft-set-player" min="1" placeholder="Player ID">
+              </div>
+            </div>
+            <button id="btn-dft-set-pick" class="btn btn-warning">Assign Pick</button>
+          </div>
+
+          <!-- Remove Pick -->
+          <div>
+            <h5 style="margin-bottom:8px">Rollback Pick</h5>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="dft-remove-pick-id">Draft Pick ID</label>
+                <input type="number" id="dft-remove-pick-id" min="1" placeholder="Pick ID from board">
+              </div>
+            </div>
+            <button id="btn-dft-remove-pick" class="btn btn-danger">Rollback Pick</button>
+          </div>
+          <div id="dft-override-status" class="status-msg" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Signing Card -->
+        <div class="card" id="dft-signing-card" style="display:none">
+          <h4>Signing Status</h4>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:8px">
+            <div>
+              <label>Status Filter</label>
+              <select id="dft-sign-filter">
+                <option value="">All</option>
+                <option value="pending">Pending</option>
+                <option value="signed">Signed</option>
+                <option value="passed">Passed</option>
+              </select>
+            </div>
+          </div>
+          <div id="dft-signing-table" style="max-height:600px;overflow-y:auto"></div>
+        </div>
+
+      </section>
+
       <section id="section-ifa-admin" class="section">
         <!-- Controls Card -->
         <div class="card">

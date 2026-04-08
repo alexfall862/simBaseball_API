@@ -3389,27 +3389,75 @@ def admin_player_preview():
                     "scaled_20_80": scaled,
                 }
 
-            # Compute overall
-            from services.weight_calibration import _compute_raw_ovr_for_row, _percentile_rank_to_20_80
+            # Compute overall — position-aware weight selection
+            from services.weight_calibration import (
+                _compute_raw_ovr_for_row, _percentile_rank_to_20_80,
+                _resolve_ovr_weights, _POS_CODE_TO_RATING_TYPE,
+            )
 
-            ovr_type = "pitcher_overall" if ptype == "Pitcher" else "position_overall"
-            ovr_weights = all_weights.get(ovr_type, {})
+            # Resolve this player's listed position
+            ly_row = conn.execute(sa_text(
+                "SELECT id FROM league_years WHERE league_year = "
+                "(SELECT season FROM timestamp_state WHERE id = 1)"
+            )).first()
+            league_year_id = int(ly_row[0]) if ly_row else None
+
+            listed_pos_code = None
+            if league_year_id is not None:
+                lp_row = conn.execute(sa_text(
+                    "SELECT position_code FROM player_listed_position "
+                    "WHERE player_id = :pid AND league_year_id = :lyid LIMIT 1"
+                ), {"pid": player_id, "lyid": league_year_id}).first()
+                if lp_row:
+                    listed_pos_code = str(lp_row[0])
+
+            # Build a single-player listed_positions dict for _resolve_ovr_weights
+            listed_positions = {player_id: listed_pos_code} if listed_pos_code else {}
+            pitcher_fallback = all_weights.get("pitcher_overall", {})
+            position_fallback = all_weights.get("position_overall", {})
+
+            ovr_weights = _resolve_ovr_weights(
+                player_id, ptype, listed_positions, all_weights,
+                pitcher_fallback, position_fallback,
+            )
+
+            # Determine which weight type was used for display
+            if listed_pos_code and _POS_CODE_TO_RATING_TYPE.get(listed_pos_code) in all_weights:
+                ovr_type = _POS_CODE_TO_RATING_TYPE[listed_pos_code]
+            else:
+                ovr_type = "pitcher_overall" if ptype == "Pitcher" else "position_overall"
 
             ovr_raw = _compute_raw_ovr_for_row(row, ovr_weights)
             if ovr_raw is None:
                 ovr_raw = 0.0
 
             # Inline percentile rank: load all peers at same (level, ptype),
-            # compute their raw_ovr, find where this player ranks.
+            # compute their raw_ovr using each peer's own position weights.
             peer_rows = conn.execute(sa_text("""
                 SELECT p.* FROM simbbPlayers p
                 JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
                 WHERE c.current_level = :lvl AND p.ptype = :pt
             """), {"lvl": player_level, "pt": ptype}).mappings().all()
 
+            # Bulk-load listed positions for all peers at this level
+            peer_listed: dict = {}
+            if league_year_id is not None:
+                plp_rows = conn.execute(sa_text(
+                    "SELECT player_id, position_code FROM player_listed_position "
+                    "WHERE league_year_id = :lyid"
+                ), {"lyid": league_year_id}).all()
+                for plp in plp_rows:
+                    peer_listed[int(plp[0])] = str(plp[1])
+
             peer_raws = []
             for pr in peer_rows:
-                pr_ovr = _compute_raw_ovr_for_row(pr, ovr_weights)
+                pr_pid = int(pr["id"])
+                pr_ptype = (pr.get("ptype") or "").strip()
+                pr_wts = _resolve_ovr_weights(
+                    pr_pid, pr_ptype, peer_listed, all_weights,
+                    pitcher_fallback, position_fallback,
+                )
+                pr_ovr = _compute_raw_ovr_for_row(pr, pr_wts)
                 if pr_ovr is not None:
                     peer_raws.append(pr_ovr)
 
@@ -3433,9 +3481,10 @@ def admin_player_preview():
 
             return jsonify(ok=True, player={
                 "id": int(row["id"]),
-                "name": f"{row['firstName']} {row['lastName']}",
+                "name": f"{row['firstname']} {row['lastname']}",
                 "ptype": ptype,
                 "level": player_level,
+                "listed_position": listed_pos_code,
                 "current_displayovr": row.get("displayovr"),
             }, raw_attributes=raw_attrs, position_ratings=position_ratings,
                overall={"type": ovr_type, "raw": round(ovr_raw, 2), "scaled_20_80": ovr_scaled,

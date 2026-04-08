@@ -18,7 +18,17 @@ from sqlalchemy import (
     MetaData, Table, and_, func, select, text as sa_text, update,
 )
 
+from services.attribute_visibility import fuzz_displayovr
+
 log = logging.getLogger(__name__)
+
+
+def _fuzz_ovr(true_ovr, org_id, player_id):
+    """Fuzz displayovr if an org_id is provided, else return raw."""
+    if org_id is None:
+        return true_ovr
+    return fuzz_displayovr(true_ovr, org_id, player_id)
+
 
 # ── Constants (mirror contract_ops.py) ────────────────────────────────
 MINOR_SALARY = Decimal("40000")
@@ -605,7 +615,7 @@ def get_waiver_wire(
             "player_name": f"{r['firstName']} {r['lastName']}",
             "ptype": r["ptype"],
             "age": r["age"],
-            "displayovr": r["displayovr"],
+            "displayovr": _fuzz_ovr(r["displayovr"], org_id, r["player_id"]),
             "contract_id": r["contract_id"],
             "releasing_org_id": r["releasing_org_id"],
             "releasing_org_abbrev": r["releasing_org_abbrev"],
@@ -645,7 +655,7 @@ def get_waiver_detail(
         "player_name": f"{row['firstName']} {row['lastName']}",
         "ptype": row["ptype"],
         "age": row["age"],
-        "displayovr": row["displayovr"],
+        "displayovr": _fuzz_ovr(row["displayovr"], org_id, row["player_id"]),
         "contract_id": row["contract_id"],
         "releasing_org_id": row["releasing_org_id"],
         "releasing_org_abbrev": row["releasing_org_abbrev"],

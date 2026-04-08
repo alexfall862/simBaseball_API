@@ -573,6 +573,49 @@ def _apply_visibility(
 
     player_dict["ratings"] = ratings
     player_dict["potentials"] = potentials
+
+    # --- displayovr fog-of-war ---
+    # displayovr is a 20-80 value that must follow the same visibility rules
+    # as other ratings to avoid leaking true ability through the overall.
+    true_ovr = player_dict.get("displayovr")
+    if true_ovr is not None:
+        try:
+            true_ovr_int = int(true_ovr)
+        except (TypeError, ValueError):
+            true_ovr_int = None
+    else:
+        true_ovr_int = None
+
+    if display_format == "hidden":
+        fuzzed_ovr = None
+    elif display_format == "letter_grade":
+        # Convert 20-80 → letter grade, then fuzz the grade
+        if true_ovr_int is not None:
+            true_grade = _score_to_letter(true_ovr_int)
+            fuzzed_ovr = fuzz_letter_grade(
+                true_grade, viewing_org_id, player_id, "displayovr"
+            )
+        else:
+            fuzzed_ovr = "?"
+    elif attrs_precise:
+        # Precise 20-80 — show the true stored value
+        fuzzed_ovr = true_ovr_int
+    else:
+        # Fuzzed 20-80
+        if true_ovr_int is not None:
+            fuzzed_ovr = fuzz_20_80(
+                true_ovr_int, viewing_org_id, player_id, "displayovr"
+            )
+        else:
+            fuzzed_ovr = None
+
+    # Write to both locations — build_player_display puts displayovr in
+    # the top-level dict AND inside bio; both must agree.
+    player_dict["displayovr"] = fuzzed_ovr
+    bio = player_dict.get("bio")
+    if bio and "displayovr" in bio:
+        bio["displayovr"] = fuzzed_ovr
+
     player_dict["visibility_context"] = {
         "context": context,
         "display_format": display_format,
@@ -651,3 +694,24 @@ def get_visible_players_batch(
         results.append(result)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Lightweight displayovr fuzz for endpoints that bypass full visibility
+# ---------------------------------------------------------------------------
+
+def fuzz_displayovr(true_ovr, viewing_org_id, player_id):
+    """
+    Fuzz a displayovr value for a viewing org.
+
+    For use in lightweight listing endpoints (e.g. waiver wire) that don't
+    go through the full _apply_visibility pipeline.  Returns the fuzzed 20-80
+    value, or None if the input is None.
+    """
+    if true_ovr is None:
+        return None
+    try:
+        ovr_int = int(true_ovr)
+    except (TypeError, ValueError):
+        return None
+    return fuzz_20_80(ovr_int, viewing_org_id, player_id, "displayovr")

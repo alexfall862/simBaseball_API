@@ -38,9 +38,9 @@ _PREREQUISITES = {
 
 # Cost config keys (map action_type -> scouting_config key with fallback)
 _COST_CONFIG_KEYS = {
-    "hs_report":                 ("hs_report_cost",                 10),
-    "recruit_potential_fuzzed":   ("recruit_potential_fuzzed_cost",   15),
-    "recruit_potential_precise":  ("recruit_potential_precise_cost",  25),
+    "hs_report":                 ("hs_report_cost",                  2),
+    "recruit_potential_fuzzed":   ("recruit_potential_fuzzed_cost",  10),
+    "recruit_potential_precise":  ("recruit_potential_precise_cost", 50),
     "college_potential_precise":  ("college_potential_precise_cost",  15),
     "draft_attrs_fuzzed":        ("draft_attrs_fuzzed_cost",         10),
     "draft_attrs_precise":       ("draft_attrs_precise_cost",        20),
@@ -99,7 +99,7 @@ def get_or_create_budget(conn, org_id, league_year_id):
     if MLB_ORG_MIN <= org_id <= MLB_ORG_MAX:
         total = int(config.get("mlb_budget_per_year", 1000))
     else:
-        total = int(config.get("college_budget_per_year", 500))
+        total = int(config.get("college_budget_per_year", 2000))
 
     conn.execute(
         text("""

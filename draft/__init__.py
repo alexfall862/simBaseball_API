@@ -32,6 +32,11 @@ from services.draft import (
     admin_remove_pick,
     admin_reset_timer,
     export_draft,
+    set_round_modes,
+    get_round_modes,
+    set_team_prefs,
+    get_team_prefs,
+    execute_auto_rounds,
 )
 
 draft_bp = Blueprint("draft", __name__)
@@ -247,12 +252,16 @@ def api_admin_init_draft():
     try:
         engine = get_engine()
         with engine.begin() as conn:
+            live_rounds = body.get("live_rounds")
+            if live_rounds is not None:
+                live_rounds = [int(r) for r in live_rounds]
             result = initialize_draft(
                 conn,
                 league_year_id=int(body["league_year_id"]),
                 total_rounds=int(body.get("total_rounds", 20)),
                 seconds_per_pick=int(body.get("seconds_per_pick", 60)),
                 is_snake=bool(body.get("is_snake", False)),
+                live_rounds=live_rounds,
             )
         return jsonify(result), 200
     except ValueError as e:
@@ -435,6 +444,104 @@ def api_admin_complete():
         with engine.begin() as conn:
             result = complete_draft(conn, int(body["league_year_id"]))
         return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+# ---------------------------------------------------------------------------
+# Round Mode & Auto-Draft Preference Endpoints
+# ---------------------------------------------------------------------------
+
+@draft_bp.get("/draft/round-modes")
+def api_round_modes():
+    lyid = request.args.get("league_year_id", type=int)
+    if not lyid:
+        return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = get_round_modes(conn, lyid)
+        return jsonify(rounds=result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.post("/draft/admin/round-modes")
+def api_admin_round_modes():
+    guard = _require_admin()
+    if guard:
+        return guard
+    body, err = _require_json("league_year_id", "round_modes")
+    if err:
+        return err
+    try:
+        modes = {int(k): v for k, v in body["round_modes"].items()}
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = set_round_modes(conn, int(body["league_year_id"]), modes)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.get("/draft/prefs/<int:org_id>")
+def api_get_team_prefs(org_id):
+    lyid = request.args.get("league_year_id", type=int)
+    if not lyid:
+        return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = get_team_prefs(conn, lyid, org_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.post("/draft/prefs")
+def api_set_team_prefs():
+    body, err = _require_json("league_year_id", "org_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = set_team_prefs(
+                conn,
+                league_year_id=int(body["league_year_id"]),
+                org_id=int(body["org_id"]),
+                pitcher_quota=body.get("pitcher_quota"),
+                hitter_quota=body.get("hitter_quota"),
+                queue=body.get("queue"),
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.post("/draft/admin/run-auto-rounds")
+def api_admin_run_auto_rounds():
+    guard = _require_admin()
+    if guard:
+        return guard
+    body, err = _require_json("league_year_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            results = execute_auto_rounds(conn, int(body["league_year_id"]))
+        return jsonify(picks_made=len(results), picks=results), 200
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
     except SQLAlchemyError:

@@ -451,6 +451,7 @@
       'db-storage': 'DB Storage',
       'batting-lab': 'Batting Lab',
       'recruiting-admin': 'Recruiting Admin',
+      'draft-admin': 'Draft Administration',
       'ifa-admin': 'IFA Administration',
       'gameplan-audit': 'Gameplan Audit',
     };
@@ -563,6 +564,10 @@
       case 'recruiting-admin':
         loadSpecialEventLeagueYears('radm-lyid');
         loadRecruitingAdmin();
+        break;
+      case 'draft-admin':
+        loadSpecialEventLeagueYears('dft-lyid');
+        loadDraftAdmin();
         break;
       case 'ifa-admin':
         loadSpecialEventLeagueYears('ifa-lyid');
@@ -8325,6 +8330,453 @@
   document.getElementById('radm-demand-limit')?.addEventListener('change', loadRadmDemand);
 
   // ======================================================================
+  // Draft Administration
+  // ======================================================================
+
+  function dftLyid() { return document.getElementById('dft-lyid')?.value; }
+  const dftFmt = v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+  // --- Phase badge helpers ---
+  const DFT_PHASE_BADGE = {
+    SETUP: 'warning', IN_PROGRESS: 'running', PAUSED: 'info',
+    SIGNING: 'primary', COMPLETE: 'success',
+  };
+
+  function loadDraftAdmin() {
+    const lyid = dftLyid();
+    if (!lyid) return;
+    const status = document.getElementById('dft-status');
+    status.textContent = 'Loading\u2026';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/draft/state?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(state => {
+        if (state.error) {
+          // No draft exists yet — show init card
+          status.textContent = '';
+          status.className = '';
+          document.getElementById('dft-state-card').style.display = 'none';
+          document.getElementById('dft-init-card').style.display = '';
+          document.getElementById('dft-round-mode-card').style.display = 'none';
+          document.getElementById('dft-board-card').style.display = 'none';
+          document.getElementById('dft-override-card').style.display = 'none';
+          document.getElementById('dft-signing-card').style.display = 'none';
+          return;
+        }
+        status.textContent = '';
+        status.className = '';
+        document.getElementById('dft-init-card').style.display = 'none';
+        document.getElementById('dft-state-card').style.display = '';
+
+        // State info
+        const badgeCls = DFT_PHASE_BADGE[state.phase] || 'pending';
+        let info = `<span class="badge badge-${badgeCls}">${state.phase}</span> `;
+        info += `Round <strong>${state.current_round}</strong> / ${state.total_rounds}`;
+        info += ` &mdash; Pick <strong>${state.current_pick}</strong> / ${state.picks_per_round}`;
+        if (state.seconds_remaining != null && state.phase === 'IN_PROGRESS') {
+          info += ` &mdash; <strong>${state.seconds_remaining}s</strong> remaining`;
+        }
+        if (state.current_round_mode === 'auto') {
+          info += ' &mdash; <span class="badge badge-pending">AUTO ROUND</span>';
+        }
+        if (state.auto_rounds_locked) {
+          info += ' &mdash; <span class="badge badge-info">PREFS LOCKED</span>';
+        }
+        document.getElementById('dft-state-info').innerHTML = info;
+
+        // Phase-dependent action buttons
+        renderDftActions(state);
+
+        // Load round strip
+        loadDftRoundStrip(lyid, state);
+
+        // Show round mode editor during SETUP
+        if (state.phase === 'SETUP') {
+          document.getElementById('dft-round-mode-card').style.display = '';
+        } else {
+          document.getElementById('dft-round-mode-card').style.display = 'none';
+        }
+
+        // Show override card when draft is in progress or signing
+        if (['IN_PROGRESS', 'PAUSED', 'SIGNING'].includes(state.phase)) {
+          document.getElementById('dft-override-card').style.display = '';
+        } else {
+          document.getElementById('dft-override-card').style.display = 'none';
+        }
+
+        // Load board if draft has started
+        if (state.phase !== 'SETUP') {
+          loadDftBoard(lyid, state);
+        } else {
+          document.getElementById('dft-board-card').style.display = 'none';
+        }
+
+        // Show signing card during SIGNING phase
+        if (state.phase === 'SIGNING') {
+          document.getElementById('dft-signing-card').style.display = '';
+          loadDftSigningTable(lyid);
+        } else {
+          document.getElementById('dft-signing-card').style.display = 'none';
+        }
+      })
+      .catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  }
+
+  function renderDftActions(state) {
+    const container = document.getElementById('dft-actions');
+    let html = '';
+    const btn = (id, label, cls) => `<button id="${id}" class="btn ${cls}">${label}</button>`;
+
+    switch (state.phase) {
+      case 'SETUP':
+        html = btn('btn-dft-start', 'Start Draft', 'btn-primary');
+        break;
+      case 'IN_PROGRESS':
+        html = btn('btn-dft-pause', 'Pause', 'btn-warning');
+        html += btn('btn-dft-reset-timer', 'Reset Timer', 'btn-secondary');
+        if (state.current_round_mode === 'auto') {
+          html += btn('btn-dft-run-auto', 'Run Auto Rounds', 'btn-primary');
+        }
+        html += btn('btn-dft-advance-signing', 'Advance to Signing', 'btn-secondary');
+        break;
+      case 'PAUSED':
+        html = btn('btn-dft-resume', 'Resume', 'btn-primary');
+        html += btn('btn-dft-advance-signing', 'Advance to Signing', 'btn-secondary');
+        break;
+      case 'SIGNING':
+        html = btn('btn-dft-export', 'Export Draft', 'btn-warning');
+        html += btn('btn-dft-complete', 'Complete Draft', 'btn-secondary');
+        break;
+    }
+    container.innerHTML = html;
+
+    // Wire up action buttons
+    document.getElementById('btn-dft-start')?.addEventListener('click', () => dftAdminPost('start', 'Draft started'));
+    document.getElementById('btn-dft-pause')?.addEventListener('click', () => dftAdminPost('pause', 'Draft paused'));
+    document.getElementById('btn-dft-resume')?.addEventListener('click', () => dftAdminPost('resume', 'Draft resumed'));
+    document.getElementById('btn-dft-reset-timer')?.addEventListener('click', () => dftAdminPost('reset-timer', 'Timer reset'));
+    document.getElementById('btn-dft-advance-signing')?.addEventListener('click', () => {
+      if (!confirm('Advance to signing phase? No more picks can be made.')) return;
+      dftAdminPost('advance-signing', 'Advanced to signing');
+    });
+    document.getElementById('btn-dft-export')?.addEventListener('click', () => {
+      if (!confirm('Export draft? This moves signed players to their drafting orgs.')) return;
+      dftAdminPost('export', 'Draft exported');
+    });
+    document.getElementById('btn-dft-complete')?.addEventListener('click', () => {
+      if (!confirm('Mark draft as complete?')) return;
+      dftAdminPost('complete', 'Draft completed');
+    });
+    document.getElementById('btn-dft-run-auto')?.addEventListener('click', () => {
+      if (!confirm('Run all auto rounds? This will execute all remaining auto-round picks.')) return;
+      const status = document.getElementById('dft-status');
+      status.textContent = 'Running auto rounds\u2026 (this may take a moment)';
+      status.className = 'status-msg info';
+      fetch(`${API_BASE}/draft/admin/run-auto-rounds`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ league_year_id: parseInt(dftLyid()) }),
+      }).then(r => r.json()).then(data => {
+        if (data.error) { status.textContent = data.message || data.error; status.className = 'status-msg error'; return; }
+        status.textContent = `Auto rounds complete \u2014 ${data.picks_made} picks made`;
+        status.className = 'status-msg success';
+        loadDraftAdmin();
+      }).catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+    });
+  }
+
+  function dftAdminPost(action, successMsg) {
+    const lyid = dftLyid();
+    if (!lyid) return;
+    const status = document.getElementById('dft-status');
+    status.textContent = 'Processing\u2026';
+    status.className = 'status-msg info';
+    fetch(`${API_BASE}/draft/admin/${action}`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = data.message || data.error; status.className = 'status-msg error'; return; }
+      status.textContent = successMsg;
+      status.className = 'status-msg success';
+      loadDraftAdmin();
+    }).catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  }
+
+  // --- Round strip & mode editor ---
+
+  function loadDftRoundStrip(lyid, state) {
+    fetch(`${API_BASE}/draft/round-modes?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const rounds = data.rounds || [];
+        // Top-level read-only strip
+        const strip = document.getElementById('dft-round-strip');
+        strip.innerHTML = rounds.map(r => {
+          const isCurrent = r.round === state.current_round && state.phase === 'IN_PROGRESS';
+          const cls = r.mode === 'live' ? 'badge-primary' : 'badge-pending';
+          const border = isCurrent ? 'border:2px solid var(--success);' : '';
+          return `<span class="badge ${cls}" style="cursor:default;${border}">R${r.round}</span>`;
+        }).join('');
+
+        // Editable grid (SETUP phase)
+        if (state.phase === 'SETUP') {
+          const grid = document.getElementById('dft-round-mode-grid');
+          grid.innerHTML = rounds.map(r => {
+            const cls = r.mode === 'live' ? 'btn-primary' : 'btn-secondary';
+            return `<button class="btn btn-sm ${cls}" data-round="${r.round}" data-mode="${r.mode}" style="min-width:52px">R${r.round}</button>`;
+          }).join('');
+          // Toggle on click
+          grid.querySelectorAll('button').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const rnd = btn.dataset.round;
+              const newMode = btn.dataset.mode === 'live' ? 'auto' : 'live';
+              const modeStatus = document.getElementById('dft-round-mode-status');
+              fetch(`${API_BASE}/draft/admin/round-modes`, {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ league_year_id: parseInt(lyid), round_modes: { [rnd]: newMode } }),
+              }).then(r => r.json()).then(data => {
+                if (data.error) { modeStatus.textContent = data.message || data.error; modeStatus.className = 'status-msg error'; return; }
+                btn.dataset.mode = newMode;
+                btn.className = `btn btn-sm ${newMode === 'live' ? 'btn-primary' : 'btn-secondary'}`;
+                modeStatus.textContent = `Round ${rnd} set to ${newMode.toUpperCase()}`;
+                modeStatus.className = 'status-msg success';
+                // Also update the read-only strip
+                loadDftRoundStrip(lyid, state);
+              }).catch(e => { modeStatus.textContent = e.message; modeStatus.className = 'status-msg error'; });
+            });
+          });
+        }
+      })
+      .catch(() => {});
+  }
+
+  // --- Draft board ---
+
+  function loadDftBoard(lyid, state) {
+    document.getElementById('dft-board-card').style.display = '';
+    fetch(`${API_BASE}/draft/board?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const picks = data.picks || [];
+        if (!picks.length) return;
+
+        // Populate round filter
+        const maxRound = Math.max(...picks.map(p => p.round));
+        const roundFilter = document.getElementById('dft-board-round-filter');
+        if (roundFilter.options.length <= 1) {
+          for (let r = 1; r <= maxRound; r++) {
+            const o = document.createElement('option');
+            o.value = r;
+            o.textContent = `Round ${r}`;
+            roundFilter.appendChild(o);
+          }
+        }
+
+        renderDftBoard(picks, state);
+      })
+      .catch(() => {});
+  }
+
+  function renderDftBoard(picks, state) {
+    const filterRound = document.getElementById('dft-board-round-filter')?.value;
+    const filtered = filterRound ? picks.filter(p => p.round === parseInt(filterRound)) : picks;
+
+    const container = document.getElementById('dft-board-table');
+    let html = '<table class="data-table"><thead><tr>';
+    html += '<th>Pick ID</th><th>Rd</th><th>Pick</th><th>Overall</th><th>Org</th>';
+    html += '<th>Player</th><th>Picked At</th><th>Auto</th><th>Slot Value</th><th>Sign Status</th>';
+    html += '</tr></thead><tbody>';
+
+    filtered.forEach(p => {
+      const isCurrent = p.round === state.current_round && p.pick_in_round === state.current_pick && state.phase === 'IN_PROGRESS';
+      const rowStyle = isCurrent ? ' style="background:rgba(59,130,246,0.15)"' : '';
+      const traded = p.current_org_id !== p.original_org_id ? ` <span style="color:var(--warning);font-size:0.75rem">(from ${p.original_org_id})</span>` : '';
+      const autoIcon = p.is_auto_pick ? '\u2699' : '';
+      const signBadge = p.sign_status ? `<span class="badge badge-${p.sign_status === 'signed' ? 'success' : p.sign_status === 'pending' ? 'warning' : 'danger'}">${p.sign_status}</span>` : '\u2014';
+
+      html += `<tr${rowStyle}>`;
+      html += `<td>${p.pick_id}</td>`;
+      html += `<td>${p.round}</td>`;
+      html += `<td>${p.pick_in_round}</td>`;
+      html += `<td>${p.overall_pick}</td>`;
+      html += `<td>${p.current_org_id}${traded}</td>`;
+      html += `<td>${p.player_name || '<span style="color:var(--text-muted)">\u2014</span>'}</td>`;
+      html += `<td>${p.picked_at ? new Date(p.picked_at).toLocaleTimeString() : '\u2014'}</td>`;
+      html += `<td>${autoIcon}</td>`;
+      html += `<td>${p.slot_value != null ? dftFmt(p.slot_value) : '\u2014'}</td>`;
+      html += `<td>${signBadge}</td>`;
+      html += '</tr>';
+    });
+
+    html += '</tbody></table>';
+    container.innerHTML = html;
+
+    // Store picks for board filter re-render
+    container._allPicks = picks;
+    container._state = state;
+  }
+
+  // --- Signing table ---
+
+  function loadDftSigningTable(lyid) {
+    fetch(`${API_BASE}/draft/board?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const picks = (data.picks || []).filter(p => p.player_id != null);
+        const filterStatus = document.getElementById('dft-sign-filter')?.value;
+        const filtered = filterStatus ? picks.filter(p => p.sign_status === filterStatus) : picks;
+
+        const container = document.getElementById('dft-signing-table');
+        let html = '<table class="data-table"><thead><tr>';
+        html += '<th>Pick ID</th><th>Rd</th><th>Pick</th><th>Org</th><th>Player</th>';
+        html += '<th>Slot Value</th><th>Status</th><th>Actions</th>';
+        html += '</tr></thead><tbody>';
+
+        filtered.forEach(p => {
+          const signBadge = `<span class="badge badge-${p.sign_status === 'signed' ? 'success' : p.sign_status === 'pending' ? 'warning' : 'danger'}">${p.sign_status}</span>`;
+          const actions = p.sign_status === 'pending'
+            ? `<button class="btn btn-sm btn-primary" onclick="window._dftSign(${p.pick_id})">Sign</button> <button class="btn btn-sm btn-secondary" onclick="window._dftPass(${p.pick_id})">Pass</button>`
+            : '\u2014';
+
+          html += `<tr>`;
+          html += `<td>${p.pick_id}</td><td>${p.round}</td><td>${p.pick_in_round}</td>`;
+          html += `<td>${p.current_org_id}</td><td>${p.player_name}</td>`;
+          html += `<td>${dftFmt(p.slot_value)}</td><td>${signBadge}</td>`;
+          html += `<td>${actions}</td></tr>`;
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      })
+      .catch(() => {});
+  }
+
+  // Global handlers for inline sign/pass buttons
+  window._dftSign = function(pickId) {
+    const lyid = dftLyid();
+    if (!lyid || !confirm(`Sign pick ${pickId}?`)) return;
+    fetch(`${API_BASE}/draft/sign/${pickId}`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    }).then(r => r.json()).then(data => {
+      const status = document.getElementById('dft-status');
+      if (data.error) { status.textContent = data.message || data.error; status.className = 'status-msg error'; return; }
+      status.textContent = `Signed ${data.player_name} \u2014 ${data.years}yr / ${dftFmt(data.slot_value)}`;
+      status.className = 'status-msg success';
+      loadDftSigningTable(lyid);
+    }).catch(e => { document.getElementById('dft-status').textContent = e.message; });
+  };
+
+  window._dftPass = function(pickId) {
+    if (!confirm(`Pass on pick ${pickId}?`)) return;
+    fetch(`${API_BASE}/draft/pass/${pickId}`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    }).then(r => r.json()).then(data => {
+      const status = document.getElementById('dft-status');
+      if (data.error) { status.textContent = data.message || data.error; status.className = 'status-msg error'; return; }
+      status.textContent = `Passed on pick ${pickId}`;
+      status.className = 'status-msg success';
+      loadDftSigningTable(dftLyid());
+    }).catch(e => { document.getElementById('dft-status').textContent = e.message; });
+  };
+
+  // --- Event Listeners ---
+
+  document.getElementById('btn-dft-refresh')?.addEventListener('click', loadDraftAdmin);
+  document.getElementById('dft-lyid')?.addEventListener('change', loadDraftAdmin);
+
+  document.getElementById('dft-board-round-filter')?.addEventListener('change', () => {
+    const container = document.getElementById('dft-board-table');
+    if (container._allPicks) renderDftBoard(container._allPicks, container._state);
+  });
+
+  document.getElementById('dft-sign-filter')?.addEventListener('change', () => {
+    const lyid = dftLyid();
+    if (lyid) loadDftSigningTable(lyid);
+  });
+
+  // Initialize draft
+  document.getElementById('btn-dft-initialize')?.addEventListener('click', () => {
+    const lyid = dftLyid();
+    if (!lyid) return;
+    const status = document.getElementById('dft-status');
+    const liveStr = document.getElementById('dft-live-rounds').value;
+    const liveRounds = liveStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+
+    status.textContent = 'Initializing draft\u2026';
+    status.className = 'status-msg info';
+
+    fetch(`${API_BASE}/draft/admin/initialize`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_year_id: parseInt(lyid),
+        total_rounds: parseInt(document.getElementById('dft-total-rounds').value),
+        seconds_per_pick: parseInt(document.getElementById('dft-seconds-per-pick').value),
+        is_snake: document.getElementById('dft-snake').value === 'true',
+        live_rounds: liveRounds,
+      }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = data.message || data.error; status.className = 'status-msg error'; return; }
+      status.textContent = `Draft initialized \u2014 ${data.total_picks} picks, ${data.eligible_players} eligible players`;
+      status.className = 'status-msg success';
+      loadDraftAdmin();
+    }).catch(e => { status.textContent = e.message; status.className = 'status-msg error'; });
+  });
+
+  // Set pick override
+  document.getElementById('btn-dft-set-pick')?.addEventListener('click', () => {
+    const lyid = dftLyid();
+    if (!lyid) return;
+    const round = document.getElementById('dft-set-round').value;
+    const pick = document.getElementById('dft-set-pick').value;
+    const playerId = document.getElementById('dft-set-player').value;
+    if (!round || !pick || !playerId) { alert('Fill in round, pick, and player ID'); return; }
+    if (!confirm(`Assign player ${playerId} to R${round}P${pick}?`)) return;
+
+    const overrideStatus = document.getElementById('dft-override-status');
+    fetch(`${API_BASE}/draft/admin/set-pick`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_year_id: parseInt(lyid),
+        round: parseInt(round),
+        pick_in_round: parseInt(pick),
+        player_id: parseInt(playerId),
+      }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { overrideStatus.textContent = data.message || data.error; overrideStatus.className = 'status-msg error'; return; }
+      overrideStatus.textContent = `Pick assigned: player ${data.player_id} to pick ${data.pick_id}`;
+      overrideStatus.className = 'status-msg success';
+      loadDraftAdmin();
+    }).catch(e => { overrideStatus.textContent = e.message; overrideStatus.className = 'status-msg error'; });
+  });
+
+  // Remove pick (rollback)
+  document.getElementById('btn-dft-remove-pick')?.addEventListener('click', () => {
+    const pickId = document.getElementById('dft-remove-pick-id').value;
+    if (!pickId) { alert('Enter a draft pick ID'); return; }
+    if (!confirm(`Rollback pick ${pickId}? This will clear the player assignment and reset signing status to pending.`)) return;
+
+    const overrideStatus = document.getElementById('dft-override-status');
+    fetch(`${API_BASE}/draft/admin/remove-pick`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft_pick_id: parseInt(pickId) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { overrideStatus.textContent = data.message || data.error; overrideStatus.className = 'status-msg error'; return; }
+      overrideStatus.textContent = `Pick ${pickId} rolled back successfully`;
+      overrideStatus.className = 'status-msg success';
+      loadDraftAdmin();
+    }).catch(e => { overrideStatus.textContent = e.message; overrideStatus.className = 'status-msg error'; });
+  });
+
+  // ======================================================================
   // IFA Administration
   // ======================================================================
 
@@ -9250,20 +9702,34 @@
     const content = document.getElementById('cal-prev-content');
 
     const p = data.player;
-    title.textContent = `${p.name} — ${p.ptype} (Level ${p.level})`;
+    const posDisplay = p.listed_position ? p.listed_position.toUpperCase() : null;
+    title.textContent = `${p.name} — ${p.ptype}${posDisplay ? ' (' + posDisplay + ')' : ''} (Level ${p.level})`;
 
     let html = '';
 
     // Overall display
+    const ovrTypeLabels = {
+      pitcher_overall: 'Pitcher Overall (fallback)',
+      position_overall: 'Position Overall (fallback)',
+      c_rating: 'C', fb_rating: '1B', sb_rating: '2B', tb_rating: '3B',
+      ss_rating: 'SS', lf_rating: 'LF', cf_rating: 'CF', rf_rating: 'RF',
+      dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
+    };
+    const ovrTypeLabel = ovrTypeLabels[data.overall.type] || data.overall.type;
+    const isFallback = data.overall.type === 'pitcher_overall' || data.overall.type === 'position_overall';
+
     html += `<div style="display:flex;gap:24px;align-items:center;margin-bottom:16px;flex-wrap:wrap">`;
     html += `<div style="text-align:center;padding:12px 24px;background:var(--bg-card);border-radius:8px;border:2px solid #2196f3">`;
     html += `<div style="font-size:2em;font-weight:bold;color:#2196f3">${data.displayovr || '—'}</div>`;
     html += `<div style="font-size:0.85em;color:var(--text-secondary)">Display OVR</div>`;
     html += `</div>`;
     html += `<div style="font-size:0.9em;color:var(--text-secondary)">`;
-    html += `Overall type: ${data.overall.type}<br>`;
+    html += `Weight type: <strong${isFallback ? ' style="color:var(--warning,#ff9800)"' : ''}>${ovrTypeLabel}</strong><br>`;
     html += `Raw: ${data.overall.raw} | 20-80: ${data.overall.scaled_20_80}<br>`;
     html += `Current stored: ${p.current_displayovr || 'null'}`;
+    if (isFallback) {
+      html += `<br><span style="color:var(--warning,#ff9800);font-size:0.85em">No listed position — using generic fallback weights</span>`;
+    }
     html += `</div></div>`;
 
     // Position ratings table

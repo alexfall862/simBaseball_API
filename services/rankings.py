@@ -572,8 +572,11 @@ def compute_power_rankings(
 def _compute_team_ovr_bulk(conn, league_level: int) -> Dict[int, float]:
     """
     Average player OVR per team at a given level.
-    Uses rating_overall_weights for pitcher_overall / position_overall.
+    Uses position-specific weights when a player has a listed position,
+    falling back to pitcher_overall / position_overall otherwise.
     """
+    from services.weight_calibration import _resolve_ovr_weights
+
     # Load overall weights
     try:
         wt_rows = conn.execute(sa_text(
@@ -590,6 +593,23 @@ def _compute_team_ovr_bulk(conn, league_level: int) -> Dict[int, float]:
 
     pitcher_wt = wt_map.get("pitcher_overall", {})
     position_wt = wt_map.get("position_overall", {})
+
+    # Resolve current league_year_id for listed-position lookup
+    ly_row = conn.execute(sa_text(
+        "SELECT id FROM league_years WHERE league_year = "
+        "(SELECT season FROM timestamp_state WHERE id = 1)"
+    )).first()
+    league_year_id = int(ly_row[0]) if ly_row else None
+
+    # Bulk-load listed positions
+    listed_positions: Dict[int, str] = {}
+    if league_year_id is not None:
+        lp_rows = conn.execute(sa_text(
+            "SELECT player_id, position_code FROM player_listed_position "
+            "WHERE league_year_id = :lyid"
+        ), {"lyid": league_year_id}).all()
+        for lp in lp_rows:
+            listed_positions[int(lp[0])] = str(lp[1])
 
     # Load all active players at this level
     rows = conn.execute(sa_text("""
@@ -638,6 +658,7 @@ def _compute_team_ovr_bulk(conn, league_level: int) -> Dict[int, float]:
     for row in rows:
         m = {col_names[i]: row[i] for i in range(len(col_names))}
         tid = m["team_id"]
+        pid = int(m["id"])
         ptype = m["ptype"]
 
         # Compute pitch overalls (derived ratings)
@@ -652,13 +673,16 @@ def _compute_team_ovr_bulk(conn, league_level: int) -> Dict[int, float]:
                 if v is not None:
                     comps.append((float(v), 0.25))
             if comps:
-                total_w = sum(c[1] for c in comps)
-                total_v = sum(c[0] * c[1] for c in comps)
-                if total_w > 0:
-                    derived[f"pitch{n}_ovr"] = total_v / total_w
+                tw = sum(c[1] for c in comps)
+                tv = sum(c[0] * c[1] for c in comps)
+                if tw > 0:
+                    derived[f"pitch{n}_ovr"] = tv / tw
 
-        # Choose weight map based on player type
-        wts = pitcher_wt if ptype == "Pitcher" else position_wt
+        # Position-aware weight selection
+        wts = _resolve_ovr_weights(
+            pid, ptype, listed_positions, wt_map,
+            pitcher_wt, position_wt,
+        )
         if not wts:
             continue
 

@@ -609,10 +609,76 @@ def run_calibration(
 # Profile management
 # ---------------------------------------------------------------------------
 
+_POSITION_PLAYER_RATINGS = frozenset({
+    "c_rating", "fb_rating", "sb_rating", "tb_rating", "ss_rating",
+    "lf_rating", "cf_rating", "rf_rating", "dh_rating",
+})
+_PITCHER_RATINGS = frozenset({"sp_rating", "rp_rating"})
+
+
+def _synthesize_backstop_weights(
+    weights_by_type: Dict[str, Dict[str, float]],
+) -> Dict[str, Dict[str, float]]:
+    """
+    Derive generic pitcher_overall / position_overall backstop weights by
+    averaging across the position-specific weights in a profile.
+
+    These backstops are used for players without an assigned listed position.
+    Only generates a backstop if the profile does not already include
+    pitcher_overall / position_overall explicitly.
+    """
+    result: Dict[str, Dict[str, float]] = {}
+
+    # position_overall = average of all position-player rating weights
+    if "position_overall" not in weights_by_type:
+        pos_sets = [
+            wt for rt, wt in weights_by_type.items()
+            if rt in _POSITION_PLAYER_RATINGS and wt
+        ]
+        if pos_sets:
+            all_attrs: set = set()
+            for wt in pos_sets:
+                all_attrs.update(wt.keys())
+            avg: Dict[str, float] = {}
+            for attr in all_attrs:
+                vals = [wt.get(attr, 0.0) for wt in pos_sets]
+                avg[attr] = sum(vals) / len(pos_sets)
+            # Normalize so weights sum to 1.0
+            total = sum(avg.values())
+            if total > 0:
+                avg = {k: v / total for k, v in avg.items()}
+            result["position_overall"] = avg
+
+    # pitcher_overall = average of SP + RP weights
+    if "pitcher_overall" not in weights_by_type:
+        pit_sets = [
+            wt for rt, wt in weights_by_type.items()
+            if rt in _PITCHER_RATINGS and wt
+        ]
+        if pit_sets:
+            all_attrs_p: set = set()
+            for wt in pit_sets:
+                all_attrs_p.update(wt.keys())
+            avg_p: Dict[str, float] = {}
+            for attr in all_attrs_p:
+                vals = [wt.get(attr, 0.0) for wt in pit_sets]
+                avg_p[attr] = sum(vals) / len(pit_sets)
+            total_p = sum(avg_p.values())
+            if total_p > 0:
+                avg_p = {k: v / total_p for k, v in avg_p.items()}
+            result["pitcher_overall"] = avg_p
+
+    return result
+
+
 def activate_profile(conn, profile_id: int):
     """
     Activate a weight profile: set is_active=1, write entries
     to rating_overall_weights (the live table consumed by rosters).
+
+    If the profile only contains position-specific weights (no
+    pitcher_overall / position_overall), backstop weights are
+    synthesized by averaging the position-specific weights.
     """
     # Deactivate all
     conn.execute(text("UPDATE weight_profiles SET is_active = 0"))
@@ -634,24 +700,44 @@ def activate_profile(conn, profile_id: int):
 
     # Collect which rating_types this profile covers
     rating_types = set()
+    weights_by_type: Dict[str, Dict[str, float]] = {}
     for e in entries:
-        rating_types.add(e[0])
+        rt = str(e[0])
+        rating_types.add(rt)
+        weights_by_type.setdefault(rt, {})[str(e[1])] = float(e[2])
 
-    # Clear existing position weights for those rating types
+    # Synthesize backstop overall weights if missing from the profile
+    backstops = _synthesize_backstop_weights(weights_by_type)
+    backstop_count = 0
+    for bs_rt, bs_weights in backstops.items():
+        rating_types.add(bs_rt)
+        for ak, w in bs_weights.items():
+            entries = list(entries)  # ensure mutable
+            backstop_count += 1
+            weights_by_type.setdefault(bs_rt, {})[ak] = w
+
+    # Clear existing weights for all rating types this profile covers
     for rt in rating_types:
         conn.execute(text(
             "DELETE FROM rating_overall_weights WHERE rating_type = :rt"
         ), {"rt": rt})
 
-    # Insert new weights
-    for e in entries:
-        conn.execute(text("""
-            INSERT INTO rating_overall_weights (rating_type, attribute_key, weight)
-            VALUES (:rt, :ak, :w)
-            ON DUPLICATE KEY UPDATE weight = :w, updated_at = CURRENT_TIMESTAMP
-        """), {"rt": e[0], "ak": e[1], "w": float(e[2])})
+    # Insert all weights (profile entries + synthesized backstops)
+    insert_count = 0
+    for rt, attr_weights in weights_by_type.items():
+        for ak, w in attr_weights.items():
+            conn.execute(text("""
+                INSERT INTO rating_overall_weights (rating_type, attribute_key, weight)
+                VALUES (:rt, :ak, :w)
+                ON DUPLICATE KEY UPDATE weight = :w, updated_at = CURRENT_TIMESTAMP
+            """), {"rt": rt, "ak": ak, "w": w})
+            insert_count += 1
 
-    return {"activated": profile_id, "entries": len(entries)}
+    return {
+        "activated": profile_id,
+        "entries": insert_count,
+        "backstops_generated": list(backstops.keys()) if backstops else [],
+    }
 
 
 def get_profiles(conn) -> List[Dict[str, Any]]:
@@ -814,6 +900,44 @@ def update_profile_weights(
     return count
 
 
+# Position code → rating_type for position-aware displayovr
+_POS_CODE_TO_RATING_TYPE = {
+    "c": "c_rating", "fb": "fb_rating", "sb": "sb_rating",
+    "tb": "tb_rating", "ss": "ss_rating", "lf": "lf_rating",
+    "cf": "cf_rating", "rf": "rf_rating", "dh": "dh_rating",
+    "sp": "sp_rating", "rp": "rp_rating",
+}
+
+
+def _resolve_ovr_weights(
+    player_id: int,
+    ptype: str,
+    listed_positions: Dict[int, str],
+    all_weights: Dict[str, Dict[str, float]],
+    pitcher_fallback: Dict[str, float],
+    position_fallback: Dict[str, float],
+) -> Dict[str, float]:
+    """
+    Pick the best weight set for a player's displayovr calculation.
+
+    1. If the player has a listed position, use the matching position-specific
+       weights (e.g. ss_rating for a SS) — if those weights exist.
+    2. Otherwise fall back to pitcher_overall / position_overall.
+    """
+    pos_code = listed_positions.get(player_id)
+    if pos_code:
+        rating_type = _POS_CODE_TO_RATING_TYPE.get(pos_code)
+        if rating_type:
+            pos_weights = all_weights.get(rating_type, {})
+            if pos_weights:
+                return pos_weights
+
+    # No listed position or no weights for that position — generic fallback
+    if ptype == "Pitcher":
+        return pitcher_fallback
+    return position_fallback
+
+
 def _compute_raw_ovr_for_row(row, ovr_weights: Dict[str, float]) -> Optional[float]:
     """Compute a single player's raw overall from their attributes and weights."""
     raw_sum = 0.0
@@ -847,8 +971,12 @@ def _percentile_rank_to_20_80(rank: float) -> int:
 
 def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
     """
-    Batch recompute displayovr for all active players using the active
-    weight profile's pitcher_overall and position_overall weights.
+    Batch recompute displayovr for all active players.
+
+    Uses position-specific weights (e.g. ss_rating, sp_rating) when a player
+    has an assigned listed position via gameplan/override/auto.  Falls back to
+    the generic pitcher_overall / position_overall weights for players without
+    a listed position.
 
     Computes raw overalls for ALL players first, then assigns 20-80 grades
     via inline percentile ranking within each (level, ptype) group.
@@ -859,7 +987,7 @@ def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
     """
     from services.rating_config import get_overall_weights
 
-    # Load active weights
+    # Load active weights — includes position-specific AND generic overalls
     all_weights = get_overall_weights(conn)
     pitcher_ovr_weights = all_weights.get("pitcher_overall", {})
     position_ovr_weights = all_weights.get("position_overall", {})
@@ -867,21 +995,41 @@ def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
     if not pitcher_ovr_weights and not position_ovr_weights:
         return {"updated": 0, "by_level": {}, "error": "no_overall_weights_configured"}
 
-    # Load all active players with their attributes and level
+    # Resolve current league_year_id for listed-position lookup
+    ly_row = conn.execute(text(
+        "SELECT id FROM league_years WHERE league_year = "
+        "(SELECT season FROM timestamp_state WHERE id = 1)"
+    )).first()
+    league_year_id = int(ly_row[0]) if ly_row else None
+
+    # Load all active players with their attributes, level, and team
     level_filter = "AND c.current_level = :level" if level else ""
-    params = {}
+    params: Dict[str, Any] = {}
     if level:
         params["level"] = level
 
     rows = conn.execute(text(f"""
-        SELECT p.*, c.current_level
+        SELECT p.*, c.current_level, t.id AS _team_id
         FROM simbbPlayers p
         JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
         WHERE 1=1 {level_filter}
     """), params).mappings().all()
 
     if not rows:
         return {"updated": 0, "by_level": {}}
+
+    # Bulk-load listed positions for all players: {player_id: position_code}
+    listed_positions: Dict[int, str] = {}
+    if league_year_id is not None:
+        lp_rows = conn.execute(text(
+            "SELECT player_id, position_code FROM player_listed_position "
+            "WHERE league_year_id = :lyid"
+        ), {"lyid": league_year_id}).all()
+        for lp in lp_rows:
+            listed_positions[int(lp[0])] = str(lp[1])
 
     # --- Pass 1: compute raw_ovr for every player ---
     # Group by (level, ptype) for separate percentile ranking
@@ -893,10 +1041,11 @@ def recompute_displayovr(conn, level: Optional[int] = None) -> Dict[str, Any]:
         ptype = (row.get("ptype") or "").strip()
         player_level = int(row["current_level"])
 
-        if ptype == "Pitcher":
-            ovr_weights = pitcher_ovr_weights
-        else:
-            ovr_weights = position_ovr_weights
+        # Determine weight set: position-specific first, generic fallback
+        ovr_weights = _resolve_ovr_weights(
+            pid, ptype, listed_positions, all_weights,
+            pitcher_ovr_weights, position_ovr_weights,
+        )
 
         if not ovr_weights:
             continue

@@ -41,6 +41,9 @@ def _get_tables(engine) -> Dict[str, Table]:
             "players": Table("simbbPlayers", md, autoload_with=engine),
             "teams": Table("teams", md, autoload_with=engine),
             "tx_log": Table("transaction_log", md, autoload_with=engine),
+            "draft_round_modes": Table("draft_round_modes", md, autoload_with=engine),
+            "draft_team_prefs": Table("draft_team_prefs", md, autoload_with=engine),
+            "draft_player_queue": Table("draft_player_queue", md, autoload_with=engine),
         }
     return _table_cache[eid]
 
@@ -106,6 +109,23 @@ def _broadcast(event_type: str, **data):
 
 
 # ---------------------------------------------------------------------------
+# Round Mode Helpers
+# ---------------------------------------------------------------------------
+
+def _get_round_mode(conn, league_year_id: int, round_num: int) -> str:
+    """Return 'live' or 'auto' for a given round.  Defaults to 'live'."""
+    row = conn.execute(text(
+        "SELECT mode FROM draft_round_modes "
+        "WHERE league_year_id = :lyid AND `round` = :rnd"
+    ), {"lyid": league_year_id, "rnd": round_num}).scalar()
+    return row or "live"
+
+
+def _is_auto_round(conn, league_year_id: int, round_num: int) -> bool:
+    return _get_round_mode(conn, league_year_id, round_num) == "auto"
+
+
+# ---------------------------------------------------------------------------
 # 1. Draft Order from Standings
 # ---------------------------------------------------------------------------
 
@@ -162,8 +182,8 @@ def _compute_draft_order(conn, league_year_id: int) -> List[int]:
 # ---------------------------------------------------------------------------
 
 def initialize_draft(conn, league_year_id: int, total_rounds: int = 20,
-                     seconds_per_pick: int = 60, is_snake: bool = False
-                     ) -> Dict[str, Any]:
+                     seconds_per_pick: int = 60, is_snake: bool = False,
+                     live_rounds: List[int] = None) -> Dict[str, Any]:
     """
     Create draft state, populate pick slots, and build eligible player pool.
 
@@ -227,6 +247,17 @@ def initialize_draft(conn, league_year_id: int, total_rounds: int = 20,
     # 5. Pre-create draft_signing rows with slot values
     _create_signing_rows(conn, league_year_id)
 
+    # 6. Populate round modes (default: rounds 1-3 live, rest auto)
+    if live_rounds is None:
+        live_rounds = [1, 2, 3]
+    live_set = set(live_rounds)
+    for rnd in range(1, total_rounds + 1):
+        mode = "live" if rnd in live_set else "auto"
+        conn.execute(text("""
+            INSERT INTO draft_round_modes (league_year_id, `round`, mode)
+            VALUES (:lyid, :rnd, :mode)
+        """), {"lyid": league_year_id, "rnd": rnd, "mode": mode})
+
     return {
         "league_year_id": league_year_id,
         "total_rounds": total_rounds,
@@ -234,6 +265,7 @@ def initialize_draft(conn, league_year_id: int, total_rounds: int = 20,
         "total_picks": overall,
         "eligible_players": eligible_count,
         "draft_order": draft_order,
+        "live_rounds": sorted(live_set),
     }
 
 
@@ -333,17 +365,28 @@ def _create_signing_rows(conn, league_year_id: int):
 # ---------------------------------------------------------------------------
 
 def start_draft(conn, league_year_id: int) -> Dict[str, Any]:
-    """Set phase to IN_PROGRESS, set timer for first pick."""
+    """Set phase to IN_PROGRESS, set timer for first pick (or no timer if auto)."""
     state = _get_draft_state(conn, league_year_id)
     if state["phase"] != "SETUP":
         raise ValueError(f"Cannot start draft: phase is {state['phase']}")
 
-    deadline = datetime.utcnow() + timedelta(seconds=state["seconds_per_pick"])
-    conn.execute(text("""
-        UPDATE draft_state
-        SET phase = 'IN_PROGRESS', pick_deadline_at = :deadline
-        WHERE league_year_id = :lyid
-    """), {"lyid": league_year_id, "deadline": deadline})
+    round_1_auto = _is_auto_round(conn, league_year_id, 1)
+
+    if round_1_auto:
+        # No timer — admin must call run-auto-rounds to proceed
+        conn.execute(text("""
+            UPDATE draft_state
+            SET phase = 'IN_PROGRESS', pick_deadline_at = NULL
+            WHERE league_year_id = :lyid
+        """), {"lyid": league_year_id})
+    else:
+        deadline = datetime.utcnow() + timedelta(
+            seconds=state["seconds_per_pick"])
+        conn.execute(text("""
+            UPDATE draft_state
+            SET phase = 'IN_PROGRESS', pick_deadline_at = :deadline
+            WHERE league_year_id = :lyid
+        """), {"lyid": league_year_id, "deadline": deadline})
 
     # Flip global timestamp flag
     from services.timestamp import set_phase_flags
@@ -352,8 +395,7 @@ def start_draft(conn, league_year_id: int) -> Dict[str, Any]:
     _broadcast("draft_state_change",
                phase="IN_PROGRESS",
                current_round=state["current_round"],
-               current_pick=state["current_pick"],
-               pick_deadline_at=deadline.isoformat())
+               current_pick=state["current_pick"])
 
     return get_draft_state(conn, league_year_id)
 
@@ -534,6 +576,7 @@ def make_pick(conn, league_year_id: int, org_id: int, player_id: int,
         "player_name": player_name,
         "is_auto_pick": is_auto,
         "draft_complete": advanced.get("draft_complete", False),
+        "auto_round_next": advanced.get("auto_round", False),
     }
 
     _broadcast("draft_pick_made", **result)
@@ -562,51 +605,167 @@ def _advance_to_next_pick(conn, state: Dict) -> Dict:
         """), {"lyid": state["league_year_id"]})
         return {"draft_complete": True}
 
-    deadline = datetime.utcnow() + timedelta(seconds=state["seconds_per_pick"])
-    conn.execute(text("""
-        UPDATE draft_state
-        SET current_round = :rnd, current_pick = :pick,
-            pick_deadline_at = :deadline
-        WHERE league_year_id = :lyid
-    """), {
-        "lyid": state["league_year_id"],
-        "rnd": next_round,
-        "pick": next_pick,
-        "deadline": deadline,
-    })
+    # Check if next round is auto — skip timer if so
+    next_is_auto = _is_auto_round(
+        conn, state["league_year_id"], next_round)
 
-    return {"draft_complete": False, "round": next_round, "pick": next_pick}
+    if next_is_auto:
+        conn.execute(text("""
+            UPDATE draft_state
+            SET current_round = :rnd, current_pick = :pick,
+                pick_deadline_at = NULL
+            WHERE league_year_id = :lyid
+        """), {
+            "lyid": state["league_year_id"],
+            "rnd": next_round,
+            "pick": next_pick,
+        })
+        return {"draft_complete": False, "round": next_round,
+                "pick": next_pick, "auto_round": True}
+    else:
+        deadline = datetime.utcnow() + timedelta(
+            seconds=state["seconds_per_pick"])
+        conn.execute(text("""
+            UPDATE draft_state
+            SET current_round = :rnd, current_pick = :pick,
+                pick_deadline_at = :deadline
+            WHERE league_year_id = :lyid
+        """), {
+            "lyid": state["league_year_id"],
+            "rnd": next_round,
+            "pick": next_pick,
+            "deadline": deadline,
+        })
+        return {"draft_complete": False, "round": next_round,
+                "pick": next_pick}
 
 
-def auto_pick(conn, league_year_id: int) -> Dict[str, Any]:
-    """Select the highest-ranked available player for the current pick."""
-    best = conn.execute(text("""
+def _smart_auto_pick(conn, league_year_id: int, org_id: int) -> int:
+    """
+    Preference-aware player selection for auto-picks.
+
+    Three-tier logic checked in order:
+      1. Highest-priority available player from the team's queue
+      2. BPA within the position type (pitcher/hitter) that still has
+         unfilled quota
+      3. Pure BPA fallback (original behaviour)
+
+    Returns a player_id.
+    """
+    # --- Layer 1: Player Queue ---
+    queued = conn.execute(text("""
+        SELECT dpq.player_id
+        FROM draft_player_queue dpq
+        JOIN draft_eligible_players dep
+            ON dep.player_id = dpq.player_id
+           AND dep.league_year_id = dpq.league_year_id
+        LEFT JOIN draft_picks dp
+            ON dp.player_id = dpq.player_id
+           AND dp.league_year_id = dpq.league_year_id
+           AND dp.player_id IS NOT NULL
+        WHERE dpq.league_year_id = :lyid
+          AND dpq.org_id = :oid
+          AND dp.id IS NULL
+        ORDER BY dpq.priority ASC
+        LIMIT 1
+    """), {"lyid": league_year_id, "oid": org_id}).scalar()
+
+    if queued:
+        return queued
+
+    # --- Layer 2: Positional Quota (pitcher / hitter) ---
+    prefs = conn.execute(text(
+        "SELECT pitcher_quota, hitter_quota FROM draft_team_prefs "
+        "WHERE league_year_id = :lyid AND org_id = :oid"
+    ), {"lyid": league_year_id, "oid": org_id}).mappings().first()
+
+    if prefs and (prefs["pitcher_quota"] > 0 or prefs["hitter_quota"] > 0):
+        counts = conn.execute(text("""
+            SELECT
+                SUM(CASE WHEN p.ptype = 'Pitcher' THEN 1 ELSE 0 END) AS pitchers_drafted,
+                SUM(CASE WHEN p.ptype != 'Pitcher' OR p.ptype IS NULL
+                         THEN 1 ELSE 0 END) AS hitters_drafted
+            FROM draft_picks dp
+            JOIN simbbPlayers p ON p.id = dp.player_id
+            WHERE dp.league_year_id = :lyid
+              AND dp.current_org_id = :oid
+              AND dp.player_id IS NOT NULL
+        """), {"lyid": league_year_id, "oid": org_id}).mappings().first()
+
+        pitchers_drafted = int(counts["pitchers_drafted"] or 0)
+        hitters_drafted = int(counts["hitters_drafted"] or 0)
+
+        pitcher_need = prefs["pitcher_quota"] - pitchers_drafted
+        hitter_need = prefs["hitter_quota"] - hitters_drafted
+
+        # Pick the type with more remaining need; tie goes to pitcher
+        target_type = None
+        if pitcher_need > 0 and hitter_need > 0:
+            target_type = "pitcher" if pitcher_need >= hitter_need else "hitter"
+        elif pitcher_need > 0:
+            target_type = "pitcher"
+        elif hitter_need > 0:
+            target_type = "hitter"
+
+        if target_type:
+            ptype_cond = ("p.ptype = 'Pitcher'" if target_type == "pitcher"
+                          else "(p.ptype != 'Pitcher' OR p.ptype IS NULL)")
+
+            typed_pick = conn.execute(text(f"""
+                SELECT dep.player_id
+                FROM draft_eligible_players dep
+                JOIN simbbPlayers p ON p.id = dep.player_id
+                LEFT JOIN draft_picks dp
+                    ON dp.player_id = dep.player_id
+                   AND dp.league_year_id = dep.league_year_id
+                   AND dp.player_id IS NOT NULL
+                WHERE dep.league_year_id = :lyid
+                  AND dp.id IS NULL
+                  AND {ptype_cond}
+                ORDER BY dep.draft_rank ASC, dep.player_id ASC
+                LIMIT 1
+            """), {"lyid": league_year_id}).scalar()
+
+            if typed_pick:
+                return typed_pick
+
+    # --- Layer 3: Pure BPA fallback ---
+    bpa = conn.execute(text("""
         SELECT dep.player_id
         FROM draft_eligible_players dep
         LEFT JOIN draft_picks dp
-            ON dp.player_id = dep.player_id AND dp.league_year_id = dep.league_year_id
+            ON dp.player_id = dep.player_id
+           AND dp.league_year_id = dep.league_year_id
+           AND dp.player_id IS NOT NULL
         WHERE dep.league_year_id = :lyid
           AND dp.id IS NULL
         ORDER BY dep.draft_rank ASC, dep.player_id ASC
         LIMIT 1
-    """), {"lyid": league_year_id}).first()
+    """), {"lyid": league_year_id}).scalar()
 
-    if not best:
+    if not bpa:
         raise ValueError("No eligible players remaining for auto-pick")
 
+    return bpa
+
+
+def auto_pick(conn, league_year_id: int) -> Dict[str, Any]:
+    """Select a player for the current pick using preference-aware logic."""
     state = _get_draft_state(conn, league_year_id)
     pick_row = conn.execute(text("""
         SELECT current_org_id FROM draft_picks
-        WHERE league_year_id = :lyid AND round = :rnd AND pick_in_round = :pir
+        WHERE league_year_id = :lyid AND `round` = :rnd AND pick_in_round = :pir
     """), {
         "lyid": league_year_id,
         "rnd": state["current_round"],
         "pir": state["current_pick"],
     }).mappings().first()
 
+    player_id = _smart_auto_pick(conn, league_year_id, pick_row["current_org_id"])
+
     return make_pick(conn, league_year_id,
                      org_id=pick_row["current_org_id"],
-                     player_id=best[0],
+                     player_id=player_id,
                      is_auto=True)
 
 
@@ -628,6 +787,9 @@ def check_timer_expiry(conn, league_year_id: int) -> List[Dict]:
             result = auto_pick(conn, league_year_id)
             auto_picks.append(result)
             if result.get("draft_complete"):
+                break
+            # Stop at auto-round boundary — admin triggers manually
+            if result.get("auto_round_next"):
                 break
         except ValueError:
             break
@@ -872,6 +1034,9 @@ def get_draft_state(conn, league_year_id: int) -> Dict[str, Any]:
         "pick_deadline_at": (state["pick_deadline_at"].isoformat()
                              if state["pick_deadline_at"] else None),
         "seconds_remaining": seconds_remaining,
+        "current_round_mode": _get_round_mode(
+            conn, league_year_id, state["current_round"]),
+        "auto_rounds_locked": bool(state.get("auto_rounds_locked", 0)),
     }
 
 
@@ -1148,6 +1313,221 @@ def admin_reset_timer(conn, league_year_id: int) -> Dict[str, Any]:
 
     return {"pick_deadline_at": deadline.isoformat(),
             "seconds_remaining": state["seconds_per_pick"]}
+
+
+# ---------------------------------------------------------------------------
+# 8b. Round Mode & Team Preference CRUD
+# ---------------------------------------------------------------------------
+
+def set_round_modes(conn, league_year_id: int,
+                    round_modes: Dict[int, str]) -> Dict[str, Any]:
+    """
+    Configure which rounds are live vs auto.  SETUP phase only.
+    round_modes: {round_number: 'live' | 'auto'}
+    """
+    state = _get_draft_state(conn, league_year_id)
+    if state["phase"] != "SETUP":
+        raise ValueError(f"Cannot set round modes: phase is {state['phase']}")
+
+    for rnd, mode in round_modes.items():
+        if mode not in ("live", "auto"):
+            raise ValueError(f"Invalid mode '{mode}' for round {rnd}")
+        if rnd < 1 or rnd > state["total_rounds"]:
+            raise ValueError(
+                f"Round {rnd} out of range (1-{state['total_rounds']})")
+        conn.execute(text("""
+            INSERT INTO draft_round_modes (league_year_id, `round`, mode)
+            VALUES (:lyid, :rnd, :mode)
+            AS new_row ON DUPLICATE KEY UPDATE mode = new_row.mode
+        """), {"lyid": league_year_id, "rnd": rnd, "mode": mode})
+
+    return {"league_year_id": league_year_id,
+            "rounds_configured": len(round_modes)}
+
+
+def get_round_modes(conn, league_year_id: int) -> List[Dict[str, Any]]:
+    """Return live/auto mode for every round (fills defaults for missing rows)."""
+    state = _get_draft_state(conn, league_year_id)
+    rows = conn.execute(text(
+        "SELECT `round`, mode FROM draft_round_modes "
+        "WHERE league_year_id = :lyid ORDER BY `round`"
+    ), {"lyid": league_year_id}).mappings().all()
+    mode_map = {r["round"]: r["mode"] for r in rows}
+    return [
+        {"round": rnd, "mode": mode_map.get(rnd, "live")}
+        for rnd in range(1, state["total_rounds"] + 1)
+    ]
+
+
+def set_team_prefs(conn, league_year_id: int, org_id: int,
+                   pitcher_quota: int = None, hitter_quota: int = None,
+                   queue: List[int] = None) -> Dict[str, Any]:
+    """
+    Set or update auto-draft preferences for a team.
+
+    - pitcher_quota / hitter_quota: target counts for auto rounds
+    - queue: ordered list of player_ids (first = highest priority)
+
+    Raises if auto rounds have already started (locked).
+    """
+    state = _get_draft_state(conn, league_year_id)
+    if state.get("auto_rounds_locked"):
+        raise ValueError(
+            "Auto-draft preferences are locked — auto rounds have begun")
+
+    # -- Upsert quotas --
+    if pitcher_quota is not None or hitter_quota is not None:
+        existing = conn.execute(text(
+            "SELECT pitcher_quota, hitter_quota FROM draft_team_prefs "
+            "WHERE league_year_id = :lyid AND org_id = :oid"
+        ), {"lyid": league_year_id, "oid": org_id}).mappings().first()
+
+        pq = (pitcher_quota if pitcher_quota is not None
+              else (existing["pitcher_quota"] if existing else 0))
+        hq = (hitter_quota if hitter_quota is not None
+              else (existing["hitter_quota"] if existing else 0))
+
+        conn.execute(text("""
+            INSERT INTO draft_team_prefs
+                (league_year_id, org_id, pitcher_quota, hitter_quota)
+            VALUES (:lyid, :oid, :pq, :hq)
+            AS new_row ON DUPLICATE KEY UPDATE
+                pitcher_quota = new_row.pitcher_quota,
+                hitter_quota  = new_row.hitter_quota
+        """), {"lyid": league_year_id, "oid": org_id, "pq": pq, "hq": hq})
+
+    # -- Replace queue --
+    if queue is not None:
+        if queue:
+            # Validate all player_ids are draft-eligible
+            placeholders = ",".join(str(int(pid)) for pid in queue)
+            eligible = conn.execute(text(f"""
+                SELECT player_id FROM draft_eligible_players
+                WHERE league_year_id = :lyid
+                  AND player_id IN ({placeholders})
+            """), {"lyid": league_year_id}).scalars().all()
+            eligible_set = set(eligible)
+            invalid = [pid for pid in queue if pid not in eligible_set]
+            if invalid:
+                raise ValueError(f"Players not draft-eligible: {invalid}")
+
+        conn.execute(text(
+            "DELETE FROM draft_player_queue "
+            "WHERE league_year_id = :lyid AND org_id = :oid"
+        ), {"lyid": league_year_id, "oid": org_id})
+
+        for priority, player_id in enumerate(queue, 1):
+            conn.execute(text("""
+                INSERT INTO draft_player_queue
+                    (league_year_id, org_id, player_id, priority)
+                VALUES (:lyid, :oid, :pid, :pri)
+            """), {"lyid": league_year_id, "oid": org_id,
+                   "pid": player_id, "pri": priority})
+
+    return {"org_id": org_id, "league_year_id": league_year_id,
+            "updated": True}
+
+
+def get_team_prefs(conn, league_year_id: int,
+                   org_id: int) -> Dict[str, Any]:
+    """Return current auto-draft preferences for a team (quotas + queue)."""
+    prefs = conn.execute(text(
+        "SELECT pitcher_quota, hitter_quota, locked FROM draft_team_prefs "
+        "WHERE league_year_id = :lyid AND org_id = :oid"
+    ), {"lyid": league_year_id, "oid": org_id}).mappings().first()
+
+    queue = conn.execute(text(
+        "SELECT player_id, priority FROM draft_player_queue "
+        "WHERE league_year_id = :lyid AND org_id = :oid "
+        "ORDER BY priority ASC"
+    ), {"lyid": league_year_id, "oid": org_id}).mappings().all()
+
+    return {
+        "org_id": org_id,
+        "pitcher_quota": prefs["pitcher_quota"] if prefs else 0,
+        "hitter_quota": prefs["hitter_quota"] if prefs else 0,
+        "locked": bool(prefs["locked"]) if prefs else False,
+        "queue": [{"player_id": q["player_id"], "priority": q["priority"]}
+                  for q in queue],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 8c. Auto-Round Execution
+# ---------------------------------------------------------------------------
+
+def execute_auto_rounds(conn, league_year_id: int) -> List[Dict[str, Any]]:
+    """
+    Execute all picks in consecutive auto rounds starting from the current
+    position.  Called by admin via the run-auto-rounds endpoint.
+
+    Locks preferences on first call, then iterates through every pick in
+    each auto round using _smart_auto_pick.
+    """
+    state = _get_draft_state(conn, league_year_id)
+    if state["phase"] != "IN_PROGRESS":
+        raise ValueError(
+            f"Cannot run auto rounds: phase is {state['phase']}")
+    if not _is_auto_round(conn, league_year_id, state["current_round"]):
+        raise ValueError(
+            f"Round {state['current_round']} is not an auto round")
+
+    # Lock preferences if not already locked
+    if not state.get("auto_rounds_locked"):
+        conn.execute(text(
+            "UPDATE draft_state SET auto_rounds_locked = 1 "
+            "WHERE league_year_id = :lyid"
+        ), {"lyid": league_year_id})
+        conn.execute(text(
+            "UPDATE draft_team_prefs SET locked = 1 "
+            "WHERE league_year_id = :lyid"
+        ), {"lyid": league_year_id})
+
+    _broadcast("auto_rounds_started", league_year_id=league_year_id,
+               starting_round=state["current_round"])
+
+    results = []
+    safety_cap = state["total_rounds"] * state["picks_per_round"]
+
+    for _ in range(safety_cap):
+        state = _get_draft_state(conn, league_year_id)
+
+        if state["phase"] != "IN_PROGRESS":
+            break
+
+        # Stop if we've left auto-round territory
+        if not _is_auto_round(conn, league_year_id, state["current_round"]):
+            break
+
+        # Get current pick's org
+        pick_row = conn.execute(text("""
+            SELECT id, current_org_id, player_id FROM draft_picks
+            WHERE league_year_id = :lyid
+              AND `round` = :rnd AND pick_in_round = :pir
+        """), {
+            "lyid": league_year_id,
+            "rnd": state["current_round"],
+            "pir": state["current_pick"],
+        }).mappings().first()
+
+        if not pick_row or pick_row["player_id"] is not None:
+            break
+
+        player_id = _smart_auto_pick(
+            conn, league_year_id, pick_row["current_org_id"])
+        result = make_pick(conn, league_year_id,
+                           org_id=pick_row["current_org_id"],
+                           player_id=player_id,
+                           is_auto=True)
+        results.append(result)
+
+        if result.get("draft_complete"):
+            break
+
+    _broadcast("auto_rounds_completed", league_year_id=league_year_id,
+               picks_made=len(results))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
