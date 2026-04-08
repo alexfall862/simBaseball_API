@@ -283,11 +283,22 @@ def compute_star_rankings(conn, league_year_id):
             ranking_params,
         )
 
-        star_params = [{"star": r["star"], "pid": r["player_id"]} for r in all_ranked]
-        conn.execute(
-            text("UPDATE simbbPlayers SET recruit_stars = :star WHERE id = :pid"),
-            star_params,
-        )
+        # Batch UPDATE star ratings using chunked CASE expressions
+        # instead of one UPDATE per player (~44k individual statements).
+        _CHUNK = 500
+        for i in range(0, len(all_ranked), _CHUNK):
+            chunk = all_ranked[i:i + _CHUNK]
+            cases = " ".join(
+                f"WHEN {r['player_id']} THEN {r['star']}" for r in chunk
+            )
+            pids = ",".join(str(r["player_id"]) for r in chunk)
+            conn.execute(
+                text(f"""
+                    UPDATE simbbPlayers
+                    SET recruit_stars = CASE id {cases} END
+                    WHERE id IN ({pids})
+                """)
+            )
 
     return len(all_ranked)
 

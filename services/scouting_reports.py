@@ -122,6 +122,21 @@ _SPEED_DESCRIPTORS = {
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _hs_cap_for_age(age):
+    """Age-aware attribute cap for HS players.
+
+    HS players start at base 0 (age 15) and accumulate via growth curves.
+    A static cap of 25 compresses older HS players into the top tier.
+    Scale the cap so elite/plus/solid tiers stay meaningful at every age.
+    """
+    if age is None or age <= 16:
+        return 35
+    if age == 17:
+        return 50
+    # 18+
+    return 65
+
+
 def generate_text_report(player, level):
     """
     Generate a template-based text scouting report from attributes.
@@ -134,7 +149,10 @@ def generate_text_report(player, level):
         dict with 'batting', 'fielding', 'athletic', and optionally 'pitching'
         keys — each a string of ~50-100 characters.
     """
-    cap = {"hs": 25, "college": 50, "intam": 50}.get(level, 25)
+    if level == "hs":
+        cap = _hs_cap_for_age(player.get("age"))
+    else:
+        cap = {"college": 50, "intam": 50}.get(level, 50)
     ptype = player.get("ptype", "Position")
 
     report = {}

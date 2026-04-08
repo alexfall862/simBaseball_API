@@ -10,6 +10,20 @@ lengths and attribute caps.
 
 import random
 
+
+def _hs_cap_for_age(age):
+    """Age-aware attribute cap for HS players.
+
+    HS players accumulate base attributes via growth curves starting at 0.
+    A static cap compresses older HS players into the top tier.
+    """
+    if age is None or age <= 16:
+        return 35
+    if age == 17:
+        return 50
+    return 65
+
+
 # Level-specific season parameters
 LEVEL_PARAMS = {
     "hs": {
@@ -17,7 +31,7 @@ LEVEL_PARAMS = {
         "ab_per_game": 3.2,
         "ip_per_start": 5.0,
         "starts": 15,
-        "attr_cap": 25,
+        "attr_cap": 35,  # default; overridden by age-aware cap at runtime
     },
     "college": {
         "games": 56,
@@ -45,7 +59,7 @@ def _norm(val, cap):
 # Position player batting
 # ---------------------------------------------------------------------------
 
-def _generate_batting(player, level, rng):
+def _generate_batting(player, params, rng):
     """
     Generate a full-season batting line.
 
@@ -56,7 +70,7 @@ def _generate_batting(player, level, rng):
         power_base      -> HR%, doubles, ISO
         speed_base      -> SB, triples
     """
-    p = LEVEL_PARAMS[level]
+    p = params
     cap = p["attr_cap"]
     games = p["games"]
 
@@ -141,7 +155,7 @@ def _generate_batting(player, level, rng):
 # Pitcher stats
 # ---------------------------------------------------------------------------
 
-def _generate_pitching(player, level, rng):
+def _generate_pitching(player, params, rng):
     """
     Generate a full-season pitching line.
 
@@ -152,7 +166,7 @@ def _generate_pitching(player, level, rng):
         pendurance_base   -> IP/start
         pitch1-3 OVR avg  -> overall effectiveness modifier
     """
-    p = LEVEL_PARAMS[level]
+    p = params
     cap = p["attr_cap"]
     starts = p["starts"]
 
@@ -225,7 +239,7 @@ def _generate_pitching(player, level, rng):
 # Fielding stats
 # ---------------------------------------------------------------------------
 
-def _generate_fielding(player, level, rng):
+def _generate_fielding(player, params, rng):
     """
     Generate a full-season fielding line.
 
@@ -235,7 +249,7 @@ def _generate_fielding(player, level, rng):
         fieldspot_base  -> error avoidance (positioning)
         throwacc_base   -> error avoidance (throwing)
     """
-    p = LEVEL_PARAMS[level]
+    p = params
     cap = p["attr_cap"]
     games = p["games"]
 
@@ -291,16 +305,23 @@ def generate_scouting_stats(player, level):
     rng = random.Random(player_id)
 
     ptype = player.get("ptype", "Position")
+
+    # Build params with age-aware cap for HS so older HS players
+    # don't all compress into the top stat tier.
+    params = dict(LEVEL_PARAMS[level])
+    if level == "hs":
+        params["attr_cap"] = _hs_cap_for_age(player.get("age"))
+
     result = {}
 
     if ptype == "Position":
-        result["batting"] = _generate_batting(player, level, rng)
-        result["fielding"] = _generate_fielding(player, level, rng)
+        result["batting"] = _generate_batting(player, params, rng)
+        result["fielding"] = _generate_fielding(player, params, rng)
     else:
-        result["pitching"] = _generate_pitching(player, level, rng)
+        result["pitching"] = _generate_pitching(player, params, rng)
         # Pitchers also bat in amateur ball — scaled-down line
         bat_rng = random.Random(player_id + 100000)
-        batting = _generate_batting(player, level, bat_rng)
+        batting = _generate_batting(player, params, bat_rng)
         batting["at_bats"] = int(batting["at_bats"] * 0.3)
         batting["hits"] = int(batting["hits"] * 0.2)
         batting["home_runs"] = max(0, int(batting["home_runs"] * 0.1))
