@@ -3656,11 +3656,20 @@
             <button id="btn-po-refresh" class="btn btn-secondary">Refresh</button>
             <button id="btn-po-wipe" class="btn btn-danger">Wipe Playoffs</button>
           </div>
+          <div id="ct-controls" class="filter-row" style="display:none;gap:12px;flex-wrap:wrap;align-items:end;margin-top:8px">
+            <button id="btn-ct-generate" class="btn btn-primary">Generate Conf Tournaments</button>
+            <button id="btn-ct-advance" class="btn btn-secondary">Advance Conf Tournaments</button>
+            <button id="btn-ct-wipe" class="btn btn-danger">Wipe Conf Tournaments</button>
+          </div>
           <div id="po-status" class="status-msg"></div>
         </div>
         <div class="card" id="po-field-card" style="display:none">
           <h4>Playoff Field</h4>
           <div id="po-field"></div>
+        </div>
+        <div class="card" id="ct-bracket-card" style="display:none">
+          <h4>Conference Tournaments</h4>
+          <div id="ct-bracket"></div>
         </div>
         <div class="card" id="po-pending-card" style="display:none">
           <h4>Pending Games</h4>

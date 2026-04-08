@@ -11,6 +11,9 @@ from services.playoffs import (
     create_milb_bracket,
     determine_cws_field,
     create_cws_bracket,
+    create_conf_tournaments,
+    advance_conf_tournaments,
+    wipe_conf_tournaments,
     update_series_after_game,
     advance_round,
     advance_cws_round,
@@ -247,6 +250,80 @@ def process_results():
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500
 
+
+# ---------------------------------------------------------------------------
+# Conference Tournaments
+# ---------------------------------------------------------------------------
+
+@playoffs_bp.post("/playoffs/conf-tournaments/generate")
+def generate_conf_tournaments():
+    """
+    Generate single-elimination conference tournament brackets for all
+    college conferences.  All teams qualify; top seeds get byes when the
+    conference size is not a power of 2.
+
+    Body: {league_year_id, start_week?}
+    """
+    data = request.get_json(force=True)
+    league_year_id = int(data["league_year_id"])
+    start_week = int(data.get("start_week", 25))
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = create_conf_tournaments(conn, league_year_id, start_week)
+        return jsonify(result), 201
+    except ValueError as e:
+        return jsonify(error="validation_error", message=str(e)), 400
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.post("/playoffs/conf-tournaments/advance")
+def advance_conf_tournaments_endpoint():
+    """
+    Advance all conference tournaments that have completed their current
+    round.  Merges bye teams for the R1→R2 transition when applicable.
+
+    Body: {league_year_id}
+    """
+    data = request.get_json(force=True)
+    league_year_id = int(data["league_year_id"])
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = advance_conf_tournaments(conn, league_year_id)
+        if "error" in result:
+            return jsonify(result), 400
+        return jsonify(result), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.post("/playoffs/conf-tournaments/wipe")
+def wipe_conf_tournaments_endpoint():
+    """
+    Wipe all conference tournament data for a league year, leaving CWS
+    data intact.
+
+    Body: {league_year_id}
+    """
+    data = request.get_json(force=True)
+    league_year_id = int(data["league_year_id"])
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = wipe_conf_tournaments(conn, league_year_id)
+        return jsonify(result), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Wipe
+# ---------------------------------------------------------------------------
 
 @playoffs_bp.post("/playoffs/wipe")
 def wipe():

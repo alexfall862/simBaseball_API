@@ -7341,10 +7341,120 @@
     loadPendingGames(lyid, level);
   });
 
+  // --- Conference Tournament controls (show only for College / level 3) ---
+  function updateCtControlsVisibility() {
+    const level = document.getElementById('po-level')?.value;
+    const ct = document.getElementById('ct-controls');
+    if (ct) ct.style.display = level === '3' ? 'flex' : 'none';
+  }
+  document.getElementById('po-level')?.addEventListener('change', updateCtControlsVisibility);
+  updateCtControlsVisibility();
+
+  document.getElementById('btn-ct-generate')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Generating conference tournaments...';
+    fetch(`${API_BASE}/playoffs/conf-tournaments/generate`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      status.textContent = `Created ${data.total_series} series across ${(data.conferences || []).length} conferences`;
+      loadPlayoffBracket(lyid, '3');
+      loadPendingGames(lyid, '3');
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-ct-advance')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Advancing conference tournaments...';
+    fetch(`${API_BASE}/playoffs/conf-tournaments/advance`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      const parts = [];
+      if (data.advanced?.length) parts.push(`${data.advanced.length} conf(s) advanced`);
+      if (data.completed?.length) parts.push(`${data.completed.length} conf(s) complete`);
+      if (data.no_action?.length) parts.push(`${data.no_action.length} no action`);
+      status.textContent = parts.join(', ') || 'No changes';
+      loadPlayoffBracket(lyid, '3');
+      loadPendingGames(lyid, '3');
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-ct-wipe')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const status = document.getElementById('po-status');
+    if (!confirm('Wipe all conference tournament data? CWS data will be kept.')) return;
+    status.textContent = 'Wiping conference tournaments...';
+    fetch(`${API_BASE}/playoffs/conf-tournaments/wipe`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      const parts = [];
+      if (data.playoff_series) parts.push(`${data.playoff_series} series`);
+      if (data.gamelist) parts.push(`${data.gamelist} games`);
+      status.textContent = `Wiped: ${parts.join(', ') || 'nothing to wipe'}`;
+      document.getElementById('ct-bracket-card').style.display = 'none';
+      loadPlayoffBracket(lyid, '3');
+      loadPendingGames(lyid, '3');
+    }).catch(e => status.textContent = e.message);
+  });
+
   function loadPlayoffBracket(lyid, level) {
     fetch(`${API_BASE}/playoffs/bracket/${lyid}/${level}`, { credentials: 'include' })
       .then(r => r.json())
       .then(data => {
+        // --- Conference Tournaments (level 3 only) ---
+        const ctCard = document.getElementById('ct-bracket-card');
+        const ctDiv = document.getElementById('ct-bracket');
+        if (data.conf_tournaments && Object.keys(data.conf_tournaments).length > 0) {
+          ctCard.style.display = '';
+          let ctHtml = '';
+          for (const [conf, cdata] of Object.entries(data.conf_tournaments).sort((a, b) => a[0].localeCompare(b[0]))) {
+            const roundNames = Object.keys(cdata.rounds).sort();
+            const totalRounds = roundNames.length;
+            // Find if conference is complete (last round has a winner)
+            const lastRound = roundNames[roundNames.length - 1];
+            const lastSeries = cdata.rounds[lastRound] || [];
+            const confWinner = lastSeries.length === 1 && lastSeries[0].winner ? lastSeries[0].winner.abbrev : null;
+            const confStatus = confWinner ? ` — Champion: ${confWinner}` : '';
+            ctHtml += `<details style="margin-bottom:8px"><summary style="cursor:pointer;font-weight:600">${conf}${confStatus}</summary>`;
+            for (const rnd of roundNames) {
+              const rndNum = parseInt(rnd.replace('CT_R', ''));
+              let label = rnd;
+              if (rndNum === totalRounds) label = 'Final';
+              else if (rndNum === totalRounds - 1) label = 'Semifinal';
+              else if (rndNum === totalRounds - 2) label = 'Quarterfinal';
+              else label = `Round ${rndNum}`;
+              ctHtml += `<h6 style="margin-top:8px;margin-left:12px">${label}</h6>`;
+              ctHtml += '<table class="data-table" style="margin-left:12px"><thead><tr><th>Matchup</th><th>Status</th><th>Winner</th></tr></thead><tbody>';
+              (cdata.rounds[rnd] || []).forEach(s => {
+                const statusBadge = s.status === 'complete'
+                  ? '<span class="badge badge-success">Complete</span>'
+                  : '<span class="badge badge-warning">Pending</span>';
+                ctHtml += `<tr>
+                  <td>${s.team_a.abbrev} (#${s.team_a.seed || '-'}) vs ${s.team_b.abbrev} (#${s.team_b.seed || '-'})</td>
+                  <td>${statusBadge}</td>
+                  <td>${s.winner ? s.winner.abbrev : '-'}</td>
+                </tr>`;
+              });
+              ctHtml += '</tbody></table>';
+            }
+            ctHtml += '</details>';
+          }
+          ctDiv.innerHTML = ctHtml;
+        } else if (ctCard) {
+          ctCard.style.display = 'none';
+        }
+
+        // --- Main Bracket (CWS rounds, MLB, MiLB) ---
         const card = document.getElementById('po-bracket-card');
         const div = document.getElementById('po-bracket');
         if (!data.rounds || Object.keys(data.rounds).length === 0) {
@@ -7359,7 +7469,6 @@
           series.forEach(s => {
             const scoreA = s.wins_a, scoreB = s.wins_b;
             const gamesPlayed = scoreA + scoreB;
-            const clinch = s.series_length === 1 ? 1 : s.series_length === 3 ? 2 : s.series_length === 5 ? 3 : 4;
             const statusBadge = s.status === 'complete'
               ? '<span class="badge badge-success">Complete</span>'
               : `<span class="badge badge-warning">Game ${gamesPlayed + 1} of ${s.series_length}</span>`;

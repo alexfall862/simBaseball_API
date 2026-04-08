@@ -3,10 +3,12 @@
 Playoff bracket generation, series tracking, and round advancement for:
   - MLB (level 9): 12-team bracket (3 div winners + 3 WC per league)
   - Minor Leagues (levels 5-8): Top 8 by record, single-elimination Bo7
-  - College World Series (level 3): Conference champs + at-large, double-elimination
+  - College Conference Tournaments (level 3): Single-elimination per conference, with byes
+  - College World Series (level 3): Conference tourney winners + at-large, double-elimination
 """
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text as sa_text
@@ -49,6 +51,43 @@ CWS_TRANSITIONS = [
     (["CWS_L4"],            "CWS_F1"),   # Losers bracket survivor vs W3 winner
     (["CWS_F1"],            "CWS_F2"),   # If-necessary (conditional)
 ]
+
+# ---------------------------------------------------------------------------
+# Conference Tournament bracket (single elimination, Bo1, byes for top seeds)
+# ---------------------------------------------------------------------------
+CT_ROUND_PREFIX = "CT_R"
+
+
+def _ct_bracket_info(num_teams: int) -> Dict[str, int]:
+    """
+    Compute bracket parameters for a conference tournament of *num_teams*.
+
+    Returns dict with:
+      field_size    – number of teams in the bracket (== num_teams)
+      total_rounds  – ceil(log2(N))
+      play_in_games – first-round games when N is not a power of 2 (else 0)
+      num_byes      – top seeds that skip the first round (else 0)
+    """
+    if num_teams < 2:
+        return {"field_size": 0, "total_rounds": 0, "play_in_games": 0, "num_byes": 0}
+    is_power_of_2 = (num_teams & (num_teams - 1)) == 0
+    if is_power_of_2:
+        return {
+            "field_size": num_teams,
+            "total_rounds": int(math.log2(num_teams)),
+            "play_in_games": 0,
+            "num_byes": 0,
+        }
+    total_rounds = math.ceil(math.log2(num_teams))
+    p = 1 << (total_rounds - 1)            # largest power of 2 < num_teams
+    play_in_games = num_teams - p
+    num_byes = 2 * p - num_teams
+    return {
+        "field_size": num_teams,
+        "total_rounds": total_rounds,
+        "play_in_games": play_in_games,
+        "num_byes": num_byes,
+    }
 
 
 # =====================================================================
@@ -326,10 +365,17 @@ def update_series_after_game(conn, game_id: int) -> Optional[Dict[str, Any]]:
 
     Returns series status dict if found, None if game is not a playoff game.
     """
-    # Get game info from game_results
+    # Get game info from game_results + gamelist for scoping
     game_row = conn.execute(sa_text("""
-        SELECT game_id, home_team_id, away_team_id, winning_team_id, game_type
-        FROM game_results WHERE game_id = :gid
+        SELECT gr.game_id, gr.home_team_id, gr.away_team_id,
+               gr.winning_team_id, gr.game_type,
+               gl.league_level,
+               ly.id AS league_year_id
+        FROM game_results gr
+        JOIN gamelist gl ON gl.id = gr.game_id
+        JOIN seasons s ON s.id = gl.season
+        JOIN league_years ly ON ly.league_year = s.year
+        WHERE gr.game_id = :gid
     """), {"gid": game_id}).mappings().first()
 
     if not game_row or game_row["game_type"] != "playoff":
@@ -341,11 +387,14 @@ def update_series_after_game(conn, game_id: int) -> Optional[Dict[str, Any]]:
     series = conn.execute(sa_text("""
         SELECT id, team_a_id, team_b_id, wins_a, wins_b, series_length, status
         FROM playoff_series
-        WHERE status IN ('pending', 'active')
+        WHERE league_year_id = :lyid AND league_level = :level
+          AND status IN ('pending', 'active')
           AND (team_a_id = :home OR team_a_id = :away)
           AND (team_b_id = :home OR team_b_id = :away)
         LIMIT 1
     """), {
+        "lyid": int(game_row["league_year_id"]),
+        "level": int(game_row["league_level"]),
         "home": int(game_row["home_team_id"]),
         "away": int(game_row["away_team_id"]),
     }).mappings().first()
@@ -916,16 +965,411 @@ def _advance_milb_round(
 
 
 # =====================================================================
+# College Conference Tournaments (Level 3) — Single Elimination
+# =====================================================================
+
+def determine_conf_tournament_fields(
+    conn, league_year_id: int,
+) -> Dict[str, List[Dict]]:
+    """
+    Build the seeded field for every conference tournament.
+
+    Returns ``{conference_name: [team_dict, ...]}`` where each list is sorted
+    by conference-record seed (1 = best).  Conferences with < 2 teams and
+    "Independent" are excluded.
+    """
+    by_conf = _get_college_team_records(conn, league_year_id)
+
+    fields: Dict[str, List[Dict]] = {}
+    for conf, teams in by_conf.items():
+        if conf == "Independent" or len(teams) < 2:
+            continue
+        # Sort: conference win%, overall win% tiebreaker, conf wins tiebreaker
+        teams.sort(
+            key=lambda t: (t["conf_win_pct"], t["win_pct"], t["conf_wins"]),
+            reverse=True,
+        )
+        for i, t in enumerate(teams):
+            t["seed"] = i + 1
+        fields[conf] = teams
+
+    return fields
+
+
+def create_conf_tournaments(
+    conn, league_year_id: int, start_week: int = 25,
+) -> Dict[str, Any]:
+    """
+    Create all conference tournament brackets in one call.
+
+    For each conference:
+      - All teams qualify (maximise field).
+      - Bracket math determines byes (top seeds skip play-in round).
+      - Single-elimination Bo1 games.
+    """
+    fields = determine_conf_tournament_fields(conn, league_year_id)
+    summary: List[Dict] = []
+    total_series = 0
+
+    for conf, teams in fields.items():
+        info = _ct_bracket_info(len(teams))
+        if info["total_rounds"] == 0:
+            continue
+
+        num_byes = info["num_byes"]
+
+        # Populate conf_tournament_field table
+        for t in teams:
+            conn.execute(sa_text("""
+                INSERT INTO conf_tournament_field
+                    (league_year_id, conference, team_id, seed, has_bye)
+                VALUES (:lyid, :conf, :tid, :seed, :bye)
+            """), {
+                "lyid": league_year_id, "conf": conf,
+                "tid": t["team_id"], "seed": t["seed"],
+                "bye": 1 if t["seed"] <= num_byes else 0,
+            })
+
+        # Build first-round matchups
+        if num_byes > 0:
+            # Play-in: bottom 2*play_in_games seeds play
+            playing = [t for t in teams if t["seed"] > num_byes]
+        else:
+            # Full first round: all teams play
+            playing = list(teams)
+
+        # Pair best-vs-worst within the playing set
+        playing.sort(key=lambda t: t["seed"])
+        pairs: List[Tuple[Dict, Dict]] = []
+        lo, hi = 0, len(playing) - 1
+        while lo < hi:
+            pairs.append((playing[lo], playing[hi]))
+            lo += 1
+            hi -= 1
+
+        created_conf: List[Dict] = []
+        for snum, (t_a, t_b) in enumerate(pairs, start=1):
+            conn.execute(sa_text("""
+                INSERT INTO playoff_series
+                    (league_year_id, league_level, round, series_number,
+                     team_a_id, team_b_id, seed_a, seed_b,
+                     series_length, status, start_week, conference)
+                VALUES
+                    (:lyid, 3, 'CT_R1', :snum,
+                     :team_a, :team_b, :seed_a, :seed_b,
+                     1, 'pending', :week, :conf)
+            """), {
+                "lyid": league_year_id, "snum": snum,
+                "team_a": t_a["team_id"], "team_b": t_b["team_id"],
+                "seed_a": t_a["seed"], "seed_b": t_b["seed"],
+                "week": start_week, "conf": conf,
+            })
+
+            week, subweek = _next_available_subweek(
+                conn, league_year_id, 3,
+                t_a["team_id"], t_b["team_id"], start_week,
+            )
+            _insert_single_playoff_game(
+                conn, league_year_id, 3,
+                t_a["team_id"], t_b["team_id"], week, subweek,
+            )
+
+            created_conf.append({
+                "matchup": f"{t_a['team_abbrev']} (#{t_a['seed']}) vs "
+                           f"{t_b['team_abbrev']} (#{t_b['seed']})",
+            })
+
+        total_series += len(created_conf)
+        summary.append({
+            "conference": conf,
+            "field_size": info["field_size"],
+            "total_rounds": info["total_rounds"],
+            "num_byes": num_byes,
+            "r1_series": len(created_conf),
+            "matchups": created_conf,
+        })
+
+        log.info(
+            "conf tournament: %s — %d teams, %d rounds, %d byes, %d R1 games",
+            conf, info["field_size"], info["total_rounds"], num_byes,
+            len(created_conf),
+        )
+
+    return {"conferences": summary, "total_series": total_series}
+
+
+def advance_conf_tournaments(
+    conn, league_year_id: int,
+) -> Dict[str, Any]:
+    """
+    Advance all conference tournaments that have completed their current round.
+
+    Iterates every conference, finds the latest complete round whose successor
+    doesn't yet exist, and creates the next round's matchups.  Handles bye
+    merging for the R1→R2 transition when R1 was a play-in round.
+
+    Idempotent: safe to call repeatedly.
+    """
+    # Load all CT series grouped by (conference, round)
+    all_ct = conn.execute(sa_text("""
+        SELECT conference, round, status
+        FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 3
+          AND round LIKE 'CT_R%%'
+    """), {"lyid": league_year_id}).mappings().all()
+
+    if not all_ct:
+        return {"error": "No conference tournament series found"}
+
+    # Build {conference: {round: {total, complete}}}
+    conf_rounds: Dict[str, Dict[str, Dict[str, int]]] = {}
+    for s in all_ct:
+        conf = s["conference"]
+        rnd = s["round"]
+        conf_rounds.setdefault(conf, {})
+        conf_rounds[conf].setdefault(rnd, {"total": 0, "complete": 0})
+        conf_rounds[conf][rnd]["total"] += 1
+        if s["status"] == "complete":
+            conf_rounds[conf][rnd]["complete"] += 1
+
+    advanced: List[Dict] = []
+    completed: List[Dict] = []
+    no_action: List[str] = []
+
+    for conf, rounds in conf_rounds.items():
+        # Get total_rounds for this conference from the field table
+        field_count = conn.execute(sa_text("""
+            SELECT COUNT(*) FROM conf_tournament_field
+            WHERE league_year_id = :lyid AND conference = :conf
+        """), {"lyid": league_year_id, "conf": conf}).scalar()
+
+        info = _ct_bracket_info(field_count)
+        total_rounds = info["total_rounds"]
+
+        # Find the latest completed round whose next round doesn't exist
+        latest_complete_num = None
+        for rnd_name, counts in sorted(rounds.items()):
+            if counts["total"] != counts["complete"]:
+                continue
+            rnd_num = int(rnd_name.replace(CT_ROUND_PREFIX, ""))
+            next_rnd = f"{CT_ROUND_PREFIX}{rnd_num + 1}"
+            if next_rnd not in rounds and rnd_num < total_rounds:
+                latest_complete_num = rnd_num
+
+        if latest_complete_num is None:
+            # Check if the final round is complete
+            final_rnd = f"{CT_ROUND_PREFIX}{total_rounds}"
+            if final_rnd in rounds and rounds[final_rnd]["total"] == rounds[final_rnd]["complete"]:
+                winner_row = conn.execute(sa_text("""
+                    SELECT winner_team_id FROM playoff_series
+                    WHERE league_year_id = :lyid AND league_level = 3
+                      AND round = :rnd AND conference = :conf AND status = 'complete'
+                """), {"lyid": league_year_id, "rnd": final_rnd, "conf": conf}).first()
+                if winner_row:
+                    completed.append({"conference": conf, "champion": int(winner_row[0])})
+            else:
+                no_action.append(f"{conf}: rounds still in progress")
+            continue
+
+        current_rnd = f"{CT_ROUND_PREFIX}{latest_complete_num}"
+        next_rnd_num = latest_complete_num + 1
+        next_rnd = f"{CT_ROUND_PREFIX}{next_rnd_num}"
+
+        # Get winners from the completed round
+        winners_rows = conn.execute(sa_text("""
+            SELECT winner_team_id, seed_a, seed_b, team_a_id
+            FROM playoff_series
+            WHERE league_year_id = :lyid AND league_level = 3
+              AND round = :rnd AND conference = :conf AND status = 'complete'
+            ORDER BY series_number
+        """), {"lyid": league_year_id, "rnd": current_rnd, "conf": conf}).mappings().all()
+
+        winners = []
+        for w in winners_rows:
+            wtid = int(w["winner_team_id"])
+            seed = min(int(w["seed_a"]), int(w["seed_b"]))
+            winners.append({"team_id": wtid, "seed": seed})
+
+        # For R1→R2: merge bye teams if R1 was a play-in round
+        if latest_complete_num == 1 and info["num_byes"] > 0:
+            bye_rows = conn.execute(sa_text("""
+                SELECT team_id, seed FROM conf_tournament_field
+                WHERE league_year_id = :lyid AND conference = :conf AND has_bye = 1
+            """), {"lyid": league_year_id, "conf": conf}).mappings().all()
+            for b in bye_rows:
+                winners.append({"team_id": int(b["team_id"]), "seed": int(b["seed"])})
+
+        # Pair best-vs-worst
+        winners.sort(key=lambda t: t["seed"])
+        pairs: List[Tuple[Dict, Dict]] = []
+        lo, hi = 0, len(winners) - 1
+        while lo < hi:
+            pairs.append((winners[lo], winners[hi]))
+            lo += 1
+            hi -= 1
+
+        # Determine start_week for next round
+        last_week_row = conn.execute(sa_text("""
+            SELECT MAX(start_week) AS mw FROM playoff_series
+            WHERE league_year_id = :lyid AND league_level = 3
+              AND round = :rnd AND conference = :conf
+        """), {"lyid": league_year_id, "rnd": current_rnd, "conf": conf}).mappings().first()
+        next_week = int(last_week_row["mw"]) + 1 if last_week_row and last_week_row["mw"] else start_week
+
+        created_round: List[Dict] = []
+        for snum, (t_a, t_b) in enumerate(pairs, start=1):
+            conn.execute(sa_text("""
+                INSERT INTO playoff_series
+                    (league_year_id, league_level, round, series_number,
+                     team_a_id, team_b_id, seed_a, seed_b,
+                     series_length, status, start_week, conference)
+                VALUES
+                    (:lyid, 3, :rnd, :snum,
+                     :team_a, :team_b, :seed_a, :seed_b,
+                     1, 'pending', :week, :conf)
+            """), {
+                "lyid": league_year_id, "rnd": next_rnd, "snum": snum,
+                "team_a": t_a["team_id"], "team_b": t_b["team_id"],
+                "seed_a": t_a["seed"], "seed_b": t_b["seed"],
+                "week": next_week, "conf": conf,
+            })
+
+            week, subweek = _next_available_subweek(
+                conn, league_year_id, 3,
+                t_a["team_id"], t_b["team_id"], next_week,
+            )
+            _insert_single_playoff_game(
+                conn, league_year_id, 3,
+                t_a["team_id"], t_b["team_id"], week, subweek,
+            )
+
+            created_round.append({
+                "matchup": f"#{t_a['seed']} vs #{t_b['seed']}",
+            })
+
+        advanced.append({
+            "conference": conf,
+            "round": next_rnd,
+            "series_created": len(created_round),
+        })
+
+        log.info(
+            "conf tournament advance: %s — created %d series for %s",
+            conf, len(created_round), next_rnd,
+        )
+
+    return {"advanced": advanced, "completed": completed, "no_action": no_action}
+
+
+def get_conf_tournament_winners(
+    conn, league_year_id: int,
+) -> Dict[str, int]:
+    """
+    Return ``{conference_name: winner_team_id}`` for all completed conference
+    tournament finals.  The final round for each conference is the MAX round
+    number (CT_R5 > CT_R4 > … > CT_R1 lexicographically).
+    """
+    rows = conn.execute(sa_text("""
+        SELECT ps.conference, ps.winner_team_id
+        FROM playoff_series ps
+        INNER JOIN (
+            SELECT conference, MAX(round) AS final_round
+            FROM playoff_series
+            WHERE league_year_id = :lyid AND league_level = 3
+              AND round LIKE 'CT_R%%'
+            GROUP BY conference
+        ) mx ON mx.conference = ps.conference AND mx.final_round = ps.round
+        WHERE ps.league_year_id = :lyid AND ps.league_level = 3
+          AND ps.status = 'complete'
+    """), {"lyid": league_year_id}).mappings().all()
+
+    return {r["conference"]: int(r["winner_team_id"]) for r in rows}
+
+
+def wipe_conf_tournaments(
+    conn, league_year_id: int,
+) -> Dict[str, Any]:
+    """
+    Delete all conference tournament data for a league year, leaving CWS
+    bracket and other playoff data untouched.
+    """
+    params = {"lyid": league_year_id}
+
+    # 1. Identify gamelist IDs from CT playoff_series
+    game_ids_rows = conn.execute(sa_text("""
+        SELECT gl.id
+        FROM gamelist gl
+        JOIN playoff_series ps
+          ON ps.league_year_id = :lyid AND ps.league_level = 3
+          AND ps.round LIKE 'CT_R%%'
+          AND ((gl.home_team = ps.team_a_id AND gl.away_team = ps.team_b_id)
+            OR (gl.home_team = ps.team_b_id AND gl.away_team = ps.team_a_id))
+        WHERE gl.game_type = 'playoff' AND gl.league_level = 3
+    """), params).all()
+    game_ids = [int(r[0]) for r in game_ids_rows]
+
+    deleted = {
+        "game_ids": len(game_ids),
+        "game_results": 0,
+        "game_batting_lines": 0,
+        "game_pitching_lines": 0,
+        "game_substitutions": 0,
+        "gamelist": 0,
+        "playoff_series": 0,
+        "conf_tournament_field": 0,
+    }
+
+    if game_ids:
+        gid_csv = ",".join(str(g) for g in game_ids)
+        for table in ("game_batting_lines", "game_pitching_lines", "game_substitutions"):
+            res = conn.execute(sa_text(
+                f"DELETE FROM {table} WHERE game_id IN ({gid_csv})"
+            ))
+            deleted[table] = res.rowcount
+
+        res = conn.execute(sa_text(
+            f"DELETE FROM game_results WHERE game_id IN ({gid_csv})"
+        ))
+        deleted["game_results"] = res.rowcount
+
+        res = conn.execute(sa_text(
+            f"DELETE FROM gamelist WHERE id IN ({gid_csv})"
+        ))
+        deleted["gamelist"] = res.rowcount
+
+    # 2. playoff_series
+    res = conn.execute(sa_text("""
+        DELETE FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 3 AND round LIKE 'CT_R%%'
+    """), params)
+    deleted["playoff_series"] = res.rowcount
+
+    # 3. conf_tournament_field
+    res = conn.execute(sa_text("""
+        DELETE FROM conf_tournament_field WHERE league_year_id = :lyid
+    """), params)
+    deleted["conf_tournament_field"] = res.rowcount
+
+    log.info("conf tournament: wiped for league_year %d: %s", league_year_id, deleted)
+    return deleted
+
+
+# =====================================================================
 # College World Series (Level 3) — Double Elimination
 # =====================================================================
 
-def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
+def _get_college_team_records(
+    conn, league_year_id: int,
+) -> Dict[str, List[Dict]]:
     """
-    Determine CWS field: conference champions (best conf record per conference)
-    plus at-large bids (best overall record) to fill remaining spots.
-    Default: 8-team field.
+    Fetch all level-3 teams with overall and conference records, grouped by
+    conference name.  Shared by conference tournament seeding and CWS field
+    selection.
+
+    Returns ``{conference_name: [team_dict, ...]}`` where each team_dict has:
+        team_id, team_abbrev, conference, wins, losses, win_pct,
+        conf_wins, conf_losses, conf_win_pct
     """
-    # Get all college teams with records
     sql = sa_text("""
         SELECT
             t.id AS team_id,
@@ -984,7 +1428,6 @@ def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
 
     rows = conn.execute(sql, {"lyid": league_year_id}).mappings().all()
 
-    # Find conference champions
     by_conf: Dict[str, List[Dict]] = {}
     for r in rows:
         conf = r["conference"] or "Independent"
@@ -1003,30 +1446,51 @@ def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
         }
         by_conf.setdefault(conf, []).append(entry)
 
+    return by_conf
+
+
+def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
+    """
+    Determine CWS field: conference tournament winners (or best conf record
+    as fallback) plus at-large bids to fill remaining spots.
+    Default: 8-team field.
+    """
+    by_conf = _get_college_team_records(conn, league_year_id)
+
+    # Check for conference tournament winners first
+    ct_winners = get_conf_tournament_winners(conn, league_year_id)
+
     conf_champs = []
     used_ids = set()
     for conf, teams in by_conf.items():
         if conf == "Independent":
             continue
-        teams.sort(key=lambda x: x["conf_win_pct"], reverse=True)
+        if conf in ct_winners:
+            # Use the tournament winner as auto-bid
+            winner_tid = ct_winners[conf]
+            champ = next((t for t in teams if t["team_id"] == winner_tid), None)
+            if champ:
+                champ["qualifier"] = "conf_tourney_champ"
+                conf_champs.append(champ)
+                used_ids.add(champ["team_id"])
+                continue
+            log.warning(
+                "CWS: conf tournament winner %d for %s not found in records, "
+                "falling back to regular-season leader", winner_tid, conf,
+            )
+        # Fallback: best conference record
+        teams.sort(key=lambda x: (x["conf_win_pct"], x["win_pct"]), reverse=True)
         champ = teams[0]
         champ["qualifier"] = "conf_champ"
         conf_champs.append(champ)
         used_ids.add(champ["team_id"])
 
     # Fill remaining spots with at-large bids (best overall record)
+    all_teams = [t for teams in by_conf.values() for t in teams]
     at_large_pool = [
-        entry for r in rows
-        if (entry := {
-            "team_id": int(r["team_id"]),
-            "team_abbrev": r["team_abbrev"],
-            "conference": r["conference"] or "Independent",
-            "wins": int(r["wins"]),
-            "losses": int(r["losses"]),
-            "win_pct": round(int(r["wins"]) / (int(r["wins"]) + int(r["losses"])), 3)
-                if (int(r["wins"]) + int(r["losses"])) > 0 else 0.0,
-            "qualifier": "at_large",
-        }) and int(r["team_id"]) not in used_ids
+        {**t, "qualifier": "at_large"}
+        for t in all_teams
+        if t["team_id"] not in used_ids
     ]
     at_large_pool.sort(key=lambda x: x["win_pct"], reverse=True)
 
@@ -1549,6 +2013,7 @@ def get_bracket(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
         LEFT JOIN teams tw ON tw.id = ps.winner_team_id
         WHERE ps.league_year_id = :lyid AND ps.league_level = :level
         ORDER BY FIELD(ps.round, 'WC','DS','CS','WS','QF','SF','F',
+                       'CT_R1','CT_R2','CT_R3','CT_R4','CT_R5',
                        'CWS_W1','CWS_W2','CWS_W3',
                        'CWS_L1','CWS_L2','CWS_L3','CWS_L4',
                        'CWS_F1','CWS_F2'),
@@ -1571,8 +2036,21 @@ def get_bracket(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
             "winner": {"id": int(s["winner_team_id"]), "abbrev": s["winner_abbrev"]} if s["winner_team_id"] else None,
         })
 
-    # Add CWS bracket state if level 3
+    # Add CWS bracket state and conference tournament grouping if level 3
     if league_level == 3:
+        # Group conference tournament rounds by conference
+        ct_data: Dict[str, Dict] = {}
+        ct_round_keys = [r for r in result["rounds"] if r.startswith(CT_ROUND_PREFIX)]
+        for rnd_name in ct_round_keys:
+            for s in result["rounds"][rnd_name]:
+                conf = s["conference"]
+                if conf:
+                    ct_data.setdefault(conf, {"rounds": {}})
+                    ct_data[conf]["rounds"].setdefault(rnd_name, []).append(s)
+        for rnd_name in ct_round_keys:
+            del result["rounds"][rnd_name]
+        result["conf_tournaments"] = ct_data
+
         cws = conn.execute(sa_text("""
             SELECT cb.*, t.team_abbrev
             FROM cws_bracket cb
@@ -1702,6 +2180,7 @@ def wipe_playoffs(
       - game_batting_lines / game_pitching_lines for those games
       - game_substitutions for those games
       - cws_bracket rows (level 3 only)
+      - conf_tournament_field rows (level 3 only)
 
     Does NOT touch:
       - Season-accumulated player stats (would require reverse-engineering
@@ -1767,12 +2246,17 @@ def wipe_playoffs(
     """), params)
     deleted["playoff_series"] = res.rowcount
 
-    # 3. cws_bracket (level 3 only)
+    # 3. cws_bracket + conf_tournament_field (level 3 only)
     if league_level == 3:
         res = conn.execute(sa_text("""
             DELETE FROM cws_bracket WHERE league_year_id = :lyid
         """), {"lyid": league_year_id})
         deleted["cws_bracket"] = res.rowcount
+
+        res = conn.execute(sa_text("""
+            DELETE FROM conf_tournament_field WHERE league_year_id = :lyid
+        """), {"lyid": league_year_id})
+        deleted["conf_tournament_field"] = res.rowcount
 
     log.info(
         "playoffs: wiped level %d for league_year %d: %s",
