@@ -450,9 +450,14 @@ def advance_auction_phases(
         auction_id = int(a["id"])
         phase = a["phase"]
         started = int(a["phase_started_week"])
+        auction_ly = int(a["league_year_id"])
 
-        # Phase must have lasted at least 1 week
-        if current_week <= started:
+        # If the auction belongs to a previous league year (e.g., season
+        # was reset), the week numbers are stale.  Force-advance it.
+        stale_auction = (auction_ly != league_year_id)
+
+        # Phase must have lasted at least 1 week (unless stale)
+        if not stale_auction and current_week <= started:
             if phase == "open":
                 summary["still_open"] += 1
             continue
@@ -600,7 +605,7 @@ def _execute_auction_signing(
 
     # Get game_week_id for the current week
     ly_row = conn.execute(sa_text(
-        "SELECT id FROM game_weeks WHERE league_year_id = :ly AND week_number = :w LIMIT 1"
+        "SELECT id FROM game_weeks WHERE league_year_id = :ly AND week_index = :w LIMIT 1"
     ), {"ly": league_year_id, "w": current_week}).first()
     game_week_id = ly_row[0] if ly_row else None
 
