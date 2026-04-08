@@ -254,6 +254,44 @@ def _get_usage_preferences_bulk(conn, player_ids: List[int]) -> Dict[int, str]:
 
 
 # -------------------------------------------------------------------
+# Rotation roster helpers (for excluding rotation arms from bullpen)
+# -------------------------------------------------------------------
+
+def get_rotation_pitcher_ids(conn, team_id: int) -> set:
+    """
+    Return the set of player IDs assigned to rotation slots for a team.
+    Returns an empty set if no rotation is configured.
+    """
+    tables = _get_rotation_tables()
+    rotation = tables["rotation"]
+    slots = tables["slots"]
+
+    rot_row = conn.execute(
+        select(rotation.c.id).where(rotation.c.team_id == team_id)
+    ).first()
+    if not rot_row:
+        return set()
+
+    slot_rows = conn.execute(
+        select(slots.c.player_id).where(slots.c.rotation_id == rot_row[0])
+    ).all()
+    return {int(r[0]) for r in slot_rows}
+
+
+def get_rotation_pitcher_ids_from_cache(cache, team_id: int) -> set:
+    """
+    Return the set of player IDs assigned to rotation slots for a team,
+    reading from SubweekCache. Returns an empty set if no rotation is configured.
+    """
+    rot_row = cache.rotation_by_team.get(team_id)
+    if not rot_row:
+        return set()
+    rotation_id = int(rot_row["id"])
+    slot_rows = cache.rotation_slots_by_rotation.get(rotation_id, [])
+    return {int(r["player_id"]) for r in slot_rows}
+
+
+# -------------------------------------------------------------------
 # Bullpen spot-starter selection
 # -------------------------------------------------------------------
 

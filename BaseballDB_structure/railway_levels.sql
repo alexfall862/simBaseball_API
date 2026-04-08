@@ -33,6 +33,7 @@ DROP TABLE IF EXISTS `levels`;
 CREATE TABLE `levels` (
   `id` int NOT NULL,
   `league_level` varchar(20) DEFAULT NULL,
+  `min_roster` int DEFAULT NULL,
   `max_roster` int DEFAULT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
@@ -44,7 +45,7 @@ CREATE TABLE `levels` (
 
 LOCK TABLES `levels` WRITE;
 /*!40000 ALTER TABLE `levels` DISABLE KEYS */;
-INSERT INTO `levels` VALUES (1,'high school',NULL),(2,'intam',NULL),(3,'college',40),(4,'scraps',40),(5,'a',28),(6,'higha',28),(7,'aa',28),(8,'aaa',28),(9,'mlb',26),(99,'wbc',NULL);
+INSERT INTO `levels` VALUES (1,'high school',NULL,NULL),(2,'intam',NULL,NULL),(3,'college',25,35),(4,'scraps',0,40),(5,'a',20,26),(6,'higha',20,26),(7,'aa',20,26),(8,'aaa',20,26),(9,'mlb',20,26),(99,'wbc',NULL,NULL);
 /*!40000 ALTER TABLE `levels` ENABLE KEYS */;
 UNLOCK TABLES;
 SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;

@@ -422,6 +422,7 @@
       'tx-roster': 'Roster Moves',
       'tx-trades': 'Trades',
       'tx-log': 'Transaction Log',
+      'roster-compliance': 'Roster Compliance',
       'pe-generate': 'Player Generation',
       'pe-progress': 'Player Progression',
       'pe-sandbox': 'Progression Sandbox',
@@ -490,6 +491,9 @@
         break;
       case 'tx-log':
         loadTransactionLog();
+        break;
+      case 'roster-compliance':
+        loadRosterCompliance();
         break;
       case 'tx-eos':
         loadEndOfSeason();
@@ -2858,7 +2862,12 @@
         if (Array.isArray(data)) {
           statusDiv.innerHTML = data
             .filter(l => l.max_roster > 0)
-            .map(l => `<span><strong>${l.level_name}:</strong> ${l.count}/${l.max_roster}${l.over_limit ? ' <span style="color:var(--danger)">OVER</span>' : ''}</span>`)
+            .map(l => {
+              let flag = '';
+              if (l.over_limit) flag = ' <span style="color:var(--danger)">OVER</span>';
+              else if (l.under_limit) flag = ' <span style="color:var(--warning)">UNDER</span>';
+              return `<span><strong>${l.level_name}:</strong> ${l.count}/${l.max_roster}${flag}</span>`;
+            })
             .join(' &nbsp;|&nbsp; ');
         }
       })
@@ -3679,6 +3688,149 @@
         }
       })
       .catch(err => { resultEl.textContent = 'Error: ' + err.message; });
+  }
+
+  // -----------------------------------------------------------------------
+  // Roster Compliance
+  // -----------------------------------------------------------------------
+
+  function loadRosterCompliance() {
+    populateTxOrgDropdown('compliance-org-select');
+    document.getElementById('compliance-summary-card').style.display = 'none';
+    document.getElementById('compliance-detail-card').style.display = 'none';
+
+    document.getElementById('btn-compliance-load').onclick = () => {
+      const orgId = document.getElementById('compliance-org-select').value;
+      fetchComplianceData(orgId || null);
+    };
+    document.getElementById('compliance-violations-only').onchange = () => {
+      renderComplianceTable();
+    };
+  }
+
+  let complianceData = [];
+
+  function fetchComplianceData(orgId) {
+    const summaryCard = document.getElementById('compliance-summary-card');
+    const detailCard = document.getElementById('compliance-detail-card');
+    const tbody = document.getElementById('compliance-tbody');
+    summaryCard.style.display = 'none';
+    detailCard.style.display = 'block';
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Loading...</td></tr>';
+
+    const orgsToFetch = orgId
+      ? [txOrgList.find(o => o.id === parseInt(orgId))].filter(Boolean)
+      : txOrgList.filter(o => o.league === 'mlb');
+
+    if (!orgsToFetch.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No organizations found</td></tr>';
+      return;
+    }
+
+    const levelNames = { 9: 'MLB', 8: 'AAA', 7: 'AA', 6: 'High-A', 5: 'A', 4: 'Scraps', 3: 'College' };
+
+    Promise.all(orgsToFetch.map(org =>
+      fetch(`${API_BASE}/transactions/roster-status/${org.id}`)
+        .then(r => r.json())
+        .then(levels => {
+          if (!Array.isArray(levels)) return [];
+          return levels
+            .filter(l => l.max_roster > 0 || l.min_roster > 0)
+            .map(l => ({
+              org_id: org.id,
+              org_abbrev: org.org_abbrev,
+              level_id: l.level_id,
+              level_name: levelNames[l.level_id] || l.level_name,
+              count: l.count,
+              min_roster: l.min_roster,
+              max_roster: l.max_roster,
+              over_limit: l.over_limit,
+              under_limit: l.under_limit,
+            }));
+        })
+        .catch(() => [])
+    )).then(results => {
+      complianceData = results.flat();
+      renderComplianceSummary();
+      renderComplianceTable();
+    });
+  }
+
+  function renderComplianceSummary() {
+    const card = document.getElementById('compliance-summary-card');
+    const container = document.getElementById('compliance-summary');
+    card.style.display = 'block';
+
+    const totalOrgs = new Set(complianceData.map(r => r.org_id)).size;
+    const overRows = complianceData.filter(r => r.over_limit);
+    const underRows = complianceData.filter(r => r.under_limit);
+    const compliantOrgs = totalOrgs - new Set([
+      ...overRows.map(r => r.org_id),
+      ...underRows.map(r => r.org_id),
+    ]).size;
+
+    container.innerHTML = `
+      <div class="stat-card">
+        <div class="stat-label">Organizations</div>
+        <div class="stat-value">${totalOrgs}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Fully Compliant</div>
+        <div class="stat-value" style="color: ${compliantOrgs === totalOrgs ? 'var(--success)' : 'var(--text-primary)'}">${compliantOrgs}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Violations</div>
+        <div class="stat-value" style="color: ${(overRows.length + underRows.length) > 0 ? 'var(--danger)' : 'var(--success)'}">${overRows.length + underRows.length}</div>
+        <div class="stat-sub">${overRows.length} over / ${underRows.length} under</div>
+      </div>
+    `;
+  }
+
+  function renderComplianceTable() {
+    const tbody = document.getElementById('compliance-tbody');
+    const violationsOnly = document.getElementById('compliance-violations-only').checked;
+
+    let rows = complianceData;
+    if (violationsOnly) {
+      rows = rows.filter(r => r.over_limit || r.under_limit);
+    }
+
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted">${violationsOnly ? 'No violations found' : 'No data'}</td></tr>`;
+      return;
+    }
+
+    // Sort: violations first, then by org + level
+    rows = [...rows].sort((a, b) => {
+      const aViolation = a.over_limit || a.under_limit ? 0 : 1;
+      const bViolation = b.over_limit || b.under_limit ? 0 : 1;
+      if (aViolation !== bViolation) return aViolation - bViolation;
+      const orgCmp = a.org_abbrev.localeCompare(b.org_abbrev);
+      if (orgCmp !== 0) return orgCmp;
+      return b.level_id - a.level_id;
+    });
+
+    tbody.innerHTML = rows.map(r => {
+      let statusBadge, rowStyle;
+      if (r.over_limit) {
+        statusBadge = '<span class="badge badge-danger">OVER</span>';
+        rowStyle = 'background: rgba(239, 68, 68, 0.08);';
+      } else if (r.under_limit) {
+        statusBadge = '<span class="badge badge-warning">UNDER</span>';
+        rowStyle = 'background: rgba(245, 158, 11, 0.08);';
+      } else {
+        statusBadge = '<span class="badge badge-success">OK</span>';
+        rowStyle = '';
+      }
+      return `<tr style="${rowStyle}">
+        <td><strong>${r.org_abbrev}</strong></td>
+        <td>${r.level_name}</td>
+        <td>${r.count}</td>
+        <td>${r.min_roster != null ? r.min_roster : '--'}</td>
+        <td>${r.max_roster != null ? r.max_roster : '--'}</td>
+        <td>${statusBadge}</td>
+      </tr>`;
+    }).join('');
   }
 
   // ── Player Engine: Generation ──────────────────────────────────────

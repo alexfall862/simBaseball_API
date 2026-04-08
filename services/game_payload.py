@@ -112,7 +112,7 @@ def _get_player_column_categories():
     """Wrapper that auto-provides engine."""
     return _get_player_column_categories_raw(get_engine())
 
-from services.rotation import pick_starting_pitcher
+from services.rotation import pick_starting_pitcher, get_rotation_pitcher_ids
 from services.defense_xp import (
     compute_defensive_xp_mod_for_player,
     compute_defensive_xp_mod_for_players,
@@ -1518,6 +1518,7 @@ def build_team_game_side(
     vs_hand: str | None,
     random_seed: int | None,
     use_dh: bool,
+    rotation_pitcher_ids: set | None = None,
 ) -> Dict[str, Any]:
     """
     Build the engine-facing payload for one team in a game.
@@ -1648,11 +1649,14 @@ def build_team_game_side(
                 "build_team_game_side: no pitchers on roster for team %s", team_id,
             )
 
-    # 3) Available pitchers: all pitchers except starter
+    # 3) Available pitchers: all pitchers except starter and resting rotation members
     #    Respect bullpen ordering if configured, append any unordered pitchers after
+    exclude_pids = {starter_id}
+    if rotation_pitcher_ids:
+        exclude_pids |= rotation_pitcher_ids
     all_pitcher_ids = {
         pid for pid, pdata in players_by_id.items()
-        if (pdata.get("ptype") or "").lower() == "pitcher" and pid != starter_id
+        if (pdata.get("ptype") or "").lower() == "pitcher" and pid not in exclude_pids
     }
     if bullpen_order:
         ordered_ids = [bp["player_id"] for bp in bullpen_order
@@ -1708,6 +1712,7 @@ def build_team_game_side_from_cache(
     vs_hand: str | None,
     random_seed: int | None,
     use_dh: bool,
+    rotation_pitcher_ids: set | None = None,
 ) -> Dict[str, Any]:
     """
     Same as build_team_game_side but reads from SubweekCache.
@@ -1809,10 +1814,13 @@ def build_team_game_side_from_cache(
                 "build_team_game_side_from_cache: no pitchers on roster for team %s", team_id,
             )
 
-    # Available pitchers (all pitchers except starter, respect bullpen order)
+    # Available pitchers (all pitchers except starter + resting rotation, respect bullpen order)
+    exclude_pids = {starter_id}
+    if rotation_pitcher_ids:
+        exclude_pids |= rotation_pitcher_ids
     all_pitcher_ids = {
         pid for pid, pdata in players_by_id.items()
-        if (pdata.get("ptype") or "").lower() == "pitcher" and pid != starter_id
+        if (pdata.get("ptype") or "").lower() == "pitcher" and pid not in exclude_pids
     }
     if bullpen_order:
         ordered_ids = [bp["player_id"] for bp in bullpen_order
@@ -1862,7 +1870,7 @@ def build_game_payload_core_from_cache(
     Same as build_game_payload_core but uses SubweekCache for team data.
     Only conn is passed through for pregame injury reference data.
     """
-    from services.rotation import pick_starting_pitcher_from_cache
+    from services.rotation import pick_starting_pitcher_from_cache, get_rotation_pitcher_ids_from_cache
 
     game_id = int(game_row["id"])
     league_level_id = int(game_row["league_level"])
@@ -1894,6 +1902,10 @@ def build_game_payload_core_from_cache(
     away_sp_id = int(away_rot["starter_id"])
     home_sp_id = int(home_rot["starter_id"])
 
+    # Rotation slot pitcher IDs — excluded from bullpen duty
+    home_rotation_pids = get_rotation_pitcher_ids_from_cache(cache, home_team_id)
+    away_rotation_pids = get_rotation_pitcher_ids_from_cache(cache, away_team_id)
+
     # Pitch hands from cache
     away_sp_hand = cache.pitch_hands.get(away_sp_id)
     home_sp_hand = cache.pitch_hands.get(home_sp_id)
@@ -1913,6 +1925,7 @@ def build_game_payload_core_from_cache(
         vs_hand=home_vs_hand,
         random_seed=random_seed,
         use_dh=use_dh,
+        rotation_pitcher_ids=home_rotation_pids,
     )
     away_side = build_team_game_side_from_cache(
         conn=conn,
@@ -1925,6 +1938,7 @@ def build_game_payload_core_from_cache(
         vs_hand=away_vs_hand,
         random_seed=random_seed,
         use_dh=use_dh,
+        rotation_pitcher_ids=away_rotation_pids,
     )
 
     # Carry scheduled rotation slot so advancement knows which slot to move past
@@ -2012,6 +2026,10 @@ def build_game_payload_core(conn, game_id: int) -> Dict[str, Any]:
     away_sp_id = int(away_rot["starter_id"])
     home_sp_id = int(home_rot["starter_id"])
 
+    # Rotation slot pitcher IDs — excluded from bullpen duty
+    home_rotation_pids = get_rotation_pitcher_ids(conn, home_team_id)
+    away_rotation_pids = get_rotation_pitcher_ids(conn, away_team_id)
+
     # --- Get opponent SP handedness for vs_hand platoon logic ---
     # Bulk-load pitch hands for both starting pitchers at once
     pitch_hands = _get_pitch_hands_bulk(conn, [away_sp_id, home_sp_id])
@@ -2033,6 +2051,7 @@ def build_game_payload_core(conn, game_id: int) -> Dict[str, Any]:
         vs_hand=home_vs_hand,
         random_seed=random_seed,
         use_dh=use_dh,
+        rotation_pitcher_ids=home_rotation_pids,
     )
     away_side = build_team_game_side(
         conn=conn,
@@ -2044,6 +2063,7 @@ def build_game_payload_core(conn, game_id: int) -> Dict[str, Any]:
         vs_hand=away_vs_hand,
         random_seed=random_seed,
         use_dh=use_dh,
+        rotation_pitcher_ids=away_rotation_pids,
     )
 
     # Carry scheduled rotation slot so advancement knows which slot to move past
@@ -4258,6 +4278,10 @@ def build_synthetic_matchups(
         home_vs_hand = away_sp_hand
         away_vs_hand = home_sp_hand
 
+        # Rotation slot pitcher IDs — excluded from bullpen duty
+        home_rotation_pids = get_rotation_pitcher_ids(conn, home_team_id)
+        away_rotation_pids = get_rotation_pitcher_ids(conn, away_team_id)
+
         # Build team sides
         try:
             home_side = build_team_game_side(
@@ -4270,6 +4294,7 @@ def build_synthetic_matchups(
                 vs_hand=home_vs_hand,
                 random_seed=game_seed,
                 use_dh=use_dh,
+                rotation_pitcher_ids=home_rotation_pids,
             )
             away_side = build_team_game_side(
                 conn=conn,
@@ -4281,6 +4306,7 @@ def build_synthetic_matchups(
                 vs_hand=away_vs_hand,
                 random_seed=game_seed,
                 use_dh=use_dh,
+                rotation_pitcher_ids=away_rotation_pids,
             )
         except Exception as e:
             logger.warning(
@@ -4441,6 +4467,10 @@ def build_synthetic_matchups_with_progress(
         home_vs_hand = away_sp_hand
         away_vs_hand = home_sp_hand
 
+        # Rotation slot pitcher IDs — excluded from bullpen duty
+        home_rotation_pids = get_rotation_pitcher_ids(conn, home_team_id)
+        away_rotation_pids = get_rotation_pitcher_ids(conn, away_team_id)
+
         # Build team sides
         try:
             home_side = build_team_game_side(
@@ -4453,6 +4483,7 @@ def build_synthetic_matchups_with_progress(
                 vs_hand=home_vs_hand,
                 random_seed=game_seed,
                 use_dh=use_dh,
+                rotation_pitcher_ids=home_rotation_pids,
             )
             away_side = build_team_game_side(
                 conn=conn,
@@ -4464,6 +4495,7 @@ def build_synthetic_matchups_with_progress(
                 vs_hand=away_vs_hand,
                 random_seed=game_seed,
                 use_dh=use_dh,
+                rotation_pitcher_ids=away_rotation_pids,
             )
         except Exception as e:
             logger.warning(

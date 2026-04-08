@@ -74,6 +74,9 @@
       <a href="#" class="nav-item" data-section="tx-log">
         <span class="nav-icon">&#128220;</span> Transaction Log
       </a>
+      <a href="#" class="nav-item" data-section="roster-compliance">
+        <span class="nav-icon">&#128203;</span> Roster Compliance
+      </a>
       <a href="#" class="nav-item" data-section="tx-eos">
         <span class="nav-icon">&#128197;</span> End of Season
       </a>
@@ -1577,6 +1580,54 @@
               <button class="btn btn-danger" id="btn-tx-bulk-delete">Clear Selected</button>
             </div>
             <pre id="tx-bulk-result" class="result-box" style="margin-top: 8px; display:none"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Roster Compliance Section -->
+      <section id="section-roster-compliance" class="section">
+        <div class="card">
+          <h3>League-Wide Roster Compliance</h3>
+          <p class="text-muted">Monitor all organizations against roster minimums and maximums per level. Select a single org or view the full league at once.</p>
+          <div class="form-row" style="margin-bottom: 16px; gap: 8px; align-items: flex-end;">
+            <div class="form-group">
+              <label for="compliance-org-select">Organization</label>
+              <select id="compliance-org-select">
+                <option value="">All Organizations</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" id="btn-compliance-load">Load</button>
+          </div>
+        </div>
+
+        <div class="card" id="compliance-summary-card" style="display:none">
+          <h3>Summary</h3>
+          <div id="compliance-summary" class="grid-3" style="gap: 12px;"></div>
+        </div>
+
+        <div class="card" id="compliance-detail-card" style="display:none">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h3 style="margin: 0;">Detail by Organization</h3>
+            <label style="font-size: 13px; color: var(--text-secondary);">
+              <input type="checkbox" id="compliance-violations-only"> Show violations only
+            </label>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Organization</th>
+                  <th>Level</th>
+                  <th>Count</th>
+                  <th>Min</th>
+                  <th>Max</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="compliance-tbody">
+                <tr><td colspan="6" class="text-center text-muted">Click Load to view compliance data</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </section>

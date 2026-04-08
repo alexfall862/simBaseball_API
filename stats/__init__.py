@@ -1034,7 +1034,8 @@ def injury_report():
                        p.firstName, p.lastName,
                        it.name AS injury_name, it.code AS injury_code,
                        pie.weeks_assigned, pie.league_year_id,
-                       t.id AS team_id, t.team_abbrev AS team_abbrev, t.orgID AS org_id
+                       t.id AS team_id, t.team_abbrev AS team_abbrev, t.orgID AS org_id,
+                       c.current_level, c.onIR
                 FROM player_injury_state pis
                 JOIN simbbPlayers p ON p.id = pis.player_id
                 JOIN player_injury_events pie ON pie.id = pis.current_event_id
@@ -1057,6 +1058,8 @@ def injury_report():
             "team_id": int(r["team_id"]) if r["team_id"] else None,
             "team_abbrev": r["team_abbrev"],
             "org_id": int(r["org_id"]) if r["org_id"] else None,
+            "current_level": int(r["current_level"]) if r["current_level"] else None,
+            "on_ir": bool(r["onIR"]) if r["onIR"] is not None else False,
             "injury_name": r["injury_name"],
             "injury_code": r["injury_code"],
             "weeks_remaining": int(r["weeks_remaining"]),
@@ -1107,7 +1110,8 @@ def injury_history():
                        pie.created_at,
                        p.firstName, p.lastName,
                        it.name AS injury_name, it.code AS injury_code,
-                       t.id AS team_id, t.team_abbrev AS team_abbrev
+                       t.id AS team_id, t.team_abbrev AS team_abbrev,
+                       c.current_level, c.onIR
                 FROM player_injury_events pie
                 JOIN simbbPlayers p ON p.id = pie.player_id
                 LEFT JOIN injury_types it ON it.id = pie.injury_type_id
@@ -1128,6 +1132,8 @@ def injury_history():
             "player_id": int(r["player_id"]),
             "name": f"{r['firstName']} {r['lastName']}",
             "team_abbrev": r["team_abbrev"],
+            "current_level": int(r["current_level"]) if r["current_level"] else None,
+            "on_ir": bool(r["onIR"]) if r["onIR"] is not None else False,
             "injury_name": r["injury_name"],
             "injury_code": r["injury_code"],
             "league_year_id": int(r["league_year_id"]),

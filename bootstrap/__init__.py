@@ -661,7 +661,9 @@ def _get_all_injury_reports(conn, tables, org_ids):
     sql = text(f"""
         SELECT p.id AS player_id, p.firstname, p.lastname, p.ptype AS position,
                it.name AS injury_type, pis.weeks_remaining,
-               cts.orgID AS org_id
+               cts.orgID AS org_id,
+               c.current_level, c.onIR AS on_ir,
+               t.id AS team_id, t.team_abbrev
         FROM player_injury_state pis
         JOIN player_injury_events pie ON pie.id = pis.current_event_id
         JOIN injury_types it ON it.id = pie.injury_type_id
@@ -670,6 +672,7 @@ def _get_all_injury_reports(conn, tables, org_ids):
         JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
         JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
              AND cts.isHolder = 1 AND cts.orgID IN ({placeholders})
+        LEFT JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
         WHERE pis.status = 'injured'
     """)
     params = {f"oid{i}": oid for i, oid in enumerate(org_ids)}
@@ -678,6 +681,7 @@ def _get_all_injury_reports(conn, tables, org_ids):
     for r in rows:
         d = _row_to_dict(r)
         oid = d.pop("org_id")
+        d["on_ir"] = bool(d.get("on_ir") or 0)
         result.setdefault(oid, []).append(d)
     return result
 
@@ -1884,7 +1888,9 @@ def _get_injury_report(conn, tables, org_id):
     """Injured players on the org's active contracts."""
     sql = text("""
         SELECT p.id AS player_id, p.firstname, p.lastname, p.ptype AS position,
-               it.name AS injury_type, pis.weeks_remaining
+               it.name AS injury_type, pis.weeks_remaining,
+               c.current_level, c.onIR AS on_ir,
+               t.id AS team_id, t.team_abbrev
         FROM player_injury_state pis
         JOIN player_injury_events pie ON pie.id = pis.current_event_id
         JOIN injury_types it ON it.id = pie.injury_type_id
@@ -1893,11 +1899,17 @@ def _get_injury_report(conn, tables, org_id):
         JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
         JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
              AND cts.isHolder = 1 AND cts.orgID = :org_id
+        LEFT JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
         WHERE pis.status = 'injured'
     """)
 
     rows = conn.execute(sql, {"org_id": org_id}).all()
-    return [_row_to_dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = _row_to_dict(r)
+        d["on_ir"] = bool(d.get("on_ir") or 0)
+        result.append(d)
+    return result
 
 
 def _get_all_teams(conn, tables):

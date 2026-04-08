@@ -148,6 +148,17 @@ def enter_auction(
     else:
         reopen_id = None
 
+    # Finish any lingering active contracts — a player entering the auction
+    # should not have an unfinished contract (can happen with orphan sweep
+    # or season wipe where the release/waiver path was incomplete)
+    conn.execute(
+        sa_text("""
+            UPDATE contracts SET isFinished = 1, isActive = 0
+            WHERE playerID = :pid AND isFinished = 0
+        """),
+        {"pid": player_id},
+    )
+
     # Compute demands
     from services.player_demands import compute_fa_demand
     demand = compute_fa_demand(conn, player_id, league_year_id)

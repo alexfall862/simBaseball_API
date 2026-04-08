@@ -112,7 +112,7 @@ def _get_signing_budget(conn, org_id: int, league_year_id: int) -> Decimal:
 
 
 def _get_roster_count(conn, org_id: int, level_id: int) -> Dict[str, Any]:
-    """Return {count, max_roster, over_limit} for an org at a level."""
+    """Return {count, min_roster, max_roster, over_limit, under_limit} for an org at a level."""
     t = _tables_from_conn(conn)
     contracts = t["contracts"]
     details = t["details"]
@@ -137,15 +137,20 @@ def _get_roster_count(conn, org_id: int, level_id: int) -> Dict[str, Any]:
         ))
     ).scalar_one()
 
-    # Get max_roster for this level
-    max_roster = conn.execute(
-        select(levels.c.max_roster).where(levels.c.id == level_id)
-    ).scalar_one_or_none()
+    # Get min/max roster for this level
+    row = conn.execute(
+        select(levels.c.min_roster, levels.c.max_roster).where(levels.c.id == level_id)
+    ).first()
+
+    min_roster = int(row[0]) if row and row[0] is not None else None
+    max_roster = int(row[1]) if row and row[1] is not None else None
 
     return {
         "count": int(count),
-        "max_roster": int(max_roster) if max_roster is not None else None,
-        "over_limit": max_roster is not None and int(count) > int(max_roster),
+        "min_roster": min_roster,
+        "max_roster": max_roster,
+        "over_limit": max_roster is not None and int(count) > max_roster,
+        "under_limit": min_roster is not None and int(count) < min_roster,
     }
 
 
@@ -606,6 +611,7 @@ def buyout_player(conn, contract_id: int, org_id: int,
             current_year=1,
             isExtension=0,
             isBuyout=1,
+            isActive=1,
             bonus=buyout_amount,
             signingOrg=org_id,
             leagueYearSigned=league_year_val,
@@ -809,6 +815,7 @@ def sign_free_agent(conn, player_id: int, org_id: int, years: int,
             current_year=1,
             isExtension=0,
             isBuyout=0,
+            isActive=1,
             bonus=bonus,
             signingOrg=org_id,
             leagueYearSigned=league_year_val,
@@ -981,6 +988,7 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
             current_year=1,
             isExtension=1,
             isBuyout=0,
+            isActive=1,
             bonus=bonus,
             signingOrg=org_id,
             leagueYearSigned=end_year,
@@ -1540,7 +1548,7 @@ def get_roster_status(conn, org_id: int) -> List[Dict[str, Any]]:
     t = _tables_from_conn(conn)
     levels = t["levels"]
     rows = conn.execute(
-        select(levels.c.id, levels.c.name, levels.c.max_roster)
+        select(levels.c.id, levels.c.league_level, levels.c.max_roster)
         .order_by(levels.c.id.desc())
     ).all()
 
@@ -1551,10 +1559,12 @@ def get_roster_status(conn, org_id: int) -> List[Dict[str, Any]]:
         roster = _get_roster_count(conn, org_id, level_id)
         result.append({
             "level_id": level_id,
-            "level_name": lm["name"],
+            "level_name": lm["league_level"],
             "count": roster["count"],
+            "min_roster": roster["min_roster"],
             "max_roster": roster["max_roster"],
             "over_limit": roster["over_limit"],
+            "under_limit": roster["under_limit"],
         })
     return result
 

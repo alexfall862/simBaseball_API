@@ -644,6 +644,7 @@ def _create_renewal_contract(
             current_year=1,
             isExtension=0,
             isBuyout=0,
+            isActive=1,
             bonus=Decimal("0.00"),
             signingOrg=org_id,
             leagueYearSigned=league_year_val,
