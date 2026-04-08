@@ -137,6 +137,9 @@ def ifa_eligible():
     viewing_org_id = request.args.get("viewing_org_id", type=int)
     if not league_year_id:
         return jsonify({"error": "league_year_id required"}), 400
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     engine = get_engine()
     from services.ifa_signing import get_ifa_eligible_players

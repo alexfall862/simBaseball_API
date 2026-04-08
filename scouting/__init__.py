@@ -449,11 +449,14 @@ def api_pro_pool():
     - INTAM (org 339) age 18+
     - College (orgs 31-338) any age
 
-    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
+    Required: ?viewing_org_id=X for fog-of-war fuzz.
     """
     try:
         page, per_page = _parse_pagination()
         viewing_org_id = request.args.get("viewing_org_id", type=int)
+        if not viewing_org_id:
+            return jsonify(error="missing_param",
+                           message="viewing_org_id query param is required"), 400
         join, tables = _build_join_chain()
 
         contracts = tables["contracts"]
@@ -606,11 +609,14 @@ def api_college_pool():
     Supports ?age=17 for "Class of" tabs (seniors, juniors, etc).
     Returns age_counts for tab badge rendering.
 
-    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
+    Required: ?viewing_org_id=X for fog-of-war fuzz.
     """
     try:
         page, per_page = _parse_pagination()
         viewing_org_id = request.args.get("viewing_org_id", type=int)
+        if not viewing_org_id:
+            return jsonify(error="missing_param",
+                           message="viewing_org_id query param is required"), 400
         join, tables = _build_join_chain()
 
         contracts = tables["contracts"]
@@ -798,11 +804,14 @@ def api_intam_pool():
     Paginated list of international amateur players (org 339, age 18+).
 
     Filters: ptype, area, search, min_age, max_age.
-    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
+    Required: ?viewing_org_id=X for fog-of-war fuzz.
     """
     try:
         page, per_page = _parse_pagination()
         viewing_org_id = request.args.get("viewing_org_id", type=int)
+        if not viewing_org_id:
+            return jsonify(error="missing_param",
+                           message="viewing_org_id query param is required"), 400
         join, tables = _build_join_chain()
 
         contracts = tables["contracts"]
@@ -891,13 +900,16 @@ def api_mlb_pool():
     Paginated list of professional players on active rosters (levels 4-9).
 
     Filters: ptype, area, search, min_age, max_age, org_id, level.
-    Optional: ?viewing_org_id=X to apply fog-of-war fuzz.
+    Required: ?viewing_org_id=X for fog-of-war fuzz.
 
     Returns level_counts for level tab badges.
     """
     try:
         page, per_page = _parse_pagination()
         viewing_org_id = request.args.get("viewing_org_id", type=int)
+        if not viewing_org_id:
+            return jsonify(error="missing_param",
+                           message="viewing_org_id query param is required"), 400
         join, tables = _build_join_chain()
 
         contracts = tables["contracts"]

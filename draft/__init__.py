@@ -124,8 +124,12 @@ def api_draft_board():
 @draft_bp.get("/draft/eligible")
 def api_draft_eligible():
     lyid = request.args.get("league_year_id", type=int)
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
     if not lyid:
         return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
     try:
         engine = get_engine()
         with engine.begin() as conn:
@@ -136,7 +140,7 @@ def api_draft_eligible():
                 available_only=request.args.get("available_only", "true").lower() != "false",
                 limit=request.args.get("limit", 100, type=int),
                 offset=request.args.get("offset", 0, type=int),
-                viewing_org_id=request.args.get("viewing_org_id", type=int),
+                viewing_org_id=viewing_org_id,
             )
         return jsonify(result), 200
     except ValueError as e:

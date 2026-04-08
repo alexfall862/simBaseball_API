@@ -88,11 +88,13 @@ def get_player(player_id):
     """
     Return a single player row by integer ID.
 
-    Optional query param: ?viewing_org_id=X
-    If provided, applies fog-of-war visibility based on the viewing org's
-    scouting actions. If absent, returns raw values (admin/legacy behavior).
+    Required query param: ?viewing_org_id=X
+    Applies fog-of-war visibility based on the viewing org's scouting actions.
     """
     viewing_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     try:
         engine = get_engine()

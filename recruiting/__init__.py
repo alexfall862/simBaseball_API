@@ -424,7 +424,7 @@ def board(org_id: int):
 def player_detail(player_id: int):
     """
     Single player recruiting detail with fog-of-war.
-    Query params: league_year_id, viewing_org_id
+    Query params: league_year_id, viewing_org_id (both required)
     """
     league_year_id = request.args.get("league_year_id", type=int)
     viewing_org_id = request.args.get("viewing_org_id", type=int)
@@ -432,6 +432,9 @@ def player_detail(player_id: int):
     if not league_year_id:
         return jsonify(error="missing_param",
                        message="league_year_id required"), 400
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     engine = get_engine()
     try:

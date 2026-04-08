@@ -704,6 +704,9 @@ def get_team_ratings():
 
     team_abbrev = request.args.get("team")
     viewing_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     try:
         engine = get_engine()
@@ -776,6 +779,9 @@ def get_org_ratings(org_abbrev: str):
     # Pro levels range (4=scraps, 9=MLB)
     level_filter = (4, 9)
     viewing_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     tables = _get_tables()
     orgs = tables["organizations"]
@@ -1008,6 +1014,9 @@ def get_org_roster(org_abbrev: str):
     """
     include_faces = request.args.get("include_faces", "0") == "1"
     viewing_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     # Parse level filters from query string
     level_filter = None
