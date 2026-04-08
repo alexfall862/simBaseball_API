@@ -877,10 +877,16 @@ def get_league_ratings():
 
     Uses pro levels 4–9 by default.
 
+    Required: ?viewing_org_id=X for fog-of-war.
+
     Example:
-      /api/v1/ratings
+      /api/v1/ratings?viewing_org_id=5
     """
     level_filter = (4, 9)
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     try:
         engine = get_engine()
@@ -893,22 +899,27 @@ def get_league_ratings():
             stmt = _build_ratings_base_stmt(level_filter=level_filter)
             rows = conn.execute(stmt).all()
 
+            if not rows:
+                return jsonify({"levels": [], "orgs": {}}), 200
+
+            # Build all player dicts, then apply fog-of-war
+            all_players = [
+                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
+                for row in rows
+            ]
+            all_players = _apply_fog_of_war(
+                conn, all_players, rows, viewing_org_id,
+                dist_by_level, col_cats, position_weights,
+            )
+
     except SQLAlchemyError as e:
         current_app.logger.exception("get_league_ratings: db error")
         return jsonify(error="database_error", message=str(e)), 500
 
-    if not rows:
-        return jsonify(
-            {
-                "levels": [],
-                "orgs": {},
-            }
-        ), 200
-
     orgs_out = {}
     level_names_set = set()
 
-    for row in rows:
+    for player, row in zip(all_players, rows):
         m = row._mapping
         org_id = m.get("org_id")
         org_abbrev = m.get("org_abbrev")
@@ -937,7 +948,6 @@ def get_league_ratings():
             },
         )
 
-        player = _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
         lvl_bucket["players"].append(player)
 
     # Add counts per level
@@ -1151,7 +1161,14 @@ def get_all_rosters_grouped():
           - a league_level string (e.g. "aaa").
 
       - min_level / max_level (int) still work as before when you want ranges.
+
+    Required: ?viewing_org_id=X for fog-of-war.
     """
+    viewing_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewing_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
+
     org_abbrev = request.args.get("org")
     include_faces = request.args.get("include_faces", "0") == "1"
 
@@ -1261,9 +1278,25 @@ def get_all_rosters_grouped():
 
                 bucket["players"].append(player)
 
+            # Apply fog-of-war to all players across all orgs
+            all_players = [p for b in by_org.values() for p in b["players"]]
+            # Build a row lookup for fog-of-war (needs holding_org_id + level)
+            row_by_id = {r._mapping.get("id"): r for r in rows}
+            matching_rows = [row_by_id[p["id"]] for p in all_players if p.get("id") in row_by_id]
+            fogged = _apply_fog_of_war(
+                conn, all_players, matching_rows, viewing_org_id,
+                dist_by_level, col_cats, position_weights,
+            )
+            # Rebuild org buckets with fogged player dicts
+            fogged_by_id = {p["id"]: p for p in fogged if p.get("id") is not None}
+            for bucket in by_org.values():
+                bucket["players"] = [
+                    fogged_by_id.get(p.get("id"), p) for p in bucket["players"]
+                ]
+            all_players = fogged
+
             # Attach stamina to all players across all orgs
             try:
-                all_players = [p for b in by_org.values() for p in b["players"]]
                 _attach_injury_and_stamina_to_players(conn, all_players)
             except Exception as exc:
                 logger.warning("_attach_injury_and_stamina_to_players failed: %s", exc, exc_info=True)

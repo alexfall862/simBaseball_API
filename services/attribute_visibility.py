@@ -49,6 +49,23 @@ _GRADE_THRESHOLDS = [
 
 PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
 
+# Letter grade → midpoint 20-80 score (for deriving displayovr from letter grades)
+_GRADE_TO_SCORE = {
+    "A+": 80, "A": 75, "A-": 70,
+    "B+": 65, "B": 60, "B-": 55,
+    "C+": 50, "C": 45, "C-": 40,
+    "D+": 35, "D": 30, "D-": 25,
+    "F": 20,
+}
+
+# Position code → rating type key in the ratings dict
+_POS_CODE_TO_RATING = {
+    "c": "c_rating", "fb": "fb_rating", "sb": "sb_rating",
+    "tb": "tb_rating", "ss": "ss_rating", "lf": "lf_rating",
+    "cf": "cf_rating", "rf": "rf_rating", "dh": "dh_rating",
+    "sp": "sp_rating", "rp": "rp_rating",
+}
+
 # Actions that grant precise attribute visibility (carryover-eligible)
 _PRECISE_ATTR_ACTIONS = frozenset({
     "draft_attrs_precise",
@@ -313,6 +330,112 @@ def _compute_derived_from_values(base_values, position_weights=None):
 
 
 # ---------------------------------------------------------------------------
+# Derived displayovr from visible ratings
+# ---------------------------------------------------------------------------
+
+def _derive_displayovr(
+    ratings, ptype, listed_pos_code, ovr_weights, display_format,
+):
+    """
+    Compute displayovr from the org-visible ratings so it is consistent
+    with whatever fuzzed/precise attributes the org can see.
+
+    For 20-80 formats: uses the fuzzed position-specific derived rating
+    (e.g. ss_rating) when a listed position exists, otherwise computes a
+    weighted average of fuzzed _display values using fallback overall weights.
+
+    For letter_grade formats: same logic, but converts grades to numeric
+    midpoints first, then converts the result back to a grade.
+
+    Returns: int (20-80), str (letter grade), or None.
+    """
+    if display_format == "hidden":
+        return None
+
+    is_letter = display_format == "letter_grade"
+
+    # --- Try position-specific derived rating first ---
+    if listed_pos_code:
+        rating_key = _POS_CODE_TO_RATING.get(listed_pos_code)
+        if rating_key and rating_key in ratings and ratings[rating_key] is not None:
+            val = ratings[rating_key]
+            if is_letter:
+                # Derived ratings are numeric even in letter mode? No —
+                # in letter_grade mode, derived ratings are not computed.
+                # Fall through to weighted-average approach.
+                pass
+            else:
+                try:
+                    score = int(round(float(val) / 5.0) * 5)
+                    return max(20, min(80, score))
+                except (TypeError, ValueError):
+                    pass
+
+    # --- Fallback: weighted average of visible base attributes ---
+    # Pick weight set: position-specific if available, else generic overall
+    if listed_pos_code:
+        rating_type = _POS_CODE_TO_RATING.get(listed_pos_code)
+        wts = ovr_weights.get(rating_type, {}) if rating_type else {}
+    else:
+        wts = {}
+
+    if not wts:
+        if ptype == "Pitcher":
+            wts = ovr_weights.get("pitcher_overall", {})
+        else:
+            wts = ovr_weights.get("position_overall", {})
+
+    if not wts:
+        return None
+
+    total_w = 0.0
+    total_v = 0.0
+
+    for attr_key, weight in wts.items():
+        if weight <= 0:
+            continue
+
+        # Map weight key to the ratings dict key
+        if attr_key.endswith("_ovr"):
+            # pitch1_ovr etc. — look up directly
+            display_key = attr_key
+        elif attr_key.endswith("_base"):
+            display_key = attr_key.replace("_base", "_display")
+        else:
+            # avg_consist etc. — skip, not in fuzzed ratings
+            continue
+
+        val = ratings.get(display_key)
+        if val is None:
+            continue
+
+        if is_letter:
+            # Convert letter grade to numeric midpoint
+            score = _GRADE_TO_SCORE.get(val)
+            if score is None:
+                continue
+            total_v += score * weight
+        else:
+            try:
+                total_v += float(val) * weight
+            except (TypeError, ValueError):
+                continue
+
+        total_w += weight
+
+    if total_w <= 0:
+        return None
+
+    avg = total_v / total_w
+
+    if is_letter:
+        return _score_to_letter(int(round(avg)))
+    else:
+        score = int(round(avg / 5.0) * 5)
+        return max(20, min(80, score))
+
+
+# ---------------------------------------------------------------------------
 # Core visibility application
 # ---------------------------------------------------------------------------
 
@@ -325,6 +448,8 @@ def _apply_visibility(
     dist_config,
     col_cats,
     position_weights=None,
+    ovr_weights=None,
+    listed_pos_code=None,
 ):
     """
     Apply fog-of-war to a player dict (output of _build_player_with_ratings).
@@ -574,47 +699,30 @@ def _apply_visibility(
     player_dict["ratings"] = ratings
     player_dict["potentials"] = potentials
 
-    # --- displayovr fog-of-war ---
-    # displayovr is a 20-80 value that must follow the same visibility rules
-    # as other ratings to avoid leaking true ability through the overall.
-    true_ovr = player_dict.get("displayovr")
-    if true_ovr is not None:
-        try:
-            true_ovr_int = int(true_ovr)
-        except (TypeError, ValueError):
-            true_ovr_int = None
+    # --- displayovr: derived from visible ratings ---
+    # Instead of fuzzing displayovr independently, we derive it from the
+    # org-visible (fuzzed/precise) ratings so it is always consistent with
+    # whatever attribute picture the org can see.
+    if attrs_precise:
+        # Precise view — keep the true stored displayovr
+        derived_ovr = player_dict.get("displayovr")
+        if derived_ovr is not None:
+            try:
+                derived_ovr = int(derived_ovr)
+            except (TypeError, ValueError):
+                derived_ovr = None
     else:
-        true_ovr_int = None
-
-    if display_format == "hidden":
-        fuzzed_ovr = None
-    elif display_format == "letter_grade":
-        # Convert 20-80 → letter grade, then fuzz the grade
-        if true_ovr_int is not None:
-            true_grade = _score_to_letter(true_ovr_int)
-            fuzzed_ovr = fuzz_letter_grade(
-                true_grade, viewing_org_id, player_id, "displayovr"
-            )
-        else:
-            fuzzed_ovr = "?"
-    elif attrs_precise:
-        # Precise 20-80 — show the true stored value
-        fuzzed_ovr = true_ovr_int
-    else:
-        # Fuzzed 20-80
-        if true_ovr_int is not None:
-            fuzzed_ovr = fuzz_20_80(
-                true_ovr_int, viewing_org_id, player_id, "displayovr"
-            )
-        else:
-            fuzzed_ovr = None
+        derived_ovr = _derive_displayovr(
+            ratings, ptype, listed_pos_code,
+            ovr_weights or {}, display_format,
+        )
 
     # Write to both locations — build_player_display puts displayovr in
     # the top-level dict AND inside bio; both must agree.
-    player_dict["displayovr"] = fuzzed_ovr
+    player_dict["displayovr"] = derived_ovr
     bio = player_dict.get("bio")
     if bio and "displayovr" in bio:
-        bio["displayovr"] = fuzzed_ovr
+        bio["displayovr"] = derived_ovr
 
     player_dict["visibility_context"] = {
         "context": context,
@@ -629,6 +737,36 @@ def _apply_visibility(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def _load_ovr_weights(conn):
+    """Load overall weights once for displayovr derivation."""
+    try:
+        from services.rating_config import get_overall_weights
+        return get_overall_weights(conn)
+    except Exception:
+        return {}
+
+
+def _load_listed_positions_batch(conn, player_ids):
+    """Bulk-load listed positions: {player_id: position_code}."""
+    if not player_ids:
+        return {}
+    try:
+        ly_row = conn.execute(text(
+            "SELECT id FROM league_years WHERE league_year = "
+            "(SELECT season FROM timestamp_state WHERE id = 1)"
+        )).first()
+        if not ly_row:
+            return {}
+        lyid = int(ly_row[0])
+        rows = conn.execute(text(
+            "SELECT player_id, position_code FROM player_listed_position "
+            "WHERE league_year_id = :lyid"
+        ), {"lyid": lyid}).all()
+        return {int(r[0]): str(r[1]) for r in rows}
+    except Exception:
+        return {}
+
 
 def get_visible_player(
     conn,
@@ -652,9 +790,13 @@ def get_visible_player(
     """
     player_id = player_dict.get("id")
     unlocked = _load_scouting_actions_single(conn, viewing_org_id, player_id)
+    ovr_weights = _load_ovr_weights(conn)
+    listed_positions = _load_listed_positions_batch(conn, [player_id])
     return _apply_visibility(
         player_dict, viewing_org_id, holding_org_id, player_level,
         unlocked, dist_config, col_cats, position_weights,
+        ovr_weights=ovr_weights,
+        listed_pos_code=listed_positions.get(player_id),
     )
 
 
@@ -681,6 +823,10 @@ def get_visible_players_batch(
     player_ids = [p.get("id") for p in player_dicts if p.get("id") is not None]
     actions_by_player = _load_scouting_actions_batch(conn, viewing_org_id, player_ids)
 
+    # Load once for the whole batch
+    ovr_weights = _load_ovr_weights(conn)
+    listed_positions = _load_listed_positions_batch(conn, player_ids)
+
     results = []
     for pd in player_dicts:
         pid = pd.get("id")
@@ -690,6 +836,8 @@ def get_visible_players_batch(
         result = _apply_visibility(
             pd, viewing_org_id, h_org, p_level,
             unlocked, dist_config, col_cats, position_weights,
+            ovr_weights=ovr_weights,
+            listed_pos_code=listed_positions.get(pid),
         )
         results.append(result)
 
@@ -702,11 +850,12 @@ def get_visible_players_batch(
 
 def fuzz_displayovr(true_ovr, viewing_org_id, player_id):
     """
-    Fuzz a displayovr value for a viewing org.
+    Fuzz a displayovr value for a viewing org (independent fuzz).
 
-    For use in lightweight listing endpoints (e.g. waiver wire) that don't
-    go through the full _apply_visibility pipeline.  Returns the fuzzed 20-80
-    value, or None if the input is None.
+    For use in lightweight listing endpoints (e.g. waiver wire) that show
+    displayovr WITHOUT individual attributes — so there is no consistency
+    requirement.  Full-visibility endpoints use _derive_displayovr() instead,
+    which derives displayovr from the org's visible attribute ratings.
     """
     if true_ovr is None:
         return None
