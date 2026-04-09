@@ -3549,12 +3549,25 @@ def admin_displayovr_debug():
                 "LIMIT 1"
             ), {"pid": player_id}).mappings().first()
 
+            # Test batch query directly
+            from services.attribute_visibility import (
+                _load_scouting_actions_batch,
+                _load_scouting_actions_single,
+            )
+            batch_result = _load_scouting_actions_batch(conn, org_id, [player_id])
+            single_result = _load_scouting_actions_single(conn, org_id, player_id)
+
             return jsonify(ok=True, debug={
                 "player_exists": player_row is not None,
                 "player": dict(player_row) if player_row else None,
                 "scouting_actions_for_org": [dict(r) for r in action_rows],
                 "scouting_actions_all_orgs": [dict(r) for r in all_action_rows],
                 "listed_position": dict(lp_row) if lp_row else None,
+                "batch_query_result": {
+                    str(k): sorted(v) for k, v in batch_result.items()
+                },
+                "single_query_result": sorted(single_result),
+                "batch_finds_player": player_id in batch_result,
             })
 
     except Exception as e:
