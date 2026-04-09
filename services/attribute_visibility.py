@@ -333,21 +333,15 @@ def _compute_derived_from_values(base_values, position_weights=None):
 # Derived displayovr from visible ratings
 # ---------------------------------------------------------------------------
 
-def _derive_displayovr(
+def _derive_raw_ovr(
     ratings, ptype, listed_pos_code, ovr_weights, display_format,
 ):
     """
-    Compute displayovr from the org-visible ratings so it is consistent
-    with whatever fuzzed/precise attributes the org can see.
+    Compute a raw overall score from the org-visible ratings.
 
-    For 20-80 formats: uses the fuzzed position-specific derived rating
-    (e.g. ss_rating) when a listed position exists, otherwise computes a
-    weighted average of fuzzed _display values using fallback overall weights.
-
-    For letter_grade formats: same logic, but converts grades to numeric
-    midpoints first, then converts the result back to a grade.
-
-    Returns: int (20-80), str (letter grade), or None.
+    Returns a raw float suitable for percentile ranking, or None.
+    For letter_grade format, converts grades to numeric midpoints first.
+    For hidden format, returns None.
     """
     if display_format == "hidden":
         return None
@@ -355,24 +349,15 @@ def _derive_displayovr(
     is_letter = display_format == "letter_grade"
 
     # --- Try position-specific derived rating first ---
-    if listed_pos_code:
+    if listed_pos_code and not is_letter:
         rating_key = _POS_CODE_TO_RATING.get(listed_pos_code)
         if rating_key and rating_key in ratings and ratings[rating_key] is not None:
-            val = ratings[rating_key]
-            if is_letter:
-                # Derived ratings are numeric even in letter mode? No —
-                # in letter_grade mode, derived ratings are not computed.
-                # Fall through to weighted-average approach.
+            try:
+                return float(ratings[rating_key])
+            except (TypeError, ValueError):
                 pass
-            else:
-                try:
-                    score = int(round(float(val) / 5.0) * 5)
-                    return max(20, min(80, score))
-                except (TypeError, ValueError):
-                    pass
 
     # --- Fallback: weighted average of visible base attributes ---
-    # Pick weight set: position-specific if available, else generic overall
     if listed_pos_code:
         rating_type = _POS_CODE_TO_RATING.get(listed_pos_code)
         wts = ovr_weights.get(rating_type, {}) if rating_type else {}
@@ -395,14 +380,11 @@ def _derive_displayovr(
         if weight <= 0:
             continue
 
-        # Map weight key to the ratings dict key
         if attr_key.endswith("_ovr"):
-            # pitch1_ovr etc. — look up directly
             display_key = attr_key
         elif attr_key.endswith("_base"):
             display_key = attr_key.replace("_base", "_display")
         else:
-            # avg_consist etc. — skip, not in fuzzed ratings
             continue
 
         val = ratings.get(display_key)
@@ -410,7 +392,6 @@ def _derive_displayovr(
             continue
 
         if is_letter:
-            # Convert letter grade to numeric midpoint
             score = _GRADE_TO_SCORE.get(val)
             if score is None:
                 continue
@@ -426,13 +407,67 @@ def _derive_displayovr(
     if total_w <= 0:
         return None
 
-    avg = total_v / total_w
+    return total_v / total_w
 
-    if is_letter:
-        return _score_to_letter(int(round(avg)))
-    else:
-        score = int(round(avg / 5.0) * 5)
-        return max(20, min(80, score))
+
+def _percentile_rank_to_20_80(rank):
+    """Map a percentile rank (0.0-1.0) to 20-80 scale, rounded to nearest 5."""
+    raw_score = 20.0 + rank * 60.0
+    score = int(round(raw_score / 5.0) * 5)
+    return max(20, min(80, score))
+
+
+def percentile_rank_displayovr(player_dicts):
+    """
+    Post-processing pass: convert each player's ``_raw_ovr`` into a
+    percentile-ranked 20-80 displayovr within (level, ptype) groups.
+
+    Operates in-place on the player dicts.  Players without ``_raw_ovr``
+    (e.g. hidden context) are skipped.
+    """
+    # Group by (level, ptype) for separate percentile ranking
+    groups = {}  # (level, ptype) -> [(index, raw_ovr), ...]
+    for i, p in enumerate(player_dicts):
+        raw_ovr = p.pop("_raw_ovr", None)
+        if raw_ovr is None:
+            continue
+        level = p.get("current_level") or p.get("league_level")
+        ptype = (p.get("bio", {}).get("ptype") or p.get("ptype") or "").strip()
+        key = (level, ptype)
+        groups.setdefault(key, []).append((i, raw_ovr))
+
+    for (level, ptype), members in groups.items():
+        n = len(members)
+        if n == 1:
+            idx, _ = members[0]
+            player_dicts[idx]["displayovr"] = 50
+            bio = player_dicts[idx].get("bio")
+            if bio and "displayovr" in bio:
+                bio["displayovr"] = 50
+            continue
+
+        # Sort by raw_ovr, assign percentile ranks with average tie-breaking
+        sorted_members = sorted(members, key=lambda x: x[1])
+
+        for rank_idx, (idx, raw_ovr) in enumerate(sorted_members):
+            # Average rank for ties (consistent with admin preview)
+            rank_below = sum(1 for _, v in sorted_members if v < raw_ovr)
+            rank_equal = sum(1 for _, v in sorted_members if v == raw_ovr)
+            pct_rank = (rank_below + (rank_equal - 1) / 2.0) / (n - 1)
+            pct_rank = max(0.0, min(1.0, pct_rank))
+            ovr = _percentile_rank_to_20_80(pct_rank)
+
+            player_dicts[idx]["displayovr"] = ovr
+            bio = player_dicts[idx].get("bio")
+            if bio and "displayovr" in bio:
+                bio["displayovr"] = ovr
+
+            # Stash display_format for letter-grade conversion
+            vis = player_dicts[idx].get("visibility_context", {})
+            if vis.get("display_format") == "letter_grade":
+                player_dicts[idx]["displayovr"] = _score_to_letter(ovr)
+                if bio and "displayovr" in bio:
+                    bio["displayovr"] = _score_to_letter(ovr)
 
 
 # ---------------------------------------------------------------------------
@@ -700,22 +735,15 @@ def _apply_visibility(
     player_dict["ratings"] = ratings
     player_dict["potentials"] = potentials
 
-    # --- displayovr: always derived from visible ratings ---
-    # Whether precise or fuzzed, displayovr is computed from whatever ratings
-    # the org can see.  This guarantees consistency: the overall always
-    # reflects the individual attributes on screen, and no stale stored value
-    # can leak through.
-    derived_ovr = _derive_displayovr(
+    # --- displayovr: derived from visible ratings, then percentile-ranked ---
+    # Compute a raw overall from whatever ratings the org can see and stash
+    # it on the dict.  The batch caller (get_visible_players_batch) will do a
+    # second pass to percentile-rank within (level, ptype) groups and write
+    # the final 20-80 displayovr.
+    player_dict["_raw_ovr"] = _derive_raw_ovr(
         ratings, ptype, listed_pos_code,
         ovr_weights or {}, display_format,
     )
-
-    # Write to both locations — build_player_display puts displayovr in
-    # the top-level dict AND inside bio; both must agree.
-    player_dict["displayovr"] = derived_ovr
-    bio = player_dict.get("bio")
-    if bio and "displayovr" in bio:
-        bio["displayovr"] = derived_ovr
 
     player_dict["visibility_context"] = {
         "context": context,
@@ -785,12 +813,22 @@ def get_visible_player(
     unlocked = _load_scouting_actions_single(conn, viewing_org_id, player_id)
     ovr_weights = _load_ovr_weights(conn)
     listed_positions = _load_listed_positions_batch(conn, [player_id])
-    return _apply_visibility(
+    result = _apply_visibility(
         player_dict, viewing_org_id, holding_org_id, player_level,
         unlocked, dist_config, col_cats, position_weights,
         ovr_weights=ovr_weights,
         listed_pos_code=listed_positions.get(player_id),
     )
+    # Single-player case: no peer group, assign 50
+    raw_ovr = result.pop("_raw_ovr", None)
+    if raw_ovr is not None:
+        result["displayovr"] = 50
+        bio = result.get("bio")
+        if bio and "displayovr" in bio:
+            bio["displayovr"] = 50
+    else:
+        result["displayovr"] = None
+    return result
 
 
 def get_visible_players_batch(
@@ -833,6 +871,9 @@ def get_visible_players_batch(
             listed_pos_code=listed_positions.get(pid),
         )
         results.append(result)
+
+    # Percentile-rank displayovr across (level, ptype) groups
+    percentile_rank_displayovr(results)
 
     return results
 
