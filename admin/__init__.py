@@ -3499,8 +3499,7 @@ def admin_player_preview():
 @admin_bp.get("/calibration/displayovr-debug")
 def admin_displayovr_debug():
     """
-    Diagnostic: show exactly what the visibility pipeline produces for a
-    player's displayovr from a specific org's perspective.
+    Diagnostic: raw SQL queries only, no imports from attribute_visibility.
 
     GET /admin/calibration/displayovr-debug?player_id=123&org_id=5
     """
@@ -3520,59 +3519,47 @@ def admin_displayovr_debug():
     engine = get_engine()
     try:
         with engine.connect() as conn:
-            from services.attribute_visibility import (
-                _load_scouting_actions_single,
-                _PRECISE_ATTR_ACTIONS,
-                _derive_raw_ovr,
-                _load_ovr_weights,
-                _load_listed_positions_batch,
-                _POS_CODE_TO_RATING,
-            )
+            # 1) Does the player exist?
+            player_row = conn.execute(sa_text(
+                "SELECT id, displayovr, ptype, firstname, lastname "
+                "FROM simbbPlayers WHERE id = :pid"
+            ), {"pid": player_id}).mappings().first()
 
-            # Load scouting state
-            unlocked = _load_scouting_actions_single(conn, org_id, player_id)
-            has_precise = bool(unlocked & _PRECISE_ATTR_ACTIONS)
+            # 2) Scouting actions for this org + player
+            action_rows = conn.execute(sa_text(
+                "SELECT id, org_id, player_id, action_type, points_spent, created_at "
+                "FROM scouting_actions "
+                "WHERE org_id = :org AND player_id = :pid "
+                "ORDER BY created_at"
+            ), {"org": org_id, "pid": player_id}).mappings().all()
 
-            # Load weights and listed position
-            ovr_weights = _load_ovr_weights(conn)
-            listed_positions = _load_listed_positions_batch(conn, [player_id])
-            listed_pos = listed_positions.get(player_id)
+            # 3) ALL scouting actions for this player (any org)
+            all_action_rows = conn.execute(sa_text(
+                "SELECT id, org_id, action_type, created_at "
+                "FROM scouting_actions "
+                "WHERE player_id = :pid "
+                "ORDER BY created_at"
+            ), {"pid": player_id}).mappings().all()
 
-            # Load player
-            row = conn.execute(sa_text(
-                "SELECT displayovr, ptype FROM simbbPlayers WHERE id = :pid"
-            ), {"pid": player_id}).first()
-            if not row:
-                return jsonify(ok=False, error="not_found"), 404
-
-            stored_displayovr = row[0]
-            ptype = (row[1] or "").strip()
-
-            # What rating key would be used?
-            rating_key = _POS_CODE_TO_RATING.get(listed_pos) if listed_pos else None
-            weights_available = bool(ovr_weights)
-            position_weights_available = bool(
-                ovr_weights.get(rating_key, {}) if rating_key else False
-            )
+            # 4) Listed position
+            lp_row = conn.execute(sa_text(
+                "SELECT position_code, source "
+                "FROM player_listed_position "
+                "WHERE player_id = :pid "
+                "LIMIT 1"
+            ), {"pid": player_id}).mappings().first()
 
             return jsonify(ok=True, debug={
-                "player_id": player_id,
-                "org_id": org_id,
-                "ptype": ptype,
-                "stored_displayovr": stored_displayovr,
-                "scouting_actions": sorted(unlocked),
-                "has_precise_attrs": has_precise,
-                "listed_position": listed_pos,
-                "rating_key_used": rating_key,
-                "ovr_weights_loaded": weights_available,
-                "ovr_weights_types": sorted(ovr_weights.keys()) if ovr_weights else [],
-                "position_weights_available": position_weights_available,
-                "listed_positions_count": len(listed_positions),
+                "player_exists": player_row is not None,
+                "player": dict(player_row) if player_row else None,
+                "scouting_actions_for_org": [dict(r) for r in action_rows],
+                "scouting_actions_all_orgs": [dict(r) for r in all_action_rows],
+                "listed_position": dict(lp_row) if lp_row else None,
             })
 
     except Exception as e:
         logging.exception("displayovr debug failed")
-        return jsonify(ok=False, error=str(e)), 500
+        return jsonify(ok=False, error="exception", message=str(e)), 500
 
 
 @admin_bp.post("/calibration/profiles")

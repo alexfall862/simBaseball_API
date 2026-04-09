@@ -377,63 +377,113 @@ def _build_player_list(rows, tables):
     return players_list
 
 
-def _apply_pool_fuzz(players_list, viewing_org_id, pool):
+def _apply_pool_fuzz(players_list, viewing_org_id, pool, conn=None):
     """
     Apply fog-of-war fuzz to pool listing results.
 
-    For pool listings we apply lightweight fuzz without needing the full
-    visibility service (no scouting action lookups — pool views show
-    the public fuzzed baseline).
+    Respects per-player scouting actions: players whose attributes or
+    potentials have been scouted to precise are shown without fuzz.
     """
     if not viewing_org_id:
         return players_list
+
+    # Bulk-load scouting actions for all players in the list
+    scouted_map = {}  # {player_id: set(action_type, ...)}
+    pids = [p.get("id") for p in players_list if p.get("id")]
+    if pids:
+        from services.attribute_visibility import _load_scouting_actions_batch
+        if conn is not None:
+            scouted_map = _load_scouting_actions_batch(conn, viewing_org_id, pids)
+        else:
+            # Open our own connection if caller didn't pass one
+            try:
+                engine = get_engine()
+                with engine.connect() as _conn:
+                    scouted_map = _load_scouting_actions_batch(_conn, viewing_org_id, pids)
+            except Exception:
+                pass  # graceful fallback: fuzz everything
+
+    # Precise-attribute action types by pool
+    _PRECISE_ATTR = {
+        "hs": set(),  # HS attributes are always hidden, no precise unlock
+        "college": {"draft_attrs_precise"},
+        "intam": {"draft_attrs_precise"},
+        "pro": {"pro_attrs_precise", "draft_attrs_precise"},
+    }
+    _PRECISE_POT = {
+        "hs": {"recruit_potential_precise"},
+        "college": {"draft_potential_precise", "college_potential_precise"},
+        "intam": {"draft_potential_precise", "college_potential_precise"},
+        "pro": {"pro_potential_precise", "draft_potential_precise"},
+    }
+
+    precise_attr_actions = _PRECISE_ATTR.get(pool, set())
+    precise_pot_actions = _PRECISE_POT.get(pool, set())
 
     for player in players_list:
         pid = player.get("id")
         if not pid:
             continue
 
+        unlocked = scouted_map.get(pid, set())
+        has_precise_attrs = bool(unlocked & precise_attr_actions)
+        has_precise_pots = bool(unlocked & precise_pot_actions)
+
         if pool == "hs":
-            # College recruiting context: attributes hidden, potentials unknown
+            # College recruiting context: attributes always hidden
             for key in list(player.keys()):
                 if key.endswith("_base"):
                     player[key] = None
                 elif key.endswith("_pot"):
-                    player[key] = "?"
+                    if has_precise_pots:
+                        pass  # keep true value
+                    elif "recruit_potential_fuzzed" in unlocked:
+                        true_pot = player[key]
+                        player[key] = fuzz_letter_grade(
+                            true_pot, viewing_org_id, pid, key
+                        ) if true_pot else "?"
+                    else:
+                        player[key] = "?"
+
         elif pool in ("college", "intam"):
-            # Fuzz _base columns to letter grades for college/intam pool views
             for key in list(player.keys()):
                 if key.endswith("_base"):
-                    raw_val = player[key]
-                    true_grade = base_to_letter_grade(raw_val)
-                    player[key] = fuzz_letter_grade(
-                        true_grade, viewing_org_id, pid, key
-                    )
+                    if has_precise_attrs:
+                        pass  # keep true value
+                    else:
+                        raw_val = player[key]
+                        true_grade = base_to_letter_grade(raw_val)
+                        player[key] = fuzz_letter_grade(
+                            true_grade, viewing_org_id, pid, key
+                        )
                 elif key.endswith("_pot"):
-                    true_pot = player[key]
-                    if true_pot:
+                    if has_precise_pots:
+                        pass  # keep true value
+                    else:
+                        true_pot = player[key]
                         player[key] = fuzz_letter_grade(
                             true_pot, viewing_org_id, pid, key
-                        )
-                    else:
-                        player[key] = "?"
+                        ) if true_pot else "?"
+
         elif pool == "pro":
-            # Pro roster context: fuzzed letter grades for pool listing
             for key in list(player.keys()):
                 if key.endswith("_base"):
-                    raw_val = player[key]
-                    true_grade = base_to_letter_grade(raw_val)
-                    player[key] = fuzz_letter_grade(
-                        true_grade, viewing_org_id, pid, key
-                    )
+                    if has_precise_attrs:
+                        pass  # keep true value
+                    else:
+                        raw_val = player[key]
+                        true_grade = base_to_letter_grade(raw_val)
+                        player[key] = fuzz_letter_grade(
+                            true_grade, viewing_org_id, pid, key
+                        )
                 elif key.endswith("_pot"):
-                    true_pot = player[key]
-                    if true_pot:
+                    if has_precise_pots:
+                        pass  # keep true value
+                    else:
+                        true_pot = player[key]
                         player[key] = fuzz_letter_grade(
                             true_pot, viewing_org_id, pid, key
-                        )
-                    else:
-                        player[key] = "?"
+                        ) if true_pot else "?"
 
     return players_list
 
@@ -563,21 +613,20 @@ def api_pro_pool():
             )
             rows = conn.execute(data_stmt).all()
 
-        players_list = _build_player_list(rows, tables)
+            players_list = _build_player_list(rows, tables)
 
-        # Add star_rating from permanent recruit_stars column
-        for player in players_list:
-            player["star_rating"] = player.get("recruit_stars")
+            # Add star_rating from permanent recruit_stars column
+            for player in players_list:
+                player["star_rating"] = player.get("recruit_stars")
 
-        # Apply fog-of-war fuzz for pool listing
-        if viewing_org_id:
-            # Determine pool type per player based on their org
-            for p in players_list:
-                p_org = p.get("org_id", 0)
-                if p_org == INTAM_ORG_ID:
-                    _apply_pool_fuzz([p], viewing_org_id, "intam")
-                else:
-                    _apply_pool_fuzz([p], viewing_org_id, "college")
+            # Apply fog-of-war fuzz for pool listing
+            if viewing_org_id:
+                for p in players_list:
+                    p_org = p.get("org_id", 0)
+                    if p_org == INTAM_ORG_ID:
+                        _apply_pool_fuzz([p], viewing_org_id, "intam", conn)
+                    else:
+                        _apply_pool_fuzz([p], viewing_org_id, "college", conn)
 
         pages = math.ceil(total / per_page) if per_page else 1
 
@@ -1744,6 +1793,58 @@ def _build_scouted_response(player, visibility, dist_by_level=None):
                 else:
                     potentials[k] = fuzz_letter_grade(v, org_id, player_id, k) if v else "?"
         response["potentials"] = potentials
+
+    # --- Derive displayovr from visible attributes ---
+    from services.attribute_visibility import _derive_raw_ovr, _load_ovr_weights, _POS_CODE_TO_RATING
+
+    # The visible ratings are in response["attributes"] (20-80 dict with _display keys)
+    # or response["letter_grades"] (letter grade dict) depending on pool.
+    visible_ratings = response.get("attributes", {})
+    if not visible_ratings:
+        # letter_grade pool — convert to _display keys for _derive_raw_ovr
+        lg = response.get("letter_grades", {})
+        if lg:
+            from services.attribute_visibility import _GRADE_TO_SCORE
+            visible_ratings = {
+                f"{k}_display": _GRADE_TO_SCORE.get(v)
+                for k, v in lg.items() if v
+            }
+
+    if visible_ratings:
+        # Get listed position for this player
+        listed_pos = None
+        try:
+            from db import get_engine as _ge
+            _eng = _ge()
+            with _eng.connect() as _c:
+                _lp = _c.execute(
+                    sa_text(
+                        "SELECT position_code FROM player_listed_position "
+                        "WHERE player_id = :pid LIMIT 1"
+                    ), {"pid": player_id}
+                ).first()
+                if _lp:
+                    listed_pos = _lp[0]
+                ovr_weights = _load_ovr_weights(_c)
+        except Exception:
+            ovr_weights = {}
+
+        fmt = response.get("display_format", "20-80")
+        display_format = "letter_grade" if "letter_grades" in response and "attributes" not in response else "20-80"
+
+        raw_ovr = _derive_raw_ovr(
+            visible_ratings, ptype, listed_pos, ovr_weights, display_format,
+        )
+        if raw_ovr is not None:
+            # Single-player: no peer group for percentile ranking, use raw value
+            # rounded to nearest 5 on 20-80 scale
+            score = int(round(raw_ovr / 5.0) * 5)
+            response["displayovr"] = max(20, min(80, score))
+        else:
+            response["displayovr"] = None
+    else:
+        # Hidden context — no visible ratings
+        response["displayovr"] = None
 
     return response
 
