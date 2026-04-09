@@ -13,8 +13,11 @@ Contexts:
 """
 
 import hashlib
+import logging
 import re
 from sqlalchemy import text
+
+log = logging.getLogger(__name__)
 
 from services.org_constants import (
     INTAM_ORG_ID, USHS_ORG_ID,
@@ -439,11 +442,14 @@ def percentile_rank_displayovr(player_dicts):
     Operates in-place on the player dicts.  Players without ``_raw_ovr``
     (e.g. hidden context) are skipped.
     """
+    log.info("percentile_rank_displayovr: processing %d players", len(player_dicts))  # TODO: revert to debug
     # Group by (level, ptype) for separate percentile ranking
     groups = {}  # (level, ptype) -> [(index, raw_ovr), ...]
+    null_count = 0
     for i, p in enumerate(player_dicts):
         raw_ovr = p.pop("_raw_ovr", None)
         if raw_ovr is None:
+            null_count += 1
             # No raw_ovr means hidden context — ensure displayovr is cleared
             p["displayovr"] = None
             bio = p.get("bio")
@@ -454,6 +460,12 @@ def percentile_rank_displayovr(player_dicts):
         ptype = (p.get("bio", {}).get("ptype") or p.get("ptype") or "").strip()
         key = (level, ptype)
         groups.setdefault(key, []).append((i, raw_ovr))
+
+    log.info(  # TODO: revert to debug after displayovr investigation
+        "percentile_rank_displayovr: %d with raw_ovr, %d null, groups=%s",
+        sum(len(m) for m in groups.values()), null_count,
+        {f"L{k[0]}_{k[1]}": len(v) for k, v in groups.items()},
+    )
 
     for (level, ptype), members in groups.items():
         n = len(members)
@@ -755,13 +767,17 @@ def _apply_visibility(
     player_dict["potentials"] = potentials
 
     # --- displayovr: derived from visible ratings, then percentile-ranked ---
-    # Compute a raw overall from whatever ratings the org can see and stash
-    # it on the dict.  The batch caller (get_visible_players_batch) will do a
-    # second pass to percentile-rank within (level, ptype) groups and write
-    # the final 20-80 displayovr.
-    player_dict["_raw_ovr"] = _derive_raw_ovr(
+    raw_ovr = _derive_raw_ovr(
         ratings, ptype, listed_pos_code,
         ovr_weights or {}, display_format,
+    )
+    player_dict["_raw_ovr"] = raw_ovr
+
+    log.info(  # TODO: revert to debug after displayovr investigation
+        "displayovr pipeline: player=%s context=%s precise=%s listed_pos=%s "
+        "raw_ovr=%s display_format=%s ovr_weights_present=%s",
+        player_id, context, attrs_precise, listed_pos_code,
+        raw_ovr, display_format, bool(ovr_weights),
     )
 
     player_dict["visibility_context"] = {
