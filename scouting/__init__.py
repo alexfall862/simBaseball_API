@@ -1286,6 +1286,18 @@ def api_scouted_player(player_id):
             # Load rating distributions for 20-80 conversion
             dist_by_level = get_rating_config_by_level_name(conn) or {}
 
+            # Load OVR weights + listed position for displayovr derivation
+            from services.attribute_visibility import _load_ovr_weights
+            single_ovr_weights = _load_ovr_weights(conn)
+
+            single_listed_pos = None
+            lp_row_single = conn.execute(sa_text(
+                "SELECT position_code FROM player_listed_position "
+                "WHERE player_id = :pid LIMIT 1"
+            ), {"pid": player_id}).first()
+            if lp_row_single:
+                single_listed_pos = lp_row_single[0]
+
             # Load contract data
             contract_row = conn.execute(
                 sa_text("""
@@ -1351,22 +1363,18 @@ def api_scouted_player(player_id):
         visibility["_org_id"] = org_id
 
         # Build response based on visibility
-        response = _build_scouted_response(player_dict, visibility, dist_by_level)
+        response = _build_scouted_response(
+            player_dict, visibility, dist_by_level,
+            _ovr_weights=single_ovr_weights,
+            _listed_pos=single_listed_pos,
+        )
         response["contract"] = contract
 
-        # Attach listed position
-        try:
-            from services.listed_position import POSITION_DISPLAY
-            with engine.connect() as conn2:
-                lp_row = conn2.execute(sa_text(
-                    "SELECT position_code FROM player_listed_position "
-                    "WHERE player_id = :pid LIMIT 1"
-                ), {"pid": player_id}).first()
-            if lp_row:
-                response["listed_position"] = POSITION_DISPLAY.get(lp_row[0], lp_row[0])
-            else:
-                response["listed_position"] = None
-        except Exception:
+        # Attach listed position display name
+        from services.listed_position import POSITION_DISPLAY
+        if single_listed_pos:
+            response["listed_position"] = POSITION_DISPLAY.get(single_listed_pos, single_listed_pos)
+        else:
             response["listed_position"] = None
 
         # Remove internal field before returning
@@ -1541,6 +1549,19 @@ def api_scouted_players_batch():
             # -- Rating config (loaded once)
             dist_by_level = get_rating_config_by_level_name(conn) or {}
 
+            # -- OVR weights + listed positions (loaded once for displayovr)
+            from services.attribute_visibility import _load_ovr_weights
+            batch_ovr_weights = _load_ovr_weights(conn)
+
+            batch_listed_pos = {}  # player_id -> position_code
+            if found_ids:
+                lp_code_rows = conn.execute(sa_text(f"""
+                    SELECT player_id, position_code
+                    FROM player_listed_position
+                    WHERE player_id IN ({ph2})
+                """), fp_params).all()
+                batch_listed_pos = {int(r[0]): str(r[1]) for r in lp_code_rows}
+
         # -- Assembly: build per-player responses outside the connection
         players_result = {}
         not_found = []
@@ -1606,7 +1627,11 @@ def api_scouted_players_batch():
                 pdict["org_abbrev"] = ct.pop("_org_abbrev", None)
 
             # Build response (pure computation)
-            response = _build_scouted_response(pdict, visibility, dist_by_level)
+            response = _build_scouted_response(
+                pdict, visibility, dist_by_level,
+                _ovr_weights=batch_ovr_weights,
+                _listed_pos=batch_listed_pos.get(pid),
+            )
 
             if overlay_mode:
                 # Lightweight: only visibility-related fields
@@ -1716,12 +1741,16 @@ def _convert_attrs_to_20_80(player, dist_for_level, org_id, player_id, fuzzed):
     return attributes
 
 
-def _build_scouted_response(player, visibility, dist_by_level=None):
+def _build_scouted_response(player, visibility, dist_by_level=None,
+                            _ovr_weights=None, _listed_pos=None):
     """
     Build the response dict with fog-of-war data masking.
 
     Applies org-specific fuzz based on pool and unlocked actions.
     Attributes are returned as 20-80 scaled values (not raw _base).
+
+    _ovr_weights and _listed_pos are optional pre-loaded data to avoid
+    per-player DB queries in batch contexts.
     """
     pool = visibility["pool"]
     unlocked = set(visibility["unlocked"])
@@ -1825,55 +1854,34 @@ def _build_scouted_response(player, visibility, dist_by_level=None):
         response["potentials"] = potentials
 
     # --- Derive displayovr from visible attributes ---
-    from services.attribute_visibility import _derive_raw_ovr, _load_ovr_weights, _POS_CODE_TO_RATING
+    # ovr_weights and listed_pos can be passed in by batch callers to avoid
+    # per-player DB queries.  Single-player callers pass None and we load.
+    from services.attribute_visibility import _derive_raw_ovr, _GRADE_TO_SCORE
 
-    # The visible ratings are in response["attributes"] (20-80 dict with _display keys)
-    # or response["letter_grades"] (letter grade dict) depending on pool.
     visible_ratings = response.get("attributes", {})
     if not visible_ratings:
-        # letter_grade pool — convert to _display keys for _derive_raw_ovr
         lg = response.get("letter_grades", {})
         if lg:
-            from services.attribute_visibility import _GRADE_TO_SCORE
             visible_ratings = {
                 f"{k}_display": _GRADE_TO_SCORE.get(v)
                 for k, v in lg.items() if v
             }
 
     if visible_ratings:
-        # Get listed position for this player
-        listed_pos = None
-        try:
-            from db import get_engine as _ge
-            _eng = _ge()
-            with _eng.connect() as _c:
-                _lp = _c.execute(
-                    sa_text(
-                        "SELECT position_code FROM player_listed_position "
-                        "WHERE player_id = :pid LIMIT 1"
-                    ), {"pid": player_id}
-                ).first()
-                if _lp:
-                    listed_pos = _lp[0]
-                ovr_weights = _load_ovr_weights(_c)
-        except Exception:
-            ovr_weights = {}
+        ovr_w = _ovr_weights if _ovr_weights is not None else {}
+        lpos = _listed_pos
 
-        fmt = response.get("display_format", "20-80")
         display_format = "letter_grade" if "letter_grades" in response and "attributes" not in response else "20-80"
 
         raw_ovr = _derive_raw_ovr(
-            visible_ratings, ptype, listed_pos, ovr_weights, display_format,
+            visible_ratings, ptype, lpos, ovr_w, display_format,
         )
         if raw_ovr is not None:
-            # Single-player: no peer group for percentile ranking, use raw value
-            # rounded to nearest 5 on 20-80 scale
             score = int(round(raw_ovr / 5.0) * 5)
             response["displayovr"] = max(20, min(80, score))
         else:
             response["displayovr"] = None
     else:
-        # Hidden context — no visible ratings
         response["displayovr"] = None
 
     return response
