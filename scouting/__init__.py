@@ -1395,13 +1395,16 @@ def api_scouted_players_batch():
     Query params:
       org_id (required), league_year_id (required),
       player_ids (required, comma-separated, max 200)
+      mode (optional): "overlay" for lightweight response (attributes,
+            potentials, display_format, displayovr, visibility only)
 
-    Returns: { players: { "id": {same shape as single-player}, ... },
+    Returns: { players: { "id": {response shape}, ... },
                not_found: [id, ...] }
     """
     org_id = request.args.get("org_id", type=int)
     league_year_id = request.args.get("league_year_id", type=int)
     player_ids_raw = request.args.get("player_ids", "")
+    overlay_mode = request.args.get("mode") == "overlay"
 
     if not org_id or not league_year_id or not player_ids_raw:
         return jsonify(error="missing_fields",
@@ -1467,9 +1470,9 @@ def api_scouted_players_batch():
                         d[key] = value
                     player_data[d["id"]] = d
 
-            # -- Query 4: batch contracts
+            # -- Query 4: batch contracts (skip in overlay mode)
             contract_map = {}  # player_id -> contract dict
-            if found_ids:
+            if found_ids and not overlay_mode:
                 ct_rows = conn.execute(sa_text(f"""
                     SELECT c.playerID,
                            c.id AS contract_id, c.years, c.current_year,
@@ -1604,12 +1607,39 @@ def api_scouted_players_batch():
 
             # Build response (pure computation)
             response = _build_scouted_response(pdict, visibility, dist_by_level)
-            response["contract"] = ct
-            response["listed_position"] = pos_map.get(pid)
+
+            if overlay_mode:
+                # Lightweight: only visibility-related fields
+                trimmed = {}
+                for key in ("attributes", "potentials", "letter_grades",
+                            "display_format", "displayovr"):
+                    if key in response:
+                        trimmed[key] = response[key]
+                response = trimmed
+            else:
+                response["contract"] = ct
+                response["listed_position"] = pos_map.get(pid)
 
             # Clean up internal field
             del visibility["_org_id"]
             response["visibility"] = visibility
+
+            # Build visibility_context for frontend compatibility
+            is_precise = False
+            if pool == "pro":
+                is_precise = "pro_attrs_precise" in unlocked_set or "draft_attrs_precise" in unlocked_set
+            elif pool in ("college", "intam"):
+                is_precise = "draft_attrs_precise" in unlocked_set
+            pot_precise = bool(unlocked_set & {
+                "pro_potential_precise", "draft_potential_precise",
+                "college_potential_precise", "recruit_potential_precise",
+            })
+            response["visibility_context"] = {
+                "context": f"{pool}_roster" if pool == "pro" else pool,
+                "display_format": response.get("display_format", "20-80"),
+                "attributes_precise": is_precise,
+                "potentials_precise": pot_precise,
+            }
 
             players_result[str(pid)] = response
 
