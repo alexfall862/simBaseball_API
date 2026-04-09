@@ -700,23 +700,15 @@ def _apply_visibility(
     player_dict["ratings"] = ratings
     player_dict["potentials"] = potentials
 
-    # --- displayovr: derived from visible ratings ---
-    # Instead of fuzzing displayovr independently, we derive it from the
-    # org-visible (fuzzed/precise) ratings so it is always consistent with
-    # whatever attribute picture the org can see.
-    if attrs_precise:
-        # Precise view — keep the true stored displayovr
-        derived_ovr = player_dict.get("displayovr")
-        if derived_ovr is not None:
-            try:
-                derived_ovr = int(derived_ovr)
-            except (TypeError, ValueError):
-                derived_ovr = None
-    else:
-        derived_ovr = _derive_displayovr(
-            ratings, ptype, listed_pos_code,
-            ovr_weights or {}, display_format,
-        )
+    # --- displayovr: always derived from visible ratings ---
+    # Whether precise or fuzzed, displayovr is computed from whatever ratings
+    # the org can see.  This guarantees consistency: the overall always
+    # reflects the individual attributes on screen, and no stale stored value
+    # can leak through.
+    derived_ovr = _derive_displayovr(
+        ratings, ptype, listed_pos_code,
+        ovr_weights or {}, display_format,
+    )
 
     # Write to both locations — build_player_display puts displayovr in
     # the top-level dict AND inside bio; both must agree.
