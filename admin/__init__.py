@@ -3496,6 +3496,85 @@ def admin_player_preview():
         return jsonify(ok=False, error="preview_failed", message=str(e)), 500
 
 
+@admin_bp.get("/calibration/displayovr-debug")
+def admin_displayovr_debug():
+    """
+    Diagnostic: show exactly what the visibility pipeline produces for a
+    player's displayovr from a specific org's perspective.
+
+    GET /admin/calibration/displayovr-debug?player_id=123&org_id=5
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    from db import get_engine
+    from sqlalchemy import text as sa_text
+
+    player_id = request.args.get("player_id", type=int)
+    org_id = request.args.get("org_id", type=int)
+    if not player_id or not org_id:
+        return jsonify(ok=False, error="missing_param",
+                       message="player_id and org_id required"), 400
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            from services.attribute_visibility import (
+                _load_scouting_actions_single,
+                _PRECISE_ATTR_ACTIONS,
+                _derive_raw_ovr,
+                _load_ovr_weights,
+                _load_listed_positions_batch,
+                _POS_CODE_TO_RATING,
+            )
+
+            # Load scouting state
+            unlocked = _load_scouting_actions_single(conn, org_id, player_id)
+            has_precise = bool(unlocked & _PRECISE_ATTR_ACTIONS)
+
+            # Load weights and listed position
+            ovr_weights = _load_ovr_weights(conn)
+            listed_positions = _load_listed_positions_batch(conn, [player_id])
+            listed_pos = listed_positions.get(player_id)
+
+            # Load player
+            row = conn.execute(sa_text(
+                "SELECT displayovr, ptype FROM simbbPlayers WHERE id = :pid"
+            ), {"pid": player_id}).first()
+            if not row:
+                return jsonify(ok=False, error="not_found"), 404
+
+            stored_displayovr = row[0]
+            ptype = (row[1] or "").strip()
+
+            # What rating key would be used?
+            rating_key = _POS_CODE_TO_RATING.get(listed_pos) if listed_pos else None
+            weights_available = bool(ovr_weights)
+            position_weights_available = bool(
+                ovr_weights.get(rating_key, {}) if rating_key else False
+            )
+
+            return jsonify(ok=True, debug={
+                "player_id": player_id,
+                "org_id": org_id,
+                "ptype": ptype,
+                "stored_displayovr": stored_displayovr,
+                "scouting_actions": sorted(unlocked),
+                "has_precise_attrs": has_precise,
+                "listed_position": listed_pos,
+                "rating_key_used": rating_key,
+                "ovr_weights_loaded": weights_available,
+                "ovr_weights_types": sorted(ovr_weights.keys()) if ovr_weights else [],
+                "position_weights_available": position_weights_available,
+                "listed_positions_count": len(listed_positions),
+            })
+
+    except Exception as e:
+        logging.exception("displayovr debug failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
 @admin_bp.post("/calibration/profiles")
 def admin_calibration_create_manual():
     """Create a manual weight profile."""

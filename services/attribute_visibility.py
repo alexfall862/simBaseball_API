@@ -342,13 +342,18 @@ def _derive_raw_ovr(
     Returns a raw float suitable for percentile ranking, or None.
     For letter_grade format, converts grades to numeric midpoints first.
     For hidden format, returns None.
+
+    Uses three tiers:
+      1. Position-specific derived rating (ss_rating, sp_rating, etc.)
+      2. Weighted average using ovr_weights
+      3. Simple average of all visible _display values (last-resort fallback)
     """
     if display_format == "hidden":
         return None
 
     is_letter = display_format == "letter_grade"
 
-    # --- Try position-specific derived rating first ---
+    # --- Tier 1: position-specific derived rating ---
     if listed_pos_code and not is_letter:
         rating_key = _POS_CODE_TO_RATING.get(listed_pos_code)
         if rating_key and rating_key in ratings and ratings[rating_key] is not None:
@@ -357,57 +362,66 @@ def _derive_raw_ovr(
             except (TypeError, ValueError):
                 pass
 
-    # --- Fallback: weighted average of visible base attributes ---
+    # --- Tier 2: weighted average using ovr_weights ---
+    wts = {}
     if listed_pos_code:
         rating_type = _POS_CODE_TO_RATING.get(listed_pos_code)
         wts = ovr_weights.get(rating_type, {}) if rating_type else {}
-    else:
-        wts = {}
-
     if not wts:
         if ptype == "Pitcher":
             wts = ovr_weights.get("pitcher_overall", {})
         else:
             wts = ovr_weights.get("position_overall", {})
 
-    if not wts:
-        return None
+    if wts:
+        total_w = 0.0
+        total_v = 0.0
+        for attr_key, weight in wts.items():
+            if weight <= 0:
+                continue
+            if attr_key.endswith("_ovr"):
+                display_key = attr_key
+            elif attr_key.endswith("_base"):
+                display_key = attr_key.replace("_base", "_display")
+            else:
+                continue
+            val = ratings.get(display_key)
+            if val is None:
+                continue
+            if is_letter:
+                score = _GRADE_TO_SCORE.get(val)
+                if score is None:
+                    continue
+                total_v += score * weight
+            else:
+                try:
+                    total_v += float(val) * weight
+                except (TypeError, ValueError):
+                    continue
+            total_w += weight
+        if total_w > 0:
+            return total_v / total_w
 
-    total_w = 0.0
-    total_v = 0.0
-
-    for attr_key, weight in wts.items():
-        if weight <= 0:
-            continue
-
-        if attr_key.endswith("_ovr"):
-            display_key = attr_key
-        elif attr_key.endswith("_base"):
-            display_key = attr_key.replace("_base", "_display")
-        else:
-            continue
-
-        val = ratings.get(display_key)
+    # --- Tier 3: simple average of all visible _display values ---
+    # Last resort when weights are unavailable. Ensures _raw_ovr is never
+    # None when there are visible ratings, so percentile ranking always runs.
+    vals = []
+    for key, val in ratings.items():
         if val is None:
             continue
-
         if is_letter:
             score = _GRADE_TO_SCORE.get(val)
-            if score is None:
-                continue
-            total_v += score * weight
-        else:
+            if score is not None:
+                vals.append(score)
+        elif key.endswith("_display"):
             try:
-                total_v += float(val) * weight
+                vals.append(float(val))
             except (TypeError, ValueError):
                 continue
+    if vals:
+        return sum(vals) / len(vals)
 
-        total_w += weight
-
-    if total_w <= 0:
-        return None
-
-    return total_v / total_w
+    return None
 
 
 def _percentile_rank_to_20_80(rank):
@@ -430,6 +444,11 @@ def percentile_rank_displayovr(player_dicts):
     for i, p in enumerate(player_dicts):
         raw_ovr = p.pop("_raw_ovr", None)
         if raw_ovr is None:
+            # No raw_ovr means hidden context — ensure displayovr is cleared
+            p["displayovr"] = None
+            bio = p.get("bio")
+            if bio and "displayovr" in bio:
+                bio["displayovr"] = None
             continue
         level = p.get("current_level") or p.get("league_level")
         ptype = (p.get("bio", {}).get("ptype") or p.get("ptype") or "").strip()
