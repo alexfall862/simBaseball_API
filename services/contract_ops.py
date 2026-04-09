@@ -230,49 +230,58 @@ def get_org_contract_overview(
             "demand": None,
         })
 
-    # Attach demand summaries if league_year_id provided
+    # Attach demand summaries if league_year_id provided.
+    # Only uses pre-cached demands (from player_demands table) to avoid
+    # expensive per-player WAR + demand computation on every page load.
+    # Fresh demands are computed on-demand when a specific player's
+    # contract detail is opened.
     if league_year_id and results:
         try:
-            from services.player_demands import (
-                get_player_demand, compute_extension_demand, compute_buyout_demand,
-            )
+            from services.player_demands import get_player_demand
+
+            # Batch-load all cached demands in one pass
+            pids = [e["player_id"] for e in results]
+            cached_ext = {}
+            cached_buyout = {}
+            if pids:
+                ph = ", ".join(f":p{i}" for i in range(len(pids)))
+                prm = {"ly": league_year_id}
+                prm.update({f"p{i}": pid for i, pid in enumerate(pids)})
+                rows = conn.execute(text(
+                    f"SELECT player_id, demand_type, demand_json "
+                    f"FROM player_demands "
+                    f"WHERE league_year_id = :ly AND player_id IN ({ph})"
+                ), prm).all()
+                import json as _json
+                for r in rows:
+                    data = _json.loads(r[2]) if r[2] else {}
+                    if r[1] == "extension":
+                        cached_ext[r[0]] = data
+                    elif r[1] == "buyout":
+                        cached_buyout[r[0]] = data
+
             for entry in results:
                 pid = entry["player_id"]
-                cid = entry["contract_id"]
                 phase = entry["contract_phase"]
                 demand = {}
 
-                # Extension demand for expiring arb/FA-eligible players
+                # Extension demand (cached only)
                 if entry["is_expiring"] and phase in ("arb_eligible", "fa_eligible"):
-                    try:
-                        ext = get_player_demand(conn, pid, league_year_id, "extension")
-                        if not ext:
-                            ext = compute_extension_demand(
-                                conn, pid, cid, league_year_id, entry["current_level"],
-                            )
-                        if ext:
-                            demand["type"] = "extension"
-                            demand["min_aav"] = ext.get("min_aav")
-                            demand["min_years"] = ext.get("min_years")
-                            demand["war"] = ext.get("war")
-                    except Exception:
-                        pass
+                    ext = cached_ext.get(pid)
+                    if ext:
+                        demand["type"] = "extension"
+                        demand["min_aav"] = ext.get("min_aav")
+                        demand["min_years"] = ext.get("min_years")
+                        demand["war"] = ext.get("war")
 
-                # Buyout demand for all players
-                try:
-                    buyout = get_player_demand(conn, pid, league_year_id, "buyout")
-                    if not buyout:
-                        buyout = compute_buyout_demand(
-                            conn, pid, cid, league_year_id, entry["current_level"],
-                        )
-                    if buyout:
-                        demand["buyout_price"] = buyout.get("buyout_price")
-                        if not demand.get("type"):
-                            demand["type"] = "buyout"
-                        if not demand.get("war") and buyout.get("war"):
-                            demand["war"] = buyout.get("war")
-                except Exception:
-                    pass
+                # Buyout demand (cached only)
+                buyout = cached_buyout.get(pid)
+                if buyout:
+                    demand["buyout_price"] = buyout.get("buyout_price")
+                    if not demand.get("type"):
+                        demand["type"] = "buyout"
+                    if not demand.get("war") and buyout.get("war"):
+                        demand["war"] = buyout.get("war")
 
                 entry["demand"] = demand if demand else None
         except Exception as e:
