@@ -231,6 +231,18 @@ def get_landing_all():
                     _apply_fog_of_war_to_roster_map(
                         conn, roster_map, oid, {}, [], [], None)
 
+            # Batch-load top players for ALL orgs in 3 queries
+            batch_top_batters = _get_all_top_batters(conn, tables, ctx, all_team_ids_flat)
+            batch_top_pitchers = _get_all_top_pitchers(conn, tables, ctx, all_team_ids_flat)
+            batch_top_fielders = _get_all_top_fielders(conn, tables, ctx, all_team_ids_flat)
+
+            # Batch-load financials for ALL orgs in ~8 queries
+            batch_financials = {}
+            try:
+                batch_financials = _get_all_financials(conn, tables, org_ids, ctx)
+            except Exception:
+                log.debug("bootstrap/all: batch financials failed, skipping")
+
             # ── Assemble per-org output ──────────────────────────
             orgs_map = {}
             all_face_data = {}
@@ -250,18 +262,20 @@ def get_landing_all():
                     org_notifs.extend(batch_notifs.get(tid, []))
                     org_news.extend(batch_news.get(tid, []))
 
-                # Top players — still per-org (complex aggregation with LIMIT)
-                top_batter = _get_top_batter(conn, tables, ctx, team_ids)
-                top_pitcher = _get_top_pitcher(conn, tables, ctx, team_ids)
-                top_fielder = _get_top_fielder(conn, tables, ctx, team_ids)
+                # Top players — pick from batch results by team_id
+                top_batter = None
+                top_pitcher = None
+                top_fielder = None
+                for tid in team_ids:
+                    if not top_batter and tid in batch_top_batters:
+                        top_batter = batch_top_batters[tid]
+                    if not top_pitcher and tid in batch_top_pitchers:
+                        top_pitcher = batch_top_pitchers[tid]
+                    if not top_fielder and tid in batch_top_fielders:
+                        top_fielder = batch_top_fielders[tid]
 
                 injury_report = batch_injuries.get(oid, [])
-
-                financials = None
-                try:
-                    financials = _get_financials(conn, tables, oid, ctx)
-                except Exception:
-                    pass
+                financials = batch_financials.get(oid)
 
                 # Attach listed positions
                 for tid, players in roster_map.items():
@@ -1342,6 +1356,305 @@ def _get_financials(conn, tables, org_id, ctx):
     }
 
 
+def _get_all_financials(conn, tables, org_ids, ctx):
+    """
+    Batch-load financials for all orgs in ~8 queries (instead of 8 per org).
+    Returns {org_id: financials_dict_or_None}.
+    """
+    league_year = ctx["league_year"]
+
+    ledger = tables["org_ledger"]
+    ly = tables["league_years"]
+    gw = tables["game_weeks"]
+    contracts = tables["contracts"]
+    details = tables["contract_details"]
+    shares = tables["contract_team_share"]
+    players = tables["players"]
+    orgs = tables["organizations"]
+
+    # Q1: league_year resolution (shared, not org-specific)
+    ly_row = conn.execute(
+        select(ly.c.id, ly.c.weeks_in_season)
+        .where(ly.c.league_year == league_year)
+        .limit(1)
+    ).first()
+    if not ly_row:
+        return {oid: None for oid in org_ids}
+
+    ly_m = ly_row._mapping
+    league_year_id = ly_m["id"]
+    weeks_in_season = int(ly_m["weeks_in_season"])
+
+    # Q2: seed capital for all orgs
+    seed_rows = conn.execute(
+        select(orgs.c.id, func.coalesce(orgs.c.cash, 0).label("cash"))
+        .where(orgs.c.id.in_(org_ids))
+    ).all()
+    seed_capitals = {int(r._mapping["id"]): float(r._mapping["cash"]) for r in seed_rows}
+
+    # Q3: prior-year ledger balances for all orgs
+    prior_rows = conn.execute(
+        select(
+            ledger.c.org_id,
+            func.coalesce(func.sum(ledger.c.amount), 0).label("total"),
+        )
+        .select_from(ledger.join(ly, ledger.c.league_year_id == ly.c.id))
+        .where(and_(
+            ledger.c.org_id.in_(org_ids),
+            ly.c.league_year < league_year,
+        ))
+        .group_by(ledger.c.org_id)
+    ).all()
+    prior_balances = {int(r._mapping["org_id"]): float(r._mapping["total"]) for r in prior_rows}
+
+    # Q4: year-level entries for all orgs
+    yl_rows = conn.execute(
+        select(
+            ledger.c.org_id,
+            ledger.c.entry_type,
+            func.coalesce(func.sum(ledger.c.amount), 0).label("total"),
+        )
+        .where(and_(
+            ledger.c.org_id.in_(org_ids),
+            ledger.c.league_year_id == league_year_id,
+            ledger.c.game_week_id.is_(None),
+        ))
+        .group_by(ledger.c.org_id, ledger.c.entry_type)
+    ).all()
+    # {org_id: {entry_type: total}}
+    yl_by_org = {}
+    for r in yl_rows:
+        m = r._mapping
+        yl_by_org.setdefault(int(m["org_id"]), {})[m["entry_type"]] = float(m["total"])
+
+    # Q5: weekly entries for all orgs
+    wk_rows = conn.execute(
+        select(
+            ledger.c.org_id,
+            gw.c.week_index,
+            ledger.c.entry_type,
+            func.coalesce(func.sum(ledger.c.amount), 0).label("total"),
+        )
+        .select_from(ledger.join(gw, ledger.c.game_week_id == gw.c.id))
+        .where(and_(
+            ledger.c.org_id.in_(org_ids),
+            ledger.c.league_year_id == league_year_id,
+        ))
+        .group_by(ledger.c.org_id, gw.c.week_index, ledger.c.entry_type)
+    ).all()
+    # {org_id: {week_index: {entry_type: total}}}
+    wk_by_org = {}
+    for r in wk_rows:
+        m = r._mapping
+        oid = int(m["org_id"])
+        wk_by_org.setdefault(oid, {}).setdefault(m["week_index"], {})[m["entry_type"]] = float(m["total"])
+
+    # Q6: salary obligations for all orgs
+    league_year_expr = contracts.c.leagueYearSigned + (details.c.year - literal(1))
+    sal_rows = conn.execute(
+        select(
+            shares.c.orgID.label("org_id"),
+            contracts.c.id.label("contract_id"),
+            contracts.c.leagueYearSigned,
+            contracts.c.isActive,
+            contracts.c.isBuyout,
+            contracts.c.bonus,
+            contracts.c.signingOrg,
+            details.c.year.label("year_index"),
+            details.c.salary,
+            shares.c.salary_share,
+            shares.c.isHolder,
+            players.c.id.label("player_id"),
+            players.c.firstname,
+            players.c.lastname,
+        )
+        .select_from(
+            contracts.join(details, details.c.contractID == contracts.c.id)
+            .join(shares, shares.c.contractDetailsID == details.c.id)
+            .join(players, players.c.id == contracts.c.playerID)
+        )
+        .where(and_(
+            league_year_expr == league_year,
+            shares.c.orgID.in_(org_ids),
+            shares.c.salary_share > 0,
+        ))
+    ).all()
+    sal_by_org = {}
+    for r in sal_rows:
+        m = r._mapping
+        sal_by_org.setdefault(int(m["org_id"]), []).append(m)
+
+    # Q7: bonus obligations for all orgs
+    bon_rows = conn.execute(
+        select(
+            contracts.c.signingOrg.label("org_id"),
+            contracts.c.id.label("contract_id"),
+            contracts.c.leagueYearSigned,
+            contracts.c.isActive,
+            contracts.c.isBuyout,
+            contracts.c.bonus,
+            players.c.id.label("player_id"),
+            players.c.firstname,
+            players.c.lastname,
+        )
+        .select_from(contracts.join(players, players.c.id == contracts.c.playerID))
+        .where(and_(
+            contracts.c.leagueYearSigned == league_year,
+            contracts.c.signingOrg.in_(org_ids),
+            contracts.c.bonus > 0,
+        ))
+    ).all()
+    bon_by_org = {}
+    for r in bon_rows:
+        m = r._mapping
+        bon_by_org.setdefault(int(m["org_id"]), []).append(m)
+
+    # Q8: future obligations for all orgs
+    fut_rows = conn.execute(
+        select(
+            shares.c.orgID.label("org_id"),
+            (contracts.c.leagueYearSigned + (details.c.year - literal(1))).label("future_year"),
+            func.sum(details.c.salary * shares.c.salary_share).label("total_salary"),
+        )
+        .select_from(
+            contracts.join(details, details.c.contractID == contracts.c.id)
+            .join(shares, shares.c.contractDetailsID == details.c.id)
+        )
+        .where(and_(
+            (contracts.c.leagueYearSigned + (details.c.year - literal(1))) > league_year,
+            shares.c.orgID.in_(org_ids),
+            shares.c.salary_share > 0,
+        ))
+        .group_by(shares.c.orgID, text("future_year"))
+    ).all()
+    fut_by_org = {}
+    for r in fut_rows:
+        m = r._mapping
+        fut_by_org.setdefault(int(m["org_id"]), {})[int(m["future_year"])] = float(m["total_salary"] or 0)
+
+    # --- Per-org assembly ---
+    def _num(val):
+        return float(val) if val is not None else 0.0
+
+    result = {}
+    for oid in org_ids:
+        seed_capital = seed_capitals.get(oid, 0.0)
+        starting_balance = seed_capital + prior_balances.get(oid, 0.0)
+
+        year_level_totals = yl_by_org.get(oid, {})
+        year_start_events = {k: v for k, v in year_level_totals.items()
+                            if k in ("media", "bonus", "buyout")}
+        interest_events = {k: v for k, v in year_level_totals.items()
+                          if k in ("interest_income", "interest_expense")}
+
+        year_start_net = sum(year_start_events.values())
+        interest_net = sum(interest_events.values())
+
+        season_revenue = 0.0
+        season_expenses = 0.0
+        for v in year_level_totals.values():
+            if v > 0:
+                season_revenue += v
+            elif v < 0:
+                season_expenses += -v
+
+        balance_after_year_start = starting_balance + year_start_net
+
+        # Weekly summary
+        week_type_totals = wk_by_org.get(oid, {})
+        for by_type in week_type_totals.values():
+            for total in by_type.values():
+                if total > 0:
+                    season_revenue += total
+                elif total < 0:
+                    season_expenses += -total
+
+        weeks_summary = []
+        cumulative = balance_after_year_start
+        for week_index in range(1, weeks_in_season + 1):
+            by_type = week_type_totals.get(week_index, {})
+            salary_total = by_type.get("salary", 0.0)
+            performance_total = by_type.get("performance", 0.0)
+            other_types = {k: v for k, v in by_type.items()
+                          if k not in ("salary", "performance")}
+            other_in = sum(v for v in other_types.values() if v > 0)
+            other_out = -sum(v for v in other_types.values() if v < 0)
+            week_net = sum(by_type.values())
+            cumulative += week_net
+            weeks_summary.append({
+                "week_index": week_index,
+                "salary_out": -salary_total,
+                "performance_in": performance_total,
+                "other_in": other_in,
+                "other_out": other_out,
+                "net": week_net,
+                "cumulative_balance": cumulative,
+                "by_type": by_type,
+            })
+
+        ending_balance_before_interest = cumulative
+        ending_balance = ending_balance_before_interest + interest_net
+
+        # Obligations
+        obligations = []
+        ob_totals = {
+            "active_salary": 0.0, "inactive_salary": 0.0,
+            "buyout": 0.0, "signing_bonus": 0.0, "overall": 0.0,
+        }
+
+        for m in sal_by_org.get(oid, []):
+            salary = _num(m["salary"])
+            share = _num(m["salary_share"])
+            base_amount = salary * share
+            is_buyout = bool(m.get("isBuyout") or False)
+            is_active = bool(m.get("isActive") or False)
+            is_holder = bool(m.get("isHolder") or False)
+            category = "buyout" if is_buyout else ("active_salary" if is_active and is_holder else "inactive_salary")
+            obligations.append({
+                "type": "salary", "category": category,
+                "player": {"id": m["player_id"], "firstname": m["firstname"], "lastname": m["lastname"]},
+                "contract_id": m["contract_id"], "year_index": m["year_index"],
+                "salary": salary, "salary_share": share, "amount": base_amount,
+            })
+            ob_totals["overall"] += base_amount
+            ob_totals[category] += base_amount
+
+        for m in bon_by_org.get(oid, []):
+            bonus = _num(m["bonus"])
+            if bonus <= 0:
+                continue
+            is_buyout = bool(m.get("isBuyout") or False)
+            category = "buyout" if is_buyout else "signing_bonus"
+            obligations.append({
+                "type": "bonus", "category": category,
+                "player": {"id": m["player_id"], "firstname": m["firstname"], "lastname": m["lastname"]},
+                "contract_id": m["contract_id"], "amount": bonus,
+            })
+            ob_totals["overall"] += bonus
+            ob_totals[category] += bonus
+
+        result[oid] = {
+            "summary": {
+                "starting_balance": starting_balance,
+                "season_revenue": season_revenue,
+                "season_expenses": season_expenses,
+                "year_start_events": year_start_events,
+                "weeks": weeks_summary,
+                "interest_events": interest_events,
+                "ending_balance_before_interest": ending_balance_before_interest,
+                "ending_balance": ending_balance,
+            },
+            "obligations": {
+                "league_year": league_year,
+                "totals": ob_totals,
+                "items": obligations,
+            },
+            "future_obligations": fut_by_org.get(oid, {}),
+        }
+
+    return result
+
+
 def _get_standings(conn, tables, ctx):
     """
     Standings for all teams from game_results.
@@ -1712,105 +2025,124 @@ def _get_news(conn, tables, team_ids):
 
 def _get_top_batter(conn, tables, ctx, team_ids):
     """Top batter by batting average (min AB threshold). Returns None if no data."""
-    if not team_ids:
-        return None
-    bs = tables["batting_stats"]
-    p = tables["players"]
-
-    avg_expr = (bs.c.hits * 1.0 / bs.c.at_bats)
-
-    stmt = (
-        select(
-            bs.c.player_id, p.c.firstname, p.c.lastname, p.c.ptype.label("position"),
-            bs.c.hits, bs.c.at_bats, bs.c.home_runs.label("hr"), bs.c.rbi,
-            avg_expr.label("avg"),
-        )
-        .select_from(bs.join(p, p.c.id == bs.c.player_id))
-        .where(and_(
-            bs.c.league_year_id == ctx["current_league_year_id"],
-            bs.c.team_id.in_(team_ids),
-            bs.c.at_bats >= MIN_AT_BATS,
-        ))
-        .order_by(avg_expr.desc())
-        .limit(1)
-    )
-
-    row = conn.execute(stmt).first()
-    if not row:
-        return None
-    d = _row_to_dict(row)
-    d["avg"] = round(d["avg"], 3)
-    return d
+    result = _get_all_top_batters(conn, tables, ctx, team_ids)
+    return result.get(team_ids[0]) if team_ids and result else None
 
 
 def _get_top_pitcher(conn, tables, ctx, team_ids):
     """Top pitcher by ERA (min IP threshold). Returns None if no data."""
-    if not team_ids:
-        return None
-    ps = tables["pitching_stats"]
-    p = tables["players"]
-
-    # ERA = (earned_runs / (innings_pitched_outs / 3)) * 9 = earned_runs * 27 / ipo
-    era_expr = (ps.c.earned_runs * 27.0 / ps.c.innings_pitched_outs)
-
-    stmt = (
-        select(
-            ps.c.player_id, p.c.firstname, p.c.lastname,
-            ps.c.wins, ps.c.strikeouts,
-            ps.c.innings_pitched_outs,
-            era_expr.label("era"),
-        )
-        .select_from(ps.join(p, p.c.id == ps.c.player_id))
-        .where(and_(
-            ps.c.league_year_id == ctx["current_league_year_id"],
-            ps.c.team_id.in_(team_ids),
-            ps.c.innings_pitched_outs >= MIN_IP_OUTS,
-        ))
-        .order_by(era_expr.asc())
-        .limit(1)
-    )
-
-    row = conn.execute(stmt).first()
-    if not row:
-        return None
-    d = _row_to_dict(row)
-    d["era"] = round(d["era"], 2)
-    return d
+    result = _get_all_top_pitchers(conn, tables, ctx, team_ids)
+    return result.get(team_ids[0]) if team_ids and result else None
 
 
 def _get_top_fielder(conn, tables, ctx, team_ids):
     """Top fielder by fielding percentage (min games threshold). Returns None if no data."""
-    if not team_ids:
-        return None
-    fs = tables["fielding_stats"]
-    p = tables["players"]
+    result = _get_all_top_fielders(conn, tables, ctx, team_ids)
+    return result.get(team_ids[0]) if team_ids and result else None
 
-    total_chances = (fs.c.putouts + fs.c.assists + fs.c.errors)
-    fpct_expr = ((fs.c.putouts + fs.c.assists) * 1.0 / total_chances)
 
-    stmt = (
-        select(
-            fs.c.player_id, p.c.firstname, p.c.lastname,
-            fs.c.position_code,
-            fpct_expr.label("fielding_pct"),
-        )
-        .select_from(fs.join(p, p.c.id == fs.c.player_id))
-        .where(and_(
-            fs.c.league_year_id == ctx["current_league_year_id"],
-            fs.c.team_id.in_(team_ids),
-            fs.c.games >= MIN_FIELDING_GAMES,
-            total_chances > 0,
-        ))
-        .order_by(fpct_expr.desc())
-        .limit(1)
-    )
+def _get_all_top_batters(conn, tables, ctx, all_team_ids):
+    """Top batter per team_id in one query. Returns {team_id: dict}."""
+    if not all_team_ids:
+        return {}
+    lyid = ctx["current_league_year_id"]
+    ph = ", ".join(f":t{i}" for i in range(len(all_team_ids)))
+    params = {"lyid": lyid, "min_ab": MIN_AT_BATS}
+    params.update({f"t{i}": tid for i, tid in enumerate(all_team_ids)})
 
-    row = conn.execute(stmt).first()
-    if not row:
-        return None
-    d = _row_to_dict(row)
-    d["fielding_pct"] = round(d["fielding_pct"], 3)
-    return d
+    rows = conn.execute(text(f"""
+        SELECT * FROM (
+            SELECT bs.team_id, bs.player_id, p.firstname, p.lastname,
+                   p.ptype AS position, bs.hits, bs.at_bats,
+                   bs.home_runs AS hr, bs.rbi,
+                   (bs.hits * 1.0 / bs.at_bats) AS avg,
+                   ROW_NUMBER() OVER (PARTITION BY bs.team_id
+                                      ORDER BY (bs.hits * 1.0 / bs.at_bats) DESC) AS rn
+            FROM player_batting_stats bs
+            JOIN simbbPlayers p ON p.id = bs.player_id
+            WHERE bs.league_year_id = :lyid
+              AND bs.team_id IN ({ph})
+              AND bs.at_bats >= :min_ab
+        ) ranked WHERE rn = 1
+    """), params).mappings().all()
+
+    result = {}
+    for r in rows:
+        d = dict(r)
+        tid = d.pop("team_id")
+        d.pop("rn", None)
+        d["avg"] = round(d["avg"], 3)
+        result[tid] = d
+    return result
+
+
+def _get_all_top_pitchers(conn, tables, ctx, all_team_ids):
+    """Top pitcher per team_id in one query. Returns {team_id: dict}."""
+    if not all_team_ids:
+        return {}
+    lyid = ctx["current_league_year_id"]
+    ph = ", ".join(f":t{i}" for i in range(len(all_team_ids)))
+    params = {"lyid": lyid, "min_ipo": MIN_IP_OUTS}
+    params.update({f"t{i}": tid for i, tid in enumerate(all_team_ids)})
+
+    rows = conn.execute(text(f"""
+        SELECT * FROM (
+            SELECT ps.team_id, ps.player_id, p.firstname, p.lastname,
+                   ps.wins, ps.strikeouts, ps.innings_pitched_outs,
+                   (ps.earned_runs * 27.0 / ps.innings_pitched_outs) AS era,
+                   ROW_NUMBER() OVER (PARTITION BY ps.team_id
+                                      ORDER BY (ps.earned_runs * 27.0 / ps.innings_pitched_outs) ASC) AS rn
+            FROM player_pitching_stats ps
+            JOIN simbbPlayers p ON p.id = ps.player_id
+            WHERE ps.league_year_id = :lyid
+              AND ps.team_id IN ({ph})
+              AND ps.innings_pitched_outs >= :min_ipo
+        ) ranked WHERE rn = 1
+    """), params).mappings().all()
+
+    result = {}
+    for r in rows:
+        d = dict(r)
+        tid = d.pop("team_id")
+        d.pop("rn", None)
+        d["era"] = round(d["era"], 2)
+        result[tid] = d
+    return result
+
+
+def _get_all_top_fielders(conn, tables, ctx, all_team_ids):
+    """Top fielder per team_id in one query. Returns {team_id: dict}."""
+    if not all_team_ids:
+        return {}
+    lyid = ctx["current_league_year_id"]
+    ph = ", ".join(f":t{i}" for i in range(len(all_team_ids)))
+    params = {"lyid": lyid, "min_games": MIN_FIELDING_GAMES}
+    params.update({f"t{i}": tid for i, tid in enumerate(all_team_ids)})
+
+    rows = conn.execute(text(f"""
+        SELECT * FROM (
+            SELECT fs.team_id, fs.player_id, p.firstname, p.lastname,
+                   fs.position_code,
+                   ((fs.putouts + fs.assists) * 1.0 / (fs.putouts + fs.assists + fs.errors)) AS fielding_pct,
+                   ROW_NUMBER() OVER (PARTITION BY fs.team_id
+                                      ORDER BY ((fs.putouts + fs.assists) * 1.0 / (fs.putouts + fs.assists + fs.errors)) DESC) AS rn
+            FROM player_fielding_stats fs
+            JOIN simbbPlayers p ON p.id = fs.player_id
+            WHERE fs.league_year_id = :lyid
+              AND fs.team_id IN ({ph})
+              AND fs.games >= :min_games
+              AND (fs.putouts + fs.assists + fs.errors) > 0
+        ) ranked WHERE rn = 1
+    """), params).mappings().all()
+
+    result = {}
+    for r in rows:
+        d = dict(r)
+        tid = d.pop("team_id")
+        d.pop("rn", None)
+        d["fielding_pct"] = round(d["fielding_pct"], 3)
+        result[tid] = d
+    return result
 
 
 def _get_injury_report(conn, tables, org_id):

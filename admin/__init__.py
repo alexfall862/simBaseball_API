@@ -1328,18 +1328,17 @@ def admin_cancel_orphan_auction(player_id):
             if not active:
                 return jsonify(ok=True, message="No active auctions found", cancelled=0)
 
-            cancelled_ids = []
-            for a in active:
-                conn.execute(sa_text("""
-                    UPDATE fa_auction SET phase = 'completed', winning_offer_id = NULL
-                    WHERE id = :aid
-                """), {"aid": a["id"]})
-                # Also mark any active offers as lost
-                conn.execute(sa_text("""
-                    UPDATE fa_auction_offers SET status = 'lost'
-                    WHERE auction_id = :aid AND status = 'active'
-                """), {"aid": a["id"]})
-                cancelled_ids.append(a["id"])
+            cancelled_ids = [a["id"] for a in active]
+            ph = ", ".join(f":a{i}" for i in range(len(cancelled_ids)))
+            a_params = {f"a{i}": aid for i, aid in enumerate(cancelled_ids)}
+            conn.execute(sa_text(
+                f"UPDATE fa_auction SET phase = 'completed', winning_offer_id = NULL "
+                f"WHERE id IN ({ph})"
+            ), a_params)
+            conn.execute(sa_text(
+                f"UPDATE fa_auction_offers SET status = 'lost' "
+                f"WHERE auction_id IN ({ph}) AND status = 'active'"
+            ), a_params)
 
             return jsonify(
                 ok=True,
@@ -1387,20 +1386,26 @@ def admin_debug_player_state(player_id):
                 ORDER BY c.id DESC
             """), {"pid": player_id}).mappings().all()
 
-            # Shares for each contract
+            # Shares for all contracts in one query
             contract_shares = {}
-            for c in contracts:
-                shares = conn.execute(sa_text("""
-                    SELECT cd.id AS detail_id, cd.year, cd.salary,
+            cids = [c["id"] for c in contracts]
+            if cids:
+                ph = ", ".join(f":c{i}" for i in range(len(cids)))
+                c_params = {f"c{i}": cid for i, cid in enumerate(cids)}
+                share_rows = conn.execute(sa_text(f"""
+                    SELECT cd.contractID, cd.id AS detail_id, cd.year, cd.salary,
                            cts.orgID, cts.isHolder, cts.salary_share,
                            o.org_abbrev
                     FROM contractDetails cd
                     JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id
                     JOIN organizations o ON o.id = cts.orgID
-                    WHERE cd.contractID = :cid
-                    ORDER BY cd.year, cts.orgID
-                """), {"cid": c["id"]}).mappings().all()
-                contract_shares[c["id"]] = [dict(s) for s in shares]
+                    WHERE cd.contractID IN ({ph})
+                    ORDER BY cd.contractID, cd.year, cts.orgID
+                """), c_params).mappings().all()
+                for s in share_rows:
+                    d = dict(s)
+                    cid = d.pop("contractID")
+                    contract_shares.setdefault(cid, []).append(d)
 
             # Active auctions
             auctions = conn.execute(sa_text("""
@@ -1412,18 +1417,24 @@ def admin_debug_player_state(player_id):
                 ORDER BY a.id DESC
             """), {"pid": player_id}).mappings().all()
 
-            # Offers for each auction
+            # Offers for all auctions in one query
             auction_offers = {}
-            for a in auctions:
-                aoffers = conn.execute(sa_text("""
-                    SELECT ao.id, ao.org_id, ao.years, ao.aav, ao.bonus,
-                           ao.total_value, ao.status, o.org_abbrev
+            aids = [a["id"] for a in auctions]
+            if aids:
+                ph = ", ".join(f":a{i}" for i in range(len(aids)))
+                a_params = {f"a{i}": aid for i, aid in enumerate(aids)}
+                offer_rows = conn.execute(sa_text(f"""
+                    SELECT ao.auction_id, ao.id, ao.org_id, ao.years, ao.aav,
+                           ao.bonus, ao.total_value, ao.status, o.org_abbrev
                     FROM fa_auction_offers ao
                     JOIN organizations o ON o.id = ao.org_id
-                    WHERE ao.auction_id = :aid
-                    ORDER BY ao.total_value DESC
-                """), {"aid": a["id"]}).mappings().all()
-                auction_offers[a["id"]] = [dict(o) for o in aoffers]
+                    WHERE ao.auction_id IN ({ph})
+                    ORDER BY ao.auction_id, ao.total_value DESC
+                """), a_params).mappings().all()
+                for o in offer_rows:
+                    d = dict(o)
+                    aid = d.pop("auction_id")
+                    auction_offers.setdefault(aid, []).append(d)
 
             # Demands
             demands = conn.execute(sa_text("""

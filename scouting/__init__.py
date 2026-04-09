@@ -50,6 +50,71 @@ from services.org_constants import (
     is_college_org,
 )
 
+# Explicit column list for simbbPlayers queries — avoids SELECT * which
+# transfers ~40 unused columns (splits, signing_tendency, etc.).
+# Used by both single-player and batch scouting endpoints.
+_SCOUTING_PLAYER_COLS = (
+    # Bio
+    "id", "firstname", "lastname", "age", "ptype",
+    "area", "city", "intorusa",
+    "height", "weight", "bat_hand", "pitch_hand",
+    "arm_angle", "durability", "injury_risk",
+    "recruit_stars",
+    # Offensive base + pot
+    "contact_base", "contact_pot",
+    "power_base", "power_pot",
+    "discipline_base", "discipline_pot",
+    "eye_base", "eye_pot",
+    "speed_base", "speed_pot",
+    "baserunning_base", "baserunning_pot",
+    "basereaction_base", "basereaction_pot",
+    # Defensive base + pot
+    "fieldcatch_base", "fieldcatch_pot",
+    "fieldreact_base", "fieldreact_pot",
+    "fieldspot_base", "fieldspot_pot",
+    "throwacc_base", "throwacc_pot",
+    "throwpower_base", "throwpower_pot",
+    "catchframe_base", "catchframe_pot",
+    "catchsequence_base", "catchsequence_pot",
+    # Pitching base + pot
+    "pendurance_base", "pendurance_pot",
+    "pgencontrol_base", "pgencontrol_pot",
+    "psequencing_base", "psequencing_pot",
+    "pthrowpower_base", "pthrowpower_pot",
+    "pickoff_base", "pickoff_pot",
+    # Pitch 1
+    "pitch1_name", "pitch1_ovr",
+    "pitch1_consist_base", "pitch1_consist_pot",
+    "pitch1_pacc_base", "pitch1_pacc_pot",
+    "pitch1_pbrk_base", "pitch1_pbrk_pot",
+    "pitch1_pcntrl_base", "pitch1_pcntrl_pot",
+    # Pitch 2
+    "pitch2_name", "pitch2_ovr",
+    "pitch2_consist_base", "pitch2_consist_pot",
+    "pitch2_pacc_base", "pitch2_pacc_pot",
+    "pitch2_pbrk_base", "pitch2_pbrk_pot",
+    "pitch2_pcntrl_base", "pitch2_pcntrl_pot",
+    # Pitch 3
+    "pitch3_name", "pitch3_ovr",
+    "pitch3_consist_base", "pitch3_consist_pot",
+    "pitch3_pacc_base", "pitch3_pacc_pot",
+    "pitch3_pbrk_base", "pitch3_pbrk_pot",
+    "pitch3_pcntrl_base", "pitch3_pcntrl_pot",
+    # Pitch 4
+    "pitch4_name", "pitch4_ovr",
+    "pitch4_consist_base", "pitch4_consist_pot",
+    "pitch4_pacc_base", "pitch4_pacc_pot",
+    "pitch4_pbrk_base", "pitch4_pbrk_pot",
+    "pitch4_pcntrl_base", "pitch4_pcntrl_pot",
+    # Pitch 5
+    "pitch5_name", "pitch5_ovr",
+    "pitch5_consist_base", "pitch5_consist_pot",
+    "pitch5_pacc_base", "pitch5_pacc_pot",
+    "pitch5_pbrk_base", "pitch5_pbrk_pot",
+    "pitch5_pcntrl_base", "pitch5_pcntrl_pot",
+)
+_SCOUTING_PLAYER_SELECT = ", ".join(f"p.{c}" for c in _SCOUTING_PLAYER_COLS)
+
 # Pagination defaults
 DEFAULT_PAGE = 1
 DEFAULT_PER_PAGE = 50
@@ -1270,7 +1335,7 @@ def api_scouted_player(player_id):
 
             # Load full player data
             row = conn.execute(
-                sa_text("SELECT * FROM simbbPlayers WHERE id = :pid"),
+                sa_text(f"SELECT {_SCOUTING_PLAYER_SELECT} FROM simbbPlayers p WHERE p.id = :pid"),
                 {"pid": player_id},
             ).first()
 
@@ -1467,7 +1532,7 @@ def api_scouted_players_batch():
                 ph2 = ", ".join(f":fp{i}" for i in range(len(found_ids)))
                 fp_params = {f"fp{i}": pid for i, pid in enumerate(found_ids)}
                 p_rows = conn.execute(
-                    sa_text(f"SELECT * FROM simbbPlayers WHERE id IN ({ph2})"),
+                    sa_text(f"SELECT {_SCOUTING_PLAYER_SELECT} FROM simbbPlayers p WHERE p.id IN ({ph2})"),
                     fp_params,
                 ).all()
                 for r in p_rows:

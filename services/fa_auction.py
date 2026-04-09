@@ -720,63 +720,83 @@ def get_auction_board(
         .order_by(auc.c.war_at_entry.desc())
     ).all()
 
+    if not auctions:
+        return []
+
+    # Batch-load ALL offers for all active auctions in one query
+    auction_ids = [int(r._mapping["id"]) for r in auctions]
+    all_offers_rows = conn.execute(
+        select(
+            offers.c.id,
+            offers.c.auction_id,
+            offers.c.org_id,
+            offers.c.total_value,
+            offers.c.aav,
+            offers.c.years,
+            offers.c.bonus,
+            offers.c.salaries_json,
+            offers.c.status,
+            offers.c.level_id,
+        )
+        .where(and_(
+            offers.c.auction_id.in_(auction_ids),
+            offers.c.status.in_(["active", "outbid"]),
+        ))
+    ).all()
+
+    # Group offers by auction_id
+    offers_by_auction = {}
+    all_competing_org_ids = set()
+    for o in all_offers_rows:
+        om = o._mapping
+        aid = int(om["auction_id"])
+        offers_by_auction.setdefault(aid, []).append(om)
+        if om["status"] == "active":
+            all_competing_org_ids.add(int(om["org_id"]))
+
+    # Batch-load all competing org names in one query
+    org_abbrev_map = {}
+    if all_competing_org_ids:
+        org_rows = conn.execute(
+            select(orgs.c.id, orgs.c.org_abbrev)
+            .where(orgs.c.id.in_(list(all_competing_org_ids)))
+        ).all()
+        org_abbrev_map = {int(r._mapping["id"]): r._mapping["org_abbrev"]
+                         for r in org_rows}
+
     result = []
     for row in auctions:
         a = row._mapping
         auction_id = int(a["id"])
 
-        # Get all offers for this auction
-        all_offers = conn.execute(
-            select(
-                offers.c.id,
-                offers.c.org_id,
-                offers.c.total_value,
-                offers.c.aav,
-                offers.c.years,
-                offers.c.bonus,
-                offers.c.salaries_json,
-                offers.c.status,
-                offers.c.level_id,
-            )
-            .where(and_(
-                offers.c.auction_id == auction_id,
-                offers.c.status.in_(["active", "outbid"]),
-            ))
-        ).all()
+        all_offers = offers_by_auction.get(auction_id, [])
 
         # Count active offers
-        active_count = sum(1 for o in all_offers if o._mapping["status"] == "active")
+        active_count = sum(1 for o in all_offers if o["status"] == "active")
 
-        # Get competing org names (alphabetically)
-        competing_org_ids = [int(o._mapping["org_id"]) for o in all_offers
-                           if o._mapping["status"] == "active"]
-        org_names = []
-        if competing_org_ids:
-            org_rows = conn.execute(
-                select(orgs.c.id, orgs.c.org_abbrev)
-                .where(orgs.c.id.in_(competing_org_ids))
-                .order_by(orgs.c.org_abbrev)
-            ).all()
-            org_names = [r._mapping["org_abbrev"] for r in org_rows]
+        # Competing org names (alphabetically)
+        org_names = sorted(
+            org_abbrev_map.get(int(o["org_id"]), "?")
+            for o in all_offers if o["status"] == "active"
+        )
 
         # Viewer's own offer (exact details)
         my_offer = None
         if viewer_org_id:
             for o in all_offers:
-                if int(o._mapping["org_id"]) == viewer_org_id:
-                    om = o._mapping
-                    salaries = om["salaries_json"]
+                if int(o["org_id"]) == viewer_org_id:
+                    salaries = o["salaries_json"]
                     if isinstance(salaries, str):
                         salaries = json.loads(salaries)
                     my_offer = {
-                        "offer_id": int(om["id"]),
-                        "years": int(om["years"]),
-                        "bonus": float(om["bonus"]),
-                        "total_value": float(om["total_value"]),
-                        "aav": float(om["aav"]),
+                        "offer_id": int(o["id"]),
+                        "years": int(o["years"]),
+                        "bonus": float(o["bonus"]),
+                        "total_value": float(o["total_value"]),
+                        "aav": float(o["aav"]),
                         "salaries": salaries,
-                        "level_id": int(om["level_id"]),
-                        "status": om["status"],
+                        "level_id": int(o["level_id"]),
+                        "status": o["status"],
                     }
                     break
 
