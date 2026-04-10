@@ -183,10 +183,6 @@
     document.getElementById('btn-load-analysis').addEventListener('click', loadAnalysis);
     document.getElementById('rc-attr-filter').addEventListener('input', filterAnalysisTable);
 
-    // Overall Weights
-    document.getElementById('btn-load-weights').addEventListener('click', loadOverallWeights);
-    document.getElementById('btn-save-weights').addEventListener('click', saveOverallWeights);
-
     // Growth Curves
     document.getElementById('btn-load-gc').addEventListener('click', loadGrowthCurves);
     document.getElementById('btn-save-gc').addEventListener('click', saveGrowthCurves);
@@ -2477,188 +2473,11 @@
     return '';
   }
 
-  // Overall Weights
-  let overallWeightsData = null; // cached after load
-
-  function loadOverallWeights() {
-    const container = document.getElementById('rc-weights-container');
-    const resultBox = document.getElementById('rc-weights-result');
-    resultBox.style.display = 'none';
-    container.innerHTML = '<div class="text-center text-muted">Loading weights...</div>';
-
-    fetch(`${ADMIN_BASE}/rating-config/overall-weights`, { credentials: 'include' })
-      .then(r => {
-        if (r.status === 401) throw new Error('Unauthorized - please login first');
-        return r.json();
-      })
-      .then(data => {
-        if (!data.ok || !data.weights) {
-          container.innerHTML = '<div class="text-center text-muted">No weights found. Run the migration first.</div>';
-          return;
-        }
-
-        overallWeightsData = data.weights;
-        renderOverallWeights();
-        document.getElementById('btn-save-weights').style.display = 'inline-block';
-      })
-      .catch(err => {
-        container.innerHTML = `<div class="text-center text-danger">Error: ${err.message}</div>`;
-      });
-  }
-
-  function renderOverallWeights() {
-    if (!overallWeightsData) return;
-
-    const container = document.getElementById('rc-weights-container');
-    const sortedTypes = Object.keys(overallWeightsData).sort();
-
-    container.innerHTML = sortedTypes.map(ratingType => {
-      const attrs = overallWeightsData[ratingType];
-      const sortedAttrs = Object.keys(attrs).sort();
-      const total = sortedAttrs.reduce((sum, k) => sum + attrs[k], 0);
-      const totalClass = Math.abs(total - 1.0) < 0.005 ? 'text-success' : 'text-danger';
-      const RATING_TYPE_LABELS = {
-        pitcher_overall: 'Pitcher Overall',
-        position_overall: 'Position Player Overall',
-        sp_rating: 'Starting Pitcher',
-        rp_rating: 'Relief Pitcher',
-        c_rating: 'Catcher',
-        fb_rating: 'First Base',
-        sb_rating: 'Second Base',
-        tb_rating: 'Third Base',
-        ss_rating: 'Shortstop',
-        lf_rating: 'Left Field',
-        cf_rating: 'Center Field',
-        rf_rating: 'Right Field',
-        dh_rating: 'Designated Hitter',
-      };
-      const label = RATING_TYPE_LABELS[ratingType] || ratingType;
-
-      return `
-        <div class="card" style="margin: 0">
-          <h4>${label}</h4>
-          <p class="text-muted" style="margin-bottom: 12px">
-            Sum: <strong class="${totalClass}">${total.toFixed(3)}</strong>
-            ${Math.abs(total - 1.0) >= 0.005 ? ' (should be 1.000)' : ''}
-          </p>
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Attribute</th>
-                <th style="width: 100px">Weight</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${sortedAttrs.map(attrKey => `
-                <tr>
-                  <td><code>${attrKey}</code></td>
-                  <td>
-                    <input type="number" step="0.01" min="0" max="1"
-                      class="weight-input"
-                      data-rating-type="${ratingType}"
-                      data-attr-key="${attrKey}"
-                      value="${attrs[attrKey]}"
-                      style="width: 80px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-primary); font-size: 0.85rem"
-                    />
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      `;
-    }).join('');
-
-    // Live sum recalculation on input change
-    container.querySelectorAll('.weight-input').forEach(input => {
-      input.addEventListener('input', recalcWeightSums);
-    });
-  }
-
-  function recalcWeightSums() {
-    const container = document.getElementById('rc-weights-container');
-    const inputs = container.querySelectorAll('.weight-input');
-
-    // Group by rating type
-    const sums = {};
-    inputs.forEach(input => {
-      const rt = input.dataset.ratingType;
-      sums[rt] = (sums[rt] || 0) + (parseFloat(input.value) || 0);
-    });
-
-    // Update the sum displays in each card
-    const cards = container.querySelectorAll('.card');
-    cards.forEach(card => {
-      const firstInput = card.querySelector('.weight-input');
-      if (!firstInput) return;
-      const rt = firstInput.dataset.ratingType;
-      const total = sums[rt] || 0;
-      const strong = card.querySelector('p strong');
-      if (strong) {
-        strong.textContent = total.toFixed(3);
-        strong.className = Math.abs(total - 1.0) < 0.005 ? 'text-success' : 'text-danger';
-        const note = Math.abs(total - 1.0) >= 0.005 ? ' (should be 1.000)' : '';
-        strong.parentElement.innerHTML = `Sum: <strong class="${strong.className}">${total.toFixed(3)}</strong>${note}`;
-      }
-    });
-  }
-
-  function saveOverallWeights() {
-    const container = document.getElementById('rc-weights-container');
-    const inputs = container.querySelectorAll('.weight-input');
-    const resultBox = document.getElementById('rc-weights-result');
-
-    // Collect weights from inputs
-    const weights = {};
-    inputs.forEach(input => {
-      const rt = input.dataset.ratingType;
-      const ak = input.dataset.attrKey;
-      const w = parseFloat(input.value) || 0;
-      if (!weights[rt]) weights[rt] = {};
-      weights[rt][ak] = w;
-    });
-
-    // Validate sums
-    for (const [rt, attrs] of Object.entries(weights)) {
-      const total = Object.values(attrs).reduce((s, v) => s + v, 0);
-      if (Math.abs(total - 1.0) >= 0.05) {
-        if (!confirm(`${rt} weights sum to ${total.toFixed(3)} (not 1.0). Save anyway?`)) {
-          return;
-        }
-      }
-    }
-
-    const btn = document.getElementById('btn-save-weights');
-    btn.disabled = true;
-    btn.textContent = 'Saving...';
-    resultBox.style.display = 'block';
-    resultBox.textContent = 'Saving weights...';
-
-    fetch(`${ADMIN_BASE}/rating-config/overall-weights`, {
-      method: 'PUT',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ weights }),
-    })
-      .then(r => {
-        if (r.status === 401) throw new Error('Unauthorized - please login first');
-        return r.json();
-      })
-      .then(data => {
-        if (data.ok) {
-          resultBox.textContent = `Saved! ${data.updated} weight(s) updated. Re-seed the config to recalculate overall distributions.`;
-        } else {
-          resultBox.textContent = 'Error: ' + (data.message || JSON.stringify(data));
-        }
-      })
-      .catch(err => {
-        resultBox.textContent = 'Error: ' + err.message;
-      })
-      .finally(() => {
-        btn.disabled = false;
-        btn.textContent = 'Save Weights';
-      });
-  }
+  // NOTE: Overall Weights editing was moved to the Weight Calibration page
+  // (see viewCalProfile / saveProfileWeights below) so all 13 rating types
+  // are managed in one place. The standalone loadOverallWeights /
+  // saveOverallWeights functions and the /rating-config/overall-weights
+  // endpoints were deleted.
 
   // ── Growth Curves ───────────────────────────────────────────────────
 
@@ -9372,15 +9191,24 @@
         _calOrigWeights = JSON.parse(JSON.stringify(p.weights || {}));
 
         const weights = p.weights || {};
+        // 13 rating types: 11 position-specifics + 2 generic overalls.
+        // Generic overalls are shown alongside position-specifics so admins
+        // can edit all weight knobs in one place.
         const posOrder = [
+          'pitcher_overall', 'position_overall',
+          'sp_rating', 'rp_rating',
           'c_rating', 'fb_rating', 'sb_rating', 'tb_rating', 'ss_rating',
-          'lf_rating', 'cf_rating', 'rf_rating', 'dh_rating', 'sp_rating', 'rp_rating',
+          'lf_rating', 'cf_rating', 'rf_rating', 'dh_rating',
         ];
         const posLabels = {
+          pitcher_overall: 'P (default)', position_overall: 'Pos (default)',
           c_rating: 'C', fb_rating: '1B', sb_rating: '2B', tb_rating: '3B',
           ss_rating: 'SS', lf_rating: 'LF', cf_rating: 'CF', rf_rating: 'RF',
           dh_rating: 'DH', sp_rating: 'SP', rp_rating: 'RP',
         };
+        // Show every type that has weights in the profile. For older profiles
+        // missing pitcher_overall/position_overall, the column header will not
+        // appear — admins should re-run calibration or seed those rows manually.
         const activePosTypes = posOrder.filter(rt => weights[rt]);
 
         const allAttrs = new Set();
@@ -9455,7 +9283,13 @@
             .then(res => {
               const st = document.getElementById('cal-edit-status');
               if (res.ok) {
-                st.textContent = `Saved ${res.updated} entries`;
+                let msg = `Saved ${res.updated} entries`;
+                if (res.activated && res.recompute && res.recompute.updated != null) {
+                  msg += ` — live: recomputed displayovr for ${res.recompute.updated} players`;
+                } else if (!res.activated) {
+                  msg += ' (profile is not active — activate to push to live)';
+                }
+                st.textContent = msg;
                 st.style.color = '#4caf50';
                 _calOrigWeights = JSON.parse(JSON.stringify(newWeights));
               } else {

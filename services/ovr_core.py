@@ -231,7 +231,7 @@ def load_weights(conn) -> Dict[str, Dict[str, float]]:
     if not weights:
         log.error(
             "rating_overall_weights table is empty — displayovr cannot be computed. "
-            "Run admin calibration or seed weights via PUT /admin/rating-config/overall-weights."
+            "Activate a weight profile via POST /admin/calibration/activate/<id>."
         )
 
     with _cache_lock:

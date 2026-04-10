@@ -432,82 +432,13 @@ def admin_update_level_config():
         return jsonify(ok=False, error="update_failed", message=str(e)), 500
 
 
-@admin_bp.get("/rating-config/overall-weights")
-def admin_get_overall_weights():
-    """
-    Return current overall rating weights.
-
-    GET /admin/rating-config/overall-weights
-
-    Response: { ok: true, weights: { "pitcher_overall": { attr: weight }, ... } }
-    """
-    guard = _require_admin()
-    if guard:
-        return guard
-
-    try:
-        from db import get_engine
-        from services.rating_config import get_overall_weights
-
-        engine = get_engine()
-        with engine.connect() as conn:
-            weights = get_overall_weights(conn)
-
-        return jsonify(ok=True, weights=weights)
-
-    except Exception as e:
-        logging.exception("admin_get_overall_weights failed")
-        return jsonify(ok=False, error="read_failed", message=str(e)), 500
-
-
-@admin_bp.put("/rating-config/overall-weights")
-def admin_update_overall_weights():
-    """
-    Update overall rating weights.
-
-    PUT /admin/rating-config/overall-weights
-    Body: { "weights": { "pitcher_overall": { "attr": weight, ... }, ... } }
-    """
-    guard = _require_admin()
-    if guard:
-        return guard
-
-    body = request.get_json(force=True, silent=True) or {}
-    weights = body.get("weights")
-    if not weights or not isinstance(weights, dict):
-        return jsonify(ok=False, error="missing_weights", message="Body must contain 'weights' dict"), 400
-
-    try:
-        from db import get_engine
-        from services.rating_config import update_overall_weight
-        from services.ovr_core import recompute_stored_displayovr, invalidate_caches
-
-        engine = get_engine()
-        count = 0
-        recompute_result = None
-        with engine.connect() as conn:
-            for rating_type, attr_map in weights.items():
-                if not isinstance(attr_map, dict):
-                    continue
-                for attr_key, weight in attr_map.items():
-                    update_overall_weight(conn, rating_type, attr_key, float(weight))
-                    count += 1
-            conn.commit()
-
-            # Invalidate caches and rebuild breakpoints + stored displayovr
-            # so the new weights propagate immediately to all read paths.
-            invalidate_caches()
-            try:
-                recompute_result = recompute_stored_displayovr(conn)
-                conn.commit()
-            except Exception:
-                logging.exception("recompute_stored_displayovr after weight update failed")
-
-        return jsonify(ok=True, updated=count, recompute=recompute_result)
-
-    except Exception as e:
-        logging.exception("admin_update_overall_weights failed")
-        return jsonify(ok=False, error="update_failed", message=str(e)), 500
+# NOTE: GET/PUT /admin/rating-config/overall-weights were deleted in the
+# weight UI unification. The Weight Calibration profile editor is now the
+# single source of truth for all 13 rating types (including pitcher_overall
+# and position_overall). Use:
+#   GET  /admin/calibration/profiles/<id>     — view profile weights
+#   PUT  /admin/calibration/profiles/<id>/weights — edit profile weights
+#   POST /admin/calibration/activate/<id>    — activate edited profile
 
 
 # ---------------------------------------------------------------------------
@@ -3202,7 +3133,13 @@ def admin_calibration_activate(profile_id):
 
 @admin_bp.put("/calibration/profiles/<int:profile_id>/weights")
 def admin_calibration_update_weights(profile_id):
-    """Update weights in an existing profile."""
+    """
+    Update weights in an existing profile.
+
+    If the edited profile is currently active, the new weights are immediately
+    pushed to rating_overall_weights and the displayovr breakpoints + stored
+    values are recomputed so changes propagate to all read paths in one call.
+    """
     guard = _require_admin()
     if guard:
         return guard
@@ -3215,13 +3152,34 @@ def admin_calibration_update_weights(profile_id):
 
     try:
         from db import get_engine
-        from services.weight_calibration import update_profile_weights
+        from sqlalchemy import text as sa_text
+        from services.weight_calibration import update_profile_weights, activate_profile
+        from services.ovr_core import recompute_stored_displayovr, invalidate_caches
 
         engine = get_engine()
+        recompute_result = None
         with engine.begin() as conn:
             count = update_profile_weights(conn, profile_id, weights)
 
-        return jsonify(ok=True, updated=count)
+            # If this profile is currently active, re-push to rating_overall_weights
+            # and recompute displayovr so the edits take effect immediately.
+            is_active_row = conn.execute(sa_text(
+                "SELECT is_active FROM weight_profiles WHERE id = :pid"
+            ), {"pid": profile_id}).first()
+            is_active = bool(is_active_row[0]) if is_active_row else False
+
+            if is_active:
+                activate_profile(conn, profile_id)
+                invalidate_caches()
+                try:
+                    recompute_result = recompute_stored_displayovr(conn)
+                except Exception:
+                    logging.exception(
+                        "recompute_stored_displayovr after profile weight update failed"
+                    )
+
+        return jsonify(ok=True, updated=count, recompute=recompute_result,
+                       activated=is_active)
 
     except ValueError as e:
         return jsonify(ok=False, error="not_found", message=str(e)), 404

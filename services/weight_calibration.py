@@ -564,11 +564,28 @@ def run_calibration(
     })
     profile_id = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar()
 
-    # Insert weight entries
+    # Collect all position-specific weights into a single dict so we can
+    # synthesize the generic pitcher_overall / position_overall backstops
+    # from them and persist all 13 rating types in the profile.
+    weights_by_type: Dict[str, Dict[str, float]] = {}
     for rating_type, cal in positions_result.items():
         if cal.get("skipped"):
             continue
-        for attr_key, weight in cal.get("weights", {}).items():
+        wts = cal.get("weights", {})
+        if wts:
+            weights_by_type[rating_type] = dict(wts)
+
+    # Synthesize pitcher_overall + position_overall as initial seed values.
+    # These are persisted in weight_profile_entries like any other rating
+    # type so admins can edit them in the profile UI without losing the
+    # values on subsequent profile activations.
+    backstops = _synthesize_backstop_weights(weights_by_type)
+    for bs_rt, bs_weights in backstops.items():
+        weights_by_type[bs_rt] = bs_weights
+
+    # Insert all weight entries (11 position-specific + 2 generic backstops)
+    for rating_type, attr_weights in weights_by_type.items():
+        for attr_key, weight in attr_weights.items():
             conn.execute(text("""
                 INSERT INTO weight_profile_entries
                     (profile_id, rating_type, attribute_key, weight)
@@ -673,12 +690,14 @@ def _synthesize_backstop_weights(
 
 def activate_profile(conn, profile_id: int):
     """
-    Activate a weight profile: set is_active=1, write entries
+    Activate a weight profile: set is_active=1, write all profile entries
     to rating_overall_weights (the live table consumed by rosters).
 
-    If the profile only contains position-specific weights (no
-    pitcher_overall / position_overall), backstop weights are
-    synthesized by averaging the position-specific weights.
+    The profile is the single source of truth — every rating type that
+    exists in weight_profile_entries (including pitcher_overall and
+    position_overall) is written verbatim. There is no synthesis or
+    auto-overwrite path: manual edits to pitcher_overall/position_overall
+    in the profile editor are preserved across activations.
     """
     # Deactivate all
     conn.execute(text("UPDATE weight_profiles SET is_active = 0"))
@@ -706,23 +725,13 @@ def activate_profile(conn, profile_id: int):
         rating_types.add(rt)
         weights_by_type.setdefault(rt, {})[str(e[1])] = float(e[2])
 
-    # Synthesize backstop overall weights if missing from the profile
-    backstops = _synthesize_backstop_weights(weights_by_type)
-    backstop_count = 0
-    for bs_rt, bs_weights in backstops.items():
-        rating_types.add(bs_rt)
-        for ak, w in bs_weights.items():
-            entries = list(entries)  # ensure mutable
-            backstop_count += 1
-            weights_by_type.setdefault(bs_rt, {})[ak] = w
-
-    # Clear existing weights for all rating types this profile covers
+    # Clear existing weights for all rating types in this profile
     for rt in rating_types:
         conn.execute(text(
             "DELETE FROM rating_overall_weights WHERE rating_type = :rt"
         ), {"rt": rt})
 
-    # Insert all weights (profile entries + synthesized backstops)
+    # Insert all profile weights into the live table
     insert_count = 0
     for rt, attr_weights in weights_by_type.items():
         for ak, w in attr_weights.items():
@@ -736,7 +745,7 @@ def activate_profile(conn, profile_id: int):
     return {
         "activated": profile_id,
         "entries": insert_count,
-        "backstops_generated": list(backstops.keys()) if backstops else [],
+        "rating_types": sorted(rating_types),
     }
 
 
