@@ -9039,6 +9039,7 @@
       league_level: parseInt(document.getElementById('cal-level').value, 10),
       config: {
         min_innings: parseInt(document.getElementById('cal-min-inn').value, 10) || 50,
+        min_at_bats: parseInt(document.getElementById('cal-min-ab').value, 10) || 100,
         min_ipo: parseInt(document.getElementById('cal-min-ipo').value, 10) || 60,
       },
     };

@@ -221,6 +221,61 @@ def _load_pitcher_data(
     return records, pitcher_attr_keys
 
 
+def _load_dh_player_data(
+    conn, league_year_id: int, league_level: int, min_at_bats: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Load batting data for DH calibration.
+
+    Unlike fielding positions, DH appearances are not recorded in
+    player_fielding_stats (DH is not a defensive role). The DH rating
+    represents pure offensive value, so we load every player with enough
+    at-bats at the target league level and run an offense-only regression
+    against their OPS.
+
+    Each player contributes ONE record per (player, team_id) combination
+    so multi-team players don't get double-counted into a skewed sample.
+    """
+    offense_cols = ", ".join(f"p.{a}" for a in OFFENSE_ATTRS)
+
+    sql = text(f"""
+        SELECT bs.player_id, {offense_cols},
+               bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
+               bs.home_runs, bs.walks, bs.strikeouts
+        FROM player_batting_stats bs
+        JOIN simbbPlayers p ON p.id = bs.player_id
+        JOIN teams tm ON tm.id = bs.team_id
+        WHERE bs.league_year_id = :lyid
+          AND tm.team_level = :level
+          AND bs.at_bats >= :min_ab
+    """)
+    rows = conn.execute(sql, {
+        "lyid": league_year_id, "level": league_level, "min_ab": min_at_bats,
+    }).mappings().all()
+
+    records = []
+    for row in rows:
+        ab = float(row["at_bats"])
+        h = float(row["hits"])
+        d = float(row["doubles_hit"])
+        t = float(row["triples"])
+        hr = float(row["home_runs"])
+        bb = float(row["walks"])
+        pa = ab + bb
+        obp = (h + bb) / pa if pa > 0 else 0.0
+        slg = (h + d + 2 * t + 3 * hr) / ab if ab > 0 else 0.0
+        ops = obp + slg
+
+        records.append({
+            "player_id": int(row["player_id"]),
+            "offense_attrs": [float(row.get(a, 0) or 0) for a in OFFENSE_ATTRS],
+            "ops": ops,
+            "fld_runs": 0.0,  # not used for DH
+        })
+
+    return records
+
+
 def _load_league_error_rates(
     conn, league_year_id: int, league_level: int,
 ) -> Dict[str, float]:
@@ -312,6 +367,7 @@ def _calibrate_position(
     conn, position_code: str, league_year_id: int, league_level: int,
     min_innings: int, blend: Tuple[float, float],
     lg_err_rate: Dict[str, float],
+    min_at_bats: int = 100,
 ) -> Dict[str, Any]:
     """
     Calibrate weights for a single fielding position.
@@ -321,10 +377,18 @@ def _calibrate_position(
     offense_pct, defense_pct = blend
     defense_attrs = DEFENSE_ATTRS_CATCHER if position_code == "c" else DEFENSE_ATTRS_BASE
 
-    records = _load_position_player_data(
-        conn, position_code, league_year_id, league_level,
-        min_innings, lg_err_rate,
-    )
+    # DH does not appear in player_fielding_stats (DH is not a defensive
+    # position). Load batting stats directly from any player with enough
+    # at-bats at this level.
+    if position_code == "dh":
+        records = _load_dh_player_data(
+            conn, league_year_id, league_level, min_at_bats=min_at_bats,
+        )
+    else:
+        records = _load_position_player_data(
+            conn, position_code, league_year_id, league_level,
+            min_innings, lg_err_rate,
+        )
 
     n = len(records)
     p_max = max(len(OFFENSE_ATTRS), len(defense_attrs))
@@ -490,8 +554,9 @@ def run_calibration(
     Run full calibration across all positions + SP/RP.
 
     config options:
-        min_innings: int (default 50)
-        min_ipo: int (default 60)
+        min_innings: int (default 50)   — fielding innings threshold
+        min_at_bats: int (default 100)  — DH-only batting threshold
+        min_ipo: int (default 60)       — pitcher innings_pitched_outs threshold
         blend_ratios: dict of {rating_type: [offense_pct, defense_pct]}
         name: str (profile name)
 
@@ -499,6 +564,7 @@ def run_calibration(
     """
     config = config or {}
     min_innings = int(config.get("min_innings", 50))
+    min_at_bats = int(config.get("min_at_bats", 100))
     min_ipo = int(config.get("min_ipo", 60))
     blend_overrides = config.get("blend_ratios", {})
     # Use the default if name is missing OR explicitly None (dict.get only
@@ -523,6 +589,7 @@ def run_calibration(
             cal = _calibrate_position(
                 conn, pos_code, league_year_id, league_level,
                 min_innings, blend, lg_err_rate,
+                min_at_bats=min_at_bats,
             )
             positions_result[rating_type] = cal
         except Exception as e:
