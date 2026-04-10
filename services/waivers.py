@@ -18,16 +18,61 @@ from sqlalchemy import (
     MetaData, Table, and_, func, select, text as sa_text, update,
 )
 
-from services.attribute_visibility import fuzz_displayovr
-
 log = logging.getLogger(__name__)
 
 
-def _fuzz_ovr(true_ovr, org_id, player_id):
-    """Fuzz displayovr if an org_id is provided, else return raw."""
-    if org_id is None:
-        return true_ovr
-    return fuzz_displayovr(true_ovr, org_id, player_id)
+def _build_waiver_displayovr_map(conn, player_ids, viewing_org_id):
+    """
+    Compute per-org-fuzzed displayovr for a set of waiver players using
+    the canonical pipeline (build_player_display + get_visible_players_batch
+    with force_free_agent=True).
+
+    Returns: {player_id: displayovr_int_or_None}
+
+    If viewing_org_id is None, returns the precise stored displayovr for
+    each player (no per-org fuzz).
+    """
+    if not player_ids:
+        return {}
+
+    try:
+        from services.player_display import load_display_context, build_player_display
+
+        rows = conn.execute(sa_text(
+            f"SELECT * FROM simbbPlayers WHERE id IN ({','.join(str(int(p)) for p in player_ids)})"
+        )).mappings().all()
+
+        if viewing_org_id is None:
+            # No viewer — return precise stored value
+            return {int(r["id"]): r.get("displayovr") for r in rows}
+
+        display_ctx = load_display_context(conn)
+        display_list = []
+        for r in rows:
+            m = dict(r)
+            m["current_level"] = m.get("current_level") or 9
+            display_list.append(build_player_display(m, display_ctx))
+
+        from services.attribute_visibility import get_visible_players_batch
+        holding_org_ids = {p["id"]: 0 for p in display_list}
+        player_levels = {p["id"]: 9 for p in display_list}
+        visible = get_visible_players_batch(
+            conn, display_list, viewing_org_id,
+            holding_org_ids, player_levels,
+            display_ctx["dist_by_level"], display_ctx["col_cats"],
+            display_ctx["position_weights"],
+            force_free_agent=True,
+        )
+        return {int(p["id"]): p.get("displayovr") for p in visible}
+    except Exception:
+        log.exception("_build_waiver_displayovr_map failed; falling back to stored values")
+        try:
+            rows = conn.execute(sa_text(
+                f"SELECT id, displayovr FROM simbbPlayers WHERE id IN ({','.join(str(int(p)) for p in player_ids)})"
+            )).mappings().all()
+            return {int(r["id"]): r.get("displayovr") for r in rows}
+        except Exception:
+            return {}
 
 
 # ── Constants (mirror contract_ops.py) ────────────────────────────────
@@ -575,7 +620,7 @@ def get_waiver_wire(
     bids = t["waiver_bids"]
 
     rows = conn.execute(sa_text("""
-        SELECT wc.*, p.firstName, p.lastName, p.ptype, p.age, p.displayovr,
+        SELECT wc.*, p.firstName, p.lastName, p.ptype, p.age,
                o.org_abbrev AS releasing_org_abbrev
         FROM waiver_claims wc
         JOIN simbbPlayers p ON p.id = wc.player_id
@@ -583,6 +628,10 @@ def get_waiver_wire(
         WHERE wc.league_year_id = :lyid AND wc.status = 'active'
         ORDER BY wc.expires_week ASC, wc.created_at ASC
     """), {"lyid": league_year_id}).mappings().all()
+
+    # Compute per-org-fuzzed displayovr via canonical pipeline
+    player_ids = [r["player_id"] for r in rows]
+    displayovr_map = _build_waiver_displayovr_map(conn, player_ids, org_id)
 
     # Count bids per waiver
     waiver_ids = [r["id"] for r in rows]
@@ -615,7 +664,7 @@ def get_waiver_wire(
             "player_name": f"{r['firstName']} {r['lastName']}",
             "ptype": r["ptype"],
             "age": r["age"],
-            "displayovr": _fuzz_ovr(r["displayovr"], org_id, r["player_id"]),
+            "displayovr": displayovr_map.get(r["player_id"]),
             "contract_id": r["contract_id"],
             "releasing_org_id": r["releasing_org_id"],
             "releasing_org_abbrev": r["releasing_org_abbrev"],
@@ -638,7 +687,7 @@ def get_waiver_detail(
     bids = t["waiver_bids"]
 
     row = conn.execute(sa_text("""
-        SELECT wc.*, p.firstName, p.lastName, p.ptype, p.age, p.displayovr,
+        SELECT wc.*, p.firstName, p.lastName, p.ptype, p.age,
                o.org_abbrev AS releasing_org_abbrev
         FROM waiver_claims wc
         JOIN simbbPlayers p ON p.id = wc.player_id
@@ -649,13 +698,15 @@ def get_waiver_detail(
     if not row:
         return None
 
+    displayovr_map = _build_waiver_displayovr_map(conn, [row["player_id"]], org_id)
+
     result = {
         "waiver_claim_id": row["id"],
         "player_id": row["player_id"],
         "player_name": f"{row['firstName']} {row['lastName']}",
         "ptype": row["ptype"],
         "age": row["age"],
-        "displayovr": _fuzz_ovr(row["displayovr"], org_id, row["player_id"]),
+        "displayovr": displayovr_map.get(row["player_id"]),
         "contract_id": row["contract_id"],
         "releasing_org_id": row["releasing_org_id"],
         "releasing_org_abbrev": row["releasing_org_abbrev"],

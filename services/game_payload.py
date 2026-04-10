@@ -4073,6 +4073,33 @@ def build_week_payloads(
                 except Exception:
                     pass
 
+            # GLOBAL: Recompute displayovr breakpoints + stored values after
+            # all attribute updates for this subweek have been committed.
+            # Ensures the next subweek (and all read paths) see displayovr
+            # values consistent with the latest player attributes.
+            try:
+                with timed_stage("recompute_displayovr",
+                                 week=season_week, subweek=subweek):
+                    from services.ovr_core import (
+                        recompute_stored_displayovr, invalidate_caches,
+                    )
+                    invalidate_caches()
+                    ovr_result = recompute_stored_displayovr(conn)
+                conn.commit()
+                logger.info(
+                    "Recomputed displayovr after subweek '%s': %d players",
+                    subweek, ovr_result.get("updated", 0),
+                )
+            except Exception as ovr_err:
+                logger.exception(
+                    "displayovr recompute failed after subweek '%s': %s",
+                    subweek, ovr_err,
+                )
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
         subweek_payloads[subweek] = sw_payloads
 
         # ---------------------------------------------------------------

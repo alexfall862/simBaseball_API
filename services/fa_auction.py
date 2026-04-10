@@ -852,6 +852,7 @@ def get_auction_board(
                         holding_org_ids, player_levels,
                         display_ctx["dist_by_level"], display_ctx["col_cats"],
                         display_ctx["position_weights"],
+                        force_free_agent=True,
                     )
                     display_map = {p["id"]: p for p in visible}
 
@@ -1116,6 +1117,7 @@ def get_free_agent_pool(
                 holding_org_ids, player_levels,
                 display_ctx["dist_by_level"], display_ctx["col_cats"],
                 display_ctx["position_weights"],
+                force_free_agent=True,
             )
         except Exception as e:
             log.warning("FA pool visibility failed, serving unfuzzed: %s", e)
@@ -1342,6 +1344,7 @@ def get_free_agent_detail(
             holding_org_ids, player_levels,
             display_ctx["dist_by_level"], display_ctx["col_cats"],
             display_ctx["position_weights"],
+            force_free_agent=True,
         )
         if visible:
             player_display = visible[0]

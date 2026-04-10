@@ -575,7 +575,7 @@ def _compute_team_ovr_bulk(conn, league_level: int) -> Dict[int, float]:
     Uses position-specific weights when a player has a listed position,
     falling back to pitcher_overall / position_overall otherwise.
     """
-    from services.weight_calibration import _resolve_ovr_weights
+    from services.ovr_core import resolve_ovr_weights
 
     # Load overall weights
     try:
@@ -678,10 +678,9 @@ def _compute_team_ovr_bulk(conn, league_level: int) -> Dict[int, float]:
                 if tw > 0:
                     derived[f"pitch{n}_ovr"] = tv / tw
 
-        # Position-aware weight selection
-        wts = _resolve_ovr_weights(
-            pid, ptype, listed_positions, wt_map,
-            pitcher_wt, position_wt,
+        # Position-aware weight selection (canonical ovr_core function)
+        wts = resolve_ovr_weights(
+            listed_positions.get(pid), ptype, wt_map,
         )
         if not wts:
             continue

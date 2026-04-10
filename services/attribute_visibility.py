@@ -14,7 +14,6 @@ Contexts:
 
 import hashlib
 import logging
-import re
 from sqlalchemy import text
 
 log = logging.getLogger(__name__)
@@ -50,7 +49,7 @@ _GRADE_THRESHOLDS = [
     (20, "F"),
 ]
 
-PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+from services.ovr_core import PITCH_COMPONENT_RE  # noqa: E402
 
 # Letter grade → midpoint 20-80 score (for deriving displayovr from letter grades)
 _GRADE_TO_SCORE = {
@@ -61,13 +60,7 @@ _GRADE_TO_SCORE = {
     "F": 20,
 }
 
-# Position code → rating type key in the ratings dict
-_POS_CODE_TO_RATING = {
-    "c": "c_rating", "fb": "fb_rating", "sb": "sb_rating",
-    "tb": "tb_rating", "ss": "ss_rating", "lf": "lf_rating",
-    "cf": "cf_rating", "rf": "rf_rating", "dh": "dh_rating",
-    "sp": "sp_rating", "rp": "rp_rating",
-}
+from services.ovr_core import POS_CODE_TO_RATING as _POS_CODE_TO_RATING  # noqa: E402
 
 # Actions that grant precise attribute visibility (carryover-eligible)
 _PRECISE_ATTR_ACTIONS = frozenset({
@@ -341,169 +334,9 @@ def _compute_derived_from_values(base_values, position_weights=None):
 # Derived displayovr from visible ratings
 # ---------------------------------------------------------------------------
 
-def _derive_raw_ovr(
-    ratings, ptype, listed_pos_code, ovr_weights, display_format,
-):
-    """
-    Compute a raw overall score from the org-visible ratings.
-
-    Returns a raw float suitable for percentile ranking, or None.
-    For letter_grade format, converts grades to numeric midpoints first.
-    For hidden format, returns None.
-
-    Uses three tiers:
-      1. Position-specific derived rating (ss_rating, sp_rating, etc.)
-      2. Weighted average using ovr_weights
-      3. Simple average of all visible _display values (last-resort fallback)
-    """
-    if display_format == "hidden":
-        return None
-
-    is_letter = display_format == "letter_grade"
-
-    # --- Tier 1: position-specific derived rating ---
-    if listed_pos_code and not is_letter:
-        rating_key = _POS_CODE_TO_RATING.get(listed_pos_code)
-        if rating_key and rating_key in ratings and ratings[rating_key] is not None:
-            try:
-                return float(ratings[rating_key])
-            except (TypeError, ValueError):
-                pass
-
-    # --- Tier 2: weighted average using ovr_weights ---
-    wts = {}
-    if listed_pos_code:
-        rating_type = _POS_CODE_TO_RATING.get(listed_pos_code)
-        wts = ovr_weights.get(rating_type, {}) if rating_type else {}
-    if not wts:
-        if ptype == "Pitcher":
-            wts = ovr_weights.get("pitcher_overall", {})
-        else:
-            wts = ovr_weights.get("position_overall", {})
-
-    if wts:
-        total_w = 0.0
-        total_v = 0.0
-        for attr_key, weight in wts.items():
-            if weight <= 0:
-                continue
-            if attr_key.endswith("_ovr"):
-                display_key = attr_key
-            elif attr_key.endswith("_base"):
-                display_key = attr_key.replace("_base", "_display")
-            else:
-                continue
-            val = ratings.get(display_key)
-            if val is None:
-                continue
-            if is_letter:
-                score = _GRADE_TO_SCORE.get(val)
-                if score is None:
-                    continue
-                total_v += score * weight
-            else:
-                try:
-                    total_v += float(val) * weight
-                except (TypeError, ValueError):
-                    continue
-            total_w += weight
-        if total_w > 0:
-            return total_v / total_w
-
-    # --- Tier 3: simple average of all visible _display values ---
-    # Last resort when weights are unavailable. Ensures _raw_ovr is never
-    # None when there are visible ratings, so percentile ranking always runs.
-    vals = []
-    for key, val in ratings.items():
-        if val is None:
-            continue
-        if is_letter:
-            score = _GRADE_TO_SCORE.get(val)
-            if score is not None:
-                vals.append(score)
-        elif key.endswith("_display"):
-            try:
-                vals.append(float(val))
-            except (TypeError, ValueError):
-                continue
-    if vals:
-        return sum(vals) / len(vals)
-
-    return None
-
-
-def _percentile_rank_to_20_80(rank):
-    """Map a percentile rank (0.0-1.0) to 20-80 scale, rounded to nearest 5."""
-    raw_score = 20.0 + rank * 60.0
-    score = int(round(raw_score / 5.0) * 5)
-    return max(20, min(80, score))
-
-
-def percentile_rank_displayovr(player_dicts):
-    """
-    Post-processing pass: convert each player's ``_raw_ovr`` into a
-    percentile-ranked 20-80 displayovr within (level, ptype) groups.
-
-    Operates in-place on the player dicts.  Players without ``_raw_ovr``
-    (e.g. hidden context) are skipped.
-    """
-    log.debug("percentile_rank_displayovr: processing %d players", len(player_dicts))
-    # Group by (level, ptype) for separate percentile ranking
-    groups = {}  # (level, ptype) -> [(index, raw_ovr), ...]
-    null_count = 0
-    for i, p in enumerate(player_dicts):
-        raw_ovr = p.pop("_raw_ovr", None)
-        if raw_ovr is None:
-            null_count += 1
-            # No raw_ovr means hidden context — ensure displayovr is cleared
-            p["displayovr"] = None
-            bio = p.get("bio")
-            if bio and "displayovr" in bio:
-                bio["displayovr"] = None
-            continue
-        level = p.get("current_level") or p.get("league_level")
-        ptype = (p.get("bio", {}).get("ptype") or p.get("ptype") or "").strip()
-        key = (level, ptype)
-        groups.setdefault(key, []).append((i, raw_ovr))
-
-    log.debug(
-        "percentile_rank_displayovr: %d with raw_ovr, %d null, groups=%s",
-        sum(len(m) for m in groups.values()), null_count,
-        {f"L{k[0]}_{k[1]}": len(v) for k, v in groups.items()},
-    )
-
-    for (level, ptype), members in groups.items():
-        n = len(members)
-        if n == 1:
-            idx, _ = members[0]
-            player_dicts[idx]["displayovr"] = 50
-            bio = player_dicts[idx].get("bio")
-            if bio and "displayovr" in bio:
-                bio["displayovr"] = 50
-            continue
-
-        # Sort by raw_ovr, assign percentile ranks with average tie-breaking
-        sorted_members = sorted(members, key=lambda x: x[1])
-
-        for rank_idx, (idx, raw_ovr) in enumerate(sorted_members):
-            # Average rank for ties (consistent with admin preview)
-            rank_below = sum(1 for _, v in sorted_members if v < raw_ovr)
-            rank_equal = sum(1 for _, v in sorted_members if v == raw_ovr)
-            pct_rank = (rank_below + (rank_equal - 1) / 2.0) / (n - 1)
-            pct_rank = max(0.0, min(1.0, pct_rank))
-            ovr = _percentile_rank_to_20_80(pct_rank)
-
-            player_dicts[idx]["displayovr"] = ovr
-            bio = player_dicts[idx].get("bio")
-            if bio and "displayovr" in bio:
-                bio["displayovr"] = ovr
-
-            # Stash display_format for letter-grade conversion
-            vis = player_dicts[idx].get("visibility_context", {})
-            if vis.get("display_format") == "letter_grade":
-                player_dicts[idx]["displayovr"] = _score_to_letter(ovr)
-                if bio and "displayovr" in bio:
-                    bio["displayovr"] = _score_to_letter(ovr)
+# NOTE: _derive_raw_ovr and percentile_rank_displayovr were deleted in the
+# canonical displayovr refactor. All displayovr derivation now goes through
+# services.ovr_core.compute_displayovr() in _apply_visibility below.
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +354,8 @@ def _apply_visibility(
     position_weights=None,
     ovr_weights=None,
     listed_pos_code=None,
+    breakpoints=None,
+    force_free_agent=False,
 ):
     """
     Apply fog-of-war to a player dict (output of _build_player_with_ratings).
@@ -771,17 +606,50 @@ def _apply_visibility(
     player_dict["ratings"] = ratings
     player_dict["potentials"] = potentials
 
-    # --- displayovr: derived from visible ratings, then percentile-ranked ---
-    player_dict["_raw_ovr"] = _derive_raw_ovr(
-        ratings, ptype, listed_pos_code,
-        ovr_weights or {}, display_format,
-    )
+    # --- displayovr: canonical compute_displayovr() against league breakpoints ---
+    # Strict-math: precise contexts use true _base attrs from bio; fuzzed contexts
+    # use the per-org fuzzed _display values produced above. Same weights and
+    # same league-wide breakpoints in both cases.
+    from services.ovr_core import compute_displayovr
+
+    if display_format == "hidden":
+        displayovr_value = None
+    else:
+        # Free-agent / waiver players are forced to MLB peer group
+        is_fa = bool(force_free_agent)
+        peer_level = level_key
+
+        if attrs_precise:
+            # Precise: use true _base values from bio
+            attrs_source = bio
+            key_suffix = "_base"
+        else:
+            # Fuzzed: use the per-org fuzzed _display ratings produced above
+            attrs_source = ratings
+            key_suffix = "_display"
+
+        displayovr_value = compute_displayovr(
+            attrs_source,
+            ptype,
+            listed_pos_code,
+            peer_level,
+            ovr_weights or {},
+            breakpoints or {},
+            key_suffix=key_suffix,
+            is_free_agent=is_fa,
+        )
+
+    player_dict["displayovr"] = displayovr_value
+    bio_for_disp = player_dict.get("bio")
+    if isinstance(bio_for_disp, dict) and "displayovr" in bio_for_disp:
+        bio_for_disp["displayovr"] = displayovr_value
 
     player_dict["visibility_context"] = {
         "context": context,
         "display_format": display_format,
         "attributes_precise": attrs_precise,
         "potentials_precise": pot_precise,
+        "displayovr_precise": attrs_precise and displayovr_value is not None,
     }
 
     return player_dict
@@ -792,11 +660,22 @@ def _apply_visibility(
 # ---------------------------------------------------------------------------
 
 def _load_ovr_weights(conn):
-    """Load overall weights once for displayovr derivation."""
+    """Load overall weights via the canonical ovr_core cache."""
     try:
-        from services.rating_config import get_overall_weights
-        return get_overall_weights(conn)
+        from services.ovr_core import load_weights
+        return load_weights(conn)
     except Exception:
+        log.exception("_load_ovr_weights failed")
+        return {}
+
+
+def _load_breakpoints(conn):
+    """Load displayovr breakpoints via the canonical ovr_core cache."""
+    try:
+        from services.ovr_core import load_breakpoints
+        return load_breakpoints(conn)
+    except Exception:
+        log.exception("_load_breakpoints failed")
         return {}
 
 
@@ -830,6 +709,7 @@ def get_visible_player(
     dist_config,
     col_cats,
     position_weights=None,
+    force_free_agent=False,
 ):
     """
     Apply fog-of-war to a single player dict.
@@ -840,27 +720,21 @@ def get_visible_player(
     player_level: current_level from contract
     dist_config: {ptype: {level: {attr: {mean, std}}}}
     col_cats: {rating: [...], pot: [...], bio: [...], derived: [...]}
+    force_free_agent: rank against MLB peer group regardless of player_level
     """
     player_id = player_dict.get("id")
     unlocked = _load_scouting_actions_single(conn, viewing_org_id, player_id)
     ovr_weights = _load_ovr_weights(conn)
+    breakpoints = _load_breakpoints(conn)
     listed_positions = _load_listed_positions_batch(conn, [player_id])
-    result = _apply_visibility(
+    return _apply_visibility(
         player_dict, viewing_org_id, holding_org_id, player_level,
         unlocked, dist_config, col_cats, position_weights,
         ovr_weights=ovr_weights,
         listed_pos_code=listed_positions.get(player_id),
+        breakpoints=breakpoints,
+        force_free_agent=force_free_agent,
     )
-    # Single-player case: no peer group, assign 50
-    raw_ovr = result.pop("_raw_ovr", None)
-    if raw_ovr is not None:
-        result["displayovr"] = 50
-        bio = result.get("bio")
-        if bio and "displayovr" in bio:
-            bio["displayovr"] = 50
-    else:
-        result["displayovr"] = None
-    return result
 
 
 def get_visible_players_batch(
@@ -872,6 +746,7 @@ def get_visible_players_batch(
     dist_config,
     col_cats,
     position_weights=None,
+    force_free_agent=False,
 ):
     """
     Apply fog-of-war to a list of player dicts.
@@ -880,14 +755,17 @@ def get_visible_players_batch(
     holding_org_ids: dict {player_id: holding_org_id}
     player_levels: dict {player_id: current_level}
     dist_config: {ptype: {level: {attr: {mean, std}}}}
+    force_free_agent: rank all players against MLB peer group (used by FA/waivers)
 
-    Uses a single batch query for scouting actions.
+    Uses a single batch query for scouting actions. displayovr is computed
+    via the canonical ovr_core.compute_displayovr() inside _apply_visibility.
     """
     player_ids = [p.get("id") for p in player_dicts if p.get("id") is not None]
     actions_by_player = _load_scouting_actions_batch(conn, viewing_org_id, player_ids)
 
-    # Load once for the whole batch
+    # Load once for the whole batch (cached in ovr_core, ~free)
     ovr_weights = _load_ovr_weights(conn)
+    breakpoints = _load_breakpoints(conn)
     listed_positions = _load_listed_positions_batch(conn, player_ids)
 
     results = []
@@ -901,32 +779,15 @@ def get_visible_players_batch(
             unlocked, dist_config, col_cats, position_weights,
             ovr_weights=ovr_weights,
             listed_pos_code=listed_positions.get(pid),
+            breakpoints=breakpoints,
+            force_free_agent=force_free_agent,
         )
         results.append(result)
-
-    # Percentile-rank displayovr across (level, ptype) groups
-    percentile_rank_displayovr(results)
 
     return results
 
 
-# ---------------------------------------------------------------------------
-# Lightweight displayovr fuzz for endpoints that bypass full visibility
-# ---------------------------------------------------------------------------
-
-def fuzz_displayovr(true_ovr, viewing_org_id, player_id):
-    """
-    Fuzz a displayovr value for a viewing org (independent fuzz).
-
-    For use in lightweight listing endpoints (e.g. waiver wire) that show
-    displayovr WITHOUT individual attributes — so there is no consistency
-    requirement.  Full-visibility endpoints use _derive_displayovr() instead,
-    which derives displayovr from the org's visible attribute ratings.
-    """
-    if true_ovr is None:
-        return None
-    try:
-        ovr_int = int(true_ovr)
-    except (TypeError, ValueError):
-        return None
-    return fuzz_20_80(ovr_int, viewing_org_id, player_id, "displayovr")
+# NOTE: fuzz_displayovr was deleted in the canonical displayovr refactor.
+# All endpoints (including lightweight listings like waivers) now route
+# through services.ovr_core.compute_displayovr() against the per-org
+# fuzzed attributes produced by _apply_visibility.

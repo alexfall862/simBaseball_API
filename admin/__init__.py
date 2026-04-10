@@ -480,9 +480,11 @@ def admin_update_overall_weights():
     try:
         from db import get_engine
         from services.rating_config import update_overall_weight
+        from services.ovr_core import recompute_stored_displayovr, invalidate_caches
 
         engine = get_engine()
         count = 0
+        recompute_result = None
         with engine.connect() as conn:
             for rating_type, attr_map in weights.items():
                 if not isinstance(attr_map, dict):
@@ -492,7 +494,16 @@ def admin_update_overall_weights():
                     count += 1
             conn.commit()
 
-        return jsonify(ok=True, updated=count)
+            # Invalidate caches and rebuild breakpoints + stored displayovr
+            # so the new weights propagate immediately to all read paths.
+            invalidate_caches()
+            try:
+                recompute_result = recompute_stored_displayovr(conn)
+                conn.commit()
+            except Exception:
+                logging.exception("recompute_stored_displayovr after weight update failed")
+
+        return jsonify(ok=True, updated=count, recompute=recompute_result)
 
     except Exception as e:
         logging.exception("admin_update_overall_weights failed")
@@ -3169,14 +3180,17 @@ def admin_calibration_activate(profile_id):
 
     try:
         from db import get_engine
-        from services.weight_calibration import activate_profile, recompute_displayovr
+        from services.weight_calibration import activate_profile
+        from services.ovr_core import recompute_stored_displayovr, invalidate_caches
         from services.rating_config import invalidate_rating_config_cache
 
         engine = get_engine()
         with engine.begin() as conn:
             result = activate_profile(conn, profile_id)
-            ovr_result = recompute_displayovr(conn)
+            invalidate_caches()
+            ovr_result = recompute_stored_displayovr(conn)
             result["displayovr_updated"] = ovr_result.get("updated", 0)
+            result["breakpoints"] = ovr_result.get("by_level", {})
 
         invalidate_rating_config_cache()
         return jsonify(ok=True, **result)
@@ -3228,11 +3242,12 @@ def admin_recompute_displayovr():
 
     try:
         from db import get_engine
-        from services.weight_calibration import recompute_displayovr
+        from services.ovr_core import recompute_stored_displayovr, invalidate_caches
 
         engine = get_engine()
         with engine.begin() as conn:
-            result = recompute_displayovr(conn, level=int(level) if level else None)
+            invalidate_caches()
+            result = recompute_stored_displayovr(conn, level=int(level) if level else None)
 
         return jsonify(ok=True, **result)
 
@@ -3400,10 +3415,10 @@ def admin_player_preview():
                     "scaled_20_80": scaled,
                 }
 
-            # Compute overall — position-aware weight selection
-            from services.weight_calibration import (
-                _compute_raw_ovr_for_row, _percentile_rank_to_20_80,
-                _resolve_ovr_weights, _POS_CODE_TO_RATING_TYPE,
+            # Compute overall via canonical ovr_core pipeline
+            from services.ovr_core import (
+                compute_raw_ovr, compute_displayovr,
+                load_breakpoints, POS_CODE_TO_RATING,
             )
 
             # Resolve this player's listed position
@@ -3422,67 +3437,27 @@ def admin_player_preview():
                 if lp_row:
                     listed_pos_code = str(lp_row[0])
 
-            # Build a single-player listed_positions dict for _resolve_ovr_weights
-            listed_positions = {player_id: listed_pos_code} if listed_pos_code else {}
-            pitcher_fallback = all_weights.get("pitcher_overall", {})
-            position_fallback = all_weights.get("position_overall", {})
-
-            ovr_weights = _resolve_ovr_weights(
-                player_id, ptype, listed_positions, all_weights,
-                pitcher_fallback, position_fallback,
-            )
-
             # Determine which weight type was used for display
-            if listed_pos_code and _POS_CODE_TO_RATING_TYPE.get(listed_pos_code) in all_weights:
-                ovr_type = _POS_CODE_TO_RATING_TYPE[listed_pos_code]
+            if listed_pos_code and POS_CODE_TO_RATING.get(listed_pos_code) in all_weights:
+                ovr_type = POS_CODE_TO_RATING[listed_pos_code]
             else:
                 ovr_type = "pitcher_overall" if ptype == "Pitcher" else "position_overall"
 
-            ovr_raw = _compute_raw_ovr_for_row(row, ovr_weights)
+            # Raw weighted average using true _base attributes
+            ovr_raw = compute_raw_ovr(row, ptype, listed_pos_code, all_weights, key_suffix="_base")
             if ovr_raw is None:
                 ovr_raw = 0.0
 
-            # Inline percentile rank: load all peers at same (level, ptype),
-            # compute their raw_ovr using each peer's own position weights.
-            peer_rows = conn.execute(sa_text("""
-                SELECT p.* FROM simbbPlayers p
-                JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
-                WHERE c.current_level = :lvl AND p.ptype = :pt
-            """), {"lvl": player_level, "pt": ptype}).mappings().all()
-
-            # Bulk-load listed positions for all peers at this level
-            peer_listed: dict = {}
-            if league_year_id is not None:
-                plp_rows = conn.execute(sa_text(
-                    "SELECT player_id, position_code FROM player_listed_position "
-                    "WHERE league_year_id = :lyid"
-                ), {"lyid": league_year_id}).all()
-                for plp in plp_rows:
-                    peer_listed[int(plp[0])] = str(plp[1])
-
-            peer_raws = []
-            for pr in peer_rows:
-                pr_pid = int(pr["id"])
-                pr_ptype = (pr.get("ptype") or "").strip()
-                pr_wts = _resolve_ovr_weights(
-                    pr_pid, pr_ptype, peer_listed, all_weights,
-                    pitcher_fallback, position_fallback,
-                )
-                pr_ovr = _compute_raw_ovr_for_row(pr, pr_wts)
-                if pr_ovr is not None:
-                    peer_raws.append(pr_ovr)
-
-            if len(peer_raws) > 1:
-                peer_raws_sorted = sorted(peer_raws)
-                # Count how many peers this player is better than
-                rank_below = sum(1 for v in peer_raws_sorted if v < ovr_raw)
-                rank_equal = sum(1 for v in peer_raws_sorted if v == ovr_raw)
-                # Average rank for ties
-                pct_rank = (rank_below + (rank_equal - 1) / 2.0) / (len(peer_raws) - 1)
-                pct_rank = max(0.0, min(1.0, pct_rank))
-                ovr_scaled = _percentile_rank_to_20_80(pct_rank)
-            else:
+            # Percentile rank against the cached league-wide breakpoints
+            breakpoints = load_breakpoints(conn)
+            ovr_scaled = compute_displayovr(
+                row, ptype, listed_pos_code, player_level,
+                all_weights, breakpoints, key_suffix="_base", is_free_agent=False,
+            )
+            if ovr_scaled is None:
                 ovr_scaled = 50
+
+            peer_count = len(breakpoints.get((player_level, ptype), []))
 
             # Raw attributes
             col_cats = _get_player_column_categories()
@@ -3499,7 +3474,7 @@ def admin_player_preview():
                 "current_displayovr": row.get("displayovr"),
             }, raw_attributes=raw_attrs, position_ratings=position_ratings,
                overall={"type": ovr_type, "raw": round(ovr_raw, 2), "scaled_20_80": ovr_scaled,
-                        "peer_count": len(peer_raws)},
+                        "peer_count": peer_count},
                displayovr=ovr_scaled)
 
     except Exception as e:

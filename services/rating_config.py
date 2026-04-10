@@ -14,7 +14,6 @@ position player overalls via the `rating_overall_weights` table.
 import json as _json
 import logging
 import math
-import re
 import time
 from bisect import bisect_left
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,7 +24,7 @@ from db import get_engine
 
 logger = logging.getLogger("app")
 
-PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+from services.ovr_core import PITCH_COMPONENT_RE  # noqa: E402, F811
 
 # Canonical ptype values stored in rating_scale_config
 PTYPE_PITCHER = "Pitcher"

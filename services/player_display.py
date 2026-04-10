@@ -17,77 +17,8 @@ log = logging.getLogger(__name__)
 
 # ── Constants ───────────────────────────────────────────────────────
 
-PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
-
-_DEFAULT_POSITION_WEIGHTS = {
-    "c_rating": {
-        "power_base": 0.025, "contact_base": 0.025, "eye_base": 0.025, "discipline_base": 0.025,
-        "basereaction_base": 0.025, "baserunning_base": 0.025,
-        "throwacc_base": 0.05, "throwpower_base": 0.05,
-        "catchframe_base": 0.25, "catchsequence_base": 0.25,
-        "fieldcatch_base": 0.05, "fieldreact_base": 0.15, "fieldspot_base": 0.05,
-    },
-    "fb_rating": {
-        "power_base": 0.175, "contact_base": 0.175, "eye_base": 0.175, "discipline_base": 0.175,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.025,
-        "throwacc_base": 0.025,
-        "fieldcatch_base": 0.05, "fieldreact_base": 0.10, "fieldspot_base": 0.05,
-    },
-    "sb_rating": {
-        "power_base": 0.1, "contact_base": 0.1, "eye_base": 0.1, "discipline_base": 0.1,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.050,
-        "throwacc_base": 0.15, "throwpower_base": 0.05,
-        "fieldcatch_base": 0.10, "fieldreact_base": 0.15, "fieldspot_base": 0.05,
-    },
-    "tb_rating": {
-        "power_base": 0.125, "contact_base": 0.125, "eye_base": 0.125, "discipline_base": 0.125,
-        "basereaction_base": 0.025, "baserunning_base": 0.025,
-        "throwacc_base": 0.10, "throwpower_base": 0.10,
-        "fieldcatch_base": 0.05, "fieldreact_base": 0.15, "fieldspot_base": 0.05,
-    },
-    "ss_rating": {
-        "power_base": 0.0375, "contact_base": 0.0375, "eye_base": 0.0375, "discipline_base": 0.0375,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.10,
-        "throwacc_base": 0.15, "throwpower_base": 0.15,
-        "fieldcatch_base": 0.15, "fieldreact_base": 0.25, "fieldspot_base": 0.10,
-    },
-    "lf_rating": {
-        "power_base": 0.1, "contact_base": 0.1, "eye_base": 0.1, "discipline_base": 0.1,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.10,
-        "throwacc_base": 0.10, "throwpower_base": 0.05,
-        "fieldcatch_base": 0.10, "fieldreact_base": 0.05, "fieldspot_base": 0.15,
-    },
-    "cf_rating": {
-        "power_base": 0.025, "contact_base": 0.025, "eye_base": 0.025, "discipline_base": 0.025,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.15,
-        "throwacc_base": 0.10, "throwpower_base": 0.15,
-        "fieldcatch_base": 0.15, "fieldreact_base": 0.20, "fieldspot_base": 0.15,
-    },
-    "rf_rating": {
-        "power_base": 0.1, "contact_base": 0.1, "eye_base": 0.1, "discipline_base": 0.1,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.10,
-        "throwacc_base": 0.05, "throwpower_base": 0.10,
-        "fieldcatch_base": 0.10, "fieldreact_base": 0.05, "fieldspot_base": 0.15,
-    },
-    "dh_rating": {
-        "power_base": 0.10, "contact_base": 0.10, "eye_base": 0.10, "discipline_base": 0.10,
-        "basereaction_base": 0.025, "baserunning_base": 0.025, "speed_base": 0.025,
-    },
-    "sp_rating": {
-        "fieldcatch_base": 0.025, "fieldreact_base": 0.05, "fieldspot_base": 0.025,
-        "pendurance_base": 0.20, "pgencontrol_base": 0.10, "psequencing_base": 0.20,
-        "pthrowpower_base": 0.05, "pickoff_base": 0.05,
-        "pitch1_ovr": 0.10, "pitch2_ovr": 0.10, "pitch3_ovr": 0.10,
-        "pitch4_ovr": 0.05, "pitch5_ovr": 0.05,
-    },
-    "rp_rating": {
-        "fieldcatch_base": 0.025, "fieldreact_base": 0.05, "fieldspot_base": 0.025,
-        "pendurance_base": 0.05, "pgencontrol_base": 0.10, "psequencing_base": 0.025,
-        "pthrowpower_base": 0.05, "pickoff_base": 0.025,
-        "pitch1_ovr": 0.25, "pitch2_ovr": 0.20, "pitch3_ovr": 0.15,
-        "pitch4_ovr": 0.10, "pitch5_ovr": 0.05,
-    },
-}
+from services.ovr_core import PITCH_COMPONENT_RE  # noqa: E402, F811
+from services.ovr_core import DEFAULT_POSITION_WEIGHTS as _DEFAULT_POSITION_WEIGHTS  # noqa: E402
 
 # ── Level ID → name mapping ─────────────────────────────────────────
 # Distribution config is keyed by level name ("mlb", "aaa", etc.)
@@ -259,8 +190,12 @@ def load_position_weights(conn) -> Optional[Dict]:
         from services.rating_config import get_overall_weights, POSITION_RATING_TYPES
         all_weights = get_overall_weights(conn)
         pos = {k: v for k, v in all_weights.items() if k in POSITION_RATING_TYPES}
-        return pos or None
+        if pos:
+            return pos
+        log.warning("No position weights in rating_overall_weights; using hardcoded defaults")
+        return None
     except Exception:
+        log.warning("Failed to load position weights; using hardcoded defaults", exc_info=True)
         return None
 
 

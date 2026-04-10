@@ -1351,9 +1351,10 @@ def api_scouted_player(player_id):
             # Load rating distributions for 20-80 conversion
             dist_by_level = get_rating_config_by_level_name(conn) or {}
 
-            # Load OVR weights + listed position for displayovr derivation
-            from services.attribute_visibility import _load_ovr_weights
+            # Load OVR weights, breakpoints + listed position for displayovr derivation
+            from services.attribute_visibility import _load_ovr_weights, _load_breakpoints
             single_ovr_weights = _load_ovr_weights(conn)
+            single_breakpoints = _load_breakpoints(conn)
 
             single_listed_pos = None
             lp_row_single = conn.execute(sa_text(
@@ -1427,12 +1428,15 @@ def api_scouted_player(player_id):
         # Pass org_id into visibility for fuzz functions
         visibility["_org_id"] = org_id
 
-        # Build response based on visibility
+        # Build response based on visibility — displayovr is computed inline
+        # via the canonical compute_displayovr() against league breakpoints.
         response = _build_scouted_response(
             player_dict, visibility, dist_by_level,
             _ovr_weights=single_ovr_weights,
             _listed_pos=single_listed_pos,
+            _breakpoints=single_breakpoints,
         )
+
         response["contract"] = contract
 
         # Attach listed position display name
@@ -1614,9 +1618,10 @@ def api_scouted_players_batch():
             # -- Rating config (loaded once)
             dist_by_level = get_rating_config_by_level_name(conn) or {}
 
-            # -- OVR weights + listed positions (loaded once for displayovr)
-            from services.attribute_visibility import _load_ovr_weights
+            # -- OVR weights + breakpoints + listed positions (loaded once for displayovr)
+            from services.attribute_visibility import _load_ovr_weights, _load_breakpoints
             batch_ovr_weights = _load_ovr_weights(conn)
+            batch_breakpoints = _load_breakpoints(conn)
 
             batch_listed_pos = {}  # player_id -> position_code
             if found_ids:
@@ -1691,11 +1696,12 @@ def api_scouted_players_batch():
                 pdict["org_id"] = ct.pop("_org_id", None)
                 pdict["org_abbrev"] = ct.pop("_org_abbrev", None)
 
-            # Build response (pure computation)
+            # Build response (pure computation) — displayovr derived inline
             response = _build_scouted_response(
                 pdict, visibility, dist_by_level,
                 _ovr_weights=batch_ovr_weights,
                 _listed_pos=batch_listed_pos.get(pid),
+                _breakpoints=batch_breakpoints,
             )
 
             if overlay_mode:
@@ -1724,11 +1730,18 @@ def api_scouted_players_batch():
                 "pro_potential_precise", "draft_potential_precise",
                 "college_potential_precise", "recruit_potential_precise",
             })
+            # Preserve displayovr_precise computed by _build_scouted_response
+            existing_vis_ctx = response.get("visibility_context") or {}
+            displayovr_precise = existing_vis_ctx.get(
+                "displayovr_precise",
+                bool(is_precise and response.get("displayovr") is not None),
+            )
             response["visibility_context"] = {
                 "context": f"{pool}_roster" if pool == "pro" else pool,
                 "display_format": response.get("display_format", "20-80"),
                 "attributes_precise": is_precise,
                 "potentials_precise": pot_precise,
+                "displayovr_precise": displayovr_precise,
             }
 
             players_result[str(pid)] = response
@@ -1807,7 +1820,8 @@ def _convert_attrs_to_20_80(player, dist_for_level, org_id, player_id, fuzzed):
 
 
 def _build_scouted_response(player, visibility, dist_by_level=None,
-                            _ovr_weights=None, _listed_pos=None):
+                            _ovr_weights=None, _listed_pos=None,
+                            _breakpoints=None):
     """
     Build the response dict with fog-of-war data masking.
 
@@ -1918,36 +1932,46 @@ def _build_scouted_response(player, visibility, dist_by_level=None,
                     potentials[k] = fuzz_letter_grade(v, org_id, player_id, k) if v else "?"
         response["potentials"] = potentials
 
-    # --- Derive displayovr from visible attributes ---
-    # ovr_weights and listed_pos can be passed in by batch callers to avoid
-    # per-player DB queries.  Single-player callers pass None and we load.
-    from services.attribute_visibility import _derive_raw_ovr, _GRADE_TO_SCORE
+    # --- Derive displayovr via canonical ovr_core.compute_displayovr() ---
+    # Strict math: compute weighted average over the visible (precise or fuzzed)
+    # attributes the org sees, then percentile-rank against league breakpoints.
+    from services.ovr_core import compute_displayovr
+    from services.attribute_visibility import _GRADE_TO_SCORE
+
+    # Determine attribute source and precision
+    is_precise = (
+        ("pro_attrs_precise" in unlocked or "draft_attrs_precise" in unlocked)
+        and "attributes" in response
+    )
 
     visible_ratings = response.get("attributes", {})
     if not visible_ratings:
         lg = response.get("letter_grades", {})
         if lg:
+            # Convert letter grades to numeric scores via _display keys
             visible_ratings = {
                 f"{k}_display": _GRADE_TO_SCORE.get(v)
                 for k, v in lg.items() if v
             }
 
+    displayovr_value = None
     if visible_ratings:
-        ovr_w = _ovr_weights if _ovr_weights is not None else {}
-        lpos = _listed_pos
-
-        display_format = "letter_grade" if "letter_grades" in response and "attributes" not in response else "20-80"
-
-        raw_ovr = _derive_raw_ovr(
-            visible_ratings, ptype, lpos, ovr_w, display_format,
+        weights = _ovr_weights if _ovr_weights is not None else {}
+        breakpoints = _breakpoints if _breakpoints is not None else {}
+        displayovr_value = compute_displayovr(
+            visible_ratings,
+            ptype,
+            _listed_pos,
+            current_level,
+            weights,
+            breakpoints,
+            key_suffix="_display",
+            is_free_agent=False,
         )
-        if raw_ovr is not None:
-            score = int(round(raw_ovr / 5.0) * 5)
-            response["displayovr"] = max(20, min(80, score))
-        else:
-            response["displayovr"] = None
-    else:
-        response["displayovr"] = None
+
+    response["displayovr"] = displayovr_value
+    response["visibility_context"] = response.get("visibility_context", {})
+    response["visibility_context"]["displayovr_precise"] = bool(is_precise and displayovr_value is not None)
 
     return response
 
