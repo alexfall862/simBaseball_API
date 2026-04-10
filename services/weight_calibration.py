@@ -501,7 +501,9 @@ def run_calibration(
     min_innings = int(config.get("min_innings", 50))
     min_ipo = int(config.get("min_ipo", 60))
     blend_overrides = config.get("blend_ratios", {})
-    profile_name = config.get("name", f"Calibrated (LY{league_year_id} L{league_level})")
+    # Use the default if name is missing OR explicitly None (dict.get only
+    # falls back when the key is absent, not when the value is None).
+    profile_name = config.get("name") or f"Calibrated (LY{league_year_id} L{league_level})"
 
     # Load league error rates for fielding runs
     lg_err_rate = _load_league_error_rates(conn, league_year_id, league_level)
