@@ -4077,28 +4077,50 @@ def build_week_payloads(
             # all attribute updates for this subweek have been committed.
             # Ensures the next subweek (and all read paths) see displayovr
             # values consistent with the latest player attributes.
+            #
+            # Pre-check: skip cleanly if the displayovr_breakpoints table
+            # doesn't exist yet (migration not applied). Otherwise the
+            # DELETE/INSERT in recompute_breakpoints would throw and leave
+            # the connection in an aborted-transaction state, cascading
+            # into downstream operations like refresh_all_teams().
             try:
-                with timed_stage("recompute_displayovr",
-                                 week=season_week, subweek=subweek):
-                    from services.ovr_core import (
-                        recompute_stored_displayovr, invalidate_caches,
-                    )
-                    invalidate_caches()
-                    ovr_result = recompute_stored_displayovr(conn)
-                conn.commit()
-                logger.info(
-                    "Recomputed displayovr after subweek '%s': %d players",
-                    subweek, ovr_result.get("updated", 0),
+                bp_exists = conn.execute(text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() "
+                    "AND table_name = 'displayovr_breakpoints' LIMIT 1"
+                )).first()
+            except Exception:
+                bp_exists = None
+
+            if not bp_exists:
+                logger.warning(
+                    "Skipping displayovr recompute for subweek '%s': "
+                    "displayovr_breakpoints table missing (apply migration)",
+                    subweek,
                 )
-            except Exception as ovr_err:
-                logger.exception(
-                    "displayovr recompute failed after subweek '%s': %s",
-                    subweek, ovr_err,
-                )
+            else:
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
+                    with timed_stage("recompute_displayovr",
+                                     week=season_week, subweek=subweek):
+                        from services.ovr_core import (
+                            recompute_stored_displayovr, invalidate_caches,
+                        )
+                        invalidate_caches()
+                        ovr_result = recompute_stored_displayovr(conn)
+                    conn.commit()
+                    logger.info(
+                        "Recomputed displayovr after subweek '%s': %d players",
+                        subweek, ovr_result.get("updated", 0),
+                    )
+                except Exception as ovr_err:
+                    logger.exception(
+                        "displayovr recompute failed after subweek '%s': %s",
+                        subweek, ovr_err,
+                    )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
         subweek_payloads[subweek] = sw_payloads
 

@@ -607,9 +607,11 @@ def _apply_visibility(
     player_dict["potentials"] = potentials
 
     # --- displayovr: canonical compute_displayovr() against league breakpoints ---
-    # Strict-math: precise contexts use true _base attrs from bio; fuzzed contexts
-    # use the per-org fuzzed _display values produced above. Same weights and
-    # same league-wide breakpoints in both cases.
+    # Strict-math: ALWAYS use the ratings dict (which holds 20-80 _display values).
+    # Precise contexts have unfuzzed _display values; fuzzed contexts have per-org
+    # fuzzed _display values. Same weights, same league breakpoints, same code path
+    # for both — the only difference is whether the upstream fog-of-war step
+    # fuzzed the _display values or not.
     from services.ovr_core import compute_displayovr
 
     if display_format == "hidden":
@@ -619,23 +621,14 @@ def _apply_visibility(
         is_fa = bool(force_free_agent)
         peer_level = level_key
 
-        if attrs_precise:
-            # Precise: use true _base values from bio
-            attrs_source = bio
-            key_suffix = "_base"
-        else:
-            # Fuzzed: use the per-org fuzzed _display ratings produced above
-            attrs_source = ratings
-            key_suffix = "_display"
-
         displayovr_value = compute_displayovr(
-            attrs_source,
+            ratings,
             ptype,
             listed_pos_code,
             peer_level,
             ovr_weights or {},
             breakpoints or {},
-            key_suffix=key_suffix,
+            key_suffix="_display",
             is_free_agent=is_fa,
         )
 

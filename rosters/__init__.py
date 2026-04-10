@@ -1096,7 +1096,7 @@ def get_org_roster(org_abbrev: str):
                     for p in players_out:
                         p["listed_position"] = lp_map.get(p["id"])
             except Exception:
-                pass
+                logger.exception("rosters: listed_position attach failed")
 
             # Attach stamina data
             try:

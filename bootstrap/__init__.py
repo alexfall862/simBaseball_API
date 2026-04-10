@@ -114,7 +114,7 @@ def get_landing(org_id: int):
                     for p in players:
                         p["listed_position"] = pos_map.get(p["id"])
             except Exception:
-                log.debug("bootstrap: listed positions unavailable, skipping")
+                log.exception("bootstrap: listed_position attach failed")
 
             # Face data — deterministic player portraits for facesjs
             face_data = {}
@@ -222,7 +222,7 @@ def get_landing_all():
                 lyid = ctx["current_league_year_id"]
                 pos_by_team = get_listed_positions_for_teams(conn, all_team_ids_flat, lyid)
             except Exception:
-                pass
+                log.exception("bootstrap (all-orgs): listed_position attach failed")
 
             # Visibility context + fog-of-war fuzzing for all orgs' rosters
             for oid in org_ids:

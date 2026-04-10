@@ -1356,13 +1356,21 @@ def api_scouted_player(player_id):
             single_ovr_weights = _load_ovr_weights(conn)
             single_breakpoints = _load_breakpoints(conn)
 
+            # Resolve current league_year_id for the position lookup
+            single_lyid_row = conn.execute(sa_text(
+                "SELECT id FROM league_years WHERE league_year = "
+                "(SELECT season FROM timestamp_state WHERE id = 1)"
+            )).first()
+            single_lyid = int(single_lyid_row[0]) if single_lyid_row else None
+
             single_listed_pos = None
-            lp_row_single = conn.execute(sa_text(
-                "SELECT position_code FROM player_listed_position "
-                "WHERE player_id = :pid LIMIT 1"
-            ), {"pid": player_id}).first()
-            if lp_row_single:
-                single_listed_pos = lp_row_single[0]
+            if single_lyid is not None:
+                lp_row_single = conn.execute(sa_text(
+                    "SELECT position_code FROM player_listed_position "
+                    "WHERE player_id = :pid AND league_year_id = :lyid LIMIT 1"
+                ), {"pid": player_id, "lyid": single_lyid}).first()
+                if lp_row_single:
+                    single_listed_pos = lp_row_single[0]
 
             # Load contract data
             contract_row = conn.execute(

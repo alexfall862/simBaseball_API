@@ -416,32 +416,35 @@ def compute_displayovr(
 # Recompute breakpoints + stored displayovr
 # ---------------------------------------------------------------------------
 
-def recompute_breakpoints(conn) -> Dict[Tuple[int, str], List[float]]:
+def _load_all_active_players_as_display(conn, level: Optional[int] = None):
     """
-    Rebuild league-wide raw_ovr breakpoints for every (level, ptype) group
-    using the active weights from rating_overall_weights and the true _base
-    attributes of all active players.
+    Load all active players and run them through build_player_display() to
+    get their _display (20-80 scaled) ratings dict, plus current_level and
+    listed_position. Returns a list of (player_id, level, ptype, listed_pos,
+    ratings_dict) tuples.
 
-    Writes to the displayovr_breakpoints table. Returns the in-memory dict.
-    Logs a loud error and returns {} if no weights are configured.
+    This is the canonical source for both breakpoint computation and stored
+    displayovr refresh — both must operate on the same _display scale that
+    live read paths use.
     """
-    weights = load_weights(conn)
-    if not weights:
-        log.error("recompute_breakpoints: rating_overall_weights is empty; aborting")
-        return {}
+    from services.player_display import load_display_context, build_player_display
 
-    # Load all active players with their attributes and current_level
-    rows = conn.execute(sa_text("""
+    level_filter = "AND c.current_level = :level" if level else ""
+    params: Dict[str, Any] = {}
+    if level:
+        params["level"] = level
+
+    rows = conn.execute(sa_text(f"""
         SELECT p.*, c.current_level
         FROM simbbPlayers p
         JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
-    """)).mappings().all()
+        WHERE 1=1 {level_filter}
+    """), params).mappings().all()
 
     if not rows:
-        log.warning("recompute_breakpoints: no active players found")
-        return {}
+        return []
 
-    # Bulk-load listed positions for all players
+    # Bulk-load listed positions for the current league year
     listed_positions: Dict[int, str] = {}
     try:
         ly_row = conn.execute(sa_text(
@@ -456,22 +459,71 @@ def recompute_breakpoints(conn) -> Dict[Tuple[int, str], List[float]]:
             for lp in lp_rows:
                 listed_positions[int(lp[0])] = str(lp[1])
     except Exception:
-        log.exception("recompute_breakpoints: failed to load listed positions")
+        log.exception("ovr_core: failed to load listed positions")
 
-    # Group raw_overalls by (level, ptype)
-    groups: Dict[Tuple[int, str], List[float]] = {}
+    # Build display context once (loads col_cats, dist_by_level, position_weights)
+    try:
+        ctx = load_display_context(conn)
+    except Exception:
+        log.exception("ovr_core: failed to load display context")
+        return []
+
+    out = []
     for row in rows:
         try:
             pid = int(row["id"])
             ptype = (row.get("ptype") or "").strip()
             if not ptype:
                 continue
-            level = int(row["current_level"])
+            player_level = int(row["current_level"])
         except (TypeError, ValueError, KeyError):
             continue
 
+        try:
+            mapping = dict(row)
+            display = build_player_display(mapping, ctx)
+            ratings = display.get("ratings", {}) or {}
+        except Exception:
+            log.exception("ovr_core: build_player_display failed for player %s", pid)
+            continue
+
         listed_pos = listed_positions.get(pid)
-        raw_ovr = compute_raw_ovr(row, ptype, listed_pos, weights, key_suffix="_base")
+        out.append((pid, player_level, ptype, listed_pos, ratings))
+
+    return out
+
+
+def recompute_breakpoints(conn) -> Dict[Tuple[int, str], List[float]]:
+    """
+    Rebuild league-wide raw_ovr breakpoints for every (level, ptype) group
+    using the active weights from rating_overall_weights and each active
+    player's _display (20-80 scaled) ratings.
+
+    Operating on _display values is critical: live read paths in
+    _apply_visibility and _build_scouted_response also use _display values
+    (because that's what fog-of-war fuzzing produces). Both stored breakpoints
+    and live derivation must be on the same scale for percentile rank lookup
+    to be meaningful.
+
+    Writes to the displayovr_breakpoints table. Returns the in-memory dict.
+    Logs a loud error and returns {} if no weights are configured.
+    """
+    weights = load_weights(conn)
+    if not weights:
+        log.error("recompute_breakpoints: rating_overall_weights is empty; aborting")
+        return {}
+
+    players = _load_all_active_players_as_display(conn)
+    if not players:
+        log.warning("recompute_breakpoints: no active players found")
+        return {}
+
+    # Group raw_overalls by (level, ptype) using _display values
+    groups: Dict[Tuple[int, str], List[float]] = {}
+    for pid, level, ptype, listed_pos, ratings in players:
+        raw_ovr = compute_raw_ovr(
+            ratings, ptype, listed_pos, weights, key_suffix="_display",
+        )
         if raw_ovr is None:
             continue
         groups.setdefault((level, ptype), []).append(raw_ovr)
@@ -508,7 +560,8 @@ def recompute_stored_displayovr(conn, level: Optional[int] = None) -> Dict[str, 
     """
     Full refresh: rebuild breakpoints, then recompute simbbPlayers.displayovr
     for every active player using compute_displayovr() against the fresh
-    breakpoints.
+    breakpoints. All values come from each player's _display ratings (the
+    same scale live read paths use).
 
     Returns {updated, by_level, error?}.
     """
@@ -524,59 +577,20 @@ def recompute_stored_displayovr(conn, level: Optional[int] = None) -> Dict[str, 
     # Re-load weights post-cache-invalidation (and to keep API symmetric)
     weights = load_weights(conn)
 
-    level_filter = "AND c.current_level = :level" if level else ""
-    params: Dict[str, Any] = {}
-    if level:
-        params["level"] = level
-
-    rows = conn.execute(sa_text(f"""
-        SELECT p.*, c.current_level
-        FROM simbbPlayers p
-        JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
-        WHERE 1=1 {level_filter}
-    """), params).mappings().all()
-
-    if not rows:
+    players = _load_all_active_players_as_display(conn, level=level)
+    if not players:
         return {"updated": 0, "by_level": {}}
-
-    # Bulk-load listed positions
-    listed_positions: Dict[int, str] = {}
-    try:
-        ly_row = conn.execute(sa_text(
-            "SELECT id FROM league_years WHERE league_year = "
-            "(SELECT season FROM timestamp_state WHERE id = 1)"
-        )).first()
-        if ly_row:
-            lp_rows = conn.execute(sa_text(
-                "SELECT player_id, position_code FROM player_listed_position "
-                "WHERE league_year_id = :lyid"
-            ), {"lyid": int(ly_row[0])}).all()
-            for lp in lp_rows:
-                listed_positions[int(lp[0])] = str(lp[1])
-    except Exception:
-        log.exception("recompute_stored_displayovr: failed to load listed positions")
 
     updates: List[Tuple[int, str]] = []
     by_level: Dict[int, int] = {}
 
-    for row in rows:
-        try:
-            pid = int(row["id"])
-            ptype = (row.get("ptype") or "").strip()
-            if not ptype:
-                continue
-            player_level = int(row["current_level"])
-        except (TypeError, ValueError, KeyError):
-            continue
-
-        listed_pos = listed_positions.get(pid)
+    for pid, player_level, ptype, listed_pos, ratings in players:
         ovr = compute_displayovr(
-            row, ptype, listed_pos, player_level, weights, breakpoints,
-            key_suffix="_base", is_free_agent=False,
+            ratings, ptype, listed_pos, player_level, weights, breakpoints,
+            key_suffix="_display", is_free_agent=False,
         )
         if ovr is None:
             continue
-
         updates.append((pid, str(ovr)))
         by_level[player_level] = by_level.get(player_level, 0) + 1
 

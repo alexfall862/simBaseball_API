@@ -3415,10 +3415,17 @@ def admin_player_preview():
                     "scaled_20_80": scaled,
                 }
 
-            # Compute overall via canonical ovr_core pipeline
+            # Compute overall via canonical ovr_core pipeline. The pipeline
+            # operates on _display (20-80 scaled) values everywhere, so we
+            # convert this player's raw row through build_player_display first
+            # to get their _display ratings dict (matching what live read
+            # paths see).
             from services.ovr_core import (
                 compute_raw_ovr, compute_displayovr,
                 load_breakpoints, POS_CODE_TO_RATING,
+            )
+            from services.player_display import (
+                load_display_context, build_player_display,
             )
 
             # Resolve this player's listed position
@@ -3443,16 +3450,25 @@ def admin_player_preview():
             else:
                 ovr_type = "pitcher_overall" if ptype == "Pitcher" else "position_overall"
 
-            # Raw weighted average using true _base attributes
-            ovr_raw = compute_raw_ovr(row, ptype, listed_pos_code, all_weights, key_suffix="_base")
+            # Build the player's _display ratings dict
+            display_ctx = load_display_context(conn)
+            display_player = build_player_display(dict(row), display_ctx)
+            display_ratings = display_player.get("ratings", {}) or {}
+
+            # Raw weighted average using _display values (same scale as live)
+            ovr_raw = compute_raw_ovr(
+                display_ratings, ptype, listed_pos_code, all_weights,
+                key_suffix="_display",
+            )
             if ovr_raw is None:
                 ovr_raw = 0.0
 
             # Percentile rank against the cached league-wide breakpoints
             breakpoints = load_breakpoints(conn)
             ovr_scaled = compute_displayovr(
-                row, ptype, listed_pos_code, player_level,
-                all_weights, breakpoints, key_suffix="_base", is_free_agent=False,
+                display_ratings, ptype, listed_pos_code, player_level,
+                all_weights, breakpoints, key_suffix="_display",
+                is_free_agent=False,
             )
             if ovr_scaled is None:
                 ovr_scaled = 50
