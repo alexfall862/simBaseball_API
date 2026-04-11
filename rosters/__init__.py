@@ -2676,7 +2676,6 @@ def get_league_state():
     tables = _get_tables()
     league_state = tables["league_state"]
     league_years = tables["league_years"]
-    game_weeks = tables["game_weeks"]
 
     try:
         with engine.connect() as conn:
@@ -2713,14 +2712,16 @@ def get_league_state():
                 if ly_row:
                     current_league_year = ly_row._mapping["league_year"]
 
-            if m["current_game_week_id"] is not None:
-                gw_row = conn.execute(
-                    select(game_weeks.c.week_index)
-                    .where(game_weeks.c.id == m["current_game_week_id"])
-                    .limit(1)
-                ).first()
-                if gw_row:
-                    current_week_index = gw_row._mapping["week_index"]
+            # Canonical current week comes from timestamp_state.week, not from
+            # league_state.current_game_week_id → game_weeks.week_index. The
+            # latter is only synced by advance_week (and can fail silently if
+            # the matching game_weeks row doesn't exist), while timestamp_state
+            # is always updated by advance_week / set_week / reset-week.
+            ts_row = conn.execute(
+                sa_text("SELECT week FROM timestamp_state WHERE id = 1")
+            ).first()
+            if ts_row and ts_row[0] is not None:
+                current_week_index = int(ts_row[0])
 
             def _to_str_or_none(val):
                 if val is None:

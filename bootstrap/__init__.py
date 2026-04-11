@@ -392,64 +392,71 @@ def get_landing_all():
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Season context cache — changes only on admin sim-advance
+# Cache for the slow-moving parts of the season context (league_year_id,
+# league_year, season_id). The current week is NOT cached here — it comes
+# fresh from timestamp_state on every call, since it's the canonical source
+# of truth and can be changed by advance_week / set_week / reset-week without
+# going through this module.
 _ctx_cache = None
 _ctx_ts = 0.0
 _CTX_TTL = 60  # seconds
 
 
 def invalidate_season_context():
-    """Clear cached season context (call after week/phase changes)."""
+    """Clear cached season context (call after league_year changes)."""
     global _ctx_cache, _ctx_ts
     _ctx_cache = None
     _ctx_ts = 0.0
 
 
 def _resolve_season_context(conn, tables):
-    """Derive current league year, season id, and week from league_state."""
+    """Derive current league year, season id, and week.
+
+    League year / season id come from league_state (cached briefly).
+    The current week is read fresh from timestamp_state.week — that is the
+    canonical source of truth updated by advance_week / set_week / reset-week.
+    """
     global _ctx_cache, _ctx_ts
 
     now = time.monotonic()
     if _ctx_cache is not None and (now - _ctx_ts) < _CTX_TTL:
-        return dict(_ctx_cache)
+        base = dict(_ctx_cache)
+    else:
+        ls = tables["league_state"]
+        ly = tables["league_years"]
+        seasons = tables["seasons"]
 
-    ls = tables["league_state"]
-    ly = tables["league_years"]
-    gw = tables["game_weeks"]
-    seasons = tables["seasons"]
+        row = conn.execute(select(ls).where(ls.c.id == 1)).first()
+        if not row:
+            return None
+        ls_d = _row_to_dict(row)
 
-    row = conn.execute(select(ls).where(ls.c.id == 1)).first()
-    if not row:
-        return None
-    ls_d = _row_to_dict(row)
+        ly_row = conn.execute(
+            select(ly).where(ly.c.id == ls_d["current_league_year_id"])
+        ).first()
+        if not ly_row:
+            return None
+        ly_d = _row_to_dict(ly_row)
 
-    ly_row = conn.execute(
-        select(ly).where(ly.c.id == ls_d["current_league_year_id"])
+        season_row = conn.execute(
+            select(seasons).where(seasons.c.year == ly_d["league_year"])
+        ).first()
+        season_id = _row_to_dict(season_row)["id"] if season_row else None
+
+        base = {
+            "current_league_year_id": ls_d["current_league_year_id"],
+            "league_year": ly_d["league_year"],
+            "current_season_id": season_id,
+        }
+        _ctx_cache = base
+        _ctx_ts = now
+        base = dict(base)
+
+    ts_row = conn.execute(
+        text("SELECT week FROM timestamp_state WHERE id = 1")
     ).first()
-    if not ly_row:
-        return None
-    ly_d = _row_to_dict(ly_row)
-
-    gw_row = conn.execute(
-        select(gw).where(gw.c.id == ls_d["current_game_week_id"])
-    ).first()
-    gw_d = _row_to_dict(gw_row) if gw_row else {}
-
-    season_row = conn.execute(
-        select(seasons).where(seasons.c.year == ly_d["league_year"])
-    ).first()
-    season_id = _row_to_dict(season_row)["id"] if season_row else None
-
-    result = {
-        "current_league_year_id": ls_d["current_league_year_id"],
-        "league_year": ly_d["league_year"],
-        "current_season_id": season_id,
-        "current_week_index": gw_d.get("week_index"),
-    }
-
-    _ctx_cache = result
-    _ctx_ts = now
-    return dict(result)
+    base["current_week_index"] = int(ts_row[0]) if ts_row and ts_row[0] is not None else None
+    return base
 
 
 # ---------------------------------------------------------------------------
