@@ -17,11 +17,18 @@ from sqlalchemy import MetaData, Table, and_, select, text
 
 logger = logging.getLogger("app")
 
-_VERSION = "2026-03-14a"  # diagnostic: confirm deployed code version
+_VERSION = "2026-04-10a"  # diagnostic: confirm deployed code version
 
 # ---------------------------------------------------------------------------
-# Constants (mirrored from lineups.py)
+# Constants
 # ---------------------------------------------------------------------------
+#
+# All player evaluation in this module reads pre-computed *_rating values off
+# the player dict produced by services.game_payload.build_engine_player_views_bulk().
+# Those ratings are weighted averages of base attributes using the active
+# weight calibration profile (rating_overall_weights table). This is the same
+# pipeline that drives displayovr, so any rating-based decision here will
+# automatically follow the active calibration profile.
 
 _POS_RATING_KEY = {
     "c": "c_rating",
@@ -35,7 +42,7 @@ _POS_RATING_KEY = {
     "dh": "dh_rating",
 }
 
-_POSITION_PRIORITY_ORDER = ["c", "ss", "cf", "tb", "sb", "lf", "rf", "fb"]
+_FIELDING_POSITIONS = ["c", "fb", "sb", "tb", "ss", "lf", "cf", "rf"]
 
 # Bullpen role assignments by slot position
 _BULLPEN_ROLES = {
@@ -50,7 +57,7 @@ DEFAULT_ROTATION_SIZE = 5
 
 
 # ---------------------------------------------------------------------------
-# Scoring helpers (same formulas as lineups.py / rotation.py)
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _safe_float(val) -> float:
@@ -60,52 +67,100 @@ def _safe_float(val) -> float:
         return 0.0
 
 
-def _compute_offense_score(p: Dict[str, Any]) -> float:
-    return (
-        _safe_float(p.get("contact_base"))
-        + _safe_float(p.get("power_base"))
-        + _safe_float(p.get("eye_base"))
-        + _safe_float(p.get("discipline_base"))
-    )
-
-
-def _compute_pitcher_ability_score(p: Dict[str, Any]) -> float:
-    """Same formula as rotation.py:34."""
-    pendurance = _safe_float(p.get("pendurance_base"))
-    pgencontrol = _safe_float(p.get("pgencontrol_base"))
-    pickoff = _safe_float(p.get("pickoff_base"))
-
-    pitch_qualities = []
-    for n in range(1, 6):
-        pacc = _safe_float(p.get(f"pitch{n}_pacc_base"))
-        pbrk = _safe_float(p.get(f"pitch{n}_pbrk_base"))
-        pcntrl = _safe_float(p.get(f"pitch{n}_pcntrl_base"))
-        pconsist = _safe_float(p.get(f"pitch{n}_consist_base"))
-        pitch_qualities.append((pacc + pbrk + pcntrl + pconsist) / 4.0)
-
-    avg_pitch_quality = sum(pitch_qualities) / 5.0
-
-    return (
-        pendurance * 0.30
-        + pgencontrol * 0.40
-        + pickoff * 0.10
-        + avg_pitch_quality * 0.20
-    )
-
-
-def _score_for_position(p: Dict[str, Any], pos: str) -> float:
-    """Score a player for a defensive position (lineups.py formula)."""
-    rating_key = _POS_RATING_KEY.get(pos)
-    pos_rating = _safe_float(p.get(rating_key)) if rating_key else 0.0
-    off_score = _compute_offense_score(p)
-    return pos_rating * 0.7 + off_score * 0.3
-
-
 def _bullpen_role_for_slot(slot: int, total: int) -> str:
     """Assign a bullpen role based on slot position."""
     if slot == total:
         return "mop_up"
     return _BULLPEN_ROLES.get(slot, "long")
+
+
+# ---------------------------------------------------------------------------
+# Hungarian (Kuhn-Munkres / Jonker-Volgenant) assignment solver
+# ---------------------------------------------------------------------------
+
+def _hungarian_min(cost: List[List[float]]) -> List[int]:
+    """
+    Solve the rectangular assignment problem minimizing total cost.
+
+    Returns a list `result` of length n_rows where result[i] is the column
+    index assigned to row i, or -1 if row i is unassigned (which only happens
+    when n_rows > n_cols).
+
+    Implementation: O(n^3) Jonker-Volgenant variant of Hungarian, padding to
+    a square matrix with a sentinel value larger than any real cost so dummy
+    assignments are taken last. Pure Python; no numpy/scipy dependency.
+    """
+    n_rows = len(cost)
+    if n_rows == 0:
+        return []
+    n_cols = len(cost[0]) if cost[0] else 0
+    if n_cols == 0:
+        return [-1] * n_rows
+
+    n = max(n_rows, n_cols)
+
+    # Build square cost matrix padded with a large sentinel so dummy
+    # rows/cols are only used to soak up surplus capacity.
+    max_real = 0.0
+    seen_any = False
+    for row in cost:
+        for v in row:
+            if not seen_any or v > max_real:
+                max_real = v
+                seen_any = True
+    pad = (max_real + 1.0) if seen_any else 1.0
+
+    c = [[pad] * n for _ in range(n)]
+    for i in range(n_rows):
+        row = cost[i]
+        for j in range(n_cols):
+            c[i][j] = row[j]
+
+    INF = float("inf")
+    u = [0.0] * (n + 1)
+    v = [0.0] * (n + 1)
+    p = [0] * (n + 1)
+    way = [0] * (n + 1)
+
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [INF] * (n + 1)
+        used = [False] * (n + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = INF
+            j1 = -1
+            for j in range(1, n + 1):
+                if not used[j]:
+                    cur = c[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+            for j in range(n + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0 != 0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+
+    result = [-1] * n_rows
+    for j in range(1, n + 1):
+        i = p[j]
+        if i != 0 and (i - 1) < n_rows and (j - 1) < n_cols:
+            result[i - 1] = j - 1
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -296,16 +351,16 @@ def _clear_team_gameplan(conn, team_id: int):
 def _assign_rotation(conn, team_id: int,
                      pitchers: Dict[int, Dict]) -> set:
     """
-    Assign top pitchers to a rotation by ability score.
+    Assign top pitchers to a rotation by sp_rating (calibrated).
     Returns set of pitcher IDs placed in rotation.
     """
     if not pitchers:
         return set()
 
-    # Rank all pitchers by ability
+    # Rank all pitchers by their calibrated starter rating.
     ranked = sorted(
         pitchers.items(),
-        key=lambda kv: _compute_pitcher_ability_score(kv[1]),
+        key=lambda kv: _safe_float(kv[1].get("sp_rating")),
         reverse=True,
     )
 
@@ -357,14 +412,14 @@ def _assign_rotation(conn, team_id: int,
 def _assign_bullpen(conn, team_id: int,
                     pitchers: Dict[int, Dict],
                     bullpen_ids: set):
-    """Assign remaining pitchers to bullpen with roles."""
+    """Assign remaining pitchers to bullpen with roles, ranked by rp_rating."""
     if not bullpen_ids:
         return
 
-    # Rank by ability (best first)
+    # Rank by calibrated reliever rating (best first).
     ranked = sorted(
         bullpen_ids,
-        key=lambda pid: _compute_pitcher_ability_score(pitchers[pid]),
+        key=lambda pid: _safe_float(pitchers[pid].get("rp_rating")),
         reverse=True,
     )
 
@@ -390,42 +445,44 @@ def _assign_bullpen(conn, team_id: int,
 def _assign_defense(conn, team_id: int,
                     position_players: Dict[int, Dict],
                     use_dh: bool):
-    """Assign position players to defensive positions in priority order."""
-    remaining = set(position_players.keys())
+    """
+    Assign position players to defensive positions using a globally optimal
+    Hungarian assignment over the calibrated per-position ratings.
+
+    Each player has a *_rating value per position (c_rating, ss_rating, ...)
+    computed from the active weight calibration profile. We build a
+    player x position value matrix and find the assignment that maximizes
+    total team rating, so a player only ends up at C if their drop-off at
+    every other position is larger than the next-best catcher's gap to them.
+    """
+    if not position_players:
+        return
+
+    positions = list(_FIELDING_POSITIONS)
+    if use_dh:
+        positions.append("dh")
+
+    players = list(position_players.items())  # [(pid, p), ...]
+    n_players = len(players)
+    n_positions = len(positions)
+
+    # Hungarian minimizes; negate ratings to maximize total team rating.
+    cost: List[List[float]] = [[0.0] * n_positions for _ in range(n_players)]
+    for i, (_, p) in enumerate(players):
+        for j, pos in enumerate(positions):
+            rating = _safe_float(p.get(_POS_RATING_KEY[pos]))
+            cost[i][j] = -rating
+
+    assignment = _hungarian_min(cost)
+
     defense_params = []
-
-    for pos in _POSITION_PRIORITY_ORDER:
-        if not remaining:
-            break
-
-        best_pid = None
-        best_score = -1.0
-
-        for pid in remaining:
-            score = _score_for_position(position_players[pid], pos)
-            if score > best_score:
-                best_pid = pid
-                best_score = score
-
-        if best_pid is not None:
-            defense_params.append(
-                {"tid": team_id, "pos": pos, "pid": best_pid})
-            remaining.discard(best_pid)
-
-    # DH assignment
-    if use_dh and remaining:
-        best_pid = None
-        best_score = -1.0
-        for pid in remaining:
-            score = _score_for_position(position_players[pid], "dh")
-            if score > best_score:
-                best_pid = pid
-                best_score = score
-
-        if best_pid is not None:
-            defense_params.append(
-                {"tid": team_id, "pos": "dh", "pid": best_pid})
-            remaining.discard(best_pid)
+    for i, j in enumerate(assignment):
+        if j < 0 or j >= n_positions:
+            # Surplus player, no slot for them.
+            continue
+        pid = players[i][0]
+        pos = positions[j]
+        defense_params.append({"tid": team_id, "pos": pos, "pid": pid})
 
     # Batch INSERT all position assignments
     if defense_params:
