@@ -672,6 +672,7 @@ def _choose_player_for_position(
     remaining_ids: List[int],
     plans_by_position: Dict[str, List[Dict[str, Any]]],
     usage_by_position: Dict[str, Tuple[Dict[int, int], int]],
+    cross_position_locks: Dict[int, set] | None = None,
 ) -> int | None:
     """
     Choose a player for a single defensive position.
@@ -766,11 +767,6 @@ def _choose_player_for_position(
                 # Weight by relative target and usage bias
                 weighted_score = base_score * (0.5 + 0.5 * weight) + target_bias
 
-                # Locked flag: large bump
-                locked = bool(row.get("locked"))
-                if locked:
-                    weighted_score += 1000.0
-
                 if best_pid is None or weighted_score > best_score:
                     best_pid = pid
                     best_score = weighted_score
@@ -778,7 +774,9 @@ def _choose_player_for_position(
             if best_pid is not None:
                 return best_pid
 
-    # Second pass: fallback to "best available" if no suitable plan candidate
+    # Second pass: fallback to "best available" if no suitable plan candidate.
+    # Players locked to a different position are excluded here — locks prevent
+    # fallback drift. Players locked to this position remain eligible.
     best_pid = None
     best_score = None
 
@@ -786,6 +784,10 @@ def _choose_player_for_position(
         p = players_by_id[pid]
         if not _is_player_available_for_lineup(p):
             continue
+        if cross_position_locks:
+            locks = cross_position_locks.get(pid)
+            if locks and position_code not in locks:
+                continue
 
         base_pos_rating = _get_rating(p, rating_key) if rating_key else 0.0
         xp_mod = 0.0
@@ -820,6 +822,153 @@ def _choose_player_for_position(
                 best_score = base_score
 
     return best_pid
+
+
+# -------------------------------------------------------------------
+# Locks: positional constraint, not a playing-time guarantee.
+#
+# A plan row with locked=True means "when this player is in the lineup,
+# this is where they go." Rotation cadence (target_weight + target_bias)
+# is unchanged — locks only restrict where a locked player can be placed:
+#   - plan pass: no filter (lenient — explicit plan rows elsewhere are honored)
+#   - fallback pass: locked player is excluded from positions outside their
+#     lock set, preventing drift.
+# A player with zero lock rows is unaffected.
+# -------------------------------------------------------------------
+
+def _build_cross_position_locks(
+    plans_by_position: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[Dict[int, set], set]:
+    """
+    Returns:
+      (cross_position_locks, locked_positions)
+
+      cross_position_locks: {player_id: {position_code, ...}} for players with
+                            at least one locked plan row.
+      locked_positions:     set of position codes that have at least one lock
+                            from any player. Used to order the position walk
+                            so locked positions are evaluated before others.
+    """
+    cross: Dict[int, set] = {}
+    locked_positions: set = set()
+    for pos, rows in (plans_by_position or {}).items():
+        for row in rows:
+            if not row.get("locked"):
+                continue
+            try:
+                pid = int(row["player_id"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            cross.setdefault(pid, set()).add(pos)
+            locked_positions.add(pos)
+    return cross, locked_positions
+
+
+def _build_walk_order(locked_positions: set) -> List[str]:
+    """
+    Returns positions in walk order: locked positions first (in global
+    priority order), then unlocked positions (also in global priority order).
+    DH is handled separately by the caller.
+    """
+    locked_first = [p for p in _POSITION_PRIORITY_ORDER if p in locked_positions]
+    rest = [p for p in _POSITION_PRIORITY_ORDER if p not in locked_positions]
+    return locked_first + rest
+
+
+def _select_dh_player(
+    plans_by_position: Dict[str, List[Dict[str, Any]]],
+    players_by_id: Dict[int, Dict[str, Any]],
+    dh_pool: List[int],
+    cross_position_locks: Dict[int, set] | None = None,
+) -> int | None:
+    """
+    Pick the DH. Three tiers:
+      1. Plan pass  — lenient: no lock filter; uses the dh plan rows.
+      2. Score pass — best bat from dh_pool, excluding players locked
+                      at positions other than dh.
+      3. Last resort — never return None in a DH league; ignores locks
+                       so the slot is always filled.
+    """
+    if not dh_pool:
+        return None
+
+    best_pid = None
+    best_score = None
+
+    # Tier 1: plan-based
+    dh_plan_rows = plans_by_position.get("dh", [])
+    if dh_plan_rows:
+        for row in dh_plan_rows:
+            try:
+                pid = int(row["player_id"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if pid not in players_by_id or pid not in dh_pool:
+                continue
+            p = players_by_id[pid]
+            if not _is_player_available_for_lineup(p):
+                continue
+            w = float(row.get("target_weight") or 0.0)
+            if w <= 0:
+                continue
+            base_pos_rating = _get_rating(p, "dh_rating")
+            off_score = _compute_offense_score(p)
+            score = base_pos_rating * 0.7 + off_score * 0.3
+            if best_pid is None or score > best_score:
+                best_pid = pid
+                best_score = score
+        if best_pid is not None:
+            return best_pid
+
+    # Tier 2: score-based, locks-aware
+    for pid in dh_pool:
+        p = players_by_id[pid]
+        if not _is_player_available_for_lineup(p):
+            continue
+        if cross_position_locks:
+            locks = cross_position_locks.get(pid)
+            if locks and "dh" not in locks:
+                continue
+        base_pos_rating = _get_rating(p, "dh_rating")
+        off_score = _compute_offense_score(p)
+        score = base_pos_rating * 0.7 + off_score * 0.3
+        if best_pid is None or score > best_score:
+            best_pid = pid
+            best_score = score
+    if best_pid is not None:
+        return best_pid
+
+    # Tier 3: last resort — never leave DH empty in a DH league. Locks are
+    # dropped here because the alternative is sending the engine a None DH,
+    # which crashes it.
+    fallback_pool = [pid for pid in dh_pool
+                     if not players_by_id[pid].get("benched_by_injury")]
+    if not fallback_pool:
+        fallback_pool = dh_pool
+    for pid in fallback_pool:
+        p = players_by_id[pid]
+        base_pos_rating = _get_rating(p, "dh_rating")
+        off_score = _compute_offense_score(p)
+        score = base_pos_rating * 0.7 + off_score * 0.3
+        if best_pid is None or score > best_score:
+            best_pid = pid
+            best_score = score
+    return best_pid
+
+
+def _build_dh_pool(
+    remaining_ids: List[int],
+    players_by_id: Dict[int, Dict[str, Any]],
+    starter_id: int,
+) -> List[int]:
+    """
+    DH pool = everyone still unassigned, plus the starter if they exist on
+    the roster (so a two-way pitcher can bat as DH).
+    """
+    pool = list(remaining_ids)
+    if starter_id in players_by_id and starter_id not in pool:
+        pool.append(starter_id)
+    return pool
 
 
 # -------------------------------------------------------------------
@@ -867,6 +1016,9 @@ def build_defense_and_lineup(
         conn, league_year_id, season_week, team_id, vs_hand
     )
 
+    # Lock map: which positions each player is constrained to (if any)
+    cross_position_locks, locked_positions = _build_cross_position_locks(plans_by_position)
+
     # Initialize defense with SP fixed
     defense: Dict[str, Any] = {
         "startingpitcher": starter_id,
@@ -883,8 +1035,25 @@ def build_defense_and_lineup(
 
     remaining_ids = [pid for pid in players_by_id.keys() if pid != starter_id]
 
-    # Assign field positions in priority order
-    for pos in _POSITION_PRIORITY_ORDER:
+    # Walk field positions — locked positions first, then the rest — so a
+    # locked player gets first crack at their locked slot before any other
+    # position's plan pass could claim them.
+    walk_order = _build_walk_order(locked_positions)
+
+    # If DH is locked and this is a DH league, evaluate it ahead of non-locked
+    # field positions too.
+    dh_locked_early = use_dh and "dh" in locked_positions
+    if dh_locked_early:
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pid = _select_dh_player(
+            plans_by_position, players_by_id, dh_pool, cross_position_locks,
+        )
+        if dh_pid is not None:
+            defense["dh"] = dh_pid
+            if dh_pid in remaining_ids:
+                remaining_ids.remove(dh_pid)
+
+    for pos in walk_order:
         chosen = _choose_player_for_position(
             conn=conn,
             team_id=team_id,
@@ -896,80 +1065,23 @@ def build_defense_and_lineup(
             remaining_ids=remaining_ids,
             plans_by_position=plans_by_position,
             usage_by_position=usage_by_position,
+            cross_position_locks=cross_position_locks,
         )
         if chosen is not None:
             defense[pos] = chosen
             if chosen in remaining_ids:
                 remaining_ids.remove(chosen)
 
-    # DH assignment — include starter_id so a two-way player can bat as DH.
-    # Also consult plans_by_position["dh"] so a plan-configured DH (including
-    # a two-way pitcher) is honoured before falling back to best-scorer logic.
-    if use_dh:
-        dh_pool = remaining_ids + (
-            [starter_id] if starter_id in players_by_id and starter_id not in remaining_ids else []
+    # DH assignment (if not already handled by the locked-first pass above).
+    if use_dh and defense["dh"] is None:
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pid = _select_dh_player(
+            plans_by_position, players_by_id, dh_pool, cross_position_locks,
         )
-        best_pid = None
-        best_score = None
-
-        # Plan-based pass: respect locked/priority plan rows for DH
-        dh_plan_rows = plans_by_position.get("dh", [])
-        if dh_plan_rows:
-            for row in dh_plan_rows:
-                pid = int(row["player_id"])
-                if pid not in players_by_id or pid not in dh_pool:
-                    continue
-                p = players_by_id[pid]
-                if not _is_player_available_for_lineup(p):
-                    continue
-                w = float(row.get("target_weight") or 0.0)
-                if w <= 0:
-                    continue
-                base_pos_rating = _get_rating(p, "dh_rating")
-                off_score = _compute_offense_score(p)
-                score = base_pos_rating * 0.7 + off_score * 0.3
-                if bool(row.get("locked")):
-                    score += 1000.0
-                if best_pid is None or score > best_score:
-                    best_pid = pid
-                    best_score = score
-
-        # Score-based pass: if no plan candidate, pick best from full pool
-        if best_pid is None:
-            for pid in dh_pool:
-                p = players_by_id[pid]
-                if not _is_player_available_for_lineup(p):
-                    continue
-                base_pos_rating = _get_rating(p, "dh_rating")
-                off_score = _compute_offense_score(p)
-                score = base_pos_rating * 0.7 + off_score * 0.3
-                if best_pid is None or score > best_score:
-                    best_pid = pid
-                    best_score = score
-
-        # Fallback: if no player passed availability, pick best non-benched
-        # so the DH slot is never left empty in a DH league.
-        if best_pid is None and dh_pool:
-            fallback_pool = [pid for pid in dh_pool
-                             if not players_by_id[pid].get("benched_by_injury")]
-            if not fallback_pool:
-                fallback_pool = dh_pool  # true last resort
-            fallback_pid = None
-            fallback_score = None
-            for pid in fallback_pool:
-                p = players_by_id[pid]
-                base_pos_rating = _get_rating(p, "dh_rating")
-                off_score = _compute_offense_score(p)
-                score = base_pos_rating * 0.7 + off_score * 0.3
-                if fallback_pid is None or score > fallback_score:
-                    fallback_pid = pid
-                    fallback_score = score
-            best_pid = fallback_pid
-
-        if best_pid is not None:
-            defense["dh"] = best_pid
-            if best_pid in remaining_ids:
-                remaining_ids.remove(best_pid)
+        if dh_pid is not None:
+            defense["dh"] = dh_pid
+            if dh_pid in remaining_ids:
+                remaining_ids.remove(dh_pid)
 
     # Build batting order using defense-based prefs (with safe fallback)
     lineup_ids = _build_batting_order(
@@ -1022,6 +1134,9 @@ def build_defense_and_lineup_from_cache(
 
     usage_by_position = cache.weekly_usage_by_team.get(team_id, {})
 
+    # Lock map: which positions each player is constrained to (if any)
+    cross_position_locks, locked_positions = _build_cross_position_locks(plans_by_position)
+
     # Initialize defense with SP fixed
     defense: Dict[str, Any] = {
         "startingpitcher": starter_id,
@@ -1032,7 +1147,20 @@ def build_defense_and_lineup_from_cache(
 
     remaining_ids = [pid for pid in players_by_id.keys() if pid != starter_id]
 
-    for pos in _POSITION_PRIORITY_ORDER:
+    walk_order = _build_walk_order(locked_positions)
+
+    dh_locked_early = use_dh and "dh" in locked_positions
+    if dh_locked_early:
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pid = _select_dh_player(
+            plans_by_position, players_by_id, dh_pool, cross_position_locks,
+        )
+        if dh_pid is not None:
+            defense["dh"] = dh_pid
+            if dh_pid in remaining_ids:
+                remaining_ids.remove(dh_pid)
+
+    for pos in walk_order:
         chosen = _choose_player_for_position(
             conn=None,
             team_id=team_id,
@@ -1044,79 +1172,22 @@ def build_defense_and_lineup_from_cache(
             remaining_ids=remaining_ids,
             plans_by_position=plans_by_position,
             usage_by_position=usage_by_position,
+            cross_position_locks=cross_position_locks,
         )
         if chosen is not None:
             defense[pos] = chosen
             if chosen in remaining_ids:
                 remaining_ids.remove(chosen)
 
-    if use_dh:
-        # Include starter_id so a two-way player can bat as DH
-        dh_pool = remaining_ids + (
-            [starter_id] if starter_id in players_by_id and starter_id not in remaining_ids else []
+    if use_dh and defense["dh"] is None:
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pid = _select_dh_player(
+            plans_by_position, players_by_id, dh_pool, cross_position_locks,
         )
-        best_pid = None
-        best_score = None
-
-        # Plan-based pass: respect locked/priority plan rows for DH
-        dh_plan_rows = plans_by_position.get("dh", [])
-        if dh_plan_rows:
-            for row in dh_plan_rows:
-                pid = int(row["player_id"])
-                if pid not in players_by_id or pid not in dh_pool:
-                    continue
-                p = players_by_id[pid]
-                if not _is_player_available_for_lineup(p):
-                    continue
-                w = float(row.get("target_weight") or 0.0)
-                if w <= 0:
-                    continue
-                base_pos_rating = _get_rating(p, "dh_rating")
-                off_score = _compute_offense_score(p)
-                score = base_pos_rating * 0.7 + off_score * 0.3
-                if bool(row.get("locked")):
-                    score += 1000.0
-                if best_pid is None or score > best_score:
-                    best_pid = pid
-                    best_score = score
-
-        # Score-based pass: if no plan candidate, pick best from full pool
-        if best_pid is None:
-            for pid in dh_pool:
-                p = players_by_id[pid]
-                if not _is_player_available_for_lineup(p):
-                    continue
-                base_pos_rating = _get_rating(p, "dh_rating")
-                off_score = _compute_offense_score(p)
-                score = base_pos_rating * 0.7 + off_score * 0.3
-                if best_pid is None or score > best_score:
-                    best_pid = pid
-                    best_score = score
-
-        # Fallback: pick best remaining player so the DH slot is never empty
-        # in a DH league. Exclude stamina=0 (benched by injury) unless no
-        # one else is available.
-        if best_pid is None and dh_pool:
-            fallback_pool = [pid for pid in dh_pool
-                             if not players_by_id[pid].get("benched_by_injury")]
-            if not fallback_pool:
-                fallback_pool = dh_pool  # true last resort
-            fallback_pid = None
-            fallback_score = None
-            for pid in fallback_pool:
-                p = players_by_id[pid]
-                base_pos_rating = _get_rating(p, "dh_rating")
-                off_score = _compute_offense_score(p)
-                score = base_pos_rating * 0.7 + off_score * 0.3
-                if fallback_pid is None or score > fallback_score:
-                    fallback_pid = pid
-                    fallback_score = score
-            best_pid = fallback_pid
-
-        if best_pid is not None:
-            defense["dh"] = best_pid
-            if best_pid in remaining_ids:
-                remaining_ids.remove(best_pid)
+        if dh_pid is not None:
+            defense["dh"] = dh_pid
+            if dh_pid in remaining_ids:
+                remaining_ids.remove(dh_pid)
 
     # Build batting order — use cached lineup roles for the fallback path
     lineup_ids = _build_batting_order_from_cache(
