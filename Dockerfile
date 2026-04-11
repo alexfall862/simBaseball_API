@@ -11,4 +11,4 @@ COPY . .
 EXPOSE 8080
 
 # Use $PORT if provided, otherwise 8080 locally
-CMD ["/bin/sh","-lc","exec gunicorn -w ${GUNICORN_WORKERS:-4} --threads ${GUNICORN_THREADS:-8} --timeout ${GUNICORN_TIMEOUT:-45} --log-level info --access-logfile - -b 0.0.0.0:${PORT:-8080} 'app:create_app()'"]
+CMD ["/bin/sh","-lc","exec gunicorn -w ${GUNICORN_WORKERS:-4} --threads ${GUNICORN_THREADS:-8} --timeout ${GUNICORN_TIMEOUT:-45} --max-requests ${GUNICORN_MAX_REQUESTS:-500} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50} --log-level info --access-logfile - -b 0.0.0.0:${PORT:-8080} 'app:create_app()'"]
