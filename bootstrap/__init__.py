@@ -68,6 +68,9 @@ def get_landing(org_id: int):
     tables = _get_tables()
 
     viewer_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewer_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     try:
         with engine.connect() as conn:
@@ -171,6 +174,9 @@ def get_landing_all():
     tables = _get_tables()
 
     viewer_org_id = request.args.get("viewing_org_id", type=int)
+    if not viewer_org_id:
+        return jsonify(error="missing_param",
+                       message="viewing_org_id query param is required"), 400
 
     try:
         with engine.connect() as conn:
@@ -228,11 +234,28 @@ def get_landing_all():
             except Exception:
                 log.exception("bootstrap (all-orgs): listed_position attach failed")
 
+            # Flatten every player across every org once. Used for both
+            # the visibility batch below and the stamina/injury attach
+            # after it, so we pay the flattening cost exactly once.
+            flat_players = []
+            holder_org_ids_flat = {}
+            player_levels_flat = {}
+            for oid in org_ids:
+                roster_map = batch_rosters.get(oid, {})
+                for team_players in roster_map.values():
+                    for p in team_players:
+                        pid = p.get("id")
+                        if pid is None:
+                            continue
+                        flat_players.append(p)
+                        holder_org_ids_flat[pid] = oid
+                        player_levels_flat[pid] = p.get("current_level", 0)
+
             # Visibility context + fog-of-war fuzzing for all orgs' rosters.
             # Single batch call across every player in every org — one
             # scouting-actions query and one dist/position-weights load
             # instead of 30 per-org passes.
-            if viewer_org_id is not None:
+            if flat_players:
                 from services.attribute_visibility import get_visible_players_batch
 
                 dist_by_level_shared = {}
@@ -249,37 +272,32 @@ def get_landing_all():
                 except Exception:
                     pass
 
-                flat_players = []
-                holder_org_ids_flat = {}
-                player_levels_flat = {}
-                for oid in org_ids:
-                    roster_map = batch_rosters.get(oid, {})
-                    for team_players in roster_map.values():
-                        for p in team_players:
-                            pid = p.get("id")
-                            if pid is None:
-                                continue
-                            flat_players.append(p)
-                            holder_org_ids_flat[pid] = oid
-                            player_levels_flat[pid] = p.get("current_level", 0)
+                sample_ratings = flat_players[0].get("ratings", {})
+                rating_cols = [k.replace("_display", "_base") for k in sample_ratings
+                               if k.endswith("_display")]
+                pot_cols = list(flat_players[0].get("potentials", {}).keys())
+                col_cats = {
+                    "rating": rating_cols,
+                    "pot": pot_cols,
+                    "bio": [],
+                    "derived": [],
+                }
 
-                if flat_players:
-                    sample_ratings = flat_players[0].get("ratings", {})
-                    rating_cols = [k.replace("_display", "_base") for k in sample_ratings
-                                   if k.endswith("_display")]
-                    pot_cols = list(flat_players[0].get("potentials", {}).keys())
-                    col_cats = {
-                        "rating": rating_cols,
-                        "pot": pot_cols,
-                        "bio": [],
-                        "derived": [],
-                    }
+                get_visible_players_batch(
+                    conn, flat_players, viewer_org_id,
+                    holder_org_ids_flat, player_levels_flat,
+                    dist_by_level_shared, col_cats, position_weights_shared,
+                )
 
-                    get_visible_players_batch(
-                        conn, flat_players, viewer_org_id,
-                        holder_org_ids_flat, player_levels_flat,
-                        dist_by_level_shared, col_cats, position_weights_shared,
-                    )
+                # Attach stamina / injury state and apply injury maluses to
+                # _display values. Must run AFTER fog-of-war so maluses
+                # multiply fogged values (matches rosters endpoint ordering).
+                try:
+                    from rosters import _attach_injury_and_stamina_to_players
+                    _attach_injury_and_stamina_to_players(conn, flat_players)
+                except Exception:
+                    log.warning("bootstrap (all-orgs): stamina/injury attach failed",
+                                exc_info=True)
 
             # Batch-load top players for ALL orgs in 3 queries
             batch_top_batters = _get_all_top_batters(conn, tables, ctx, all_team_ids_flat)
@@ -580,7 +598,7 @@ def _get_all_rosters(conn, tables, org_ids):
                     "contract_id", "contract_years", "contract_current_year",
                     "leagueYearSigned", "contract_isActive", "contract_isBuyout",
                     "contract_isExtension", "contract_isFinished", "contract_bonus",
-                    "detail_id", "year_index", "org_id"])
+                    "detail_id", "year_index", "org_id", "displayovr"])
 
     def _to_20_80(raw_val, mean, std):
         if raw_val is None or mean is None:
@@ -983,7 +1001,7 @@ def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
                     "contract_id", "contract_years", "contract_current_year",
                     "leagueYearSigned", "contract_isActive", "contract_isBuyout",
                     "contract_isExtension", "contract_isFinished", "contract_bonus",
-                    "detail_id", "year_index"])
+                    "detail_id", "year_index", "displayovr"])
 
     def _to_20_80(raw_val, mean, std):
         if raw_val is None or mean is None:
@@ -1103,6 +1121,17 @@ def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
         pot_cols=pot_cols,
         position_weights=position_weights,
     )
+
+    # --- Attach stamina, injury state, and apply injury maluses ---
+    # Must run AFTER fog-of-war so maluses multiply fogged _display values
+    # (matches rosters endpoint ordering).
+    try:
+        from rosters import _attach_injury_and_stamina_to_players
+        flat_players = [pl for team_players in roster_map.values() for pl in team_players]
+        if flat_players:
+            _attach_injury_and_stamina_to_players(conn, flat_players)
+    except Exception:
+        log.warning("bootstrap: stamina/injury attach failed", exc_info=True)
 
     return roster_map
 
