@@ -99,18 +99,33 @@ def _fuzz_seed(org_id, player_id, attr_name):
     return int.from_bytes(hashlib.sha256(raw).digest()[:4], "big")
 
 
+def _fuzz_magnitude_step(seed):
+    """
+    Map a seed to a magnitude step (1, 2, or 3) with a normal-shaped
+    distribution: 70% / 25% / 5%.  Uses the low two bytes of the seed
+    so the direction bit (bit 16) stays independent.
+    """
+    bucket = seed % 100
+    if bucket < 70:
+        return 1
+    if bucket < 95:
+        return 2
+    return 3
+
+
 def fuzz_letter_grade(true_grade, org_id, player_id, attr_name):
     """
     Shift a letter grade by 1-3 positions in GRADE_LIST.
     Direction and magnitude are deterministic per (org, player, attr).
+    Magnitude is weighted 70/25/5 toward smaller shifts.
     """
     true_idx = GRADE_INDEX.get(true_grade)
     if true_idx is None:
         return "?"
 
     seed = _fuzz_seed(org_id, player_id, attr_name)
-    magnitude = (seed % 3) + 1                        # 1, 2, or 3 steps
-    direction = 1 if (seed >> 2) % 2 == 0 else -1     # up or down
+    magnitude = _fuzz_magnitude_step(seed)
+    direction = 1 if (seed >> 16) % 2 == 0 else -1
 
     fuzzed_idx = true_idx + (direction * magnitude)
     fuzzed_idx = max(0, min(len(GRADE_LIST) - 1, fuzzed_idx))
@@ -121,13 +136,14 @@ def fuzz_20_80(true_score, org_id, player_id, attr_name):
     """
     Offset a 20-80 score by 5, 10, or 15 (1-3 steps of 5).
     Direction and magnitude are deterministic per (org, player, attr).
+    Magnitude is weighted 70/25/5 toward smaller shifts.
     """
     if true_score is None:
         return None
 
     seed = _fuzz_seed(org_id, player_id, attr_name)
-    magnitude = ((seed % 3) + 1) * 5                  # 5, 10, or 15
-    direction = 1 if (seed >> 2) % 2 == 0 else -1
+    magnitude = _fuzz_magnitude_step(seed) * 5
+    direction = 1 if (seed >> 16) % 2 == 0 else -1
 
     fuzzed = true_score + (direction * magnitude)
     return max(20, min(80, fuzzed))

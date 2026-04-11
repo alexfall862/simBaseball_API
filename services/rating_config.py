@@ -24,7 +24,11 @@ from db import get_engine
 
 logger = logging.getLogger("app")
 
-from services.ovr_core import PITCH_COMPONENT_RE  # noqa: E402, F811
+from services.ovr_core import (  # noqa: E402, F811
+    PITCH_COMPONENT_RE,
+    DEFENSE_EXCLUDED_ATTR_KEYS,
+    FIELDING_RATING_TYPES,
+)
 
 # Canonical ptype values stored in rating_scale_config
 PTYPE_PITCHER = "Pitcher"
@@ -606,5 +610,27 @@ def _compute_derived_for_seed(
         val = _compute_overall_for_player(m, derived, wt_map)
         if val is not None:
             derived[rating_type] = val
+
+    # -- Defense-only counterparts of fielding position ratings --
+    # Mirrors the parallel computation in
+    # services/player_display.py::compute_derived_raw_ratings so the seeded
+    # distributions match what the live rating pipeline produces. DH is
+    # intentionally skipped (no defensive responsibility — see player_display
+    # for the explanation).
+    for rating_type, wt_map in position_weights.items():
+        if rating_type not in FIELDING_RATING_TYPES:
+            continue
+        if rating_type == "dh_rating":
+            continue
+        def_wt_map = {
+            k: w for k, w in wt_map.items()
+            if k not in DEFENSE_EXCLUDED_ATTR_KEYS
+        }
+        if not def_wt_map:
+            continue
+        def_val = _compute_overall_for_player(m, derived, def_wt_map)
+        if def_val is not None:
+            def_key = rating_type.replace("_rating", "_def_rating")
+            derived[def_key] = def_val
 
     return derived

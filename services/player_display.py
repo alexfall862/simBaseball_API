@@ -179,6 +179,37 @@ def compute_derived_raw_ratings(
     for rating_type, wt_map in weights.items():
         derived[rating_type] = _w_avg(wt_map)
 
+    # Defense-only position ratings (parallel fields).
+    # For each fielding position, compute a second weighted average using
+    # the same calibrated weights but with offensive and pure-baserunning
+    # attribute keys stripped out. _w_avg re-normalizes by the surviving
+    # weights, so the ratio between the kept defensive components is
+    # preserved exactly. These power "where to play" decisions in
+    # default_gameplan without the offense double-count problem.
+    from services.ovr_core import (
+        DEFENSE_EXCLUDED_ATTR_KEYS,
+        FIELDING_RATING_TYPES,
+    )
+    for rating_type, wt_map in weights.items():
+        if rating_type not in FIELDING_RATING_TYPES:
+            continue
+        def_key = rating_type.replace("_rating", "_def_rating")
+        # DH has no real defensive responsibility. Its calibrated weight
+        # set is overwhelmingly offense, with at most a token speed weight
+        # left over after stripping. Re-normalizing one tiny weight to
+        # 100% would make dh_def_rating = speed_base, which is misleading.
+        # Force None so consumers treat DH as a flat zero column —
+        # placement logic should put the player with the lowest defensive
+        # opportunity cost there, not the fastest one.
+        if rating_type == "dh_rating":
+            derived[def_key] = None
+            continue
+        def_wt_map = {
+            k: w for k, w in wt_map.items()
+            if k not in DEFENSE_EXCLUDED_ATTR_KEYS
+        }
+        derived[def_key] = _w_avg(def_wt_map) if def_wt_map else None
+
     return derived
 
 

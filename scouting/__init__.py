@@ -1180,6 +1180,13 @@ def api_scouting_action():
     Spend scouting points to unlock player information.
 
     Body: { org_id, league_year_id, player_id, action_type }
+
+    Response includes a `player` field with the post-spend, fully fogged
+    bootstrap-shape player object so the frontend can patch its state
+    structures without a follow-up GET /scouting/player/{id} round trip.
+    `player` is null if the target is not on an active roster (free
+    agents, recruits, IFA prospects) — caller should fall back to
+    GET /scouting/player/{id} for those.
     """
     body = request.get_json(silent=True) or {}
     required = ["org_id", "league_year_id", "player_id", "action_type"]
@@ -1187,16 +1194,26 @@ def api_scouting_action():
     if missing:
         return jsonify(error="missing_fields", fields=missing), 400
 
+    org_id = int(body["org_id"])
+    target_player_id = int(body["player_id"])
+
     try:
         engine = get_engine()
         with engine.begin() as conn:
             result = perform_scouting_action(
                 conn,
-                org_id=int(body["org_id"]),
+                org_id=org_id,
                 league_year_id=int(body["league_year_id"]),
-                player_id=int(body["player_id"]),
+                player_id=target_player_id,
                 action_type=body["action_type"],
             )
+            # Build the post-spend player in the same transaction so the
+            # fog-of-war pass sees the freshly-inserted scouting_action.
+            from bootstrap import build_bootstrap_players_for_viewer
+            players_map = build_bootstrap_players_for_viewer(
+                conn, [target_player_id], org_id,
+            )
+            result["player"] = players_map.get(target_player_id)
         return jsonify(result), 200
 
     except ValueError as e:
@@ -1268,9 +1285,22 @@ def api_scouting_action_batch():
             # Get final budget state
             budget = get_or_create_budget(conn, org_id, league_year_id)
 
-        total_spent = sum(
-            1 for _ in successes
-        )  # actual cost per player resolved inside perform_scouting_action
+            # Build post-spend bootstrap-shape players for everything that
+            # changed state (successes) plus already-unlocked entries so
+            # the frontend can heal any drift in its cached state. Errors
+            # do NOT get player objects. Non-roster players (free agents,
+            # recruits, IFA prospects) come back missing from players_map
+            # and are reported in not_found so the frontend can route
+            # them to its fallback path without index-alignment hacks.
+            from bootstrap import build_bootstrap_players_for_viewer
+            ids_to_refresh = successes + already_unlocked
+            players_map = build_bootstrap_players_for_viewer(
+                conn, ids_to_refresh, org_id,
+            )
+            players_list = [players_map[pid] for pid in ids_to_refresh
+                            if pid in players_map]
+            not_found = [pid for pid in ids_to_refresh
+                         if pid not in players_map]
 
         return jsonify(
             successes=successes,
@@ -1281,6 +1311,8 @@ def api_scouting_action_batch():
                 "spent_points": budget["spent_points"],
                 "remaining_points": budget["total_points"] - budget["spent_points"],
             },
+            players=players_list,
+            not_found=not_found,
         ), 200
 
     except ValueError as e:

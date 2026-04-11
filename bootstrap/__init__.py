@@ -522,13 +522,322 @@ def _get_all_organizations(conn, tables, org_ids):
     return result
 
 
+def _to_20_80(raw_val, mean, std):
+    """Z-score scaling helper used by all bootstrap player builders."""
+    if raw_val is None or mean is None:
+        return None
+    try:
+        x = float(raw_val)
+    except (TypeError, ValueError):
+        return None
+    if std is None or std <= 0:
+        z = 0.0
+    else:
+        z = (x - mean) / std
+    z = max(-3.0, min(3.0, z))
+    raw_score = 50.0 + (z / 3.0) * 30.0
+    score = int(round(max(20.0, min(80.0, raw_score)) / 5.0) * 5)
+    return max(20, min(80, score))
+
+
+_PITCH_COMP_RE = None  # lazy-init below to avoid top-level re cost
+
+
+def _bootstrap_pitch_comp_re():
+    global _PITCH_COMP_RE
+    if _PITCH_COMP_RE is None:
+        import re
+        _PITCH_COMP_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
+    return _PITCH_COMP_RE
+
+
+def _classify_player_columns(col_names):
+    """
+    Categorize a roster query's result columns into the buckets the
+    bootstrap player builder needs.
+
+    Returns (base_cols, pot_cols, derived_cols, bio_skip).
+    """
+    import re
+    base_cols = [n for n in col_names if n.endswith("_base")]
+    pot_cols = [n for n in col_names if n.endswith("_pot")]
+    derived_cols = [n for n in col_names
+                    if n.endswith("_rating") or re.match(r"^pitch\d+_ovr$", n)]
+    bio_skip = set(base_cols + pot_cols + derived_cols +
+                   ["team", "current_level", "onIR", "salary",
+                    "salary_share", "team_id", "team_abbrev", "league_level",
+                    "contract_id", "contract_years", "contract_current_year",
+                    "leagueYearSigned", "contract_isActive", "contract_isBuyout",
+                    "contract_isExtension", "contract_isFinished", "contract_bonus",
+                    "detail_id", "year_index", "org_id", "displayovr"])
+    return base_cols, pot_cols, derived_cols, bio_skip
+
+
+def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
+                                  base_cols, pot_cols, bio_skip, col_names):
+    """
+    Build a single bootstrap-shape player dict from a SQLAlchemy roster
+    row. Used by /bootstrap/landing/<org_id>, /bootstrap/landing/all, and
+    build_bootstrap_players_for_viewer (the post-scouting-action path).
+
+    Output shape (pre-fog, pre-stamina):
+        {
+          ...bio fields spread at top level...,
+          "current_level", "league_level", "team_abbrev",
+          "contract": {...},
+          "ratings": {<attr>_display: 20-80 int, c_rating: int, ...},
+          "potentials": {<attr>_pot: letter grade},
+        }
+
+    Visibility fogging and stamina/injury attach are applied separately
+    by the caller.
+    """
+    from rosters import _compute_derived_raw_ratings
+
+    pitch_comp_re = _bootstrap_pitch_comp_re()
+    m = row._mapping
+
+    ptype = (m.get("ptype") or "").strip()
+    league_level = m.get("league_level")
+
+    ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
+    dist_for_level = ptype_dist.get(league_level, {})
+
+    bio = {}
+    for k in col_names:
+        if k not in bio_skip:
+            bio[k] = m.get(k)
+
+    ratings = {}
+    for col in base_cols:
+        val = m.get(col)
+        mp = pitch_comp_re.match(col)
+        dist_key = f"pitch_{mp.group(1)}" if mp else col
+        d = dist_for_level.get(dist_key)
+        if d and d.get("mean") is not None:
+            ratings[col.replace("_base", "_display")] = _to_20_80(val, d["mean"], d["std"])
+        else:
+            ratings[col.replace("_base", "_display")] = None
+
+    raw_derived = _compute_derived_raw_ratings(row, position_weights)
+    for attr_name, raw_val in raw_derived.items():
+        d = dist_for_level.get(attr_name)
+        if d and d.get("mean") is not None:
+            ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
+        else:
+            ratings[attr_name] = None
+
+    potentials = {}
+    for col in pot_cols:
+        potentials[col] = m.get(col)
+
+    base_salary = m.get("salary")
+    share = m.get("salary_share")
+    salary_for_org = None
+    if base_salary is not None and share is not None:
+        try:
+            salary_for_org = float(base_salary) * float(share)
+        except (TypeError, ValueError):
+            pass
+
+    contract = {
+        "id": m.get("contract_id"),
+        "years": m.get("contract_years"),
+        "current_year": m.get("contract_current_year"),
+        "league_year_signed": m.get("leagueYearSigned"),
+        "is_active": bool(m.get("contract_isActive") or 0),
+        "is_buyout": bool(m.get("contract_isBuyout") or 0),
+        "is_extension": bool(m.get("contract_isExtension") or 0),
+        "is_finished": bool(m.get("contract_isFinished") or 0),
+        "on_ir": bool(m.get("onIR") or 0),
+        "bonus": float(m.get("contract_bonus") or 0),
+        "current_year_detail": {
+            "id": m.get("detail_id"),
+            "year_index": m.get("year_index"),
+            "base_salary": float(base_salary) if base_salary is not None else None,
+            "salary_share": float(share) if share is not None else None,
+            "salary_for_org": salary_for_org,
+        },
+    }
+
+    return {
+        **bio,
+        "current_level": m.get("current_level"),
+        "league_level": league_level,
+        "team_abbrev": m.get("team_abbrev"),
+        "contract": contract,
+        "ratings": ratings,
+        "potentials": potentials,
+    }
+
+
+def build_bootstrap_players_for_viewer(conn, player_ids, viewer_org_id):
+    """
+    Build bootstrap-shape player dicts for an arbitrary list of player IDs,
+    fogged from viewer_org_id's perspective and stamina/injury attached.
+
+    Returns {player_id: player_dict}. Players that are not on an active
+    roster (free agents, college recruits, IFA prospects, etc.) are
+    omitted from the result; callers should fall back to other paths
+    for those.
+
+    Output dicts are byte-for-byte identical to entries inside the
+    RosterMap returned by /bootstrap/landing/<org_id>?viewing_org_id=<viewer>
+    for the same (viewer, target) pair.
+
+    Designed for the post-scouting-action path so the action endpoints
+    can return the updated player without the frontend needing a
+    second round trip.
+    """
+    if not player_ids:
+        return {}
+
+    from rosters import _load_position_weights, _attach_injury_and_stamina_to_players
+
+    tables = _get_tables()
+    c = tables["contracts"]
+    cd = tables["contract_details"]
+    cts = tables["contract_team_share"]
+    p = tables["players"]
+    t = tables["teams"]
+    lvl = tables["levels"]
+
+    # Same JOIN as _get_all_rosters; filtered by player_id IN (...) instead
+    # of by org_id. The active-contract + isHolder filters mean players
+    # without an active contract simply won't show up.
+    stmt = (
+        select(
+            p,
+            c.c.id.label("contract_id"),
+            c.c.years.label("contract_years"),
+            c.c.current_year.label("contract_current_year"),
+            c.c.leagueYearSigned,
+            c.c.isActive.label("contract_isActive"),
+            c.c.isBuyout.label("contract_isBuyout"),
+            c.c.isExtension.label("contract_isExtension"),
+            c.c.isFinished.label("contract_isFinished"),
+            c.c.bonus.label("contract_bonus"),
+            c.c.current_level,
+            c.c.onIR,
+            cd.c.id.label("detail_id"),
+            cd.c.year.label("year_index"),
+            cd.c.salary,
+            cts.c.salary_share,
+            cts.c.orgID.label("org_id"),
+            t.c.id.label("team_id"),
+            t.c.team_abbrev,
+            lvl.c.league_level,
+        )
+        .select_from(
+            c.join(cd, and_(cd.c.contractID == c.c.id,
+                            cd.c.year == c.c.current_year))
+             .join(cts, cts.c.contractDetailsID == cd.c.id)
+             .join(p, p.c.id == c.c.playerID)
+             .join(t, and_(t.c.orgID == cts.c.orgID,
+                           t.c.team_level == c.c.current_level))
+             .join(lvl, lvl.c.id == c.c.current_level)
+        )
+        .where(and_(
+            c.c.isActive == 1,
+            cts.c.isHolder == 1,
+            p.c.id.in_(list(player_ids)),
+        ))
+    )
+
+    rows = conn.execute(stmt).all()
+    if not rows:
+        return {}
+
+    dist_by_level = {}
+    try:
+        from services.rating_config import get_rating_config_by_level_name
+        dist_by_level = get_rating_config_by_level_name(conn) or {}
+    except Exception:
+        pass
+
+    position_weights = _load_position_weights(conn)
+
+    col_names = list(rows[0]._mapping.keys())
+    base_cols, pot_cols, _derived_cols, bio_skip = _classify_player_columns(col_names)
+
+    players_by_id = {}
+    holder_org_ids = {}
+    player_levels = {}
+    for row in rows:
+        m = row._mapping
+        pid = m["id"]
+        if pid in players_by_id:
+            continue
+        player = _build_bootstrap_player_dict(
+            row, dist_by_level, position_weights,
+            base_cols, pot_cols, bio_skip, col_names,
+        )
+        players_by_id[pid] = player
+        holder_org_ids[pid] = m.get("org_id")
+        player_levels[pid] = m.get("current_level", 0)
+
+    if not players_by_id:
+        return {}
+
+    # Attach listed_position before fog so the visibility pipeline can
+    # use it for context determination if needed (matches bootstrap order).
+    try:
+        from services.listed_position import POSITION_DISPLAY
+        pid_list = list(players_by_id.keys())
+        ph = ", ".join(f":p{i}" for i in range(len(pid_list)))
+        prm = {f"p{i}": pid for i, pid in enumerate(pid_list)}
+        lp_rows = conn.execute(text(
+            f"SELECT player_id, position_code "
+            f"FROM player_listed_position "
+            f"WHERE player_id IN ({ph})"
+        ), prm).all()
+        lp_map = {r[0]: POSITION_DISPLAY.get(r[1], r[1]) for r in lp_rows}
+        for pid, pl in players_by_id.items():
+            pl["listed_position"] = lp_map.get(pid)
+    except Exception:
+        log.warning("build_bootstrap_players_for_viewer: listed_position attach failed",
+                    exc_info=True)
+
+    # Apply fog-of-war via the shared visibility pipeline. The action
+    # has already been written to scouting_actions in the same transaction
+    # by the time this is called, so the fog reflects the post-spend state.
+    from services.attribute_visibility import get_visible_players_batch
+
+    sample_ratings = next(iter(players_by_id.values())).get("ratings", {})
+    rating_cols_for_fog = [k.replace("_display", "_base") for k in sample_ratings
+                           if k.endswith("_display")]
+    pot_cols_for_fog = list(next(iter(players_by_id.values())).get("potentials", {}).keys())
+    col_cats = {
+        "rating": rating_cols_for_fog,
+        "pot": pot_cols_for_fog,
+        "bio": [],
+        "derived": [],
+    }
+
+    flat_players = list(players_by_id.values())
+    get_visible_players_batch(
+        conn, flat_players, viewer_org_id,
+        holder_org_ids, player_levels,
+        dist_by_level, col_cats, position_weights,
+    )
+
+    # Attach stamina/injury after fog so injury maluses multiply fogged
+    # _display values (matches bootstrap and rosters endpoint ordering).
+    try:
+        _attach_injury_and_stamina_to_players(conn, flat_players)
+    except Exception:
+        log.warning("build_bootstrap_players_for_viewer: stamina/injury attach failed",
+                    exc_info=True)
+
+    return players_by_id
+
+
 def _get_all_rosters(conn, tables, org_ids):
     """
     Fetch rosters for all orgs in 1 query instead of N.
     Returns {org_id: {team_id: [player_dicts]}}.
     """
-    import re
-    from rosters import _compute_derived_raw_ratings, _load_position_weights
+    from rosters import _load_position_weights
 
     c = tables["contracts"]
     cd = tables["contract_details"]
@@ -586,35 +895,8 @@ def _get_all_rosters(conn, tables, org_ids):
 
     position_weights = _load_position_weights(conn)
 
-    pitch_comp_re = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
-    col_names = [k for k in rows[0]._mapping.keys()]
-    base_cols = [n for n in col_names if n.endswith("_base")]
-    pot_cols = [n for n in col_names if n.endswith("_pot")]
-    derived_cols = [n for n in col_names
-                    if n.endswith("_rating") or re.match(r"^pitch\d+_ovr$", n)]
-    bio_skip = set(base_cols + pot_cols + derived_cols +
-                   ["team", "current_level", "onIR", "salary",
-                    "salary_share", "team_id", "team_abbrev", "league_level",
-                    "contract_id", "contract_years", "contract_current_year",
-                    "leagueYearSigned", "contract_isActive", "contract_isBuyout",
-                    "contract_isExtension", "contract_isFinished", "contract_bonus",
-                    "detail_id", "year_index", "org_id", "displayovr"])
-
-    def _to_20_80(raw_val, mean, std):
-        if raw_val is None or mean is None:
-            return None
-        try:
-            x = float(raw_val)
-        except (TypeError, ValueError):
-            return None
-        if std is None or std <= 0:
-            z = 0.0
-        else:
-            z = (x - mean) / std
-        z = max(-3.0, min(3.0, z))
-        raw_score = 50.0 + (z / 3.0) * 30.0
-        score = int(round(max(20.0, min(80.0, raw_score)) / 5.0) * 5)
-        return max(20, min(80, score))
+    col_names = list(rows[0]._mapping.keys())
+    base_cols, pot_cols, _derived_cols, bio_skip = _classify_player_columns(col_names)
 
     # {org_id: {team_id: [player_dicts]}}
     all_rosters = {}
@@ -628,78 +910,10 @@ def _get_all_rosters(conn, tables, org_ids):
             continue
         seen.add(player_id)
 
-        ptype = (m.get("ptype") or "").strip()
-        league_level = m.get("league_level")
-
-        ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
-        dist_for_level = ptype_dist.get(league_level, {})
-
-        bio = {}
-        for k in col_names:
-            if k not in bio_skip:
-                bio[k] = m.get(k)
-
-        ratings = {}
-        for col in base_cols:
-            val = m.get(col)
-            mp = pitch_comp_re.match(col)
-            dist_key = f"pitch_{mp.group(1)}" if mp else col
-            d = dist_for_level.get(dist_key)
-            if d and d.get("mean") is not None:
-                ratings[col.replace("_base", "_display")] = _to_20_80(val, d["mean"], d["std"])
-            else:
-                ratings[col.replace("_base", "_display")] = None
-
-        raw_derived = _compute_derived_raw_ratings(row, position_weights)
-        for attr_name, raw_val in raw_derived.items():
-            d = dist_for_level.get(attr_name)
-            if d and d.get("mean") is not None:
-                ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
-            else:
-                ratings[attr_name] = None
-
-        potentials = {}
-        for col in pot_cols:
-            potentials[col] = m.get(col)
-
-        base_salary = m.get("salary")
-        share = m.get("salary_share")
-        salary_for_org = None
-        if base_salary is not None and share is not None:
-            try:
-                salary_for_org = float(base_salary) * float(share)
-            except (TypeError, ValueError):
-                pass
-
-        contract = {
-            "id": m.get("contract_id"),
-            "years": m.get("contract_years"),
-            "current_year": m.get("contract_current_year"),
-            "league_year_signed": m.get("leagueYearSigned"),
-            "is_active": bool(m.get("contract_isActive") or 0),
-            "is_buyout": bool(m.get("contract_isBuyout") or 0),
-            "is_extension": bool(m.get("contract_isExtension") or 0),
-            "is_finished": bool(m.get("contract_isFinished") or 0),
-            "on_ir": bool(m.get("onIR") or 0),
-            "bonus": float(m.get("contract_bonus") or 0),
-            "current_year_detail": {
-                "id": m.get("detail_id"),
-                "year_index": m.get("year_index"),
-                "base_salary": float(base_salary) if base_salary is not None else None,
-                "salary_share": float(share) if share is not None else None,
-                "salary_for_org": salary_for_org,
-            },
-        }
-
-        player = {
-            **bio,
-            "current_level": m.get("current_level"),
-            "league_level": league_level,
-            "team_abbrev": m.get("team_abbrev"),
-            "contract": contract,
-            "ratings": ratings,
-            "potentials": potentials,
-        }
+        player = _build_bootstrap_player_dict(
+            row, dist_by_level, position_weights,
+            base_cols, pot_cols, bio_skip, col_names,
+        )
         all_rosters.setdefault(org_id, {}).setdefault(team_id, []).append(player)
 
     return all_rosters
@@ -929,8 +1143,7 @@ def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
       - ratings dict: {power_display: 70, c_rating: 65, pitch1_ovr: 72, ...}
       - potentials dict: {power_pot: "B+", ...}
     """
-    import re
-    from rosters import _compute_derived_raw_ratings, _load_position_weights
+    from rosters import _load_position_weights
 
     c = tables["contracts"]
     cd = tables["contract_details"]
@@ -988,36 +1201,8 @@ def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
 
     position_weights = _load_position_weights(conn)
 
-    # Classify player columns from the first row
-    pitch_comp_re = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
-    col_names = [k for k in rows[0]._mapping.keys()]
-    base_cols = [n for n in col_names if n.endswith("_base")]
-    pot_cols = [n for n in col_names if n.endswith("_pot")]
-    derived_cols = [n for n in col_names
-                    if n.endswith("_rating") or re.match(r"^pitch\d+_ovr$", n)]
-    bio_skip = set(base_cols + pot_cols + derived_cols +
-                   ["team", "current_level", "onIR", "salary",
-                    "salary_share", "team_id", "team_abbrev", "league_level",
-                    "contract_id", "contract_years", "contract_current_year",
-                    "leagueYearSigned", "contract_isActive", "contract_isBuyout",
-                    "contract_isExtension", "contract_isFinished", "contract_bonus",
-                    "detail_id", "year_index", "displayovr"])
-
-    def _to_20_80(raw_val, mean, std):
-        if raw_val is None or mean is None:
-            return None
-        try:
-            x = float(raw_val)
-        except (TypeError, ValueError):
-            return None
-        if std is None or std <= 0:
-            z = 0.0
-        else:
-            z = (x - mean) / std
-        z = max(-3.0, min(3.0, z))
-        raw_score = 50.0 + (z / 3.0) * 30.0
-        score = int(round(max(20.0, min(80.0, raw_score)) / 5.0) * 5)
-        return max(20, min(80, score))
+    col_names = list(rows[0]._mapping.keys())
+    base_cols, pot_cols, _derived_cols, bio_skip = _classify_player_columns(col_names)
 
     roster_map = {}
     seen = set()
@@ -1029,84 +1214,10 @@ def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
             continue
         seen.add(player_id)
 
-        ptype = (m.get("ptype") or "").strip()
-        league_level = m.get("league_level")
-
-        # Distribution lookup: player's ptype → level, fallback to "all"
-        ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
-        dist_for_level = ptype_dist.get(league_level, {})
-
-        # Bio fields
-        bio = {}
-        for k in col_names:
-            if k not in bio_skip:
-                bio[k] = m.get(k)
-
-        # 20-80 ratings for *_base columns
-        ratings = {}
-        for col in base_cols:
-            val = m.get(col)
-            mp = pitch_comp_re.match(col)
-            dist_key = f"pitch_{mp.group(1)}" if mp else col
-            d = dist_for_level.get(dist_key)
-            if d and d.get("mean") is not None:
-                ratings[col.replace("_base", "_display")] = _to_20_80(val, d["mean"], d["std"])
-            else:
-                ratings[col.replace("_base", "_display")] = None
-
-        # Derived ratings (position ratings + pitch overalls)
-        raw_derived = _compute_derived_raw_ratings(row, position_weights)
-        for attr_name, raw_val in raw_derived.items():
-            d = dist_for_level.get(attr_name)
-            if d and d.get("mean") is not None:
-                ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
-            else:
-                ratings[attr_name] = None
-
-        # Potentials
-        potentials = {}
-        for col in pot_cols:
-            potentials[col] = m.get(col)
-
-        # Contract details
-        base_salary = m.get("salary")
-        share = m.get("salary_share")
-        salary_for_org = None
-        if base_salary is not None and share is not None:
-            try:
-                salary_for_org = float(base_salary) * float(share)
-            except (TypeError, ValueError):
-                pass
-
-        contract = {
-            "id": m.get("contract_id"),
-            "years": m.get("contract_years"),
-            "current_year": m.get("contract_current_year"),
-            "league_year_signed": m.get("leagueYearSigned"),
-            "is_active": bool(m.get("contract_isActive") or 0),
-            "is_buyout": bool(m.get("contract_isBuyout") or 0),
-            "is_extension": bool(m.get("contract_isExtension") or 0),
-            "is_finished": bool(m.get("contract_isFinished") or 0),
-            "on_ir": bool(m.get("onIR") or 0),
-            "bonus": float(m.get("contract_bonus") or 0),
-            "current_year_detail": {
-                "id": m.get("detail_id"),
-                "year_index": m.get("year_index"),
-                "base_salary": float(base_salary) if base_salary is not None else None,
-                "salary_share": float(share) if share is not None else None,
-                "salary_for_org": salary_for_org,
-            },
-        }
-
-        player = {
-            **bio,
-            "current_level": m.get("current_level"),
-            "league_level": league_level,
-            "team_abbrev": m.get("team_abbrev"),
-            "contract": contract,
-            "ratings": ratings,
-            "potentials": potentials,
-        }
+        player = _build_bootstrap_player_dict(
+            row, dist_by_level, position_weights,
+            base_cols, pot_cols, bio_skip, col_names,
+        )
         roster_map.setdefault(team_id, []).append(player)
 
     # --- Apply fog-of-war via shared visibility pipeline ---

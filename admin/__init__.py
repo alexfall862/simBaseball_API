@@ -3361,6 +3361,10 @@ def admin_player_preview():
 
             position_ratings = {}
             for rating_name, raw_val in raw_ratings.items():
+                # Skip rating types that have no raw value (e.g. dh_def_rating
+                # is intentionally None — DH has no defensive responsibility).
+                if raw_val is None:
+                    continue
                 d = level_dists.get(rating_name)
                 if d and is_derived_rating(rating_name) and d.get("percentiles"):
                     scaled = to_20_80_percentile(raw_val, d["percentiles"])

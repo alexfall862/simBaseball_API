@@ -116,6 +116,26 @@ def resolve_ovr_weights(
 # ---------------------------------------------------------------------------
 # Previously _DEFAULT_POSITION_WEIGHTS in player_display.py.
 
+# Attribute keys excluded when computing defense-only position ratings.
+# These are the offensive (hitting eye/power/contact/discipline) and pure
+# baserunning components. `speed_base` is intentionally retained because it
+# contributes to defensive range in the outfield and middle infield.
+DEFENSE_EXCLUDED_ATTR_KEYS: frozenset = frozenset({
+    "power_base",
+    "contact_base",
+    "eye_base",
+    "discipline_base",
+    "basereaction_base",
+    "baserunning_base",
+})
+
+# Position rating types that have a corresponding defense-only counterpart
+# (the 9 fielding positions including DH; pitchers are excluded).
+FIELDING_RATING_TYPES: frozenset = frozenset({
+    "c_rating", "fb_rating", "sb_rating", "tb_rating", "ss_rating",
+    "lf_rating", "cf_rating", "rf_rating", "dh_rating",
+})
+
 DEFAULT_POSITION_WEIGHTS: Dict[str, Dict[str, float]] = {
     "c_rating": {
         "power_base": 0.025, "contact_base": 0.025, "eye_base": 0.025, "discipline_base": 0.025,

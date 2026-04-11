@@ -17,7 +17,7 @@ from sqlalchemy import MetaData, Table, and_, select, text
 
 logger = logging.getLogger("app")
 
-_VERSION = "2026-04-10a"  # diagnostic: confirm deployed code version
+_VERSION = "2026-04-10c"  # diagnostic: confirm deployed code version
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -42,7 +42,33 @@ _POS_RATING_KEY = {
     "dh": "dh_rating",
 }
 
+# Defense-only counterparts produced by player_display.compute_derived_raw_ratings.
+# These strip offensive (power/contact/eye/discipline) and pure baserunning
+# components from the calibrated position weights so they answer "how good
+# is this player defensively at this spot" without offense double-counting.
+_POS_DEF_RATING_KEY = {
+    "c": "c_def_rating",
+    "fb": "fb_def_rating",
+    "sb": "sb_def_rating",
+    "tb": "tb_def_rating",
+    "ss": "ss_def_rating",
+    "lf": "lf_def_rating",
+    "cf": "cf_def_rating",
+    "rf": "rf_def_rating",
+    "dh": "dh_def_rating",  # always None — DH has no defensive weights
+}
+
 _FIELDING_POSITIONS = ["c", "fb", "sb", "tb", "ss", "lf", "cf", "rf"]
+
+# Premium scarcity positions. Within the selected starting 9, the best
+# defensive fits at these spots are pinned BEFORE the rest of the field
+# is filled in. This guarantees the team's best catcher catches, best
+# shortstop plays SS, and best center fielder plays CF, even when one
+# of them would score marginally higher at a less-scarce position on
+# the defense-only matrix. Joint assignment (not sequential) so a
+# player who's elite at both C and SS lands at whichever of the two
+# yields the higher total team value.
+_PRIORITY_POSITIONS = ["c", "ss", "cf"]
 
 # Bullpen role assignments by slot position
 _BULLPEN_ROLES = {
@@ -446,14 +472,29 @@ def _assign_defense(conn, team_id: int,
                     position_players: Dict[int, Dict],
                     use_dh: bool):
     """
-    Assign position players to defensive positions using a globally optimal
-    Hungarian assignment over the calibrated per-position ratings.
+    Assign position players to defensive positions in two stages:
 
-    Each player has a *_rating value per position (c_rating, ss_rating, ...)
-    computed from the active weight calibration profile. We build a
-    player x position value matrix and find the assignment that maximizes
-    total team rating, so a player only ends up at C if their drop-off at
-    every other position is larger than the next-best catcher's gap to them.
+      Stage 1 — Selection:
+        Pick the starting 9 (or 8 if no DH) using the full calibrated
+        *_rating values, which include offense. A player's selection
+        value is the maximum across all positions of their *_rating —
+        i.e. their best-position overall. The top N by this value make
+        the lineup.
+
+      Stage 2 — Placement:
+        Of the selected players, decide WHERE each plays using
+        defense-only ratings (*_def_rating) — the same calibrated weights
+        with offensive and pure-baserunning components stripped out.
+        A Hungarian solver finds the assignment that maximizes total
+        team defensive value. DH has no defensive weight, so its column
+        is zero for everyone, and the Hungarian solver naturally routes
+        the player with the lowest defensive opportunity cost there
+        (typically the bat-first slugger with no glove).
+
+    This separation fixes the prior failure mode where a great hitter's
+    full *_rating looked good at every position because offense was
+    baked in, leading to placement decisions driven by bat instead of
+    glove.
     """
     if not position_players:
         return
@@ -462,29 +503,85 @@ def _assign_defense(conn, team_id: int,
     if use_dh:
         positions.append("dh")
 
-    players = list(position_players.items())  # [(pid, p), ...]
-    n_players = len(players)
-    n_positions = len(positions)
+    n_slots = len(positions)
+    all_players = list(position_players.items())  # [(pid, p), ...]
 
-    # Hungarian minimizes; negate ratings to maximize total team rating.
-    cost: List[List[float]] = [[0.0] * n_positions for _ in range(n_players)]
-    for i, (_, p) in enumerate(players):
-        for j, pos in enumerate(positions):
-            rating = _safe_float(p.get(_POS_RATING_KEY[pos]))
-            cost[i][j] = -rating
+    # ------------------------------------------------------------------
+    # Stage 1: select the starting N by best-position full rating.
+    # ------------------------------------------------------------------
+    def _selection_value(p: Dict[str, Any]) -> float:
+        best = 0.0
+        for pos in _FIELDING_POSITIONS:
+            r = _safe_float(p.get(_POS_RATING_KEY[pos]))
+            if r > best:
+                best = r
+        if use_dh:
+            r = _safe_float(p.get(_POS_RATING_KEY["dh"]))
+            if r > best:
+                best = r
+        return best
 
-    assignment = _hungarian_min(cost)
+    ranked = sorted(
+        all_players,
+        key=lambda kv: _selection_value(kv[1]),
+        reverse=True,
+    )
+    selected = ranked[:n_slots]
+
+    # ------------------------------------------------------------------
+    # Stage 2a: pin C / SS / CF first via a small joint Hungarian.
+    # These three are scarce premium positions where defensive
+    # specialists are irreplaceable, so they get first pick of the
+    # selected pool — the rest of the field fills in around them.
+    # ------------------------------------------------------------------
+    pinned_pid_to_pos: Dict[int, str] = {}
+    priority_positions = [p for p in _PRIORITY_POSITIONS if p in positions]
+    if priority_positions and selected:
+        pri_cost: List[List[float]] = [
+            [0.0] * len(priority_positions) for _ in range(len(selected))
+        ]
+        for i, (_, p) in enumerate(selected):
+            for j, pos in enumerate(priority_positions):
+                def_rating = _safe_float(p.get(_POS_DEF_RATING_KEY[pos]))
+                pri_cost[i][j] = -def_rating
+
+        pri_assignment = _hungarian_min(pri_cost)
+        for i, j in enumerate(pri_assignment):
+            if 0 <= j < len(priority_positions):
+                pid = selected[i][0]
+                pinned_pid_to_pos[pid] = priority_positions[j]
+
+    # ------------------------------------------------------------------
+    # Stage 2b: place the remaining selected players in the remaining
+    # positions using the same defense-only Hungarian.
+    # ------------------------------------------------------------------
+    remaining_players = [
+        (pid, p) for (pid, p) in selected if pid not in pinned_pid_to_pos
+    ]
+    remaining_positions = [pos for pos in positions if pos not in pinned_pid_to_pos.values()]
+    n_rem_pos = len(remaining_positions)
+
+    rem_assignment: List[int] = []
+    if remaining_players and remaining_positions:
+        rem_cost: List[List[float]] = [
+            [0.0] * n_rem_pos for _ in range(len(remaining_players))
+        ]
+        for i, (_, p) in enumerate(remaining_players):
+            for j, pos in enumerate(remaining_positions):
+                def_rating = _safe_float(p.get(_POS_DEF_RATING_KEY[pos]))
+                rem_cost[i][j] = -def_rating
+        rem_assignment = _hungarian_min(rem_cost)
 
     defense_params = []
-    for i, j in enumerate(assignment):
-        if j < 0 or j >= n_positions:
-            # Surplus player, no slot for them.
+    for pid, pos in pinned_pid_to_pos.items():
+        defense_params.append({"tid": team_id, "pos": pos, "pid": pid})
+    for i, j in enumerate(rem_assignment):
+        if j < 0 or j >= n_rem_pos:
             continue
-        pid = players[i][0]
-        pos = positions[j]
+        pid = remaining_players[i][0]
+        pos = remaining_positions[j]
         defense_params.append({"tid": team_id, "pos": pos, "pid": pid})
 
-    # Batch INSERT all position assignments
     if defense_params:
         conn.execute(text("""
             INSERT INTO team_position_plan
