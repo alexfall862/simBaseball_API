@@ -177,9 +177,14 @@ def _build_engine_player_view_from_mapping(mapping: Dict[str, Any], position_wei
     """
     col_cats = _get_player_column_categories()
     rating_cols = col_cats["rating"]
-    derived_cols = col_cats["derived"]
 
-    # Compute derived ratings (position ratings, pitch overalls)
+    # Compute derived ratings (position ratings, pitch overalls, defense-only
+    # ratings). All of these are virtual — they do not exist as physical
+    # columns on simbbPlayers, so we cannot filter them through a
+    # schema-derived whitelist. Pass them through unconditionally so
+    # downstream consumers (services/lineups.py, services/default_gameplan.py,
+    # the game engine itself) can read sp_rating, rp_rating, c_rating,
+    # ss_rating, *_def_rating, etc.
     derived = _compute_derived_raw_ratings(mapping, position_weights) or {}
 
     engine_player: Dict[str, Any] = {}
@@ -210,10 +215,9 @@ def _build_engine_player_view_from_mapping(mapping: Dict[str, Any], position_wei
     for col in rating_cols:
         engine_player[col] = mapping.get(col)
 
-    # Derived *_rating + pitchN_ovr
+    # All derived ratings — pitch overalls, position ratings, defense ratings.
     for key, value in derived.items():
-        if key in derived_cols or (key.startswith("pitch") and key.endswith("_ovr")):
-            engine_player[key] = value
+        engine_player[key] = value
 
     return engine_player
 
