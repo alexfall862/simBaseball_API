@@ -22,6 +22,7 @@ import logging
 import re
 import threading
 import time
+from statistics import NormalDist
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text as sa_text
@@ -56,13 +57,26 @@ PITCH_COMPONENT_RE = re.compile(r"^pitch\d+_(pacc|pbrk|pcntrl|consist)_base$")
 # ---------------------------------------------------------------------------
 # Percentile rank → 20-80 scale
 # ---------------------------------------------------------------------------
-# Previously duplicated as _percentile_rank_to_20_80 in both
-# weight_calibration.py and attribute_visibility.py.
+# Maps a uniform percentile rank through the inverse standard-normal CDF so
+# the discretized output follows a normal distribution centered at 50 with
+# SD 10: each 10 points (two buckets of 5) equals one standard deviation, so
+# 40/60 are ±1 SD, 30/70 are ±2 SD, 20/80 are ±3 SD. Tail buckets are rare
+# by construction (~0.3% at 20/80, ~19.7% at 50) which matches the scouting-
+# scale mental model of 80 being generational talent.
+
+_STD_NORMAL = NormalDist()
 
 def percentile_rank_to_20_80(rank: float) -> int:
-    """Map a percentile rank (0.0-1.0) to 20-80 scale, rounded to nearest 5."""
-    raw_score = 20.0 + rank * 60.0
-    score = int(round(raw_score / 5.0) * 5)
+    """Map a percentile rank (0.0-1.0) to 20-80 scale via inverse normal CDF.
+
+    Output is rounded to the nearest multiple of 5 and clamped to [20, 80].
+    The rank is clamped to [0.001, 0.999] so the extreme ends don't map to
+    ±inf; in practice this means the literal top/bottom player in a cohort
+    lands at 80/20.
+    """
+    rank = max(0.001, min(0.999, rank))
+    z = _STD_NORMAL.inv_cdf(rank)
+    score = int(round((50.0 + z * 10.0) / 5.0) * 5)
     return max(20, min(80, score))
 
 

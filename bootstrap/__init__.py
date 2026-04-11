@@ -1,7 +1,7 @@
 # bootstrap/__init__.py
 import logging
 import time
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from sqlalchemy import MetaData, Table, select, and_, text, func, literal
 from sqlalchemy.exc import SQLAlchemyError
 from db import get_engine
@@ -67,6 +67,8 @@ def get_landing(org_id: int):
     engine = get_engine()
     tables = _get_tables()
 
+    viewer_org_id = request.args.get("viewing_org_id", type=int)
+
     try:
         with engine.connect() as conn:
             # Step 0: current season context
@@ -84,7 +86,7 @@ def get_landing(org_id: int):
             team_ids = _get_org_team_ids(org)
 
             # Steps 2-11: assemble all sections
-            roster_map    = _get_roster_map(conn, tables, org_id)
+            roster_map    = _get_roster_map(conn, tables, org_id, viewer_org_id)
             standings     = _get_standings(conn, tables, ctx)
             all_games     = _get_all_games(conn, tables, ctx, team_ids)
             notifications = _get_notifications(conn, tables, team_ids)
@@ -168,6 +170,8 @@ def get_landing_all():
     engine = get_engine()
     tables = _get_tables()
 
+    viewer_org_id = request.args.get("viewing_org_id", type=int)
+
     try:
         with engine.connect() as conn:
             # ── Shared data ──────────────────────────────────────
@@ -224,12 +228,58 @@ def get_landing_all():
             except Exception:
                 log.exception("bootstrap (all-orgs): listed_position attach failed")
 
-            # Visibility context + fog-of-war fuzzing for all orgs' rosters
-            for oid in org_ids:
-                roster_map = batch_rosters.get(oid, {})
-                if roster_map:
-                    _apply_fog_of_war_to_roster_map(
-                        conn, roster_map, oid, {}, [], [], None)
+            # Visibility context + fog-of-war fuzzing for all orgs' rosters.
+            # Single batch call across every player in every org — one
+            # scouting-actions query and one dist/position-weights load
+            # instead of 30 per-org passes.
+            if viewer_org_id is not None:
+                from services.attribute_visibility import get_visible_players_batch
+
+                dist_by_level_shared = {}
+                try:
+                    from services.rating_config import get_rating_config_by_level_name
+                    dist_by_level_shared = get_rating_config_by_level_name(conn) or {}
+                except Exception:
+                    pass
+
+                position_weights_shared = None
+                try:
+                    from rosters import _load_position_weights
+                    position_weights_shared = _load_position_weights(conn)
+                except Exception:
+                    pass
+
+                flat_players = []
+                holder_org_ids_flat = {}
+                player_levels_flat = {}
+                for oid in org_ids:
+                    roster_map = batch_rosters.get(oid, {})
+                    for team_players in roster_map.values():
+                        for p in team_players:
+                            pid = p.get("id")
+                            if pid is None:
+                                continue
+                            flat_players.append(p)
+                            holder_org_ids_flat[pid] = oid
+                            player_levels_flat[pid] = p.get("current_level", 0)
+
+                if flat_players:
+                    sample_ratings = flat_players[0].get("ratings", {})
+                    rating_cols = [k.replace("_display", "_base") for k in sample_ratings
+                                   if k.endswith("_display")]
+                    pot_cols = list(flat_players[0].get("potentials", {}).keys())
+                    col_cats = {
+                        "rating": rating_cols,
+                        "pot": pot_cols,
+                        "bio": [],
+                        "derived": [],
+                    }
+
+                    get_visible_players_batch(
+                        conn, flat_players, viewer_org_id,
+                        holder_org_ids_flat, player_levels_flat,
+                        dist_by_level_shared, col_cats, position_weights_shared,
+                    )
 
             # Batch-load top players for ALL orgs in 3 queries
             batch_top_batters = _get_all_top_batters(conn, tables, ctx, all_team_ids_flat)
@@ -775,7 +825,7 @@ def _get_org_team_ids(org):
     return ids
 
 
-def _apply_fog_of_war_to_roster_map(conn, roster_map, viewing_org_id,
+def _apply_fog_of_war_to_roster_map(conn, roster_map, viewer_org_id, holder_org_id,
                                     dist_by_level, rating_cols, pot_cols,
                                     position_weights):
     """
@@ -785,8 +835,19 @@ def _apply_fog_of_war_to_roster_map(conn, roster_map, viewing_org_id,
     so that all fuzzing, derived-rating recomputation, and displayovr
     derivation use a single code path.
 
+    viewer_org_id: the org doing the viewing (source of scouting unlocks).
+        If None, no fogging is applied and the function returns immediately
+        (phase 1 soft-fallback; phase 2 flips this to a hard 400 at the
+        endpoint layer).
+    holder_org_id: the org that actually holds these players. Passed to
+        ``determine_player_context`` so the "own roster = precise" rule
+        fires only when viewer_org_id == holder_org_id.
+
     ``roster_map``: {team_id: [player_dict, ...]} — mutated in place.
     """
+    if viewer_org_id is None:
+        return
+
     from services.attribute_visibility import get_visible_players_batch
 
     # Flatten roster_map to a list for batch processing
@@ -797,22 +858,16 @@ def _apply_fog_of_war_to_roster_map(conn, roster_map, viewing_org_id,
     if not all_players:
         return
 
-    # Build holding_org_ids and player_levels dicts
-    # Bootstrap rosters are the org's own players, so holding org = viewing org
-    # for the purpose of context determination. But determine_player_context
-    # uses holding_org to classify the relationship, so we pass viewing_org_id.
     holding_org_ids = {}
     player_levels = {}
     for p in all_players:
         pid = p.get("id")
         if pid is None:
             continue
-        holding_org_ids[pid] = viewing_org_id
+        holding_org_ids[pid] = holder_org_id
         player_levels[pid] = p.get("current_level", 0)
 
-    # Build col_cats from available data if not provided
     if not rating_cols:
-        # Infer from the first player's ratings keys
         sample_ratings = all_players[0].get("ratings", {}) if all_players else {}
         rating_cols = [k.replace("_display", "_base") for k in sample_ratings
                        if k.endswith("_display")]
@@ -820,7 +875,6 @@ def _apply_fog_of_war_to_roster_map(conn, roster_map, viewing_org_id,
 
     col_cats = {"rating": rating_cols, "pot": pot_cols, "bio": [], "derived": []}
 
-    # Load distributions if not provided
     if not dist_by_level:
         try:
             from services.rating_config import get_rating_config_by_level_name
@@ -828,7 +882,6 @@ def _apply_fog_of_war_to_roster_map(conn, roster_map, viewing_org_id,
         except Exception:
             dist_by_level = {}
 
-    # Load position weights if not provided
     if position_weights is None:
         try:
             from rosters import _load_position_weights
@@ -836,19 +889,21 @@ def _apply_fog_of_war_to_roster_map(conn, roster_map, viewing_org_id,
         except Exception:
             position_weights = None
 
-    # Apply shared visibility pipeline (handles scouting actions, fuzz,
-    # derived rating recomputation, and displayovr derivation)
     get_visible_players_batch(
-        conn, all_players, viewing_org_id,
+        conn, all_players, viewer_org_id,
         holding_org_ids, player_levels,
         dist_by_level, col_cats, position_weights,
     )
-    # all_players are mutated in place; roster_map references the same dicts
 
 
-def _get_roster_map(conn, tables, org_id):
+def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
     """
     Players keyed by team_id, with 20-80 scaled ratings and position ratings.
+
+    If viewer_org_id is provided, applies fog-of-war visibility so that
+    viewers outside org_id see fogged/letter-grade ratings per their
+    scouting unlocks. If viewer_org_id is None (legacy callers), skips
+    fog-of-war and returns precise data.
 
     Each player object includes:
       - bio fields (firstname, lastname, ptype, age, etc.)
@@ -1037,8 +1092,17 @@ def _get_roster_map(conn, tables, org_id):
         roster_map.setdefault(team_id, []).append(player)
 
     # --- Apply fog-of-war via shared visibility pipeline ---
-    _apply_fog_of_war_to_roster_map(conn, roster_map, org_id, dist_by_level,
-                                    base_cols, pot_cols, position_weights)
+    # Every player in this map is held by org_id (query is filtered by
+    # cts.orgID == org_id), so holder_org_id is a scalar.
+    _apply_fog_of_war_to_roster_map(
+        conn, roster_map,
+        viewer_org_id=viewer_org_id,
+        holder_org_id=org_id,
+        dist_by_level=dist_by_level,
+        rating_cols=base_cols,
+        pot_cols=pot_cols,
+        position_weights=position_weights,
+    )
 
     return roster_map
 

@@ -642,7 +642,6 @@ def _apply_visibility(
         "display_format": display_format,
         "attributes_precise": attrs_precise,
         "potentials_precise": pot_precise,
-        "displayovr_precise": attrs_precise and displayovr_value is not None,
     }
 
     return player_dict

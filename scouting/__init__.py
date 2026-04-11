@@ -1738,18 +1738,11 @@ def api_scouted_players_batch():
                 "pro_potential_precise", "draft_potential_precise",
                 "college_potential_precise", "recruit_potential_precise",
             })
-            # Preserve displayovr_precise computed by _build_scouted_response
-            existing_vis_ctx = response.get("visibility_context") or {}
-            displayovr_precise = existing_vis_ctx.get(
-                "displayovr_precise",
-                bool(is_precise and response.get("displayovr") is not None),
-            )
             response["visibility_context"] = {
                 "context": f"{pool}_roster" if pool == "pro" else pool,
                 "display_format": response.get("display_format", "20-80"),
                 "attributes_precise": is_precise,
                 "potentials_precise": pot_precise,
-                "displayovr_precise": displayovr_precise,
             }
 
             players_result[str(pid)] = response
@@ -1978,8 +1971,6 @@ def _build_scouted_response(player, visibility, dist_by_level=None,
         )
 
     response["displayovr"] = displayovr_value
-    response["visibility_context"] = response.get("visibility_context", {})
-    response["visibility_context"]["displayovr_precise"] = bool(is_precise and displayovr_value is not None)
 
     return response
 
