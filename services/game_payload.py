@@ -3152,7 +3152,19 @@ def _rollback_prior_results(
                        SUM(stolen_bases) AS stolen_bases,
                        SUM(caught_stealing) AS caught_stealing,
                        SUM(plate_appearances) AS plate_appearances,
-                       SUM(hbp) AS hbp
+                       SUM(hbp) AS hbp,
+                       SUM(sacrifice_flies) AS sacrifice_flies,
+                       SUM(gidp) AS gidp,
+                       SUM(ground_balls) AS ground_balls,
+                       SUM(fly_balls) AS fly_balls,
+                       SUM(popups) AS popups,
+                       SUM(contact_barrel) AS contact_barrel,
+                       SUM(contact_solid) AS contact_solid,
+                       SUM(contact_flare) AS contact_flare,
+                       SUM(contact_burner) AS contact_burner,
+                       SUM(contact_under) AS contact_under,
+                       SUM(contact_topped) AS contact_topped,
+                       SUM(contact_weak) AS contact_weak
                 FROM game_batting_lines
                 WHERE game_id IN ({ph})
                 GROUP BY player_id, league_year_id, team_id
@@ -3175,7 +3187,19 @@ def _rollback_prior_results(
                         stolen_bases   = GREATEST(0, stolen_bases - :stolen_bases),
                         caught_stealing = GREATEST(0, caught_stealing - :caught_stealing),
                         plate_appearances = GREATEST(0, plate_appearances - :plate_appearances),
-                        hbp            = GREATEST(0, hbp - :hbp)
+                        hbp            = GREATEST(0, hbp - :hbp),
+                        sacrifice_flies = GREATEST(0, sacrifice_flies - :sacrifice_flies),
+                        gidp           = GREATEST(0, gidp - :gidp),
+                        ground_balls   = GREATEST(0, ground_balls - :ground_balls),
+                        fly_balls      = GREATEST(0, fly_balls - :fly_balls),
+                        popups         = GREATEST(0, popups - :popups),
+                        contact_barrel = GREATEST(0, contact_barrel - :contact_barrel),
+                        contact_solid  = GREATEST(0, contact_solid - :contact_solid),
+                        contact_flare  = GREATEST(0, contact_flare - :contact_flare),
+                        contact_burner = GREATEST(0, contact_burner - :contact_burner),
+                        contact_under  = GREATEST(0, contact_under - :contact_under),
+                        contact_topped = GREATEST(0, contact_topped - :contact_topped),
+                        contact_weak   = GREATEST(0, contact_weak - :contact_weak)
                     WHERE player_id = :player_id
                       AND league_year_id = :league_year_id
                       AND team_id = :team_id
@@ -3206,7 +3230,22 @@ def _rollback_prior_results(
                        SUM(balls) AS balls,
                        SUM(strikes) AS strikes,
                        SUM(hbp) AS hbp,
-                       SUM(wildpitches) AS wildpitches
+                       SUM(wildpitches) AS wildpitches,
+                       SUM(batters_faced) AS batters_faced,
+                       SUM(sacrifice_flies_allowed) AS sacrifice_flies_allowed,
+                       SUM(gidp_induced) AS gidp_induced,
+                       SUM(ground_balls_allowed) AS ground_balls_allowed,
+                       SUM(fly_balls_allowed) AS fly_balls_allowed,
+                       SUM(popups_allowed) AS popups_allowed,
+                       SUM(inherited_runners) AS inherited_runners,
+                       SUM(inherited_runners_scored) AS inherited_runners_scored,
+                       SUM(contact_barrel) AS contact_barrel,
+                       SUM(contact_solid) AS contact_solid,
+                       SUM(contact_flare) AS contact_flare,
+                       SUM(contact_burner) AS contact_burner,
+                       SUM(contact_under) AS contact_under,
+                       SUM(contact_topped) AS contact_topped,
+                       SUM(contact_weak) AS contact_weak
                 FROM game_pitching_lines
                 WHERE game_id IN ({ph})
                 GROUP BY player_id, league_year_id, team_id
@@ -3235,7 +3274,22 @@ def _rollback_prior_results(
                         balls              = GREATEST(0, balls - :balls),
                         strikes            = GREATEST(0, strikes - :strikes),
                         hbp                = GREATEST(0, hbp - :hbp),
-                        wildpitches        = GREATEST(0, wildpitches - :wildpitches)
+                        wildpitches        = GREATEST(0, wildpitches - :wildpitches),
+                        batters_faced      = GREATEST(0, batters_faced - :batters_faced),
+                        sacrifice_flies_allowed = GREATEST(0, sacrifice_flies_allowed - :sacrifice_flies_allowed),
+                        gidp_induced       = GREATEST(0, gidp_induced - :gidp_induced),
+                        ground_balls_allowed = GREATEST(0, ground_balls_allowed - :ground_balls_allowed),
+                        fly_balls_allowed  = GREATEST(0, fly_balls_allowed - :fly_balls_allowed),
+                        popups_allowed     = GREATEST(0, popups_allowed - :popups_allowed),
+                        inherited_runners  = GREATEST(0, inherited_runners - :inherited_runners),
+                        inherited_runners_scored = GREATEST(0, inherited_runners_scored - :inherited_runners_scored),
+                        contact_barrel     = GREATEST(0, contact_barrel - :contact_barrel),
+                        contact_solid      = GREATEST(0, contact_solid - :contact_solid),
+                        contact_flare      = GREATEST(0, contact_flare - :contact_flare),
+                        contact_burner     = GREATEST(0, contact_burner - :contact_burner),
+                        contact_under      = GREATEST(0, contact_under - :contact_under),
+                        contact_topped     = GREATEST(0, contact_topped - :contact_topped),
+                        contact_weak       = GREATEST(0, contact_weak - :contact_weak)
                     WHERE player_id = :player_id
                       AND league_year_id = :league_year_id
                       AND team_id = :team_id
@@ -3251,7 +3305,8 @@ def _rollback_prior_results(
                 SELECT player_id, league_year_id, team_id, position_code,
                        COUNT(*) AS game_count,
                        SUM(innings) AS innings, SUM(putouts) AS putouts,
-                       SUM(assists) AS assists, SUM(errors) AS errors
+                       SUM(assists) AS assists, SUM(errors) AS errors,
+                       SUM(double_plays) AS double_plays
                 FROM game_fielding_lines
                 WHERE game_id IN ({ph})
                 GROUP BY player_id, league_year_id, team_id, position_code
@@ -3264,7 +3319,8 @@ def _rollback_prior_results(
                         innings = GREATEST(0, innings - :innings),
                         putouts = GREATEST(0, putouts - :putouts),
                         assists = GREATEST(0, assists - :assists),
-                        errors  = GREATEST(0, errors - :errors)
+                        errors       = GREATEST(0, errors - :errors),
+                        double_plays = GREATEST(0, double_plays - :double_plays)
                     WHERE player_id = :player_id
                       AND league_year_id = :league_year_id
                       AND team_id = :team_id

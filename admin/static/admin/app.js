@@ -5236,11 +5236,14 @@
     const avgsDiv = document.getElementById('an-war-avgs');
     const la = data.league_averages;
     avgsDiv.innerHTML = `
+      <div class="stat-card"><div class="stat-label">Lg wOBA</div><div class="stat-value">${la.woba.toFixed(3)}</div></div>
       <div class="stat-card"><div class="stat-label">Lg OPS</div><div class="stat-value">${la.ops.toFixed(3)}</div></div>
       <div class="stat-card"><div class="stat-label">Lg ERA</div><div class="stat-value">${la.era.toFixed(2)}</div></div>
-      <div class="stat-card"><div class="stat-label">Repl OPS</div><div class="stat-value">${data.repl_ops.toFixed(3)}</div></div>
-      <div class="stat-card"><div class="stat-label">Repl ERA</div><div class="stat-value">${data.repl_era.toFixed(2)}</div></div>
-      <div class="stat-card"><div class="stat-label">PA/Run</div><div class="stat-value">${la.pa_per_run.toFixed(1)}</div></div>
+      <div class="stat-card"><div class="stat-label">Lg FIP</div><div class="stat-value">${la.fip.toFixed(2)}</div></div>
+      <div class="stat-card"><div class="stat-label">Repl wOBA</div><div class="stat-value">${data.repl_woba.toFixed(3)}</div></div>
+      <div class="stat-card"><div class="stat-label">Repl FIP</div><div class="stat-value">${data.repl_fip.toFixed(2)}</div></div>
+      <div class="stat-card"><div class="stat-label">R/PA</div><div class="stat-value">${la.r_pa.toFixed(4)}</div></div>
+      <div class="stat-card"><div class="stat-label">cFIP</div><div class="stat-value">${la.fip_constant.toFixed(2)}</div></div>
     `;
     document.getElementById('an-war-avgs-card').style.display = '';
 
@@ -5260,7 +5263,11 @@
         <td>${p.batting_runs.toFixed(1)}</td>
         <td>${p.br_runs.toFixed(1)}</td>
         <td>${p.fld_runs.toFixed(1)}</td>
+        <td>${(p.pos_adj || 0).toFixed(1)}</td>
         <td>${p.pit_runs.toFixed(1)}</td>
+        <td>${(p.woba || 0).toFixed(3)}</td>
+        <td>${Math.round(p.wrc_plus || 0)}</td>
+        <td>${p.fip != null ? p.fip.toFixed(2) : '—'}</td>
       `;
       tbody.appendChild(tr);
     });
@@ -5282,6 +5289,14 @@
     { value: 'OPS', label: 'OPS' }, { value: 'SB_pct', label: 'SB%' },
     { value: 'AB_per_HR', label: 'AB/HR' }, { value: 'BABIP', label: 'BABIP' },
     { value: 'XBH_pct', label: 'XBH%' }, { value: 'BB_K', label: 'BB/K' },
+    { value: 'wOBA', label: 'wOBA' }, { value: 'RC', label: 'RC' },
+    { value: 'SecA', label: 'SecA' }, { value: 'PSS', label: 'PSS' },
+    { value: 'GB_pct', label: 'GB%' }, { value: 'FB_pct', label: 'FB%' },
+    { value: 'PU_pct', label: 'PU%' }, { value: 'Barrel_pct', label: 'Barrel%' },
+    { value: 'HardHit_pct', label: 'HardHit%' }, { value: 'Soft_pct', label: 'Soft%' },
+    { value: 'Med_pct', label: 'Med%' }, { value: 'LD_pct', label: 'LD%' },
+    { value: 'Contact_pct', label: 'Contact%' }, { value: 'GIDP_pct', label: 'GIDP%' },
+    { value: 'HR_FB', label: 'HR/FB' },
   ];
   const PITCHING_STATS = [
     { value: 'ERA', label: 'ERA' }, { value: 'WHIP', label: 'WHIP' },
@@ -5290,6 +5305,14 @@
     { value: 'H_per_9', label: 'H/9' }, { value: 'IP_per_GS', label: 'IP/GS' },
     { value: 'W_pct', label: 'W%' }, { value: 'BABIP_against', label: 'BABIP Ag' },
     { value: 'K_pct_p', label: 'K%' }, { value: 'BB_pct_p', label: 'BB%' },
+    { value: 'FIP', label: 'FIP' }, { value: 'xFIP', label: 'xFIP' },
+    { value: 'K_BB_pct', label: 'K-BB%' }, { value: 'LOB_pct', label: 'LOB%' },
+    { value: 'WP_per_9', label: 'WP/9' },
+    { value: 'GB_pct', label: 'GB%' }, { value: 'FB_pct', label: 'FB%' },
+    { value: 'Barrel_pct', label: 'Barrel%' }, { value: 'HardHit_pct', label: 'HardHit%' },
+    { value: 'Soft_pct', label: 'Soft%' }, { value: 'LD_pct', label: 'LD%' },
+    { value: 'HR_FB', label: 'HR/FB' },
+    { value: 'IR_pct', label: 'IR%' }, { value: 'GIDP_rate', label: 'GIDP Rate' },
   ];
   const BATTING_ATTRS = [
     { value: 'contact_base', label: 'Contact' }, { value: 'power_base', label: 'Power' },

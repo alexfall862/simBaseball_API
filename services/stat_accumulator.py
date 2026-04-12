@@ -152,10 +152,38 @@ def _multi_row_chunked_execute(
     return total
 
 
+# --- Engine expansion field lists (used to DRY up param extraction) ---
+_NEW_BAT_FIELDS = [
+    "sacrifice_flies", "gidp", "ground_balls", "fly_balls", "popups",
+    "contact_barrel", "contact_solid", "contact_flare", "contact_burner",
+    "contact_under", "contact_topped", "contact_weak",
+]
+_NEW_PIT_FIELDS = [
+    "batters_faced", "sacrifice_flies_allowed", "gidp_induced",
+    "ground_balls_allowed", "fly_balls_allowed", "popups_allowed",
+    "inherited_runners", "inherited_runners_scored",
+    "contact_barrel", "contact_solid", "contact_flare", "contact_burner",
+    "contact_under", "contact_topped", "contact_weak",
+]
+
+
+def _extract_new_fields(data: Dict[str, Any], fields: list) -> Dict[str, int]:
+    """Extract new engine fields from a result dict, defaulting to 0."""
+    return {f: int(data.get(f, 0)) for f in fields}
+
+
 # --- Multi-row definitions for each UPSERT type ---
 
-_BAT_SEASON_INSERT = "INSERT INTO player_batting_stats (player_id, league_year_id, team_id, games, at_bats, runs, hits, doubles_hit, triples, home_runs, inside_the_park_hr, rbi, walks, strikeouts, stolen_bases, caught_stealing, plate_appearances, hbp)"
-_BAT_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :at_bats, :runs, :hits, :doubles, :triples, :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing, :plate_appearances, :hbp)"
+_BAT_SEASON_INSERT = ("INSERT INTO player_batting_stats (player_id, league_year_id, team_id, games, "
+    "at_bats, runs, hits, doubles_hit, triples, home_runs, inside_the_park_hr, rbi, walks, strikeouts, "
+    "stolen_bases, caught_stealing, plate_appearances, hbp, "
+    "sacrifice_flies, gidp, ground_balls, fly_balls, popups, "
+    "contact_barrel, contact_solid, contact_flare, contact_burner, contact_under, contact_topped, contact_weak)")
+_BAT_SEASON_VALS = ("(:player_id, :league_year_id, :team_id, 1, "
+    ":at_bats, :runs, :hits, :doubles, :triples, :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts, "
+    ":stolen_bases, :caught_stealing, :plate_appearances, :hbp, "
+    ":sacrifice_flies, :gidp, :ground_balls, :fly_balls, :popups, "
+    ":contact_barrel, :contact_solid, :contact_flare, :contact_burner, :contact_under, :contact_topped, :contact_weak)")
 _BAT_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         games              = player_batting_stats.games + 1,
         at_bats            = player_batting_stats.at_bats + new_row.at_bats,
@@ -171,11 +199,38 @@ _BAT_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         stolen_bases       = player_batting_stats.stolen_bases + new_row.stolen_bases,
         caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing,
         plate_appearances  = player_batting_stats.plate_appearances + new_row.plate_appearances,
-        hbp                = player_batting_stats.hbp + new_row.hbp"""
-_BAT_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "at_bats", "runs", "hits", "doubles", "triples", "home_runs", "inside_the_park_hr", "rbi", "walks", "strikeouts", "stolen_bases", "caught_stealing", "plate_appearances", "hbp"]
+        hbp                = player_batting_stats.hbp + new_row.hbp,
+        sacrifice_flies    = player_batting_stats.sacrifice_flies + new_row.sacrifice_flies,
+        gidp               = player_batting_stats.gidp + new_row.gidp,
+        ground_balls       = player_batting_stats.ground_balls + new_row.ground_balls,
+        fly_balls          = player_batting_stats.fly_balls + new_row.fly_balls,
+        popups             = player_batting_stats.popups + new_row.popups,
+        contact_barrel     = player_batting_stats.contact_barrel + new_row.contact_barrel,
+        contact_solid      = player_batting_stats.contact_solid + new_row.contact_solid,
+        contact_flare      = player_batting_stats.contact_flare + new_row.contact_flare,
+        contact_burner     = player_batting_stats.contact_burner + new_row.contact_burner,
+        contact_under      = player_batting_stats.contact_under + new_row.contact_under,
+        contact_topped     = player_batting_stats.contact_topped + new_row.contact_topped,
+        contact_weak       = player_batting_stats.contact_weak + new_row.contact_weak"""
+_BAT_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "at_bats", "runs", "hits", "doubles", "triples",
+    "home_runs", "inside_the_park_hr", "rbi", "walks", "strikeouts", "stolen_bases", "caught_stealing",
+    "plate_appearances", "hbp", "sacrifice_flies", "gidp", "ground_balls", "fly_balls", "popups",
+    "contact_barrel", "contact_solid", "contact_flare", "contact_burner", "contact_under", "contact_topped", "contact_weak"]
 
-_PITCH_SEASON_INSERT = "INSERT INTO player_pitching_stats (player_id, league_year_id, team_id, games, games_started, wins, losses, saves, holds, blown_saves, quality_starts, innings_pitched_outs, hits_allowed, runs_allowed, earned_runs, walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed, pitches_thrown, balls, strikes, hbp, wildpitches)"
-_PITCH_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :games_started, :win, :loss, :save, :hold, :blown_save, :quality_start, :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs, :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed, :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)"
+_PITCH_SEASON_INSERT = ("INSERT INTO player_pitching_stats (player_id, league_year_id, team_id, games, "
+    "games_started, wins, losses, saves, holds, blown_saves, quality_starts, "
+    "innings_pitched_outs, hits_allowed, runs_allowed, earned_runs, walks, strikeouts, "
+    "home_runs_allowed, inside_the_park_hr_allowed, pitches_thrown, balls, strikes, hbp, wildpitches, "
+    "batters_faced, sacrifice_flies_allowed, gidp_induced, ground_balls_allowed, fly_balls_allowed, popups_allowed, "
+    "inherited_runners, inherited_runners_scored, "
+    "contact_barrel, contact_solid, contact_flare, contact_burner, contact_under, contact_topped, contact_weak)")
+_PITCH_SEASON_VALS = ("(:player_id, :league_year_id, :team_id, 1, "
+    ":games_started, :win, :loss, :save, :hold, :blown_save, :quality_start, "
+    ":innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs, :walks, :strikeouts, "
+    ":home_runs_allowed, :inside_the_park_hr_allowed, :pitches_thrown, :balls, :strikes, :hbp, :wildpitches, "
+    ":batters_faced, :sacrifice_flies_allowed, :gidp_induced, :ground_balls_allowed, :fly_balls_allowed, :popups_allowed, "
+    ":inherited_runners, :inherited_runners_scored, "
+    ":contact_barrel, :contact_solid, :contact_flare, :contact_burner, :contact_under, :contact_topped, :contact_weak)")
 _PITCH_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         games                       = player_pitching_stats.games + 1,
         games_started               = player_pitching_stats.games_started + new_row.games_started,
@@ -197,18 +252,39 @@ _PITCH_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         balls                       = player_pitching_stats.balls + new_row.balls,
         strikes                     = player_pitching_stats.strikes + new_row.strikes,
         hbp                         = player_pitching_stats.hbp + new_row.hbp,
-        wildpitches                 = player_pitching_stats.wildpitches + new_row.wildpitches"""
-_PITCH_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "games_started", "win", "loss", "save", "hold", "blown_save", "quality_start", "innings_pitched_outs", "hits_allowed", "runs_allowed", "earned_runs", "walks", "strikeouts", "home_runs_allowed", "inside_the_park_hr_allowed", "pitches_thrown", "balls", "strikes", "hbp", "wildpitches"]
+        wildpitches                 = player_pitching_stats.wildpitches + new_row.wildpitches,
+        batters_faced               = player_pitching_stats.batters_faced + new_row.batters_faced,
+        sacrifice_flies_allowed     = player_pitching_stats.sacrifice_flies_allowed + new_row.sacrifice_flies_allowed,
+        gidp_induced                = player_pitching_stats.gidp_induced + new_row.gidp_induced,
+        ground_balls_allowed        = player_pitching_stats.ground_balls_allowed + new_row.ground_balls_allowed,
+        fly_balls_allowed           = player_pitching_stats.fly_balls_allowed + new_row.fly_balls_allowed,
+        popups_allowed              = player_pitching_stats.popups_allowed + new_row.popups_allowed,
+        inherited_runners           = player_pitching_stats.inherited_runners + new_row.inherited_runners,
+        inherited_runners_scored    = player_pitching_stats.inherited_runners_scored + new_row.inherited_runners_scored,
+        contact_barrel              = player_pitching_stats.contact_barrel + new_row.contact_barrel,
+        contact_solid               = player_pitching_stats.contact_solid + new_row.contact_solid,
+        contact_flare               = player_pitching_stats.contact_flare + new_row.contact_flare,
+        contact_burner              = player_pitching_stats.contact_burner + new_row.contact_burner,
+        contact_under               = player_pitching_stats.contact_under + new_row.contact_under,
+        contact_topped              = player_pitching_stats.contact_topped + new_row.contact_topped,
+        contact_weak                = player_pitching_stats.contact_weak + new_row.contact_weak"""
+_PITCH_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "games_started", "win", "loss", "save", "hold",
+    "blown_save", "quality_start", "innings_pitched_outs", "hits_allowed", "runs_allowed", "earned_runs",
+    "walks", "strikeouts", "home_runs_allowed", "inside_the_park_hr_allowed", "pitches_thrown", "balls",
+    "strikes", "hbp", "wildpitches", "batters_faced", "sacrifice_flies_allowed", "gidp_induced",
+    "ground_balls_allowed", "fly_balls_allowed", "popups_allowed", "inherited_runners", "inherited_runners_scored",
+    "contact_barrel", "contact_solid", "contact_flare", "contact_burner", "contact_under", "contact_topped", "contact_weak"]
 
-_FIELD_SEASON_INSERT = "INSERT INTO player_fielding_stats (player_id, league_year_id, team_id, position_code, games, innings, putouts, assists, errors)"
-_FIELD_SEASON_VALS = "(:player_id, :league_year_id, :team_id, :position_code, 1, :innings, :putouts, :assists, :errors)"
+_FIELD_SEASON_INSERT = "INSERT INTO player_fielding_stats (player_id, league_year_id, team_id, position_code, games, innings, putouts, assists, errors, double_plays)"
+_FIELD_SEASON_VALS = "(:player_id, :league_year_id, :team_id, :position_code, 1, :innings, :putouts, :assists, :errors, :double_plays)"
 _FIELD_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
-        games   = player_fielding_stats.games + 1,
-        innings = player_fielding_stats.innings + new_row.innings,
-        putouts = player_fielding_stats.putouts + new_row.putouts,
-        assists = player_fielding_stats.assists + new_row.assists,
-        errors  = player_fielding_stats.errors + new_row.errors"""
-_FIELD_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "position_code", "innings", "putouts", "assists", "errors"]
+        games        = player_fielding_stats.games + 1,
+        innings      = player_fielding_stats.innings + new_row.innings,
+        putouts      = player_fielding_stats.putouts + new_row.putouts,
+        assists      = player_fielding_stats.assists + new_row.assists,
+        errors       = player_fielding_stats.errors + new_row.errors,
+        double_plays = player_fielding_stats.double_plays + new_row.double_plays"""
+_FIELD_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "position_code", "innings", "putouts", "assists", "errors", "double_plays"]
 
 _USAGE_INSERT = "INSERT INTO player_position_usage_week (league_year_id, season_week, team_id, player_id, position_code, vs_hand, starts_this_week)"
 _USAGE_VALS = "(:league_year_id, :season_week, :team_id, :player_id, :position_code, :vs_hand, 1)"
@@ -346,12 +422,18 @@ _BATTING_UPSERT = text("""
         (player_id, league_year_id, team_id,
          games, at_bats, runs, hits, doubles_hit, triples,
          home_runs, inside_the_park_hr, rbi, walks, strikeouts,
-         stolen_bases, caught_stealing, plate_appearances, hbp)
+         stolen_bases, caught_stealing, plate_appearances, hbp,
+         sacrifice_flies, gidp, ground_balls, fly_balls, popups,
+         contact_barrel, contact_solid, contact_flare, contact_burner,
+         contact_under, contact_topped, contact_weak)
     VALUES
         (:player_id, :league_year_id, :team_id,
          1, :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
-         :stolen_bases, :caught_stealing, :plate_appearances, :hbp)
+         :stolen_bases, :caught_stealing, :plate_appearances, :hbp,
+         :sacrifice_flies, :gidp, :ground_balls, :fly_balls, :popups,
+         :contact_barrel, :contact_solid, :contact_flare, :contact_burner,
+         :contact_under, :contact_topped, :contact_weak)
     AS new_row ON DUPLICATE KEY UPDATE
         games              = player_batting_stats.games + 1,
         at_bats            = player_batting_stats.at_bats + new_row.at_bats,
@@ -367,7 +449,19 @@ _BATTING_UPSERT = text("""
         stolen_bases       = player_batting_stats.stolen_bases + new_row.stolen_bases,
         caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing,
         plate_appearances  = player_batting_stats.plate_appearances + new_row.plate_appearances,
-        hbp                = player_batting_stats.hbp + new_row.hbp
+        hbp                = player_batting_stats.hbp + new_row.hbp,
+        sacrifice_flies    = player_batting_stats.sacrifice_flies + new_row.sacrifice_flies,
+        gidp               = player_batting_stats.gidp + new_row.gidp,
+        ground_balls       = player_batting_stats.ground_balls + new_row.ground_balls,
+        fly_balls          = player_batting_stats.fly_balls + new_row.fly_balls,
+        popups             = player_batting_stats.popups + new_row.popups,
+        contact_barrel     = player_batting_stats.contact_barrel + new_row.contact_barrel,
+        contact_solid      = player_batting_stats.contact_solid + new_row.contact_solid,
+        contact_flare      = player_batting_stats.contact_flare + new_row.contact_flare,
+        contact_burner     = player_batting_stats.contact_burner + new_row.contact_burner,
+        contact_under      = player_batting_stats.contact_under + new_row.contact_under,
+        contact_topped     = player_batting_stats.contact_topped + new_row.contact_topped,
+        contact_weak       = player_batting_stats.contact_weak + new_row.contact_weak
 """)
 
 _PITCHING_UPSERT = text("""
@@ -377,14 +471,24 @@ _PITCHING_UPSERT = text("""
          holds, blown_saves, quality_starts,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
          walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed,
-         pitches_thrown, balls, strikes, hbp, wildpitches)
+         pitches_thrown, balls, strikes, hbp, wildpitches,
+         batters_faced, sacrifice_flies_allowed, gidp_induced,
+         ground_balls_allowed, fly_balls_allowed, popups_allowed,
+         inherited_runners, inherited_runners_scored,
+         contact_barrel, contact_solid, contact_flare, contact_burner,
+         contact_under, contact_topped, contact_weak)
     VALUES
         (:player_id, :league_year_id, :team_id,
          1, :games_started, :win, :loss, :save,
          :hold, :blown_save, :quality_start,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed,
-         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)
+         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches,
+         :batters_faced, :sacrifice_flies_allowed, :gidp_induced,
+         :ground_balls_allowed, :fly_balls_allowed, :popups_allowed,
+         :inherited_runners, :inherited_runners_scored,
+         :contact_barrel, :contact_solid, :contact_flare, :contact_burner,
+         :contact_under, :contact_topped, :contact_weak)
     AS new_row ON DUPLICATE KEY UPDATE
         games                       = player_pitching_stats.games + 1,
         games_started               = player_pitching_stats.games_started + new_row.games_started,
@@ -406,22 +510,38 @@ _PITCHING_UPSERT = text("""
         balls                       = player_pitching_stats.balls + new_row.balls,
         strikes                     = player_pitching_stats.strikes + new_row.strikes,
         hbp                         = player_pitching_stats.hbp + new_row.hbp,
-        wildpitches                 = player_pitching_stats.wildpitches + new_row.wildpitches
+        wildpitches                 = player_pitching_stats.wildpitches + new_row.wildpitches,
+        batters_faced               = player_pitching_stats.batters_faced + new_row.batters_faced,
+        sacrifice_flies_allowed     = player_pitching_stats.sacrifice_flies_allowed + new_row.sacrifice_flies_allowed,
+        gidp_induced                = player_pitching_stats.gidp_induced + new_row.gidp_induced,
+        ground_balls_allowed        = player_pitching_stats.ground_balls_allowed + new_row.ground_balls_allowed,
+        fly_balls_allowed           = player_pitching_stats.fly_balls_allowed + new_row.fly_balls_allowed,
+        popups_allowed              = player_pitching_stats.popups_allowed + new_row.popups_allowed,
+        inherited_runners           = player_pitching_stats.inherited_runners + new_row.inherited_runners,
+        inherited_runners_scored    = player_pitching_stats.inherited_runners_scored + new_row.inherited_runners_scored,
+        contact_barrel              = player_pitching_stats.contact_barrel + new_row.contact_barrel,
+        contact_solid               = player_pitching_stats.contact_solid + new_row.contact_solid,
+        contact_flare               = player_pitching_stats.contact_flare + new_row.contact_flare,
+        contact_burner              = player_pitching_stats.contact_burner + new_row.contact_burner,
+        contact_under               = player_pitching_stats.contact_under + new_row.contact_under,
+        contact_topped              = player_pitching_stats.contact_topped + new_row.contact_topped,
+        contact_weak                = player_pitching_stats.contact_weak + new_row.contact_weak
 """)
 
 _FIELDING_UPSERT = text("""
     INSERT INTO player_fielding_stats
         (player_id, league_year_id, team_id, position_code,
-         games, innings, putouts, assists, errors)
+         games, innings, putouts, assists, errors, double_plays)
     VALUES
         (:player_id, :league_year_id, :team_id, :position_code,
-         1, :innings, :putouts, :assists, :errors)
+         1, :innings, :putouts, :assists, :errors, :double_plays)
     AS new_row ON DUPLICATE KEY UPDATE
-        games   = player_fielding_stats.games + 1,
-        innings = player_fielding_stats.innings + new_row.innings,
-        putouts = player_fielding_stats.putouts + new_row.putouts,
-        assists = player_fielding_stats.assists + new_row.assists,
-        errors  = player_fielding_stats.errors + new_row.errors
+        games        = player_fielding_stats.games + 1,
+        innings      = player_fielding_stats.innings + new_row.innings,
+        putouts      = player_fielding_stats.putouts + new_row.putouts,
+        assists      = player_fielding_stats.assists + new_row.assists,
+        errors       = player_fielding_stats.errors + new_row.errors,
+        double_plays = player_fielding_stats.double_plays + new_row.double_plays
 """)
 
 
@@ -449,6 +569,7 @@ def _upsert_batting(
                 "caught_stealing":    int(b.get("caught_stealing", 0)),
                 "plate_appearances":  int(b.get("plate_appearances", 0)),
                 "hbp":                int(b.get("hbp", 0)),
+                **_extract_new_fields(b, _NEW_BAT_FIELDS),
             })
             count += 1
         except Exception:
@@ -489,6 +610,7 @@ def _upsert_pitching(
                 "strikes":                     int(p.get("strikes", 0)),
                 "hbp":                         int(p.get("hbp", 0)),
                 "wildpitches":                 int(p.get("wildpitches", 0)),
+                **_extract_new_fields(p, _NEW_PIT_FIELDS),
             })
             count += 1
         except Exception:
@@ -539,6 +661,7 @@ def _upsert_fielding(
                 "putouts":        int(f.get("putouts", 0)),
                 "assists":        int(f.get("assists", 0)),
                 "errors":         int(f.get("errors", 0)),
+                "double_plays":   int(f.get("double_plays_turned", 0)),
             })
             count += 1
         except Exception:
@@ -703,12 +826,18 @@ def record_subweek_position_usage(
 _GAME_BATTING_COLS = """(game_id, player_id, team_id, league_year_id, position_code,
          batting_order, at_bats, runs, hits, doubles_hit, triples,
          home_runs, inside_the_park_hr, rbi, walks, strikeouts,
-         stolen_bases, caught_stealing, plate_appearances, hbp)"""
+         stolen_bases, caught_stealing, plate_appearances, hbp,
+         sacrifice_flies, gidp, ground_balls, fly_balls, popups,
+         contact_barrel, contact_solid, contact_flare, contact_burner,
+         contact_under, contact_topped, contact_weak)"""
 
 _GAME_BATTING_VALS = """(:game_id, :player_id, :team_id, :league_year_id, :position_code,
          :batting_order, :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
-         :stolen_bases, :caught_stealing, :plate_appearances, :hbp)"""
+         :stolen_bases, :caught_stealing, :plate_appearances, :hbp,
+         :sacrifice_flies, :gidp, :ground_balls, :fly_balls, :popups,
+         :contact_barrel, :contact_solid, :contact_flare, :contact_burner,
+         :contact_under, :contact_topped, :contact_weak)"""
 
 # Fresh insert — no ON DUPLICATE KEY overhead (used for first-time simulation)
 _GAME_BATTING_INSERT_FRESH = text(f"""
@@ -736,7 +865,19 @@ _GAME_BATTING_INSERT = text(f"""
         stolen_bases       = new_row.stolen_bases,
         caught_stealing    = new_row.caught_stealing,
         plate_appearances  = new_row.plate_appearances,
-        hbp                = new_row.hbp
+        hbp                = new_row.hbp,
+        sacrifice_flies    = new_row.sacrifice_flies,
+        gidp               = new_row.gidp,
+        ground_balls       = new_row.ground_balls,
+        fly_balls          = new_row.fly_balls,
+        popups             = new_row.popups,
+        contact_barrel     = new_row.contact_barrel,
+        contact_solid      = new_row.contact_solid,
+        contact_flare      = new_row.contact_flare,
+        contact_burner     = new_row.contact_burner,
+        contact_under      = new_row.contact_under,
+        contact_topped     = new_row.contact_topped,
+        contact_weak       = new_row.contact_weak
 """)
 
 _GAME_PITCHING_COLS = """(game_id, player_id, team_id, league_year_id,
@@ -745,7 +886,12 @@ _GAME_PITCHING_COLS = """(game_id, player_id, team_id, league_year_id,
          hold, blown_save, quality_start,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
          walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed,
-         pitches_thrown, balls, strikes, hbp, wildpitches)"""
+         pitches_thrown, balls, strikes, hbp, wildpitches,
+         batters_faced, sacrifice_flies_allowed, gidp_induced,
+         ground_balls_allowed, fly_balls_allowed, popups_allowed,
+         inherited_runners, inherited_runners_scored,
+         contact_barrel, contact_solid, contact_flare, contact_burner,
+         contact_under, contact_topped, contact_weak)"""
 
 _GAME_PITCHING_VALS = """(:game_id, :player_id, :team_id, :league_year_id,
          :pitch_appearance_order,
@@ -753,7 +899,12 @@ _GAME_PITCHING_VALS = """(:game_id, :player_id, :team_id, :league_year_id,
          :hold, :blown_save, :quality_start,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
          :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed,
-         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)"""
+         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches,
+         :batters_faced, :sacrifice_flies_allowed, :gidp_induced,
+         :ground_balls_allowed, :fly_balls_allowed, :popups_allowed,
+         :inherited_runners, :inherited_runners_scored,
+         :contact_barrel, :contact_solid, :contact_flare, :contact_burner,
+         :contact_under, :contact_topped, :contact_weak)"""
 
 # Fresh insert — no ON DUPLICATE KEY overhead (used for first-time simulation)
 _GAME_PITCHING_INSERT_FRESH = text(f"""
@@ -786,7 +937,22 @@ _GAME_PITCHING_INSERT = text(f"""
         balls                       = new_row.balls,
         strikes                     = new_row.strikes,
         hbp                         = new_row.hbp,
-        wildpitches                 = new_row.wildpitches
+        wildpitches                 = new_row.wildpitches,
+        batters_faced               = new_row.batters_faced,
+        sacrifice_flies_allowed     = new_row.sacrifice_flies_allowed,
+        gidp_induced                = new_row.gidp_induced,
+        ground_balls_allowed        = new_row.ground_balls_allowed,
+        fly_balls_allowed           = new_row.fly_balls_allowed,
+        popups_allowed              = new_row.popups_allowed,
+        inherited_runners           = new_row.inherited_runners,
+        inherited_runners_scored    = new_row.inherited_runners_scored,
+        contact_barrel              = new_row.contact_barrel,
+        contact_solid               = new_row.contact_solid,
+        contact_flare               = new_row.contact_flare,
+        contact_burner              = new_row.contact_burner,
+        contact_under               = new_row.contact_under,
+        contact_topped              = new_row.contact_topped,
+        contact_weak                = new_row.contact_weak
 """)
 
 
@@ -794,24 +960,25 @@ _GAME_PITCHING_INSERT = text(f"""
 _GAME_FIELDING_INSERT_FRESH = text("""
     INSERT INTO game_fielding_lines
         (game_id, player_id, team_id, league_year_id, position_code,
-         innings, putouts, assists, errors)
+         innings, putouts, assists, errors, double_plays)
     VALUES
         (:game_id, :player_id, :team_id, :league_year_id, :position_code,
-         :innings, :putouts, :assists, :errors)
+         :innings, :putouts, :assists, :errors, :double_plays)
 """)
 
 _GAME_FIELDING_INSERT = text("""
     INSERT INTO game_fielding_lines
         (game_id, player_id, team_id, league_year_id, position_code,
-         innings, putouts, assists, errors)
+         innings, putouts, assists, errors, double_plays)
     VALUES
         (:game_id, :player_id, :team_id, :league_year_id, :position_code,
-         :innings, :putouts, :assists, :errors)
+         :innings, :putouts, :assists, :errors, :double_plays)
     AS new_row ON DUPLICATE KEY UPDATE
-        innings = new_row.innings,
-        putouts = new_row.putouts,
-        assists = new_row.assists,
-        errors  = new_row.errors
+        innings      = new_row.innings,
+        putouts      = new_row.putouts,
+        assists      = new_row.assists,
+        errors       = new_row.errors,
+        double_plays = new_row.double_plays
 """)
 
 
@@ -857,6 +1024,7 @@ def _insert_game_batting_lines(
                 "caught_stealing":    int(b.get("caught_stealing", 0)),
                 "plate_appearances":  int(b.get("plate_appearances", 0)),
                 "hbp":                int(b.get("hbp", 0)),
+                **_extract_new_fields(b, _NEW_BAT_FIELDS),
             })
             count += 1
         except Exception as e:
@@ -900,6 +1068,7 @@ def _insert_game_pitching_lines(
                 "strikes":                     int(p.get("strikes", 0)),
                 "hbp":                         int(p.get("hbp", 0)),
                 "wildpitches":                 int(p.get("wildpitches", 0)),
+                **_extract_new_fields(p, _NEW_PIT_FIELDS),
             })
             count += 1
         except Exception as e:
@@ -936,11 +1105,20 @@ _GBAT_ONDUP_RESIM = """AS new_row ON DUPLICATE KEY UPDATE
         home_runs = new_row.home_runs, inside_the_park_hr = new_row.inside_the_park_hr,
         rbi = new_row.rbi, walks = new_row.walks, strikeouts = new_row.strikeouts,
         stolen_bases = new_row.stolen_bases, caught_stealing = new_row.caught_stealing,
-        plate_appearances = new_row.plate_appearances, hbp = new_row.hbp"""
+        plate_appearances = new_row.plate_appearances, hbp = new_row.hbp,
+        sacrifice_flies = new_row.sacrifice_flies, gidp = new_row.gidp,
+        ground_balls = new_row.ground_balls, fly_balls = new_row.fly_balls,
+        popups = new_row.popups, contact_barrel = new_row.contact_barrel,
+        contact_solid = new_row.contact_solid, contact_flare = new_row.contact_flare,
+        contact_burner = new_row.contact_burner, contact_under = new_row.contact_under,
+        contact_topped = new_row.contact_topped, contact_weak = new_row.contact_weak"""
 _GBAT_KEYS = ["game_id", "player_id", "team_id", "league_year_id", "position_code",
               "batting_order", "at_bats", "runs", "hits", "doubles", "triples",
               "home_runs", "inside_the_park_hr", "rbi", "walks", "strikeouts",
-              "stolen_bases", "caught_stealing", "plate_appearances", "hbp"]
+              "stolen_bases", "caught_stealing", "plate_appearances", "hbp",
+              "sacrifice_flies", "gidp", "ground_balls", "fly_balls", "popups",
+              "contact_barrel", "contact_solid", "contact_flare", "contact_burner",
+              "contact_under", "contact_topped", "contact_weak"]
 
 _GPIT_INSERT = f"INSERT INTO game_pitching_lines {_GAME_PITCHING_COLS}"
 _GPIT_VALS = _GAME_PITCHING_VALS
@@ -957,22 +1135,40 @@ _GPIT_ONDUP_RESIM = """AS new_row ON DUPLICATE KEY UPDATE
         strikeouts = new_row.strikeouts, home_runs_allowed = new_row.home_runs_allowed,
         inside_the_park_hr_allowed = new_row.inside_the_park_hr_allowed,
         pitches_thrown = new_row.pitches_thrown, balls = new_row.balls,
-        strikes = new_row.strikes, hbp = new_row.hbp, wildpitches = new_row.wildpitches"""
+        strikes = new_row.strikes, hbp = new_row.hbp, wildpitches = new_row.wildpitches,
+        batters_faced = new_row.batters_faced,
+        sacrifice_flies_allowed = new_row.sacrifice_flies_allowed,
+        gidp_induced = new_row.gidp_induced,
+        ground_balls_allowed = new_row.ground_balls_allowed,
+        fly_balls_allowed = new_row.fly_balls_allowed,
+        popups_allowed = new_row.popups_allowed,
+        inherited_runners = new_row.inherited_runners,
+        inherited_runners_scored = new_row.inherited_runners_scored,
+        contact_barrel = new_row.contact_barrel, contact_solid = new_row.contact_solid,
+        contact_flare = new_row.contact_flare, contact_burner = new_row.contact_burner,
+        contact_under = new_row.contact_under, contact_topped = new_row.contact_topped,
+        contact_weak = new_row.contact_weak"""
 _GPIT_KEYS = ["game_id", "player_id", "team_id", "league_year_id",
               "pitch_appearance_order", "games_started", "win", "loss", "save",
               "hold", "blown_save", "quality_start", "innings_pitched_outs",
               "hits_allowed", "runs_allowed", "earned_runs", "walks", "strikeouts",
               "home_runs_allowed", "inside_the_park_hr_allowed",
-              "pitches_thrown", "balls", "strikes", "hbp", "wildpitches"]
+              "pitches_thrown", "balls", "strikes", "hbp", "wildpitches",
+              "batters_faced", "sacrifice_flies_allowed", "gidp_induced",
+              "ground_balls_allowed", "fly_balls_allowed", "popups_allowed",
+              "inherited_runners", "inherited_runners_scored",
+              "contact_barrel", "contact_solid", "contact_flare", "contact_burner",
+              "contact_under", "contact_topped", "contact_weak"]
 
-_GFLD_INSERT = "INSERT INTO game_fielding_lines (game_id, player_id, team_id, league_year_id, position_code, innings, putouts, assists, errors)"
-_GFLD_VALS = "(:game_id, :player_id, :team_id, :league_year_id, :position_code, :innings, :putouts, :assists, :errors)"
+_GFLD_INSERT = "INSERT INTO game_fielding_lines (game_id, player_id, team_id, league_year_id, position_code, innings, putouts, assists, errors, double_plays)"
+_GFLD_VALS = "(:game_id, :player_id, :team_id, :league_year_id, :position_code, :innings, :putouts, :assists, :errors, :double_plays)"
 _GFLD_ONDUP_FRESH = ""
 _GFLD_ONDUP_RESIM = """AS new_row ON DUPLICATE KEY UPDATE
         innings = new_row.innings, putouts = new_row.putouts,
-        assists = new_row.assists, errors = new_row.errors"""
+        assists = new_row.assists, errors = new_row.errors,
+        double_plays = new_row.double_plays"""
 _GFLD_KEYS = ["game_id", "player_id", "team_id", "league_year_id", "position_code",
-              "innings", "putouts", "assists", "errors"]
+              "innings", "putouts", "assists", "errors", "double_plays"]
 
 _GSUB_INSERT = "INSERT INTO game_substitutions (game_id, league_year_id, inning, half, sub_type, player_in_id, player_out_id, new_position, entry_score_diff, entry_runners_on, entry_inning, entry_outs, entry_is_save_situation)"
 _GSUB_VALS = "(:game_id, :league_year_id, :inning, :half, :sub_type, :player_in_id, :player_out_id, :new_position, :entry_score_diff, :entry_runners_on, :entry_inning, :entry_outs, :entry_is_save_situation)"
@@ -1099,6 +1295,7 @@ def accumulate_subweek_stats_bulk(
                     "caught_stealing":    int(b.get("caught_stealing", 0)),
                     "plate_appearances":  int(b.get("plate_appearances", 0)),
                     "hbp":                int(b.get("hbp", 0)),
+                    **_extract_new_fields(b, _NEW_BAT_FIELDS),
                 }
                 if not skip_season:
                     batting_params.append(params)
@@ -1145,6 +1342,7 @@ def accumulate_subweek_stats_bulk(
                     "strikes":                     int(p.get("strikes", 0)),
                     "hbp":                         int(p.get("hbp", 0)),
                     "wildpitches":                 int(p.get("wildpitches", 0)),
+                    **_extract_new_fields(p, _NEW_PIT_FIELDS),
                 }
                 if not skip_season:
                     pitching_params.append(params)
@@ -1181,6 +1379,7 @@ def accumulate_subweek_stats_bulk(
                     "putouts":        int(f.get("putouts", 0)),
                     "assists":        int(f.get("assists", 0)),
                     "errors":         int(f.get("errors", 0)),
+                    "double_plays":   int(f.get("double_plays_turned", 0)),
                 }
                 if not skip_season:
                     fielding_params.append(field_row)

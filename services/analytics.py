@@ -24,6 +24,10 @@ BATTING_ATTRS = [
 BATTING_STATS = [
     "AVG", "ISO", "BB_pct", "K_pct", "OBP", "SLG", "OPS", "SB_pct",
     "AB_per_HR", "BABIP", "XBH_pct", "BB_K",
+    "wOBA", "RC", "SecA", "PSS",
+    "GB_pct", "FB_pct", "PU_pct", "Barrel_pct", "HardHit_pct",
+    "Soft_pct", "Med_pct", "LD_pct", "Contact_pct",
+    "GIDP_pct", "HR_FB",
 ]
 
 PITCHING_CORE_ATTRS = [
@@ -36,6 +40,10 @@ PITCHING_ATTRS = PITCHING_CORE_ATTRS + PITCHING_AGG_ATTRS
 PITCHING_STATS = [
     "ERA", "WHIP", "K_per_9", "BB_per_9", "HR_per_9", "K_per_BB",
     "H_per_9", "IP_per_GS", "W_pct", "BABIP_against", "K_pct_p", "BB_pct_p",
+    "FIP", "xFIP", "K_BB_pct", "LOB_pct", "WP_per_9",
+    "GB_pct", "FB_pct", "Barrel_pct", "HardHit_pct",
+    "Soft_pct", "LD_pct",
+    "HR_FB", "IR_pct", "GIDP_rate",
 ]
 
 DEFENSIVE_ATTRS = [
@@ -149,11 +157,70 @@ def _derive_batting_stats(row: Dict[str, Any]) -> Dict[str, float]:
     xbh_pct = (d + t + hr) / ab if ab > 0 else 0.0
     bb_k = bb / so if so > 0 else bb * 1.0
 
-    return {
+    # wOBA
+    singles = h - d - t - hr
+    woba_num = (WOBA_WEIGHTS["bb"] * bb + WOBA_WEIGHTS["hbp"] * hbp
+                + WOBA_WEIGHTS["1b"] * singles + WOBA_WEIGHTS["2b"] * d
+                + WOBA_WEIGHTS["3b"] * t + WOBA_WEIGHTS["hr"] * hr)
+    woba = woba_num / pa if pa > 0 else 0.0
+
+    # Runs Created (Bill James basic)
+    tb = h + d + 2 * t + 3 * hr
+    rc = ((h + bb) * tb) / (ab + bb) if (ab + bb) > 0 else 0.0
+
+    # Secondary Average
+    sec_a = (tb - h + bb + sb - cs) / ab if ab > 0 else 0.0
+
+    # Power/Speed Score (Bill James)
+    pss = (2.0 * hr * sb) / (hr + sb) if (hr + sb) > 0 else 0.0
+
+    # Batted ball rates (engine expansion fields)
+    gb = float(row.get("ground_balls", 0) or 0)
+    fb = float(row.get("fly_balls", 0) or 0)
+    pu = float(row.get("popups", 0) or 0)
+    bip_total = gb + fb + pu
+    gb_pct = gb / bip_total if bip_total > 0 else 0.0
+    fb_pct = fb / bip_total if bip_total > 0 else 0.0
+    pu_pct = pu / bip_total if bip_total > 0 else 0.0
+
+    # Contact quality rates
+    c_barrel = float(row.get("contact_barrel", 0) or 0)
+    c_solid = float(row.get("contact_solid", 0) or 0)
+    c_flare = float(row.get("contact_flare", 0) or 0)
+    c_total = sum(float(row.get(f"contact_{t}", 0) or 0)
+                  for t in ("barrel", "solid", "flare", "burner", "under", "topped", "weak"))
+    barrel_pct = c_barrel / c_total if c_total > 0 else 0.0
+    hard_hit_pct = (c_barrel + c_solid) / c_total if c_total > 0 else 0.0
+    c_topped = float(row.get("contact_topped", 0) or 0)
+    c_weak = float(row.get("contact_weak", 0) or 0)
+    c_burner = float(row.get("contact_burner", 0) or 0)
+    c_under = float(row.get("contact_under", 0) or 0)
+    soft_pct = (c_topped + c_weak) / c_total if c_total > 0 else 0.0
+    med_pct = (c_flare + c_burner + c_under) / c_total if c_total > 0 else 0.0
+    ld_pct = (c_barrel + c_solid + c_flare) / c_total if c_total > 0 else 0.0
+
+    # GIDP rate
+    gidp = float(row.get("gidp", 0) or 0)
+    gidp_pct = gidp / pa if pa > 0 else 0.0
+
+    # HR/FB
+    hr_fb = hr / fb if fb > 0 else 0.0
+
+    # Contact% = balls put in play / at-bats (1 - K/AB)
+    contact_pct = (ab - so) / ab if ab > 0 else 0.0
+
+    result = {
         "AVG": avg, "ISO": iso, "BB_pct": bb_pct, "K_pct": k_pct,
         "OBP": obp, "SLG": slg, "OPS": ops, "SB_pct": sb_pct,
         "AB_per_HR": ab_per_hr, "BABIP": babip, "XBH_pct": xbh_pct, "BB_K": bb_k,
+        "wOBA": woba, "RC": rc, "SecA": sec_a, "PSS": pss,
+        "GB_pct": gb_pct, "FB_pct": fb_pct, "PU_pct": pu_pct,
+        "Barrel_pct": barrel_pct, "HardHit_pct": hard_hit_pct,
+        "Soft_pct": soft_pct, "Med_pct": med_pct, "LD_pct": ld_pct,
+        "Contact_pct": contact_pct,
+        "GIDP_pct": gidp_pct, "HR_FB": hr_fb,
     }
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -186,20 +253,88 @@ def _derive_pitching_stats(row: Dict[str, Any]) -> Optional[Dict[str, float]]:
     ip_per_gs = (ipo / 3.0) / gs if gs > 0 else 0.0
     w_pct = w / (w + l) if (w + l) > 0 else 0.0
 
-    # BF = outs recorded + hits + walks + HBP
-    bf = ipo + ha + bb + hbp
-    # BIP = balls in play = BF - SO - BB - HBP - HR (outs on contact + hits on contact)
+    # BF — use real batters_faced from engine if available, else approximate
+    real_bf = float(row.get("batters_faced", 0) or 0)
+    bf = real_bf if real_bf > 0 else (ipo + ha + bb + hbp)
+    # BIP = balls in play = BF - SO - BB - HBP - HR
     bip = bf - so - bb - hbp - hra
     babip_ag = (ha - hra) / bip if bip > 0 else 0.0
 
     k_pct_p = so / bf if bf > 0 else 0.0
     bb_pct_p = bb / bf if bf > 0 else 0.0
 
+    # FIP — uses a passed-in constant or a default approximation
+    ip = ipo / 3.0
+    fip_constant = float(row.get("_fip_constant", 3.17) or 3.17)
+    fip = ((13.0 * hra + 3.0 * (bb + hbp) - 2.0 * so) / ip
+           + fip_constant) if ip > 0 else 0.0
+
+    # Batted ball rates (engine expansion)
+    gb_a = float(row.get("ground_balls_allowed", 0) or 0)
+    fb_a = float(row.get("fly_balls_allowed", 0) or 0)
+    pu_a = float(row.get("popups_allowed", 0) or 0)
+    bip_total = gb_a + fb_a + pu_a
+    gb_pct = gb_a / bip_total if bip_total > 0 else 0.0
+    fb_pct = fb_a / bip_total if bip_total > 0 else 0.0
+
+    # Contact quality
+    c_barrel = float(row.get("contact_barrel", 0) or 0)
+    c_solid = float(row.get("contact_solid", 0) or 0)
+    c_total = sum(float(row.get(f"contact_{t}", 0) or 0)
+                  for t in ("barrel", "solid", "flare", "burner", "under", "topped", "weak"))
+    barrel_pct = c_barrel / c_total if c_total > 0 else 0.0
+    hard_hit_pct = (c_barrel + c_solid) / c_total if c_total > 0 else 0.0
+    c_topped = float(row.get("contact_topped", 0) or 0)
+    c_weak = float(row.get("contact_weak", 0) or 0)
+    c_flare = float(row.get("contact_flare", 0) or 0)
+    c_burner = float(row.get("contact_burner", 0) or 0)
+    c_under = float(row.get("contact_under", 0) or 0)
+    soft_pct = (c_topped + c_weak) / c_total if c_total > 0 else 0.0
+    ld_pct = (c_barrel + c_solid + c_flare) / c_total if c_total > 0 else 0.0
+
+    # HR/FB
+    hr_fb = hra / fb_a if fb_a > 0 else 0.0
+
+    # xFIP — replace actual HR with league-average HR/FB rate * fly balls
+    lg_hr_fb = float(row.get("_lg_hr_fb", 0) or 0)
+    if lg_hr_fb > 0 and fb_a > 0 and ip > 0:
+        xfip = ((13.0 * lg_hr_fb * fb_a + 3.0 * (bb + hbp) - 2.0 * so) / ip
+                + fip_constant)
+    else:
+        xfip = fip  # fall back to FIP if no fly ball data
+
+    # K-BB%
+    k_bb_pct = k_pct_p - bb_pct_p
+
+    # LOB% = (H + BB + HBP - R) / (H + BB + HBP - 1.4*HR)
+    lob_num = ha + bb + hbp - float(row.get("runs_allowed", 0) or 0)
+    lob_den = ha + bb + hbp - 1.4 * hra
+    lob_pct = lob_num / lob_den if lob_den > 0 else 0.0
+
+    # WP/9
+    wp_val = float(row.get("wildpitches", 0) or 0)
+    wp9 = wp_val * 27.0 / ipo if ipo > 0 else 0.0
+
+    # Inherited runner scoring rate
+    ir = float(row.get("inherited_runners", 0) or 0)
+    irs = float(row.get("inherited_runners_scored", 0) or 0)
+    ir_pct = irs / ir if ir > 0 else 0.0
+
+    # GIDP induced rate
+    gidp_induced = float(row.get("gidp_induced", 0) or 0)
+    gidp_rate = gidp_induced / bf if bf > 0 else 0.0
+
     return {
         "ERA": era, "WHIP": whip, "K_per_9": k9,
         "BB_per_9": bb9, "HR_per_9": hr9, "K_per_BB": k_bb,
         "H_per_9": h9, "IP_per_GS": ip_per_gs, "W_pct": w_pct,
         "BABIP_against": babip_ag, "K_pct_p": k_pct_p, "BB_pct_p": bb_pct_p,
+        "FIP": fip, "xFIP": xfip, "K_BB_pct": k_bb_pct, "LOB_pct": lob_pct,
+        "WP_per_9": wp9,
+        "GB_pct": gb_pct, "FB_pct": fb_pct,
+        "Barrel_pct": barrel_pct, "HardHit_pct": hard_hit_pct,
+        "Soft_pct": soft_pct, "LD_pct": ld_pct,
+        "HR_FB": hr_fb, "IR_pct": ir_pct, "GIDP_rate": gidp_rate,
     }
 
 
@@ -233,12 +368,18 @@ def _derive_defensive_stats(row: Dict[str, Any]) -> Optional[Dict[str, float]]:
     if inn == 0:
         return None
     total = po + a + e
+    g = float(row.get("games", 0) or 0)
+    dp = float(row.get("double_plays", 0) or 0)
     fld_pct = (po + a) / total if total > 0 else 1.0
+    rf = (po + a) * 9.0 / inn  # range factor per 9 innings
+    dp_g = dp / g if g > 0 else 0.0
     return {
         "Fld_pct": fld_pct,
         "PO_per_Inn": po / inn,
         "A_per_Inn": a / inn,
         "E_per_Inn": e / inn,
+        "RF": rf,
+        "DP_per_G": dp_g,
     }
 
 
@@ -361,7 +502,11 @@ def batting_correlations(
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
                bs.home_runs, bs.walks, bs.strikeouts,
                bs.stolen_bases, bs.caught_stealing,
-               bs.plate_appearances, bs.hbp
+               bs.plate_appearances, bs.hbp,
+               bs.sacrifice_flies, bs.gidp,
+               bs.ground_balls, bs.fly_balls, bs.popups,
+               bs.contact_barrel, bs.contact_solid, bs.contact_flare,
+               bs.contact_burner, bs.contact_under, bs.contact_topped, bs.contact_weak
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -404,7 +549,12 @@ def pitching_correlations(
                {_PITCH_SELECT},
                ps.innings_pitched_outs, ps.hits_allowed, ps.earned_runs,
                ps.walks, ps.strikeouts, ps.home_runs_allowed,
-               ps.games_started, ps.wins, ps.losses, ps.hbp
+               ps.games_started, ps.wins, ps.losses, ps.hbp,
+               ps.batters_faced, ps.sacrifice_flies_allowed, ps.gidp_induced,
+               ps.ground_balls_allowed, ps.fly_balls_allowed, ps.popups_allowed,
+               ps.inherited_runners, ps.inherited_runners_scored,
+               ps.contact_barrel, ps.contact_solid, ps.contact_flare,
+               ps.contact_burner, ps.contact_under, ps.contact_topped, ps.contact_weak
         FROM player_pitching_stats ps
         JOIN simbbPlayers p ON p.id = ps.player_id
         JOIN teams tm ON tm.id = ps.team_id
@@ -503,6 +653,19 @@ DEFAULT_WEIGHTS = {
 }
 RUNS_PER_WIN = 10.0
 
+# wOBA linear weights (MLB-standard baselines, tunable per league)
+WOBA_WEIGHTS = {
+    "bb": 0.690, "hbp": 0.722, "1b": 0.878, "2b": 1.242,
+    "3b": 1.568, "hr": 2.004,
+}
+WOBA_SCALE = 1.204
+
+# Positional adjustment runs per 162 games (prorated by games played)
+POS_ADJ_162 = {
+    "c": 12.5, "ss": 7.5, "sb": 2.5, "cf": 2.5, "tb": 2.5,
+    "rf": -7.5, "lf": -7.5, "fb": -12.5, "dh": -17.5, "p": 0.0,
+}
+
 
 def war_leaderboard(
     conn,
@@ -521,10 +684,14 @@ def war_leaderboard(
     # --- Step 1: League averages ---
     lg = conn.execute(sa_text("""
         SELECT
-            SUM(bs.hits + bs.walks + bs.hbp) AS lg_on_base,
-            SUM(bs.at_bats + bs.walks + bs.hbp) AS lg_pa,
-            SUM(bs.hits + bs.doubles_hit + 2*bs.triples + 3*bs.home_runs) AS lg_tb,
+            SUM(bs.hits) AS lg_h,
+            SUM(bs.doubles_hit) AS lg_2b,
+            SUM(bs.triples) AS lg_3b,
+            SUM(bs.home_runs) AS lg_hr,
+            SUM(bs.walks) AS lg_bb,
+            SUM(bs.hbp) AS lg_hbp,
             SUM(bs.at_bats) AS lg_ab,
+            SUM(bs.at_bats + bs.walks + bs.hbp) AS lg_pa,
             SUM(bs.runs) AS lg_runs,
             SUM(bs.stolen_bases) AS lg_sb,
             SUM(bs.caught_stealing) AS lg_cs
@@ -536,18 +703,38 @@ def war_leaderboard(
     lg_pa = float(lg["lg_pa"] or 1)
     lg_ab = float(lg["lg_ab"] or 1)
     lg_runs = float(lg["lg_runs"] or 1)
-    lg_obp = float(lg["lg_on_base"] or 0) / lg_pa if lg_pa > 0 else 0.0
-    lg_slg = float(lg["lg_tb"] or 0) / lg_ab if lg_ab > 0 else 0.0
+    lg_h = float(lg["lg_h"] or 0)
+    lg_2b = float(lg["lg_2b"] or 0)
+    lg_3b = float(lg["lg_3b"] or 0)
+    lg_hr = float(lg["lg_hr"] or 0)
+    lg_bb = float(lg["lg_bb"] or 0)
+    lg_hbp = float(lg["lg_hbp"] or 0)
+    lg_1b = lg_h - lg_2b - lg_3b - lg_hr
+
+    # League wOBA
+    lg_woba = ((WOBA_WEIGHTS["bb"] * lg_bb + WOBA_WEIGHTS["hbp"] * lg_hbp
+                + WOBA_WEIGHTS["1b"] * lg_1b + WOBA_WEIGHTS["2b"] * lg_2b
+                + WOBA_WEIGHTS["3b"] * lg_3b + WOBA_WEIGHTS["hr"] * lg_hr)
+               / lg_pa) if lg_pa > 0 else 0.320
+    lg_r_pa = lg_runs / lg_pa if lg_pa > 0 else 0.110
+
+    repl_woba = lg_woba * replacement_pct
+
+    # Legacy OPS (kept for response metadata)
+    lg_tb = lg_h + lg_2b + 2 * lg_3b + 3 * lg_hr
+    lg_obp = (lg_h + lg_bb + lg_hbp) / lg_pa if lg_pa > 0 else 0.0
+    lg_slg = lg_tb / lg_ab if lg_ab > 0 else 0.0
     lg_ops = lg_obp + lg_slg
-    pa_per_run = lg_pa / lg_runs if lg_runs > 0 else 25.0
 
-    repl_ops = lg_ops * replacement_pct
-
-    # League pitching averages
+    # League pitching averages (ERA + FIP)
     lg_pit = conn.execute(sa_text("""
         SELECT
             SUM(ps.earned_runs) AS lg_er,
-            SUM(ps.innings_pitched_outs) AS lg_ipo
+            SUM(ps.innings_pitched_outs) AS lg_ipo,
+            SUM(ps.home_runs_allowed) AS lg_hra,
+            SUM(ps.walks) AS lg_bb,
+            SUM(ps.strikeouts) AS lg_so,
+            SUM(ps.hbp) AS lg_hbp
         FROM player_pitching_stats ps
         JOIN teams tm ON tm.id = ps.team_id
         WHERE ps.league_year_id = :lyid AND tm.team_level = :level
@@ -555,8 +742,20 @@ def war_leaderboard(
 
     lg_ipo = float(lg_pit["lg_ipo"] or 1)
     lg_er = float(lg_pit["lg_er"] or 0)
+    lg_ip = lg_ipo / 3.0 if lg_ipo > 0 else 1.0
     lg_era = lg_er * 27.0 / lg_ipo if lg_ipo > 0 else 4.50
-    repl_era = lg_era / replacement_pct if replacement_pct > 0 else lg_era * 1.5
+
+    # FIP constant = lgERA - (13*lgHR + 3*(lgBB+lgHBP) - 2*lgK) / lgIP
+    p_hra = float(lg_pit["lg_hra"] or 0)
+    p_bb = float(lg_pit["lg_bb"] or 0)
+    p_so = float(lg_pit["lg_so"] or 0)
+    p_hbp = float(lg_pit["lg_hbp"] or 0)
+    fip_constant = (lg_era - (13.0 * p_hra + 3.0 * (p_bb + p_hbp)
+                    - 2.0 * p_so) / lg_ip) if lg_ip > 0 else 3.17
+    lg_fip = ((13.0 * p_hra + 3.0 * (p_bb + p_hbp) - 2.0 * p_so)
+              / lg_ip + fip_constant) if lg_ip > 0 else lg_era
+
+    repl_fip = lg_fip / replacement_pct if replacement_pct > 0 else lg_fip * 1.5
 
     # League fielding averages by position
     lg_fld_rows = conn.execute(sa_text("""
@@ -582,7 +781,11 @@ def war_leaderboard(
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
                bs.home_runs, bs.walks, bs.strikeouts,
                bs.stolen_bases, bs.caught_stealing, bs.runs,
-               bs.plate_appearances, bs.hbp
+               bs.plate_appearances, bs.hbp,
+               bs.sacrifice_flies, bs.gidp,
+               bs.ground_balls, bs.fly_balls, bs.popups,
+               bs.contact_barrel, bs.contact_solid, bs.contact_flare,
+               bs.contact_burner, bs.contact_under, bs.contact_topped, bs.contact_weak
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -630,14 +833,18 @@ def war_leaderboard(
         sb = float(row["stolen_bases"])
         cs = float(row["caught_stealing"])
         hbp = float(row.get("hbp", 0) or 0)
+        games = float(row.get("games", 0) or 0)
 
         pa = ab + bb + hbp
-        obp = (h + bb + hbp) / pa if pa > 0 else 0.0
-        slg = (h + d + 2 * t + 3 * hr) / ab if ab > 0 else 0.0
-        player_ops = obp + slg
+        singles = h - d - t - hr
+        player_woba = ((WOBA_WEIGHTS["bb"] * bb + WOBA_WEIGHTS["hbp"] * hbp
+                        + WOBA_WEIGHTS["1b"] * singles + WOBA_WEIGHTS["2b"] * d
+                        + WOBA_WEIGHTS["3b"] * t + WOBA_WEIGHTS["hr"] * hr)
+                       / pa) if pa > 0 else 0.0
 
-        # Batting runs
-        batting_runs = (player_ops - repl_ops) * pa / pa_per_run
+        # wOBA-based batting runs
+        woba_above_repl = player_woba - repl_woba
+        batting_runs = (woba_above_repl / WOBA_SCALE) * pa if WOBA_SCALE > 0 else 0.0
 
         # Baserunning runs
         br_runs = (sb - 2.0 * cs) * 0.2
@@ -651,12 +858,22 @@ def war_leaderboard(
             expected_err = lg_err_rate.get(pos, 0.0) * fld_data["innings"]
             fld_runs = (expected_err - fld_data["errors"]) * 0.8
 
+        # Positional adjustment (prorated from 162 games)
+        pos_adj = POS_ADJ_162.get(pos.lower(), 0.0) * (games / 162.0)
+
         total_runs = (
             batting_runs * w["batting"]
             + br_runs * w["baserunning"]
             + fld_runs * w["fielding"]
+            + pos_adj
         )
         war = total_runs / RUNS_PER_WIN
+
+        # wRC+ for display
+        wrc_plus = 0.0
+        if lg_r_pa > 0 and WOBA_SCALE > 0 and pa > 0:
+            wrc_per_pa = (player_woba - lg_woba) / WOBA_SCALE + lg_r_pa
+            wrc_plus = (wrc_per_pa / lg_r_pa) * 100.0
 
         players[pid] = {
             "player_id": pid,
@@ -668,15 +885,20 @@ def war_leaderboard(
             "batting_runs": round(batting_runs, 1),
             "br_runs": round(br_runs, 1),
             "fld_runs": round(fld_runs, 1),
+            "pos_adj": round(pos_adj, 1),
             "pit_runs": 0.0,
+            "woba": round(player_woba, 3),
+            "wrc_plus": round(wrc_plus, 0),
         }
 
-    # --- Step 3: Pitcher WAR ---
+    # --- Step 3: Pitcher WAR (FIP-based) ---
     pit_sql = sa_text("""
         SELECT ps.player_id, p.firstName, p.lastName, p.ptype,
                tm.team_abbrev,
                ps.innings_pitched_outs, ps.earned_runs,
-               ps.wins, ps.losses, ps.games_started
+               ps.wins, ps.losses, ps.games_started,
+               ps.home_runs_allowed, ps.walks, ps.strikeouts,
+               ps.hbp
         FROM player_pitching_stats ps
         JOIN simbbPlayers p ON p.id = ps.player_id
         JOIN teams tm ON tm.id = ps.team_id
@@ -691,11 +913,15 @@ def war_leaderboard(
     for row in pit_rows:
         pid = int(row["player_id"])
         ipo = float(row["innings_pitched_outs"])
-        er = float(row["earned_runs"])
         ip = ipo / 3.0
+        hra = float(row["home_runs_allowed"] or 0)
+        pit_bb = float(row["walks"] or 0)
+        pit_so = float(row["strikeouts"] or 0)
+        pit_hbp = float(row.get("hbp", 0) or 0)
 
-        player_era = er * 9.0 / ip if ip > 0 else 99.0
-        pit_runs = (repl_era - player_era) * ip / 9.0
+        player_fip = ((13.0 * hra + 3.0 * (pit_bb + pit_hbp) - 2.0 * pit_so)
+                      / ip + fip_constant) if ip > 0 else 99.0
+        pit_runs = (repl_fip - player_fip) * ip / 9.0
 
         total_runs = pit_runs * w["pitching"]
         war = total_runs / RUNS_PER_WIN
@@ -706,6 +932,7 @@ def war_leaderboard(
         if pid in players:
             # Two-way player: add pitching to existing
             players[pid]["pit_runs"] = round(pit_runs, 1)
+            players[pid]["fip"] = round(player_fip, 2)
             players[pid]["war"] = round(
                 players[pid]["war"] + war, 2
             )
@@ -721,7 +948,11 @@ def war_leaderboard(
                 "batting_runs": 0.0,
                 "br_runs": 0.0,
                 "fld_runs": 0.0,
+                "pos_adj": 0.0,
                 "pit_runs": round(pit_runs, 1),
+                "woba": 0.0,
+                "wrc_plus": 0.0,
+                "fip": round(player_fip, 2),
             }
 
     # --- Step 4: Sort and paginate ---
@@ -743,12 +974,15 @@ def war_leaderboard(
         "pages": pages,
         "league_averages": {
             "ops": round(lg_ops, 3),
+            "woba": round(lg_woba, 3),
+            "r_pa": round(lg_r_pa, 4),
             "era": round(lg_era, 2),
-            "pa_per_run": round(pa_per_run, 1),
+            "fip": round(lg_fip, 2),
+            "fip_constant": round(fip_constant, 2),
         },
         "replacement_pct": replacement_pct,
-        "repl_ops": round(repl_ops, 3),
-        "repl_era": round(repl_era, 2),
+        "repl_woba": round(repl_woba, 3),
+        "repl_fip": round(repl_fip, 2),
         "runs_per_win": RUNS_PER_WIN,
         "weights": w,
     }
@@ -977,7 +1211,11 @@ def _load_batting_records(conn, league_year_id, league_level, min_ab=50):
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
                bs.home_runs, bs.walks, bs.strikeouts,
                bs.stolen_bases, bs.caught_stealing,
-               bs.plate_appearances, bs.hbp
+               bs.plate_appearances, bs.hbp,
+               bs.sacrifice_flies, bs.gidp,
+               bs.ground_balls, bs.fly_balls, bs.popups,
+               bs.contact_barrel, bs.contact_solid, bs.contact_flare,
+               bs.contact_burner, bs.contact_under, bs.contact_topped, bs.contact_weak
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -1010,7 +1248,12 @@ def _load_pitching_records(conn, league_year_id, league_level, min_ipo=60):
                {_PITCH_SELECT},
                ps.innings_pitched_outs, ps.hits_allowed, ps.earned_runs,
                ps.walks, ps.strikeouts, ps.home_runs_allowed,
-               ps.games_started, ps.wins, ps.losses, ps.hbp
+               ps.games_started, ps.wins, ps.losses, ps.hbp,
+               ps.batters_faced, ps.sacrifice_flies_allowed, ps.gidp_induced,
+               ps.ground_balls_allowed, ps.fly_balls_allowed, ps.popups_allowed,
+               ps.inherited_runners, ps.inherited_runners_scored,
+               ps.contact_barrel, ps.contact_solid, ps.contact_flare,
+               ps.contact_burner, ps.contact_under, ps.contact_topped, ps.contact_weak
         FROM player_pitching_stats ps
         JOIN simbbPlayers p ON p.id = ps.player_id
         JOIN teams tm ON tm.id = ps.team_id
@@ -1719,7 +1962,12 @@ def pitch_type_analysis(
                p.pitch1_name AS primary_pitch,
                ps.innings_pitched_outs, ps.hits_allowed, ps.earned_runs,
                ps.walks, ps.strikeouts, ps.home_runs_allowed,
-               ps.games_started, ps.wins, ps.losses, ps.hbp
+               ps.games_started, ps.wins, ps.losses, ps.hbp,
+               ps.batters_faced, ps.sacrifice_flies_allowed, ps.gidp_induced,
+               ps.ground_balls_allowed, ps.fly_balls_allowed, ps.popups_allowed,
+               ps.inherited_runners, ps.inherited_runners_scored,
+               ps.contact_barrel, ps.contact_solid, ps.contact_flare,
+               ps.contact_burner, ps.contact_under, ps.contact_topped, ps.contact_weak
         FROM player_pitching_stats ps
         JOIN simbbPlayers p ON p.id = ps.player_id
         JOIN teams tm ON tm.id = ps.team_id
