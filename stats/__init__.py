@@ -82,6 +82,10 @@ def batting_leaderboard():
     else:
         order = "ASC" if order == "asc" else "DESC"
 
+    _bip = "(bs.ground_balls + bs.fly_balls + bs.popups)"
+    _contact_total = ("(bs.contact_barrel + bs.contact_solid + bs.contact_flare "
+                      "+ bs.contact_burner + bs.contact_under + bs.contact_topped + bs.contact_weak)")
+
     sort_expr_map = {
         "avg": _avg, "obp": _obp, "slg": _slg, "ops": _ops,
         "iso": _iso, "babip": _babip,
@@ -93,12 +97,25 @@ def batting_leaderboard():
         "bb": "bs.walks", "so": "bs.strikeouts",
         "sb": "bs.stolen_bases", "cs": "bs.caught_stealing",
         "tb": _tb, "hbp": "bs.hbp",
+        "itphr": "bs.inside_the_park_hr",
         "woba": _woba, "rc": _rc, "sec_a": _sec_a,
         "sf": "bs.sacrifice_flies", "gidp": "bs.gidp",
-        "gb_pct": "IF(bs.ground_balls + bs.fly_balls + bs.popups > 0, bs.ground_balls / (bs.ground_balls + bs.fly_balls + bs.popups), 0)",
+        "gb_pct": f"IF({_bip} > 0, bs.ground_balls / {_bip}, 0)",
+        "fb_pct": f"IF({_bip} > 0, bs.fly_balls / {_bip}, 0)",
+        "hr_fb": "IF(bs.fly_balls > 0, bs.home_runs / bs.fly_balls, 0)",
+        "barrel_pct": f"IF({_contact_total} > 0, bs.contact_barrel / {_contact_total}, 0)",
+        "hard_hit_pct": f"IF({_contact_total} > 0, (bs.contact_barrel + bs.contact_solid) / {_contact_total}, 0)",
+        "soft_pct": f"IF({_contact_total} > 0, (bs.contact_topped + bs.contact_weak) / {_contact_total}, 0)",
+        "med_pct": f"IF({_contact_total} > 0, (bs.contact_flare + bs.contact_burner + bs.contact_under) / {_contact_total}, 0)",
+        "ld_pct": f"IF({_contact_total} > 0, (bs.contact_barrel + bs.contact_solid + bs.contact_flare) / {_contact_total}, 0)",
+        "contact_pct": "IF(bs.at_bats > 0, (bs.at_bats - bs.strikeouts) / bs.at_bats, 0)",
+        "pss": "IF(bs.home_runs + bs.stolen_bases > 0, 2.0 * bs.home_runs * bs.stolen_bases / (bs.home_runs + bs.stolen_bases), 0)",
     }
+    # Python-computed stats: need league context, fetch all rows and sort in Python
+    _python_sort_keys = {"bwar", "wrc_plus", "ops_plus"}
+    python_sort = sort in _python_sort_keys
     sort_expr = sort_expr_map.get(sort, _avg)
-    order_by = f"{sort_expr} {order}"
+    order_by = f"{sort_expr} {order}" if not python_sort else f"{_avg} DESC"
 
     where_parts = ["bs.league_year_id = :lyid",
                     f"{_pa} >= :min_pa"]
@@ -136,8 +153,14 @@ def batting_leaderboard():
             """), params).scalar()
 
             offset = (page - 1) * page_size
-            params["limit"] = page_size
-            params["offset"] = offset
+
+            # For Python-sorted stats, fetch all rows; otherwise paginate in SQL
+            if python_sort:
+                limit_clause = ""
+            else:
+                params["limit"] = page_size
+                params["offset"] = offset
+                limit_clause = "LIMIT :limit OFFSET :offset"
 
             rows = conn.execute(sa_text(f"""
                 SELECT bs.player_id, bs.team_id, bs.games, bs.at_bats,
@@ -159,7 +182,7 @@ def batting_leaderboard():
                 {join_pos}
                 WHERE {where_sql}
                 ORDER BY {order_by}
-                LIMIT :limit OFFSET :offset
+                {limit_clause}
             """), params).mappings().all()
 
             # Bulk-load listed positions for players in results
@@ -371,6 +394,21 @@ def batting_leaderboard():
                 "contact_pct": f"{contact_pct:.3f}",
             })
 
+        # Python-sort: sort the full list, then paginate
+        if python_sort:
+            reverse = (order == "DESC")
+            def _sort_val(x):
+                v = x.get(sort, 0)
+                try:
+                    return float(v) if v is not None else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+            leaders.sort(key=_sort_val, reverse=reverse)
+            total = len(leaders)
+            leaders = leaders[offset:offset + page_size]
+            for i, ldr in enumerate(leaders):
+                ldr["rank"] = offset + i + 1
+
         pages = (total + page_size - 1) // page_size if total else 0
         return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
 
@@ -431,11 +469,17 @@ def pitching_leaderboard():
     _ip_gs = f"IF(ps.games_started > 0, ({_ipo} / 3.0) / ps.games_started, 0)"
 
     # Default direction: ASC for rate stats where lower is better
-    asc_defaults = {"era", "whip", "bb9", "hr9", "h9", "bb_pct", "fip"}
+    asc_defaults = {"era", "whip", "bb9", "hr9", "h9", "bb_pct", "fip",
+                    "xfip", "era_minus", "fip_minus"}
     if not order:
         order = "ASC" if sort in asc_defaults else "DESC"
     else:
         order = "ASC" if order == "asc" else "DESC"
+
+    _p_bip = "(ps.ground_balls_allowed + ps.fly_balls_allowed + ps.popups_allowed)"
+    _p_ct = ("(ps.contact_barrel + ps.contact_solid + ps.contact_flare "
+             "+ ps.contact_burner + ps.contact_under + ps.contact_topped + ps.contact_weak)")
+    _p_lob_den = "(ps.hits_allowed + ps.walks + ps.hbp - 1.4 * ps.home_runs_allowed)"
 
     sort_expr_map = {
         "era": _era, "whip": _whip,
@@ -445,6 +489,7 @@ def pitching_leaderboard():
         "babip": _babip, "ip_gs": _ip_gs,
         "g": "ps.games", "gs": "ps.games_started",
         "w": "ps.wins", "l": "ps.losses", "sv": "ps.saves",
+        "hld": "ps.holds", "bs": "ps.blown_saves", "qs": "ps.quality_starts",
         "ip": _ipo, "h": "ps.hits_allowed", "r": "ps.runs_allowed",
         "er": "ps.earned_runs", "bb": "ps.walks",
         "so": "ps.strikeouts", "hr": "ps.home_runs_allowed",
@@ -452,9 +497,28 @@ def pitching_leaderboard():
         "pitches": "ps.pitches_thrown",
         "str_pct": f"IF(ps.pitches_thrown > 0, ps.strikes / ps.pitches_thrown, 0)",
         "p_ip": f"IF({_ipo} > 0, ps.pitches_thrown / ({_ipo} / 3.0), 0)",
+        "fip": f"IF({_ipo} > 0, (13.0 * ps.home_runs_allowed + 3.0 * (ps.walks + ps.hbp) - 2.0 * ps.strikeouts) / ({_ipo} / 3.0) + 3.17, 99)",
+        "itphr": "ps.inside_the_park_hr_allowed",
+        "bf": "ps.batters_faced",
+        "ir": "ps.inherited_runners", "irs": "ps.inherited_runners_scored",
+        "ir_pct": "IF(ps.inherited_runners > 0, ps.inherited_runners_scored / ps.inherited_runners, 0)",
+        "gidp_induced": "ps.gidp_induced",
+        "gb_pct": f"IF({_p_bip} > 0, ps.ground_balls_allowed / {_p_bip}, 0)",
+        "fb_pct": f"IF({_p_bip} > 0, ps.fly_balls_allowed / {_p_bip}, 0)",
+        "hr_fb": "IF(ps.fly_balls_allowed > 0, ps.home_runs_allowed / ps.fly_balls_allowed, 0)",
+        "barrel_pct": f"IF({_p_ct} > 0, ps.contact_barrel / {_p_ct}, 0)",
+        "hard_hit_pct": f"IF({_p_ct} > 0, (ps.contact_barrel + ps.contact_solid) / {_p_ct}, 0)",
+        "soft_pct": f"IF({_p_ct} > 0, (ps.contact_topped + ps.contact_weak) / {_p_ct}, 0)",
+        "ld_pct": f"IF({_p_ct} > 0, (ps.contact_barrel + ps.contact_solid + ps.contact_flare) / {_p_ct}, 0)",
+        "k_bb_pct": f"IF({_bf} > 0, (ps.strikeouts - ps.walks) / {_bf}, 0)",
+        "wp9": f"IF({_ipo} > 0, ps.wildpitches * 27.0 / {_ipo}, 0)",
+        "lob_pct": f"IF({_p_lob_den} > 0, (ps.hits_allowed + ps.walks + ps.hbp - ps.runs_allowed) / {_p_lob_den}, 0)",
     }
+    # Python-computed: need league context
+    _python_sort_keys_pit = {"pwar", "xfip", "era_minus", "fip_minus"}
+    python_sort = sort in _python_sort_keys_pit
     sort_expr = sort_expr_map.get(sort, _era)
-    order_by = f"{sort_expr} {order}"
+    order_by = f"{sort_expr} {order}" if not python_sort else f"{_era} ASC"
 
     where_parts = ["ps.league_year_id = :lyid",
                     f"{_ipo} >= :min_ipo"]
@@ -486,8 +550,13 @@ def pitching_leaderboard():
             """), params).scalar()
 
             offset = (page - 1) * page_size
-            params["limit"] = page_size
-            params["offset"] = offset
+
+            if python_sort:
+                limit_clause = ""
+            else:
+                params["limit"] = page_size
+                params["offset"] = offset
+                limit_clause = "LIMIT :limit OFFSET :offset"
 
             rows = conn.execute(sa_text(f"""
                 SELECT ps.player_id, ps.team_id, ps.games, ps.games_started,
@@ -512,7 +581,7 @@ def pitching_leaderboard():
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE {where_sql}
                 ORDER BY {order_by}
-                LIMIT :limit OFFSET :offset
+                {limit_clause}
             """), params).mappings().all()
 
             # Compute league FIP constant
@@ -682,6 +751,21 @@ def pitching_leaderboard():
                 "bf": real_bf if real_bf else bf,
             })
 
+        # Python-sort: sort full list, then paginate
+        if python_sort:
+            reverse = (order == "DESC")
+            def _sort_val(x):
+                v = x.get(sort, 0)
+                try:
+                    return float(v) if v is not None else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+            leaders.sort(key=_sort_val, reverse=reverse)
+            total = len(leaders)
+            leaders = leaders[offset:offset + page_size]
+            for i, ldr in enumerate(leaders):
+                ldr["rank"] = offset + i + 1
+
         pages = (total + page_size - 1) // page_size if total else 0
         return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
 
@@ -743,8 +827,11 @@ def fielding_leaderboard():
         "rf": "IF(fs.innings > 0, (fs.putouts + fs.assists) * 9.0 / fs.innings, 0)",
         "dp_g": "IF(fs.games > 0, fs.double_plays / fs.games, 0)",
     }
+    # fWAR and component sorts need league context
+    _python_sort_keys_fld = {"fwar", "err_runs", "range_runs", "dp_runs"}
+    python_sort = sort in _python_sort_keys_fld
     sort_expr = sort_expr_map.get(sort, _fpct)
-    order_by = f"{sort_expr} {order}"
+    order_by = f"{sort_expr} {order}" if not python_sort else f"{_fpct} DESC"
 
     where_parts = ["fs.league_year_id = :lyid",
                     "fs.innings >= :min_inn"]
@@ -772,8 +859,13 @@ def fielding_leaderboard():
             """), params).scalar()
 
             offset = (page - 1) * page_size
-            params["limit"] = page_size
-            params["offset"] = offset
+
+            if python_sort:
+                limit_clause = ""
+            else:
+                params["limit"] = page_size
+                params["offset"] = offset
+                limit_clause = "LIMIT :limit OFFSET :offset"
 
             rows = conn.execute(sa_text(f"""
                 SELECT fs.player_id, fs.team_id, fs.position_code,
@@ -787,7 +879,7 @@ def fielding_leaderboard():
                 JOIN teams tm ON tm.id = fs.team_id
                 WHERE {where_sql}
                 ORDER BY {order_by}
-                LIMIT :limit OFFSET :offset
+                {limit_clause}
             """), params).mappings().all()
 
             from services.analytics import compute_war_context, compute_fielding_war
@@ -841,6 +933,21 @@ def fielding_leaderboard():
                 "range_runs": _fwar["range_runs"],
                 "dp_runs": _fwar["dp_runs"],
             })
+
+        # Python-sort: sort full list, then paginate
+        if python_sort:
+            reverse = (order == "DESC")
+            def _sort_val(x):
+                v = x.get(sort, 0)
+                try:
+                    return float(v) if v is not None else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+            leaders.sort(key=_sort_val, reverse=reverse)
+            total = len(leaders)
+            leaders = leaders[offset:offset + page_size]
+            for i, ldr in enumerate(leaders):
+                ldr["rank"] = offset + i + 1
 
         pages = (total + page_size - 1) // page_size if total else 0
         return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
@@ -1005,7 +1112,6 @@ def team_stats():
             fld_rows = conn.execute(sa_text(f"""
                 SELECT fs.team_id, tm.team_abbrev AS team_abbrev,
                        tm.team_level AS team_level,
-                       SUM(fs.games) AS g,
                        SUM(fs.innings) AS inn,
                        SUM(fs.putouts) AS po,
                        SUM(fs.assists) AS a,
@@ -1018,8 +1124,19 @@ def team_stats():
                 ORDER BY SUM(fs.errors) ASC
             """), params).mappings().all()
 
-            # Defensive efficiency: 1 - (H - HR) / (BF - SO - HR - BB - HBP)
-            # Uses pitching data for BF components, batting data for context
+            # Actual team games played: count distinct game_ids per team
+            # from per-game lines (which have league_year_id)
+            team_games = {}
+            tg_rows = conn.execute(sa_text(f"""
+                SELECT team_id, COUNT(DISTINCT game_id) AS g
+                FROM game_batting_lines
+                WHERE league_year_id = :lyid
+                GROUP BY team_id
+            """), {"lyid": league_year_id}).mappings().all()
+            for tg in tg_rows:
+                team_games[int(tg["team_id"])] = int(tg["g"])
+
+            # Defensive efficiency: 1 - (H - HR) / BIP
             pit_def = {}
             for r in pit_rows:
                 tid = int(r["team_id"])
@@ -1037,7 +1154,8 @@ def team_stats():
             tid = int(r["team_id"])
             inn = int(r["inn"])
             po = int(r["po"]); a = int(r["a"]); e = int(r["e"])
-            dp = int(r["dp"]); g = int(r["g"])
+            dp = int(r["dp"])
+            g = team_games.get(tid, 0)
             tc = po + a + e
             fpct = (po + a) / tc if tc > 0 else 1.0
             rf = (po + a) * 9.0 / inn if inn > 0 else 0
