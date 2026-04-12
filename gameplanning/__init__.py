@@ -2,7 +2,7 @@
 import json
 import logging
 from flask import Blueprint, jsonify, request
-from sqlalchemy import MetaData, Table, select, and_, text
+from sqlalchemy import MetaData, Table, select, and_, text, bindparam
 from sqlalchemy.exc import SQLAlchemyError
 from db import get_engine
 
@@ -293,6 +293,219 @@ def put_player_strategy(org_id: int, player_id: int):
         return jsonify(error="unexpected", message="Row not found after save"), 500
     except SQLAlchemyError:
         log.exception("gameplanning: put player strategy db error")
+        return jsonify(error="db_unavailable", message="Database temporarily unavailable"), 503
+
+
+def _validate_strategy_fields(body: dict):
+    """Validate a single strategy dict. Returns list of (field, message) tuples."""
+    errors = []
+
+    if "stealfreq" in body and body["stealfreq"] is not None:
+        try:
+            sf = float(body["stealfreq"])
+            if not 0 <= sf <= 100:
+                errors.append(("stealfreq", "must be between 0 and 100"))
+        except (TypeError, ValueError):
+            errors.append(("stealfreq", "must be a number"))
+
+    if "pickofffreq" in body and body["pickofffreq"] is not None:
+        try:
+            pf = float(body["pickofffreq"])
+            if not 0 <= pf <= 100:
+                errors.append(("pickofffreq", "must be between 0 and 100"))
+        except (TypeError, ValueError):
+            errors.append(("pickofffreq", "must be a number"))
+
+    if "pitchchoices" in body and body["pitchchoices"] is not None:
+        pc = body["pitchchoices"]
+        if not isinstance(pc, list) or len(pc) != 5:
+            errors.append(("pitchchoices", "must be an array of exactly 5 numbers"))
+        else:
+            for v in pc:
+                if not isinstance(v, (int, float)):
+                    errors.append(("pitchchoices", "entries must be numbers"))
+                    break
+
+    if "plate_approach" in body and body["plate_approach"] is not None \
+            and body["plate_approach"] not in VALID_PLATE_APPROACH:
+        errors.append(("plate_approach", f"must be one of: {', '.join(sorted(VALID_PLATE_APPROACH))}"))
+    if "pitching_approach" in body and body["pitching_approach"] is not None \
+            and body["pitching_approach"] not in VALID_PITCHING_APPROACH:
+        errors.append(("pitching_approach", f"must be one of: {', '.join(sorted(VALID_PITCHING_APPROACH))}"))
+    if "baserunning_approach" in body and body["baserunning_approach"] is not None \
+            and body["baserunning_approach"] not in VALID_BASERUNNING_APPROACH:
+        errors.append(("baserunning_approach", f"must be one of: {', '.join(sorted(VALID_BASERUNNING_APPROACH))}"))
+    if "usage_preference" in body and body["usage_preference"] is not None \
+            and body["usage_preference"] not in VALID_USAGE_PREFERENCE:
+        errors.append(("usage_preference", f"must be one of: {', '.join(sorted(VALID_USAGE_PREFERENCE))}"))
+    if "pulltend" in body and body["pulltend"] is not None and body["pulltend"] not in VALID_PULLTEND:
+        errors.append(("pulltend", f"must be one of: {', '.join(sorted(VALID_PULLTEND))}"))
+    if "pitchpull" in body and body["pitchpull"] is not None:
+        try:
+            pp = int(body["pitchpull"])
+            if pp <= 0:
+                errors.append(("pitchpull", "must be a positive integer"))
+        except (TypeError, ValueError):
+            errors.append(("pitchpull", "must be an integer"))
+
+    return errors
+
+
+def _strategy_column_values(body: dict) -> dict:
+    """Extract writable column values from a validated strategy dict."""
+    values = {}
+    for f in ("plate_approach", "pitching_approach", "baserunning_approach", "usage_preference"):
+        if f in body:
+            values[f] = body[f]
+
+    if "stealfreq" in body:
+        values["stealfreq"] = float(body["stealfreq"]) if body["stealfreq"] is not None else None
+    if "pickofffreq" in body:
+        values["pickofffreq"] = float(body["pickofffreq"]) if body["pickofffreq"] is not None else None
+    if "pitchpull" in body:
+        values["pitchpull"] = int(body["pitchpull"]) if body["pitchpull"] is not None else None
+    if "pulltend" in body:
+        values["pulltend"] = body["pulltend"]
+    if "pitchchoices" in body:
+        values["pitchchoices"] = json.dumps(body["pitchchoices"]) if body["pitchchoices"] is not None else None
+
+    return values
+
+
+_BULK_STRATEGY_MAX = 500
+
+
+@gameplanning_bp.put("/gameplanning/org/<int:org_id>/player-strategies")
+def put_org_player_strategies(org_id: int):
+    """Bulk upsert player strategies for an org. All-or-nothing."""
+    body = request.get_json(silent=True) or {}
+    rows = body.get("strategies")
+    if not isinstance(rows, list):
+        return jsonify(error="invalid_body", message="'strategies' must be an array"), 400
+
+    if len(rows) == 0:
+        return jsonify({"org_id": org_id, "strategies": []}), 200
+
+    if len(rows) > _BULK_STRATEGY_MAX:
+        return jsonify(
+            error="payload_too_large",
+            message=f"at most {_BULK_STRATEGY_MAX} strategies per request",
+        ), 413
+
+    # Per-row validation: collect (player_id, field, message) for every bad field.
+    details = []
+    cleaned = []  # list of (player_id, values_dict)
+    seen_pids = set()
+
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            details.append({"player_id": None, "field": None,
+                            "message": f"strategies[{idx}] must be an object"})
+            continue
+
+        raw_pid = row.get("player_id")
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            details.append({"player_id": raw_pid, "field": "player_id",
+                            "message": "must be an integer"})
+            continue
+
+        if pid in seen_pids:
+            details.append({"player_id": pid, "field": "player_id",
+                            "message": "duplicate player_id in request"})
+            continue
+        seen_pids.add(pid)
+
+        for field, msg in _validate_strategy_fields(row):
+            details.append({"player_id": pid, "field": field, "message": msg})
+
+        cleaned.append((pid, row))
+
+    if details:
+        return jsonify(error="validation_failed", details=details), 400
+
+    # Ownership check: every player_id must have an active contract with a team in this org.
+    pids = [pid for pid, _ in cleaned]
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            owned_rows = conn.execute(text("""
+                SELECT DISTINCT p.id AS pid
+                FROM simbbPlayers p
+                JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+                JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+                JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+                WHERE cts.orgID = :oid AND p.id IN :pids
+            """).bindparams(bindparam("pids", expanding=True)),
+                {"oid": org_id, "pids": pids}).all()
+        owned = {int(r[0]) for r in owned_rows}
+    except SQLAlchemyError:
+        log.exception("gameplanning: bulk strategies ownership check db error")
+        return jsonify(error="db_unavailable", message="Database temporarily unavailable"), 503
+
+    not_owned = [pid for pid in pids if pid not in owned]
+    if not_owned:
+        return jsonify(
+            error="validation_failed",
+            details=[{"player_id": pid, "field": "player_id",
+                      "message": "player is not owned by this org"}
+                     for pid in not_owned],
+        ), 400
+
+    # Single transaction: update-then-insert per row.
+    tbl = _reflect_table("playerStrategies")
+    try:
+        with engine.begin() as conn:
+            for pid, row in cleaned:
+                values = _strategy_column_values(row)
+                if not values:
+                    continue  # nothing to write for this player
+
+                set_clause = ", ".join(f"{k} = :{k}" for k in values)
+                update_params = dict(values)
+                update_params["_pid"] = pid
+                update_params["_oid"] = org_id
+                result = conn.execute(text(
+                    f"UPDATE playerStrategies SET {set_clause} "
+                    f"WHERE playerID = :_pid AND orgID = :_oid"
+                ), update_params)
+
+                if result.rowcount == 0:
+                    col_names = ["playerID", "orgID"] + list(values.keys())
+                    placeholders = ", ".join(f":{c}" for c in col_names)
+                    col_list = ", ".join(col_names)
+                    insert_params = {"playerID": pid, "orgID": org_id}
+                    insert_params.update(values)
+                    conn.execute(text(
+                        f"INSERT INTO playerStrategies ({col_list}) VALUES ({placeholders})"
+                    ), insert_params)
+
+        # Read back every row that was in the request so we return canonical values.
+        with engine.connect() as conn:
+            saved_rows = conn.execute(
+                select(tbl).where(
+                    and_(tbl.c.orgID == org_id, tbl.c.playerID.in_(pids))
+                )
+            ).all()
+
+        by_pid = {int(r._mapping["playerID"]): _format_strategy(_row_to_dict(r)) for r in saved_rows}
+
+        out = []
+        for pid, _ in cleaned:
+            if pid in by_pid:
+                out.append(by_pid[pid])
+            else:
+                # No row exists and nothing was written (empty values) — return defaults.
+                d = dict(DEFAULT_PLAYER_STRATEGY)
+                d["player_id"] = pid
+                d["org_id"] = org_id
+                d["id"] = None
+                out.append(d)
+
+        return jsonify({"org_id": org_id, "strategies": out}), 200
+    except SQLAlchemyError:
+        log.exception("gameplanning: bulk put player strategies db error")
         return jsonify(error="db_unavailable", message="Database temporarily unavailable"), 503
 
 
