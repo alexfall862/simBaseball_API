@@ -2744,3 +2744,42 @@ def get_league_state():
         return jsonify(error="database_error", message=str(e)), 500
 
     return jsonify(payload), 200
+
+
+@rosters_bp.get("/players/<int:player_id>/injury-history")
+def get_player_injury_history(player_id: int):
+    """
+    Return the full injury history for a player — active and healed,
+    pregame and ingame, unified into one timeline newest-first.
+
+    Query params:
+      - league_year_id (optional): restrict to a single season
+      - limit (optional, default 50): cap rows returned
+
+    Response shape: see services.injuries.get_injury_history_bulk.
+    """
+    from services.injuries import get_injury_history_bulk
+
+    engine = get_engine()
+    league_year_id = request.args.get("league_year_id", type=int)
+    limit = request.args.get("limit", default=50, type=int)
+
+    try:
+        with engine.connect() as conn:
+            history_map = get_injury_history_bulk(
+                conn,
+                [player_id],
+                league_year_id=league_year_id,
+                limit_per_player=limit,
+            )
+    except SQLAlchemyError as e:
+        current_app.logger.exception("get_player_injury_history: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+    events = history_map.get(player_id, [])
+    return jsonify(
+        player_id=player_id,
+        league_year_id=league_year_id,
+        count=len(events),
+        events=events,
+    ), 200

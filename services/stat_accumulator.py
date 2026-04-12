@@ -154,8 +154,8 @@ def _multi_row_chunked_execute(
 
 # --- Multi-row definitions for each UPSERT type ---
 
-_BAT_SEASON_INSERT = "INSERT INTO player_batting_stats (player_id, league_year_id, team_id, games, at_bats, runs, hits, doubles_hit, triples, home_runs, inside_the_park_hr, rbi, walks, strikeouts, stolen_bases, caught_stealing)"
-_BAT_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :at_bats, :runs, :hits, :doubles, :triples, :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing)"
+_BAT_SEASON_INSERT = "INSERT INTO player_batting_stats (player_id, league_year_id, team_id, games, at_bats, runs, hits, doubles_hit, triples, home_runs, inside_the_park_hr, rbi, walks, strikeouts, stolen_bases, caught_stealing, plate_appearances, hbp)"
+_BAT_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :at_bats, :runs, :hits, :doubles, :triples, :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts, :stolen_bases, :caught_stealing, :plate_appearances, :hbp)"
 _BAT_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         games              = player_batting_stats.games + 1,
         at_bats            = player_batting_stats.at_bats + new_row.at_bats,
@@ -169,11 +169,13 @@ _BAT_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         walks              = player_batting_stats.walks + new_row.walks,
         strikeouts         = player_batting_stats.strikeouts + new_row.strikeouts,
         stolen_bases       = player_batting_stats.stolen_bases + new_row.stolen_bases,
-        caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing"""
-_BAT_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "at_bats", "runs", "hits", "doubles", "triples", "home_runs", "inside_the_park_hr", "rbi", "walks", "strikeouts", "stolen_bases", "caught_stealing"]
+        caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing,
+        plate_appearances  = player_batting_stats.plate_appearances + new_row.plate_appearances,
+        hbp                = player_batting_stats.hbp + new_row.hbp"""
+_BAT_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "at_bats", "runs", "hits", "doubles", "triples", "home_runs", "inside_the_park_hr", "rbi", "walks", "strikeouts", "stolen_bases", "caught_stealing", "plate_appearances", "hbp"]
 
-_PITCH_SEASON_INSERT = "INSERT INTO player_pitching_stats (player_id, league_year_id, team_id, games, games_started, wins, losses, saves, holds, blown_saves, quality_starts, innings_pitched_outs, hits_allowed, runs_allowed, earned_runs, walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed)"
-_PITCH_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :games_started, :win, :loss, :save, :hold, :blown_save, :quality_start, :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs, :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)"
+_PITCH_SEASON_INSERT = "INSERT INTO player_pitching_stats (player_id, league_year_id, team_id, games, games_started, wins, losses, saves, holds, blown_saves, quality_starts, innings_pitched_outs, hits_allowed, runs_allowed, earned_runs, walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed, pitches_thrown, balls, strikes, hbp, wildpitches)"
+_PITCH_SEASON_VALS = "(:player_id, :league_year_id, :team_id, 1, :games_started, :win, :loss, :save, :hold, :blown_save, :quality_start, :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs, :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed, :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)"
 _PITCH_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         games                       = player_pitching_stats.games + 1,
         games_started               = player_pitching_stats.games_started + new_row.games_started,
@@ -190,8 +192,13 @@ _PITCH_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         walks                       = player_pitching_stats.walks + new_row.walks,
         strikeouts                  = player_pitching_stats.strikeouts + new_row.strikeouts,
         home_runs_allowed           = player_pitching_stats.home_runs_allowed + new_row.home_runs_allowed,
-        inside_the_park_hr_allowed  = player_pitching_stats.inside_the_park_hr_allowed + new_row.inside_the_park_hr_allowed"""
-_PITCH_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "games_started", "win", "loss", "save", "hold", "blown_save", "quality_start", "innings_pitched_outs", "hits_allowed", "runs_allowed", "earned_runs", "walks", "strikeouts", "home_runs_allowed", "inside_the_park_hr_allowed"]
+        inside_the_park_hr_allowed  = player_pitching_stats.inside_the_park_hr_allowed + new_row.inside_the_park_hr_allowed,
+        pitches_thrown              = player_pitching_stats.pitches_thrown + new_row.pitches_thrown,
+        balls                       = player_pitching_stats.balls + new_row.balls,
+        strikes                     = player_pitching_stats.strikes + new_row.strikes,
+        hbp                         = player_pitching_stats.hbp + new_row.hbp,
+        wildpitches                 = player_pitching_stats.wildpitches + new_row.wildpitches"""
+_PITCH_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "games_started", "win", "loss", "save", "hold", "blown_save", "quality_start", "innings_pitched_outs", "hits_allowed", "runs_allowed", "earned_runs", "walks", "strikeouts", "home_runs_allowed", "inside_the_park_hr_allowed", "pitches_thrown", "balls", "strikes", "hbp", "wildpitches"]
 
 _FIELD_SEASON_INSERT = "INSERT INTO player_fielding_stats (player_id, league_year_id, team_id, position_code, games, innings, putouts, assists, errors)"
 _FIELD_SEASON_VALS = "(:player_id, :league_year_id, :team_id, :position_code, 1, :innings, :putouts, :assists, :errors)"
@@ -339,12 +346,12 @@ _BATTING_UPSERT = text("""
         (player_id, league_year_id, team_id,
          games, at_bats, runs, hits, doubles_hit, triples,
          home_runs, inside_the_park_hr, rbi, walks, strikeouts,
-         stolen_bases, caught_stealing)
+         stolen_bases, caught_stealing, plate_appearances, hbp)
     VALUES
         (:player_id, :league_year_id, :team_id,
          1, :at_bats, :runs, :hits, :doubles, :triples,
          :home_runs, :inside_the_park_hr, :rbi, :walks, :strikeouts,
-         :stolen_bases, :caught_stealing)
+         :stolen_bases, :caught_stealing, :plate_appearances, :hbp)
     AS new_row ON DUPLICATE KEY UPDATE
         games              = player_batting_stats.games + 1,
         at_bats            = player_batting_stats.at_bats + new_row.at_bats,
@@ -358,7 +365,9 @@ _BATTING_UPSERT = text("""
         walks              = player_batting_stats.walks + new_row.walks,
         strikeouts         = player_batting_stats.strikeouts + new_row.strikeouts,
         stolen_bases       = player_batting_stats.stolen_bases + new_row.stolen_bases,
-        caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing
+        caught_stealing    = player_batting_stats.caught_stealing + new_row.caught_stealing,
+        plate_appearances  = player_batting_stats.plate_appearances + new_row.plate_appearances,
+        hbp                = player_batting_stats.hbp + new_row.hbp
 """)
 
 _PITCHING_UPSERT = text("""
@@ -367,13 +376,15 @@ _PITCHING_UPSERT = text("""
          games, games_started, wins, losses, saves,
          holds, blown_saves, quality_starts,
          innings_pitched_outs, hits_allowed, runs_allowed, earned_runs,
-         walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed)
+         walks, strikeouts, home_runs_allowed, inside_the_park_hr_allowed,
+         pitches_thrown, balls, strikes, hbp, wildpitches)
     VALUES
         (:player_id, :league_year_id, :team_id,
          1, :games_started, :win, :loss, :save,
          :hold, :blown_save, :quality_start,
          :innings_pitched_outs, :hits_allowed, :runs_allowed, :earned_runs,
-         :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed)
+         :walks, :strikeouts, :home_runs_allowed, :inside_the_park_hr_allowed,
+         :pitches_thrown, :balls, :strikes, :hbp, :wildpitches)
     AS new_row ON DUPLICATE KEY UPDATE
         games                       = player_pitching_stats.games + 1,
         games_started               = player_pitching_stats.games_started + new_row.games_started,
@@ -390,7 +401,12 @@ _PITCHING_UPSERT = text("""
         walks                       = player_pitching_stats.walks + new_row.walks,
         strikeouts                  = player_pitching_stats.strikeouts + new_row.strikeouts,
         home_runs_allowed           = player_pitching_stats.home_runs_allowed + new_row.home_runs_allowed,
-        inside_the_park_hr_allowed  = player_pitching_stats.inside_the_park_hr_allowed + new_row.inside_the_park_hr_allowed
+        inside_the_park_hr_allowed  = player_pitching_stats.inside_the_park_hr_allowed + new_row.inside_the_park_hr_allowed,
+        pitches_thrown              = player_pitching_stats.pitches_thrown + new_row.pitches_thrown,
+        balls                       = player_pitching_stats.balls + new_row.balls,
+        strikes                     = player_pitching_stats.strikes + new_row.strikes,
+        hbp                         = player_pitching_stats.hbp + new_row.hbp,
+        wildpitches                 = player_pitching_stats.wildpitches + new_row.wildpitches
 """)
 
 _FIELDING_UPSERT = text("""
@@ -431,6 +447,8 @@ def _upsert_batting(
                 "strikeouts":         int(b.get("strikeouts", 0)),
                 "stolen_bases":       int(b.get("stolen_bases", 0)),
                 "caught_stealing":    int(b.get("caught_stealing", 0)),
+                "plate_appearances":  int(b.get("plate_appearances", 0)),
+                "hbp":                int(b.get("hbp", 0)),
             })
             count += 1
         except Exception:
@@ -466,6 +484,11 @@ def _upsert_pitching(
                 "strikeouts":                  int(p.get("strikeouts", 0)),
                 "home_runs_allowed":           int(p.get("home_runs_allowed", 0)),
                 "inside_the_park_hr_allowed":  int(p.get("inside_the_park_hr_allowed", 0)),
+                "pitches_thrown":              int(p.get("pitches_thrown", 0)),
+                "balls":                       int(p.get("balls", 0)),
+                "strikes":                     int(p.get("strikes", 0)),
+                "hbp":                         int(p.get("hbp", 0)),
+                "wildpitches":                 int(p.get("wildpitches", 0)),
             })
             count += 1
         except Exception:
@@ -1074,6 +1097,8 @@ def accumulate_subweek_stats_bulk(
                     "strikeouts":         int(b.get("strikeouts", 0)),
                     "stolen_bases":       int(b.get("stolen_bases", 0)),
                     "caught_stealing":    int(b.get("caught_stealing", 0)),
+                    "plate_appearances":  int(b.get("plate_appearances", 0)),
+                    "hbp":                int(b.get("hbp", 0)),
                 }
                 if not skip_season:
                     batting_params.append(params)
@@ -1115,6 +1140,11 @@ def accumulate_subweek_stats_bulk(
                     "strikeouts":                  int(p.get("strikeouts", 0)),
                     "home_runs_allowed":           int(p.get("home_runs_allowed", 0)),
                     "inside_the_park_hr_allowed":  int(p.get("inside_the_park_hr_allowed", 0)),
+                    "pitches_thrown":              int(p.get("pitches_thrown", 0)),
+                    "balls":                       int(p.get("balls", 0)),
+                    "strikes":                     int(p.get("strikes", 0)),
+                    "hbp":                         int(p.get("hbp", 0)),
+                    "wildpitches":                 int(p.get("wildpitches", 0)),
                 }
                 if not skip_season:
                     pitching_params.append(params)
@@ -1123,11 +1153,6 @@ def accumulate_subweek_stats_bulk(
                     game_pitching_params.append({
                         "game_id": int(game_id),
                         "pitch_appearance_order": int(p.get("pitch_appearance_order", 0)),
-                        "pitches_thrown": int(p.get("pitches_thrown", 0)),
-                        "balls": int(p.get("balls", 0)),
-                        "strikes": int(p.get("strikes", 0)),
-                        "hbp": int(p.get("hbp", 0)),
-                        "wildpitches": int(p.get("wildpitches", 0)),
                         **params,
                     })
             except Exception:

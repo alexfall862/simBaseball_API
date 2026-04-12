@@ -2591,6 +2591,43 @@ def admin_stamina_consumption():
         return jsonify(ok=False, error="analytics_error", message=str(e)), 500
 
 
+@admin_bp.get("/analytics/injury-log")
+def admin_injury_log():
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(ok=False, error="missing_params",
+                       message="league_year_id is required"), 400
+    league_level = request.args.get("league_level", type=int)
+    team_id = request.args.get("team_id", type=int)
+    source = request.args.get("source", type=str)
+    if source not in (None, "", "pregame", "ingame"):
+        return jsonify(ok=False, error="invalid_source",
+                       message="source must be 'pregame' or 'ingame'"), 400
+    season_week = request.args.get("season_week", type=int)
+    limit = request.args.get("limit", default=500, type=int)
+    try:
+        from db import get_engine
+        from services.analytics import injury_log_report
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = injury_log_report(
+                conn,
+                league_year_id=league_year_id,
+                league_level=league_level,
+                team_id=team_id,
+                source=source if source else None,
+                season_week=season_week,
+                limit=limit,
+            )
+        return jsonify(ok=True, **result)
+    except Exception as e:
+        logging.exception("injury_log_failed")
+        return jsonify(ok=False, error="analytics_error", message=str(e)), 500
+
+
 @admin_bp.get("/analytics/stamina-flow")
 def admin_stamina_flow():
     guard = _require_admin()

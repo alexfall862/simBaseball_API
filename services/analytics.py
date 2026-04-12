@@ -131,14 +131,15 @@ def _derive_batting_stats(row: Dict[str, Any]) -> Dict[str, float]:
     so = float(row["strikeouts"])
     sb = float(row["stolen_bases"])
     cs = float(row["caught_stealing"])
+    hbp = float(row.get("hbp", 0) or 0)
 
-    pa = ab + bb  # simplified PA (no HBP/SF in our data)
+    pa = ab + bb + hbp
     avg = h / ab if ab > 0 else 0.0
     slg = (h + d + 2 * t + 3 * hr) / ab if ab > 0 else 0.0
     iso = slg - avg
     bb_pct = bb / pa if pa > 0 else 0.0
     k_pct = so / pa if pa > 0 else 0.0
-    obp = (h + bb) / pa if pa > 0 else 0.0
+    obp = (h + bb + hbp) / pa if pa > 0 else 0.0
     ops = obp + slg
     sb_pct = sb / (sb + cs) if (sb + cs) > 0 else 0.0
 
@@ -173,6 +174,7 @@ def _derive_pitching_stats(row: Dict[str, Any]) -> Optional[Dict[str, float]]:
     gs = float(row.get("games_started", 0) or 0)
     w = float(row.get("wins", 0) or 0)
     l = float(row.get("losses", 0) or 0)
+    hbp = float(row.get("hbp", 0) or 0)
 
     era = er * 27.0 / ipo
     whip = (bb + ha) * 3.0 / ipo
@@ -184,19 +186,14 @@ def _derive_pitching_stats(row: Dict[str, Any]) -> Optional[Dict[str, float]]:
     ip_per_gs = (ipo / 3.0) / gs if gs > 0 else 0.0
     w_pct = w / (w + l) if (w + l) > 0 else 0.0
 
-    # BABIP against: (H - HR) / (BF - SO - HR - BB) approx BF from IPO
-    # Approximate BF = IPO/3 * 3 + H + BB (outs + hits + walks)
-    babip_denom = ha - hra + (ipo / 3.0 * 3 - so - hra - ha)
-    # Simplified: BIP = (ipo/3)*3 - SO + H - HR... let's use standard formula
-    # BIP = AB - SO - HR, approximate AB = ipo/3*3 + H - BB (not perfect)
-    # Safer: BIP ≈ (ipo/3*3) - SO - HR + (H - HR) = total outs excl SO + hits excl HR
-    bip = (ipo / 3.0 * 3 - so) + (ha - hra)  # outs on contact + hits on contact
+    # BF = outs recorded + hits + walks + HBP
+    bf = ipo + ha + bb + hbp
+    # BIP = balls in play = BF - SO - BB - HBP - HR (outs on contact + hits on contact)
+    bip = bf - so - bb - hbp - hra
     babip_ag = (ha - hra) / bip if bip > 0 else 0.0
 
-    # K% and BB% per batter faced; approximate BF = ipo/3*3 + H + BB
-    bf_approx = ipo / 3.0 * 3 + ha + bb
-    k_pct_p = so / bf_approx if bf_approx > 0 else 0.0
-    bb_pct_p = bb / bf_approx if bf_approx > 0 else 0.0
+    k_pct_p = so / bf if bf > 0 else 0.0
+    bb_pct_p = bb / bf if bf > 0 else 0.0
 
     return {
         "ERA": era, "WHIP": whip, "K_per_9": k9,
@@ -363,7 +360,8 @@ def batting_correlations(
                {attr_cols},
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
                bs.home_runs, bs.walks, bs.strikeouts,
-               bs.stolen_bases, bs.caught_stealing
+               bs.stolen_bases, bs.caught_stealing,
+               bs.plate_appearances, bs.hbp
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -406,7 +404,7 @@ def pitching_correlations(
                {_PITCH_SELECT},
                ps.innings_pitched_outs, ps.hits_allowed, ps.earned_runs,
                ps.walks, ps.strikeouts, ps.home_runs_allowed,
-               ps.games_started, ps.wins, ps.losses
+               ps.games_started, ps.wins, ps.losses, ps.hbp
         FROM player_pitching_stats ps
         JOIN simbbPlayers p ON p.id = ps.player_id
         JOIN teams tm ON tm.id = ps.team_id
@@ -523,8 +521,8 @@ def war_leaderboard(
     # --- Step 1: League averages ---
     lg = conn.execute(sa_text("""
         SELECT
-            SUM(bs.hits + bs.walks) AS lg_on_base,
-            SUM(bs.at_bats + bs.walks) AS lg_pa,
+            SUM(bs.hits + bs.walks + bs.hbp) AS lg_on_base,
+            SUM(bs.at_bats + bs.walks + bs.hbp) AS lg_pa,
             SUM(bs.hits + bs.doubles_hit + 2*bs.triples + 3*bs.home_runs) AS lg_tb,
             SUM(bs.at_bats) AS lg_ab,
             SUM(bs.runs) AS lg_runs,
@@ -583,7 +581,8 @@ def war_leaderboard(
                tm.team_abbrev,
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
                bs.home_runs, bs.walks, bs.strikeouts,
-               bs.stolen_bases, bs.caught_stealing, bs.runs
+               bs.stolen_bases, bs.caught_stealing, bs.runs,
+               bs.plate_appearances, bs.hbp
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -630,9 +629,10 @@ def war_leaderboard(
         bb = float(row["walks"])
         sb = float(row["stolen_bases"])
         cs = float(row["caught_stealing"])
+        hbp = float(row.get("hbp", 0) or 0)
 
-        pa = ab + bb
-        obp = (h + bb) / pa if pa > 0 else 0.0
+        pa = ab + bb + hbp
+        obp = (h + bb + hbp) / pa if pa > 0 else 0.0
         slg = (h + d + 2 * t + 3 * hr) / ab if ab > 0 else 0.0
         player_ops = obp + slg
 
@@ -976,7 +976,8 @@ def _load_batting_records(conn, league_year_id, league_level, min_ab=50):
                {attr_cols},
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
                bs.home_runs, bs.walks, bs.strikeouts,
-               bs.stolen_bases, bs.caught_stealing
+               bs.stolen_bases, bs.caught_stealing,
+               bs.plate_appearances, bs.hbp
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -1009,7 +1010,7 @@ def _load_pitching_records(conn, league_year_id, league_level, min_ipo=60):
                {_PITCH_SELECT},
                ps.innings_pitched_outs, ps.hits_allowed, ps.earned_runs,
                ps.walks, ps.strikeouts, ps.home_runs_allowed,
-               ps.games_started, ps.wins, ps.losses
+               ps.games_started, ps.wins, ps.losses, ps.hbp
         FROM player_pitching_stats ps
         JOIN simbbPlayers p ON p.id = ps.player_id
         JOIN teams tm ON tm.id = ps.team_id
@@ -1718,7 +1719,7 @@ def pitch_type_analysis(
                p.pitch1_name AS primary_pitch,
                ps.innings_pitched_outs, ps.hits_allowed, ps.earned_runs,
                ps.walks, ps.strikeouts, ps.home_runs_allowed,
-               ps.games_started, ps.wins, ps.losses
+               ps.games_started, ps.wins, ps.losses, ps.hbp
         FROM player_pitching_stats ps
         JOIN simbbPlayers p ON p.id = ps.player_id
         JOIN teams tm ON tm.id = ps.team_id
@@ -3005,4 +3006,161 @@ def hr_depth_analysis(
         "cross_tab": cross_tab,
         "by_contact_type": by_contact_type,
         "by_hit_depth": by_hit_depth,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Injury log — unified pregame + ingame league-wide injury history
+# ---------------------------------------------------------------------------
+
+def injury_log_report(
+    conn,
+    league_year_id: int,
+    league_level: Optional[int] = None,
+    team_id: Optional[int] = None,
+    source: Optional[str] = None,
+    season_week: Optional[int] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """
+    League-wide injury log for the admin panel. Returns one row per injury
+    event, unified across pregame and ingame sources.
+
+    Filters are all optional and additive. Rows are newest-first by event id
+    and capped at `limit` (default 500 — the admin panel paginates or adds
+    narrower filters if the full set is needed).
+
+    Summary counters are computed over the filtered set so the admin header
+    shows "X pregame, Y ingame, Z active" at a glance.
+    """
+    # Player → team resolution comes from player_listed_position, scoped to
+    # the same league_year. simbbPlayers has no direct team/level columns.
+    # Using LEFT JOIN so players without a listed-position row still appear.
+    where = ["pie.league_year_id = :lyid"]
+    params: Dict[str, Any] = {"lyid": int(league_year_id), "lim": int(limit)}
+
+    if league_level is not None:
+        where.append("tm.team_level = :lvl")
+        params["lvl"] = int(league_level)
+
+    if team_id is not None:
+        where.append("plp.team_id = :tid")
+        params["tid"] = int(team_id)
+
+    if source in ("pregame", "ingame"):
+        where.append("pie.source = :src")
+        params["src"] = source
+
+    if season_week is not None:
+        where.append("gl.season_week = :wk")
+        params["wk"] = int(season_week)
+
+    where_sql = " AND ".join(where)
+
+    rows = conn.execute(sa_text(f"""
+        SELECT
+            pie.id              AS event_id,
+            pie.player_id,
+            pie.injury_type_id,
+            pie.source,
+            pie.weeks_assigned,
+            pie.weeks_remaining,
+            pie.gamelist_id,
+            pie.created_at,
+            CONCAT_WS(' ', p.firstname, p.lastname) AS player_name,
+            p.ptype             AS player_ptype,
+            plp.team_id         AS player_team_id,
+            tm.team_abbrev      AS player_team_abbrev,
+            tm.team_level       AS player_league_level,
+            it.code             AS injury_code,
+            it.name             AS injury_name,
+            it.timeframe        AS injury_timeframe,
+            gl.season_week,
+            gl.season_subweek,
+            gl.home_team        AS game_home_team,
+            gl.away_team        AS game_away_team
+        FROM player_injury_events pie
+        JOIN simbbPlayers p     ON p.id = pie.player_id
+        JOIN injury_types it    ON it.id = pie.injury_type_id
+        LEFT JOIN player_listed_position plp
+            ON plp.player_id = pie.player_id
+           AND plp.league_year_id = pie.league_year_id
+        LEFT JOIN teams tm      ON tm.id = plp.team_id
+        LEFT JOIN gamelist gl   ON gl.id = pie.gamelist_id
+        WHERE {where_sql}
+        ORDER BY pie.id DESC
+        LIMIT :lim
+    """), params).mappings().all()
+
+    events: List[Dict[str, Any]] = []
+    pregame_count = 0
+    ingame_count = 0
+    active_count = 0
+    by_week: Dict[int, int] = {}
+    by_injury_code: Dict[str, int] = {}
+
+    for r in rows:
+        src = r["source"] or ("pregame" if r["injury_timeframe"] == "pregame" else "ingame")
+        weeks_remaining = int(r["weeks_remaining"])
+        status = "active" if weeks_remaining > 0 else "healed"
+
+        if src == "pregame":
+            pregame_count += 1
+        else:
+            ingame_count += 1
+        if status == "active":
+            active_count += 1
+
+        wk = r["season_week"]
+        if wk is not None:
+            by_week[int(wk)] = by_week.get(int(wk), 0) + 1
+
+        code = r["injury_code"] or "unknown"
+        by_injury_code[code] = by_injury_code.get(code, 0) + 1
+
+        events.append({
+            "event_id": int(r["event_id"]),
+            "player_id": int(r["player_id"]),
+            "player_name": r["player_name"],
+            "player_team_id": int(r["player_team_id"]) if r["player_team_id"] is not None else None,
+            "player_team_abbrev": r["player_team_abbrev"],
+            "player_league_level": int(r["player_league_level"]) if r["player_league_level"] is not None else None,
+            "player_ptype": r["player_ptype"],
+            "injury_type_id": int(r["injury_type_id"]),
+            "injury_code": r["injury_code"],
+            "injury_name": r["injury_name"],
+            "source": src,
+            "status": status,
+            "weeks_assigned": int(r["weeks_assigned"]),
+            "weeks_remaining": weeks_remaining,
+            "gamelist_id": int(r["gamelist_id"]) if r["gamelist_id"] is not None else None,
+            "season_week": int(r["season_week"]) if r["season_week"] is not None else None,
+            "season_subweek": r["season_subweek"],
+            "game_home_team": int(r["game_home_team"]) if r["game_home_team"] is not None else None,
+            "game_away_team": int(r["game_away_team"]) if r["game_away_team"] is not None else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] is not None else None,
+        })
+
+    return {
+        "filters": {
+            "league_year_id": int(league_year_id),
+            "league_level": league_level,
+            "team_id": team_id,
+            "source": source,
+            "season_week": season_week,
+            "limit": int(limit),
+        },
+        "summary": {
+            "total": len(events),
+            "pregame": pregame_count,
+            "ingame": ingame_count,
+            "active": active_count,
+            "healed": len(events) - active_count,
+            "by_week": [{"week": k, "count": v} for k, v in sorted(by_week.items())],
+            "by_injury_code": sorted(
+                [{"code": k, "count": v} for k, v in by_injury_code.items()],
+                key=lambda x: x["count"], reverse=True,
+            )[:20],
+        },
+        "events": events,
     }

@@ -46,9 +46,9 @@ def batting_leaderboard():
     page_size = min(request.args.get("page_size", 50, type=int), 200)
 
     # SQL expressions for every sortable stat
-    _pa = "(bs.at_bats + bs.walks)"
+    _pa = "(bs.at_bats + bs.walks + bs.hbp)"
     _avg = "IF(bs.at_bats > 0, bs.hits / bs.at_bats, 0)"
-    _obp = f"IF({_pa} > 0, (bs.hits + bs.walks) / {_pa}, 0)"
+    _obp = f"IF({_pa} > 0, (bs.hits + bs.walks + bs.hbp) / {_pa}, 0)"
     _slg = ("IF(bs.at_bats > 0, (bs.hits + bs.doubles_hit "
             "+ 2*bs.triples + 3*bs.home_runs) / bs.at_bats, 0)")
     _iso = f"IF(bs.at_bats > 0, (bs.doubles_hit + 2*bs.triples + 3*bs.home_runs) / bs.at_bats, 0)"
@@ -82,7 +82,7 @@ def batting_leaderboard():
         "3b": "bs.triples", "hr": "bs.home_runs", "rbi": "bs.rbi",
         "bb": "bs.walks", "so": "bs.strikeouts",
         "sb": "bs.stolen_bases", "cs": "bs.caught_stealing",
-        "tb": _tb,
+        "tb": _tb, "hbp": "bs.hbp",
     }
     sort_expr = sort_expr_map.get(sort, _avg)
     order_by = f"{sort_expr} {order}"
@@ -132,6 +132,7 @@ def batting_leaderboard():
                        bs.home_runs, bs.inside_the_park_hr,
                        bs.rbi, bs.walks, bs.strikeouts,
                        bs.stolen_bases, bs.caught_stealing,
+                       bs.plate_appearances, bs.hbp,
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
                        tm.team_level AS team_level
@@ -173,11 +174,12 @@ def batting_leaderboard():
             t = int(r["triples"])
             sb = int(r["stolen_bases"])
             cs = int(r["caught_stealing"])
-            pa = ab + bb
+            hbp = int(r.get("hbp", 0) or 0)
+            pa = ab + bb + hbp
             tb = h + d + 2 * t + 3 * hr
 
             avg_val = h / ab if ab else 0
-            obp_val = (h + bb) / pa if pa else 0
+            obp_val = (h + bb + hbp) / pa if pa else 0
             slg_val = tb / ab if ab else 0
             iso_val = slg_val - avg_val
             ops_val = obp_val + slg_val
@@ -203,7 +205,7 @@ def batting_leaderboard():
                 "2b": d, "3b": t,
                 "hr": hr, "itphr": itphr, "rbi": int(r["rbi"]),
                 "bb": bb, "so": so,
-                "sb": sb, "cs": cs, "tb": tb,
+                "sb": sb, "cs": cs, "tb": tb, "hbp": hbp,
                 "avg": f"{avg_val:.3f}",
                 "obp": f"{obp_val:.3f}",
                 "slg": f"{slg_val:.3f}",
@@ -261,7 +263,7 @@ def pitching_leaderboard():
 
     # SQL expressions for derived stats
     _ipo = "ps.innings_pitched_outs"
-    _bf = f"({_ipo} / 3 * 3 + ps.hits_allowed + ps.walks)"  # approx batters faced
+    _bf = f"({_ipo} + ps.hits_allowed + ps.walks + ps.hbp)"
     _era = f"IF({_ipo} > 0, ps.earned_runs * 27.0 / {_ipo}, 99)"
     _whip = f"IF({_ipo} > 0, (ps.walks + ps.hits_allowed) * 3.0 / {_ipo}, 99)"
     _k9 = f"IF({_ipo} > 0, ps.strikeouts * 27.0 / {_ipo}, 0)"
@@ -295,6 +297,10 @@ def pitching_leaderboard():
         "ip": _ipo, "h": "ps.hits_allowed", "r": "ps.runs_allowed",
         "er": "ps.earned_runs", "bb": "ps.walks",
         "so": "ps.strikeouts", "hr": "ps.home_runs_allowed",
+        "hbp": "ps.hbp", "wp": "ps.wildpitches",
+        "pitches": "ps.pitches_thrown",
+        "str_pct": f"IF(ps.pitches_thrown > 0, ps.strikes / ps.pitches_thrown, 0)",
+        "p_ip": f"IF({_ipo} > 0, ps.pitches_thrown / ({_ipo} / 3.0), 0)",
     }
     sort_expr = sort_expr_map.get(sort, _era)
     order_by = f"{sort_expr} {order}"
@@ -340,6 +346,8 @@ def pitching_leaderboard():
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
                        ps.inside_the_park_hr_allowed,
+                       ps.pitches_thrown, ps.balls, ps.strikes,
+                       ps.hbp, ps.wildpitches,
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
                        tm.team_level AS team_level
@@ -369,10 +377,15 @@ def pitching_leaderboard():
             so = int(r["strikeouts"])
             hra = int(r["home_runs_allowed"])
             itphra = int(r["inside_the_park_hr_allowed"])
+            hbp = int(r.get("hbp", 0) or 0)
+            wp = int(r.get("wildpitches", 0) or 0)
+            pitches = int(r.get("pitches_thrown", 0) or 0)
+            balls = int(r.get("balls", 0) or 0)
+            strikes = int(r.get("strikes", 0) or 0)
 
             ip_f = ipo / 3.0
-            bf = int(ip_f) * 3 + h + bb  # approx batters faced
-            bip = bf - so - hra
+            bf = ipo + h + bb + hbp
+            bip = bf - so - bb - hbp - hra
 
             era_val = er * 27.0 / ipo if ipo else 0
             whip_val = (bb + h) * 3.0 / ipo if ipo else 0
@@ -400,6 +413,10 @@ def pitching_leaderboard():
                 "ip": f"{ipo // 3}.{ipo % 3}",
                 "h": h, "r": ra, "er": er,
                 "bb": bb, "so": so, "hr": hra, "itphr": itphra,
+                "hbp": hbp, "wp": wp,
+                "pitches": pitches, "balls": balls, "strikes": strikes,
+                "str_pct": f"{(strikes / pitches if pitches else 0):.3f}",
+                "p_ip": f"{(pitches / ip_f if ip_f else 0):.1f}",
                 "era": f"{era_val:.2f}",
                 "whip": f"{whip_val:.2f}",
                 "k9": f"{k9_val:.1f}",
@@ -601,7 +618,9 @@ def team_stats():
                        SUM(bs.rbi) AS rbi,
                        SUM(bs.walks) AS bb, SUM(bs.strikeouts) AS so,
                        SUM(bs.stolen_bases) AS sb,
-                       SUM(bs.caught_stealing) AS cs
+                       SUM(bs.caught_stealing) AS cs,
+                       SUM(bs.plate_appearances) AS pa,
+                       SUM(bs.hbp) AS hbp
                 FROM player_batting_stats bs
                 JOIN teams tm ON tm.id = bs.team_id
                 WHERE bs.league_year_id = :lyid {level_filter}
@@ -624,7 +643,10 @@ def team_stats():
                        SUM(ps.earned_runs) AS er,
                        SUM(ps.walks) AS bb, SUM(ps.strikeouts) AS so,
                        SUM(ps.home_runs_allowed) AS hra,
-                       SUM(ps.inside_the_park_hr_allowed) AS itphra
+                       SUM(ps.inside_the_park_hr_allowed) AS itphra,
+                       SUM(ps.hbp) AS hbp,
+                       SUM(ps.pitches_thrown) AS pitches,
+                       SUM(ps.wildpitches) AS wp
                 FROM player_pitching_stats ps
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE ps.league_year_id = :lyid {level_filter}
@@ -644,10 +666,11 @@ def team_stats():
             t = int(r["3b"])
             sb = int(r["sb"])
             cs = int(r["cs"])
-            pa = ab + bb
+            hbp = int(r.get("hbp", 0) or 0)
+            pa = ab + bb + hbp
             tb = h + d + 2 * t + 3 * hr
             avg_val = h / ab if ab else 0
-            obp_val = (h + bb) / pa if pa else 0
+            obp_val = (h + bb + hbp) / pa if pa else 0
             slg_val = tb / ab if ab else 0
             ops_val = obp_val + slg_val
             babip_denom = ab - so - hr
@@ -661,7 +684,7 @@ def team_stats():
                 "2b": d, "3b": t,
                 "hr": hr, "itphr": itphr, "rbi": int(r["rbi"]),
                 "bb": bb, "so": so,
-                "sb": sb, "cs": cs, "tb": tb,
+                "sb": sb, "cs": cs, "tb": tb, "hbp": hbp,
                 "avg": f"{avg_val:.3f}",
                 "obp": f"{obp_val:.3f}",
                 "slg": f"{slg_val:.3f}",
@@ -752,6 +775,7 @@ def player_stats(player_id: int):
                        bs.home_runs, bs.inside_the_park_hr,
                        bs.rbi, bs.walks, bs.strikeouts,
                        bs.stolen_bases, bs.caught_stealing,
+                       bs.plate_appearances, bs.hbp,
                        tm.team_abbrev AS team_abbrev
                 FROM player_batting_stats bs
                 JOIN teams tm ON tm.id = bs.team_id
@@ -774,6 +798,8 @@ def player_stats(player_id: int):
                        ps.runs_allowed, ps.earned_runs,
                        ps.walks, ps.strikeouts, ps.home_runs_allowed,
                        ps.inside_the_park_hr_allowed,
+                       ps.pitches_thrown, ps.balls, ps.strikes,
+                       ps.hbp, ps.wildpitches,
                        tm.team_abbrev AS team_abbrev
                 FROM player_pitching_stats ps
                 JOIN teams tm ON tm.id = ps.team_id
@@ -888,24 +914,31 @@ def player_stats(player_id: int):
             ab = int(r["at_bats"])
             h = int(r["hits"])
             bb = int(r["walks"])
+            hbp = int(r.get("hbp", 0) or 0)
+            pa = ab + bb + hbp
             return {
                 "league_year_id": int(r["league_year_id"]),
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
-                "g": int(r["games"]), "ab": ab,
+                "g": int(r["games"]), "ab": ab, "pa": pa,
                 "r": int(r["runs"]), "h": h,
                 "2b": int(r["doubles_hit"]), "3b": int(r["triples"]),
                 "hr": int(r["home_runs"]), "itphr": int(r["inside_the_park_hr"]),
                 "rbi": int(r["rbi"]),
                 "bb": bb, "so": int(r["strikeouts"]),
                 "sb": int(r["stolen_bases"]), "cs": int(r["caught_stealing"]),
+                "hbp": hbp,
                 "avg": f"{h / ab:.3f}" if ab else ".000",
-                "obp": f"{(h + bb) / (ab + bb):.3f}" if (ab + bb) else ".000",
+                "obp": f"{(h + bb + hbp) / pa:.3f}" if pa else ".000",
             }
 
         def _pit_season(r):
             ipo = int(r["innings_pitched_outs"])
             er = int(r["earned_runs"])
+            hbp = int(r.get("hbp", 0) or 0)
+            pitches = int(r.get("pitches_thrown", 0) or 0)
+            wp = int(r.get("wildpitches", 0) or 0)
+            ip_f = ipo / 3.0
             return {
                 "league_year_id": int(r["league_year_id"]),
                 "team_id": int(r["team_id"]),
@@ -921,7 +954,10 @@ def player_stats(player_id: int):
                 "er": er, "bb": int(r["walks"]),
                 "so": int(r["strikeouts"]), "hr": int(r["home_runs_allowed"]),
                 "itphr": int(r["inside_the_park_hr_allowed"]),
+                "hbp": hbp, "wp": wp, "pitches": pitches,
                 "era": f"{er * 27.0 / ipo:.2f}" if ipo else "0.00",
+                "str_pct": f"{(int(r.get('strikes', 0) or 0) / pitches if pitches else 0):.3f}",
+                "p_ip": f"{(pitches / ip_f if ip_f else 0):.1f}",
             }
 
         result = {

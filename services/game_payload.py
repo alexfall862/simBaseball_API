@@ -1629,8 +1629,6 @@ def build_team_game_side(
             players_by_id=players_by_id,
             rng=rng,
         )
-        if pregame_injuries:
-            _persist_pregame_injuries(conn, pregame_injuries, league_year_id)
 
     # 2) Validate starter is on the roster and not benched; fallback to best available if not
     if starter_id not in players_by_id or players_by_id[starter_id].get("benched_by_injury"):
@@ -1794,8 +1792,6 @@ def build_team_game_side_from_cache(
             players_by_id=players_by_id,
             rng=rng,
         )
-        if pregame_injuries:
-            _persist_pregame_injuries(conn, pregame_injuries, league_year_id)
 
     # Validate starter is on the roster; fallback to best available if not
     if starter_id not in players_by_id or players_by_id[starter_id].get("benched_by_injury"):
@@ -2640,82 +2636,6 @@ def _normalize_engine_effects(effects: Dict[str, Any]) -> Dict[str, float]:
     return out
 
 
-def _persist_pregame_injuries(
-    conn,
-    pregame_injuries: List[Dict[str, Any]],
-    league_year_id: int,
-) -> int:
-    """
-    Persist pregame injuries to player_injury_events and player_injury_state.
-
-    Called immediately after roll_pregame_injuries_for_team so that the
-    rolled injuries are visible via the roster/player endpoints for the
-    duration of the subweek (or until they expire via weekly advancement).
-
-    Returns count of injuries persisted.
-    """
-    from sqlalchemy import text as sa_text
-
-    if not pregame_injuries:
-        return 0
-
-    injury_insert = sa_text("""
-        INSERT INTO player_injury_events
-            (player_id, injury_type_id, league_year_id, weeks_assigned,
-             weeks_remaining, malus_json)
-        VALUES
-            (:player_id, :injury_type_id, :league_year_id, :weeks_assigned,
-             :weeks_remaining, :malus_json)
-    """)
-    injury_state_upsert = sa_text("""
-        INSERT INTO player_injury_state
-            (player_id, status, current_event_id, weeks_remaining, last_updated_at)
-        VALUES
-            (:player_id, 'injured', :event_id, :weeks_remaining, NOW())
-        ON DUPLICATE KEY UPDATE
-            status           = 'injured',
-            current_event_id = IF(:weeks_remaining > weeks_remaining,
-                                  :event_id, current_event_id),
-            weeks_remaining  = GREATEST(:weeks_remaining, weeks_remaining),
-            last_updated_at  = NOW()
-    """)
-
-    count = 0
-    for inj in pregame_injuries:
-        pid = inj.get("player_id")
-        if pid is None:
-            continue
-        pid = int(pid)
-        injury_type_id = int(inj.get("injury_type_id", 0))
-        duration_weeks = int(inj.get("duration_weeks", 1))
-        effects = inj.get("effects") or {}
-
-        try:
-            ev_result = conn.execute(injury_insert, {
-                "player_id": pid,
-                "injury_type_id": injury_type_id,
-                "league_year_id": league_year_id,
-                "weeks_assigned": duration_weeks,
-                "weeks_remaining": duration_weeks,
-                "malus_json": json.dumps(effects),
-            })
-            event_id = ev_result.lastrowid
-            conn.execute(injury_state_upsert, {
-                "player_id": pid,
-                "event_id": event_id,
-                "weeks_remaining": duration_weeks,
-            })
-            count += 1
-        except Exception:
-            logger.exception(
-                "_persist_pregame_injuries: failed for player %d", pid
-            )
-
-    if count:
-        logger.info("_persist_pregame_injuries: persisted %d pregame injuries", count)
-    return count
-
-
 def _drain_stamina_and_persist_injuries(
     conn,
     results: List[Dict[str, Any]],
@@ -2863,13 +2783,24 @@ def _drain_stamina_and_persist_injuries(
             logger.debug("drain_stamina: stamina_cost column update skipped (column may not exist yet)")
 
     # --- 2. INJURY PERSISTENCE ---
+    # This is the single sink for both pregame and ingame injuries.
+    # Pregame entries (timeframe='pregame') are rolled by the backend pre-sim,
+    # sent to the engine, echoed back in result["injuries"], and persisted here.
+    # Ingame entries are rolled by the engine and arrive the same way.
+    #
+    # The UNIQUE KEY (gamelist_id, player_id, injury_type_id) guards against
+    # duplicates from re-sim / replay / engine echo: ON DUPLICATE KEY UPDATE
+    # is a no-op that just touches weeks_remaining to its existing value so
+    # lastrowid still resolves for the state upsert path.
     injury_insert = sa_text("""
         INSERT INTO player_injury_events
-            (player_id, injury_type_id, league_year_id, gamelist_id,
+            (player_id, injury_type_id, league_year_id, gamelist_id, source,
              weeks_assigned, weeks_remaining, malus_json)
         VALUES
-            (:player_id, :injury_type_id, :league_year_id, :gamelist_id,
+            (:player_id, :injury_type_id, :league_year_id, :gamelist_id, :source,
              :weeks_assigned, :weeks_remaining, :malus_json)
+        ON DUPLICATE KEY UPDATE
+            id = LAST_INSERT_ID(id)
     """)
 
     injury_state_upsert = sa_text("""
@@ -2931,11 +2862,22 @@ def _drain_stamina_and_persist_injuries(
                         injury_type_id,
                     )
 
+            # Source attribution: prefer the timeframe field the engine echoes
+            # back on each injury entry; fall back to the injury_type's own
+            # timeframe if the engine didn't set it. Defaults to 'ingame' so
+            # legacy payloads stay consistent with historical data.
+            raw_timeframe = (inj.get("timeframe") or "").strip().lower()
+            if raw_timeframe not in ("pregame", "ingame"):
+                it_row = injury_type_map.get(injury_type_id) or {}
+                raw_timeframe = (it_row.get("timeframe") or "ingame").strip().lower()
+            source = "pregame" if raw_timeframe == "pregame" else "ingame"
+
             injury_event_params.append({
                 "player_id": pid,
                 "injury_type_id": injury_type_id,
                 "league_year_id": league_year_id,
                 "gamelist_id": int(_r_game_id) if _r_game_id is not None else None,
+                "source": source,
                 "weeks_assigned": duration_weeks,
                 "weeks_remaining": duration_weeks,
                 "malus_json": json.dumps(effects),
@@ -3208,7 +3150,9 @@ def _rollback_prior_results(
                        SUM(rbi) AS rbi, SUM(walks) AS walks,
                        SUM(strikeouts) AS strikeouts,
                        SUM(stolen_bases) AS stolen_bases,
-                       SUM(caught_stealing) AS caught_stealing
+                       SUM(caught_stealing) AS caught_stealing,
+                       SUM(plate_appearances) AS plate_appearances,
+                       SUM(hbp) AS hbp
                 FROM game_batting_lines
                 WHERE game_id IN ({ph})
                 GROUP BY player_id, league_year_id, team_id
@@ -3229,7 +3173,9 @@ def _rollback_prior_results(
                         walks          = GREATEST(0, walks - :walks),
                         strikeouts     = GREATEST(0, strikeouts - :strikeouts),
                         stolen_bases   = GREATEST(0, stolen_bases - :stolen_bases),
-                        caught_stealing = GREATEST(0, caught_stealing - :caught_stealing)
+                        caught_stealing = GREATEST(0, caught_stealing - :caught_stealing),
+                        plate_appearances = GREATEST(0, plate_appearances - :plate_appearances),
+                        hbp            = GREATEST(0, hbp - :hbp)
                     WHERE player_id = :player_id
                       AND league_year_id = :league_year_id
                       AND team_id = :team_id
@@ -3255,7 +3201,12 @@ def _rollback_prior_results(
                        SUM(earned_runs) AS earned_runs,
                        SUM(walks) AS walks, SUM(strikeouts) AS strikeouts,
                        SUM(home_runs_allowed) AS home_runs_allowed,
-                       SUM(inside_the_park_hr_allowed) AS inside_the_park_hr_allowed
+                       SUM(inside_the_park_hr_allowed) AS inside_the_park_hr_allowed,
+                       SUM(pitches_thrown) AS pitches_thrown,
+                       SUM(balls) AS balls,
+                       SUM(strikes) AS strikes,
+                       SUM(hbp) AS hbp,
+                       SUM(wildpitches) AS wildpitches
                 FROM game_pitching_lines
                 WHERE game_id IN ({ph})
                 GROUP BY player_id, league_year_id, team_id
@@ -3279,7 +3230,12 @@ def _rollback_prior_results(
                         walks              = GREATEST(0, walks - :walks),
                         strikeouts         = GREATEST(0, strikeouts - :strikeouts),
                         home_runs_allowed  = GREATEST(0, home_runs_allowed - :home_runs_allowed),
-                        inside_the_park_hr_allowed = GREATEST(0, inside_the_park_hr_allowed - :inside_the_park_hr_allowed)
+                        inside_the_park_hr_allowed = GREATEST(0, inside_the_park_hr_allowed - :inside_the_park_hr_allowed),
+                        pitches_thrown     = GREATEST(0, pitches_thrown - :pitches_thrown),
+                        balls              = GREATEST(0, balls - :balls),
+                        strikes            = GREATEST(0, strikes - :strikes),
+                        hbp                = GREATEST(0, hbp - :hbp),
+                        wildpitches        = GREATEST(0, wildpitches - :wildpitches)
                     WHERE player_id = :player_id
                       AND league_year_id = :league_year_id
                       AND team_id = :team_id

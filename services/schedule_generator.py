@@ -9,6 +9,7 @@ College: 50 games/team, ~14 weeks, conference round-robin + OOC, starts week 1
 
 import logging
 import random
+import secrets
 import time
 from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,6 +22,10 @@ log = logging.getLogger("app")
 class ScheduleTimeout(RuntimeError):
     """Raised when a schedule generation phase exceeds its time budget."""
     pass
+
+
+def _new_game_seed() -> int:
+    return secrets.randbits(62)
 
 
 def _check_timeout(deadline: float, phase: str):
@@ -1067,7 +1072,7 @@ def _expand_to_game_rows(
                     "season_subweek": SUBWEEK_LABELS[subweek_offset + game_idx],
                     "league_level": league_level,
                     "season": season_id,
-                    "random_seed": None,
+                    "random_seed": _new_game_seed(),
                     "is_conference": is_conf,
                 })
     return rows
@@ -1223,7 +1228,7 @@ def _generate_round_based_schedule(
                 "season_subweek": SUBWEEK_LABELS[game_idx],
                 "league_level": league_level,
                 "season": season_id,
-                "random_seed": None,
+                "random_seed": _new_game_seed(),
             })
 
     return rows, len(all_series)
@@ -1980,7 +1985,7 @@ def add_series(
                 "season_subweek": SUBWEEK_LABELS[i],
                 "league_level": league_level,
                 "season": season_id,
-                "random_seed": None,
+                "random_seed": _new_game_seed(),
                 "game_type": game_type,
             })
 
