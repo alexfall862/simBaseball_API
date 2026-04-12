@@ -943,7 +943,70 @@ def team_stats():
                 "hr9": f"{hr9_val:.1f}",
             })
 
-        return jsonify(batting=batting, pitching=pitching), 200
+        # --- Team Fielding ---
+        with engine.connect() as conn:
+            fld_rows = conn.execute(sa_text(f"""
+                SELECT fs.team_id, tm.team_abbrev AS team_abbrev,
+                       tm.team_level AS team_level,
+                       SUM(fs.games) AS g,
+                       SUM(fs.innings) AS inn,
+                       SUM(fs.putouts) AS po,
+                       SUM(fs.assists) AS a,
+                       SUM(fs.errors) AS e,
+                       SUM(fs.double_plays) AS dp
+                FROM player_fielding_stats fs
+                JOIN teams tm ON tm.id = fs.team_id
+                WHERE fs.league_year_id = :lyid {level_filter}
+                GROUP BY fs.team_id, tm.team_abbrev, tm.team_level
+                ORDER BY SUM(fs.errors) ASC
+            """), params).mappings().all()
+
+            # Defensive efficiency: 1 - (H - HR) / (BF - SO - HR - BB - HBP)
+            # Uses pitching data for BF components, batting data for context
+            pit_def = {}
+            for r in pit_rows:
+                tid = int(r["team_id"])
+                ipo = int(r["ipo"])
+                ha = int(r["ha"]); hra = int(r["hra"])
+                bb_p = int(r["bb"]); so_p = int(r["so"])
+                hbp_p = int(r.get("hbp", 0) or 0)
+                bip = (ipo + ha + bb_p + hbp_p) - so_p - bb_p - hbp_p - hra
+                h_on_contact = ha - hra
+                pit_def[tid] = {"bip": bip, "h_contact": h_on_contact,
+                                "ipo": ipo, "ra": int(r["ra"]), "er": int(r["er"])}
+
+        fielding = []
+        for r in fld_rows:
+            tid = int(r["team_id"])
+            inn = int(r["inn"])
+            po = int(r["po"]); a = int(r["a"]); e = int(r["e"])
+            dp = int(r["dp"]); g = int(r["g"])
+            tc = po + a + e
+            fpct = (po + a) / tc if tc > 0 else 1.0
+            rf = (po + a) * 9.0 / inn if inn > 0 else 0
+            dp_g = dp / g if g > 0 else 0
+            e_g = e / g if g > 0 else 0
+
+            # Defensive efficiency from pitching data
+            pd = pit_def.get(tid, {})
+            bip = pd.get("bip", 0)
+            def_eff = 1.0 - (pd.get("h_contact", 0) / bip) if bip > 0 else 0
+
+            fielding.append({
+                "team_id": tid,
+                "team_abbrev": r["team_abbrev"],
+                "team_level": int(r["team_level"]),
+                "g": g, "inn": inn,
+                "po": po, "a": a, "e": e, "dp": dp,
+                "tc": tc,
+                "fpct": f"{fpct:.3f}",
+                "rf": f"{rf:.1f}",
+                "dp_g": f"{dp_g:.2f}",
+                "e_g": f"{e_g:.2f}",
+                "def_eff": f"{def_eff:.3f}",
+            })
+
+        return jsonify(batting=batting, pitching=pitching, fielding=fielding), 200
 
     except SQLAlchemyError as e:
         logger.exception("Stats endpoint error: %s", e)
