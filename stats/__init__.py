@@ -195,7 +195,7 @@ def batting_leaderboard():
                 WHERE bs.league_year_id = :lyid {lg_level_filter}
             """), lg_params).mappings().first()
 
-            from services.analytics import WOBA_WEIGHTS, WOBA_SCALE
+            from services.analytics import WOBA_WEIGHTS, WOBA_SCALE, compute_war_context, compute_batting_war
             _lg_pa = float(lg_avg["pa"] or 1)
             _lg_h = float(lg_avg["h"] or 0)
             _lg_1b = _lg_h - float(lg_avg["d2"] or 0) - float(lg_avg["d3"] or 0) - float(lg_avg["hr"] or 0)
@@ -210,6 +210,35 @@ def batting_leaderboard():
             _lg_ab = float(lg_avg["ab"] or 1)
             _lg_obp = (_lg_h + float(lg_avg["bb"] or 0) + float(lg_avg["hbp"] or 0)) / _lg_pa if _lg_pa > 0 else 0.320
             _lg_slg = (_lg_h + float(lg_avg["d2"] or 0) + 2 * float(lg_avg["d3"] or 0) + 3 * float(lg_avg["hr"] or 0)) / _lg_ab if _lg_ab > 0 else 0.400
+
+            # WAR context
+            _war_ctx = compute_war_context(conn, league_year_id, league_level or 9)
+
+            # Fielding data for WAR
+            _fld_map = {}
+            if player_ids:
+                fld_ph = ", ".join(f":fp{i}" for i in range(len(player_ids)))
+                fld_pp = {f"fp{i}": pid for i, pid in enumerate(player_ids)}
+                fld_pp["lyid3"] = league_year_id
+                fld_qry = conn.execute(sa_text(f"""
+                    SELECT player_id, position_code, games, innings,
+                           errors, putouts, assists, double_plays
+                    FROM player_fielding_stats
+                    WHERE player_id IN ({fld_ph}) AND league_year_id = :lyid3
+                    ORDER BY innings DESC
+                """), fld_pp).mappings().all()
+                for fr in fld_qry:
+                    fpid = int(fr["player_id"])
+                    if fpid not in _fld_map:
+                        _fld_map[fpid] = {
+                            "position": fr["position_code"],
+                            "games": float(fr["games"] or 0),
+                            "innings": float(fr["innings"] or 0),
+                            "errors": float(fr["errors"] or 0),
+                            "putouts": float(fr["putouts"] or 0),
+                            "assists": float(fr["assists"] or 0),
+                            "double_plays": float(fr["double_plays"] or 0),
+                        }
 
         leaders = []
         for i, r in enumerate(rows):
@@ -290,6 +319,13 @@ def batting_leaderboard():
             ld_pct_val = (c_barrel + c_solid + c_flare) / c_total if c_total else 0
             contact_pct = (ab - so) / ab if ab else 0
 
+            # bWAR
+            _war_row = {"at_bats": ab, "hits": h, "doubles_hit": d, "triples": t,
+                        "home_runs": hr, "walks": bb, "strikeouts": so,
+                        "stolen_bases": sb, "caught_stealing": cs,
+                        "hbp": hbp, "gidp": gidp_val, "games": int(r["games"])}
+            _bwar = compute_batting_war(_war_row, _fld_map.get(pid), _war_ctx)
+
             leaders.append({
                 "rank": offset + i + 1,
                 "player_id": pid,
@@ -319,6 +355,7 @@ def batting_leaderboard():
                 "woba": f"{woba_val:.3f}",
                 "wrc_plus": round(wrc_plus),
                 "ops_plus": ops_plus,
+                "bwar": _bwar["war"],
                 "rc": f"{rc:.1f}",
                 "sec_a": f"{sec_a:.3f}",
                 "pss": f"{pss:.1f}",
@@ -499,6 +536,9 @@ def pitching_leaderboard():
                           + 3.0 * (float(fip_lg["bb"] or 0) + float(fip_lg["hbp"] or 0))
                           - 2.0 * float(fip_lg["so"] or 0)) / _fip_ip) if _fip_ip > 0 else 3.17
 
+            from services.analytics import compute_war_context, compute_pitching_war
+            _war_ctx = compute_war_context(conn, league_year_id, league_level or 9)
+
         leaders = []
         for i, r in enumerate(rows):
             ipo = int(r["innings_pitched_outs"])
@@ -587,6 +627,11 @@ def pitching_leaderboard():
             soft_pct_p = (c_topped_p + c_weak_p) / c_total_p if c_total_p else 0
             ld_pct_p = (c_barrel_p + c_solid_p + c_flare_p) / c_total_p if c_total_p else 0
 
+            # pWAR
+            _pwar_row = {"innings_pitched_outs": ipo, "home_runs_allowed": hra,
+                         "walks": bb, "strikeouts": so, "hbp": hbp}
+            _pwar = compute_pitching_war(_pwar_row, _war_ctx)
+
             leaders.append({
                 "rank": offset + i + 1,
                 "player_id": int(r["player_id"]),
@@ -619,6 +664,7 @@ def pitching_leaderboard():
                 "fip": f"{fip_val:.2f}",
                 "era_minus": round(era_val / _fip_era * 100) if _fip_era > 0 and ipo > 0 else 0,
                 "fip_minus": round(fip_val / _fip_era * 100) if _fip_era > 0 and ipo > 0 else 0,
+                "pwar": _pwar["war"],
                 "xfip": f"{xfip_val:.2f}",
                 "k_bb_pct": f"{k_bb_pct_val:.3f}",
                 "lob_pct": f"{lob_pct_val:.3f}",
@@ -744,6 +790,9 @@ def fielding_leaderboard():
                 LIMIT :limit OFFSET :offset
             """), params).mappings().all()
 
+            from services.analytics import compute_war_context, compute_fielding_war
+            _war_ctx = compute_war_context(conn, league_year_id, league_level or 9)
+
         leaders = []
         for i, r in enumerate(rows):
             g = int(r["games"])
@@ -762,6 +811,10 @@ def fielding_leaderboard():
             dp = int(r.get("double_plays", 0) or 0)
             rf_val = (po + a) * 9.0 / inn if inn else 0
             dp_g_val = dp / g if g else 0
+
+            _fld_data = {"position": r["position_code"], "games": g, "innings": inn,
+                         "errors": e, "putouts": po, "assists": a, "double_plays": dp}
+            _fwar = compute_fielding_war(_fld_data, _war_ctx)
 
             leaders.append({
                 "rank": offset + i + 1,
@@ -783,6 +836,10 @@ def fielding_leaderboard():
                 "dp": dp,
                 "rf": f"{rf_val:.1f}",
                 "dp_g": f"{dp_g_val:.2f}",
+                "fwar": _fwar["fwar"],
+                "err_runs": _fwar["err_runs"],
+                "range_runs": _fwar["range_runs"],
+                "dp_runs": _fwar["dp_runs"],
             })
 
         pages = (total + page_size - 1) // page_size if total else 0

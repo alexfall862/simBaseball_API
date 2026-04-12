@@ -667,34 +667,31 @@ POS_ADJ_162 = {
 }
 
 
-def war_leaderboard(
+def compute_war_context(
     conn,
     league_year_id: int,
     league_level: int,
     replacement_pct: float = 0.80,
-    min_ab: int = 50,
-    min_ipo: int = 60,
-    weights: Optional[Dict[str, float]] = None,
-    page: int = 1,
-    page_size: int = 50,
 ) -> Dict[str, Any]:
-    """Compute custom WAR leaderboard."""
-    w = {**DEFAULT_WEIGHTS, **(weights or {})}
+    """
+    Compute all league-wide averages needed for WAR calculations.
+    Reusable by both the admin WAR leaderboard and public stat leaderboards.
 
-    # --- Step 1: League averages ---
+    Returns a dict with: lg_woba, lg_r_pa, lg_ops, lg_era, lg_fip, lg_gidp_rate,
+    fip_constant, repl_woba, repl_fip, lg_fld (per-position fielding rates),
+    and the raw league totals for display.
+    """
+    # --- Batting league averages ---
     lg = conn.execute(sa_text("""
         SELECT
-            SUM(bs.hits) AS lg_h,
-            SUM(bs.doubles_hit) AS lg_2b,
-            SUM(bs.triples) AS lg_3b,
-            SUM(bs.home_runs) AS lg_hr,
-            SUM(bs.walks) AS lg_bb,
-            SUM(bs.hbp) AS lg_hbp,
+            SUM(bs.hits) AS lg_h, SUM(bs.doubles_hit) AS lg_2b,
+            SUM(bs.triples) AS lg_3b, SUM(bs.home_runs) AS lg_hr,
+            SUM(bs.walks) AS lg_bb, SUM(bs.hbp) AS lg_hbp,
             SUM(bs.at_bats) AS lg_ab,
             SUM(bs.at_bats + bs.walks + bs.hbp) AS lg_pa,
             SUM(bs.runs) AS lg_runs,
-            SUM(bs.stolen_bases) AS lg_sb,
-            SUM(bs.caught_stealing) AS lg_cs
+            SUM(bs.stolen_bases) AS lg_sb, SUM(bs.caught_stealing) AS lg_cs,
+            SUM(bs.gidp) AS lg_gidp
         FROM player_batting_stats bs
         JOIN teams tm ON tm.id = bs.team_id
         WHERE bs.league_year_id = :lyid AND tm.team_level = :level
@@ -710,31 +707,29 @@ def war_leaderboard(
     lg_bb = float(lg["lg_bb"] or 0)
     lg_hbp = float(lg["lg_hbp"] or 0)
     lg_1b = lg_h - lg_2b - lg_3b - lg_hr
+    lg_gidp = float(lg["lg_gidp"] or 0)
 
-    # League wOBA
     lg_woba = ((WOBA_WEIGHTS["bb"] * lg_bb + WOBA_WEIGHTS["hbp"] * lg_hbp
                 + WOBA_WEIGHTS["1b"] * lg_1b + WOBA_WEIGHTS["2b"] * lg_2b
                 + WOBA_WEIGHTS["3b"] * lg_3b + WOBA_WEIGHTS["hr"] * lg_hr)
                / lg_pa) if lg_pa > 0 else 0.320
     lg_r_pa = lg_runs / lg_pa if lg_pa > 0 else 0.110
+    lg_gidp_rate = lg_gidp / lg_pa if lg_pa > 0 else 0.0
 
-    repl_woba = lg_woba * replacement_pct
-
-    # Legacy OPS (kept for response metadata)
     lg_tb = lg_h + lg_2b + 2 * lg_3b + 3 * lg_hr
     lg_obp = (lg_h + lg_bb + lg_hbp) / lg_pa if lg_pa > 0 else 0.0
     lg_slg = lg_tb / lg_ab if lg_ab > 0 else 0.0
     lg_ops = lg_obp + lg_slg
 
-    # League pitching averages (ERA + FIP)
+    repl_woba = lg_woba * replacement_pct
+
+    # --- Pitching league averages ---
     lg_pit = conn.execute(sa_text("""
         SELECT
-            SUM(ps.earned_runs) AS lg_er,
-            SUM(ps.innings_pitched_outs) AS lg_ipo,
-            SUM(ps.home_runs_allowed) AS lg_hra,
-            SUM(ps.walks) AS lg_bb,
-            SUM(ps.strikeouts) AS lg_so,
-            SUM(ps.hbp) AS lg_hbp
+            SUM(ps.earned_runs) AS lg_er, SUM(ps.innings_pitched_outs) AS lg_ipo,
+            SUM(ps.home_runs_allowed) AS lg_hra, SUM(ps.walks) AS lg_bb,
+            SUM(ps.strikeouts) AS lg_so, SUM(ps.hbp) AS lg_hbp,
+            SUM(ps.fly_balls_allowed) AS lg_fb
         FROM player_pitching_stats ps
         JOIN teams tm ON tm.id = ps.team_id
         WHERE ps.league_year_id = :lyid AND tm.team_level = :level
@@ -745,47 +740,206 @@ def war_leaderboard(
     lg_ip = lg_ipo / 3.0 if lg_ipo > 0 else 1.0
     lg_era = lg_er * 27.0 / lg_ipo if lg_ipo > 0 else 4.50
 
-    # FIP constant = lgERA - (13*lgHR + 3*(lgBB+lgHBP) - 2*lgK) / lgIP
     p_hra = float(lg_pit["lg_hra"] or 0)
     p_bb = float(lg_pit["lg_bb"] or 0)
     p_so = float(lg_pit["lg_so"] or 0)
     p_hbp = float(lg_pit["lg_hbp"] or 0)
+    p_fb = float(lg_pit["lg_fb"] or 0)
     fip_constant = (lg_era - (13.0 * p_hra + 3.0 * (p_bb + p_hbp)
                     - 2.0 * p_so) / lg_ip) if lg_ip > 0 else 3.17
     lg_fip = ((13.0 * p_hra + 3.0 * (p_bb + p_hbp) - 2.0 * p_so)
               / lg_ip + fip_constant) if lg_ip > 0 else lg_era
+    lg_hr_fb = p_hra / p_fb if p_fb > 0 else 0.0
 
     repl_fip = lg_fip / replacement_pct if replacement_pct > 0 else lg_fip * 1.5
 
-    # League fielding averages by position
+    # --- Fielding league averages by position ---
     lg_fld_rows = conn.execute(sa_text("""
         SELECT fs.position_code,
                SUM(fs.errors) AS total_errors,
-               SUM(fs.innings) AS total_innings
+               SUM(fs.innings) AS total_innings,
+               SUM(fs.putouts) AS total_po,
+               SUM(fs.assists) AS total_a,
+               SUM(fs.double_plays) AS total_dp,
+               SUM(fs.games) AS total_g
         FROM player_fielding_stats fs
         JOIN teams tm ON tm.id = fs.team_id
         WHERE fs.league_year_id = :lyid AND tm.team_level = :level
         GROUP BY fs.position_code
     """), {"lyid": league_year_id, "level": league_level}).mappings().all()
 
-    lg_err_rate = {}
+    lg_fld: Dict[str, Dict[str, float]] = {}
     for fr in lg_fld_rows:
         pos = fr["position_code"]
         inn = float(fr["total_innings"] or 1)
-        lg_err_rate[pos] = float(fr["total_errors"] or 0) / inn if inn > 0 else 0.0
+        g = float(fr["total_g"] or 1)
+        lg_fld[pos] = {
+            "err_rate": float(fr["total_errors"] or 0) / inn if inn > 0 else 0.0,
+            "rf_per_inn": (float(fr["total_po"] or 0) + float(fr["total_a"] or 0)) / inn if inn > 0 else 0.0,
+            "dp_per_g": float(fr["total_dp"] or 0) / g if g > 0 else 0.0,
+        }
 
-    # --- Step 2: Position player WAR ---
+    return {
+        "lg_woba": lg_woba, "lg_r_pa": lg_r_pa, "lg_ops": lg_ops,
+        "lg_era": lg_era, "lg_fip": lg_fip, "lg_hr_fb": lg_hr_fb,
+        "lg_gidp_rate": lg_gidp_rate,
+        "fip_constant": fip_constant,
+        "repl_woba": repl_woba, "repl_fip": repl_fip,
+        "replacement_pct": replacement_pct,
+        "lg_fld": lg_fld,
+    }
+
+
+def compute_batting_war(row: Dict, fld_data: Optional[Dict], ctx: Dict) -> Dict[str, float]:
+    """Compute position-player WAR components from a batting stat row + fielding data."""
+    ab = float(row["at_bats"]); h = float(row["hits"])
+    d = float(row["doubles_hit"]); t = float(row["triples"])
+    hr = float(row["home_runs"]); bb = float(row["walks"])
+    sb = float(row["stolen_bases"]); cs = float(row["caught_stealing"])
+    hbp = float(row.get("hbp", 0) or 0)
+    gidp = float(row.get("gidp", 0) or 0)
+    games = float(row.get("games", 0) or 0)
+
+    pa = ab + bb + hbp
+    singles = h - d - t - hr
+    player_woba = ((WOBA_WEIGHTS["bb"] * bb + WOBA_WEIGHTS["hbp"] * hbp
+                    + WOBA_WEIGHTS["1b"] * singles + WOBA_WEIGHTS["2b"] * d
+                    + WOBA_WEIGHTS["3b"] * t + WOBA_WEIGHTS["hr"] * hr)
+                   / pa) if pa > 0 else 0.0
+
+    # Batting runs (wOBA-based, above replacement)
+    batting_runs = ((player_woba - ctx["repl_woba"]) / WOBA_SCALE) * pa if WOBA_SCALE > 0 else 0.0
+
+    # Baserunning runs: SB/CS value + GIDP penalty
+    br_runs = (sb - 2.0 * cs) * 0.2
+    # GIDP: each GIDP above league-average rate costs ~0.4 runs
+    expected_gidp = ctx["lg_gidp_rate"] * pa
+    br_runs += (expected_gidp - gidp) * 0.4
+
+    # Fielding runs (error-based + range factor + DP contribution)
+    fld_runs = 0.0
+    pos = "dh"
+    if fld_data and fld_data["innings"] > 0:
+        pos = fld_data["position"]
+        lg_pos = ctx["lg_fld"].get(pos, {})
+        p_inn = fld_data["innings"]
+        p_g = fld_data.get("games", 0) or (games if games > 0 else 1)
+
+        # Error component: runs saved vs league-average error rate at position
+        expected_err = lg_pos.get("err_rate", 0.0) * p_inn
+        err_runs = (expected_err - fld_data["errors"]) * 0.8
+
+        # Range component: (PO+A)/Inn vs league average at position
+        p_rf = (fld_data.get("putouts", 0) + fld_data.get("assists", 0)) / p_inn if p_inn > 0 else 0
+        lg_rf = lg_pos.get("rf_per_inn", 0.0)
+        range_runs = (p_rf - lg_rf) * p_inn * 0.1  # ~0.1 runs per extra play per inn
+
+        # DP component
+        p_dp_g = fld_data.get("double_plays", 0) / p_g if p_g > 0 else 0
+        lg_dp_g = lg_pos.get("dp_per_g", 0.0)
+        dp_runs = (p_dp_g - lg_dp_g) * p_g * 0.3  # ~0.3 runs per extra DP
+
+        fld_runs = err_runs + range_runs + dp_runs
+
+    # Positional adjustment
+    pos_adj = POS_ADJ_162.get(pos.lower(), 0.0) * (games / 162.0) if games > 0 else 0.0
+
+    total_runs = batting_runs + br_runs + fld_runs + pos_adj
+    war = total_runs / RUNS_PER_WIN
+
+    # wRC+
+    wrc_plus = 0.0
+    if ctx["lg_r_pa"] > 0 and WOBA_SCALE > 0 and pa > 0:
+        wrc_per_pa = (player_woba - ctx["lg_woba"]) / WOBA_SCALE + ctx["lg_r_pa"]
+        wrc_plus = (wrc_per_pa / ctx["lg_r_pa"]) * 100.0
+
+    return {
+        "war": round(war, 2),
+        "batting_runs": round(batting_runs, 1),
+        "br_runs": round(br_runs, 1),
+        "fld_runs": round(fld_runs, 1),
+        "pos_adj": round(pos_adj, 1),
+        "woba": round(player_woba, 3),
+        "wrc_plus": round(wrc_plus, 0),
+        "position": pos.upper(),
+    }
+
+
+def compute_pitching_war(row: Dict, ctx: Dict) -> Dict[str, float]:
+    """Compute pitcher WAR from a pitching stat row."""
+    ipo = float(row["innings_pitched_outs"])
+    ip = ipo / 3.0
+    hra = float(row["home_runs_allowed"] or 0)
+    bb = float(row["walks"] or 0)
+    so = float(row["strikeouts"] or 0)
+    hbp = float(row.get("hbp", 0) or 0)
+
+    player_fip = ((13.0 * hra + 3.0 * (bb + hbp) - 2.0 * so)
+                  / ip + ctx["fip_constant"]) if ip > 0 else 99.0
+    pit_runs = (ctx["repl_fip"] - player_fip) * ip / 9.0
+    war = pit_runs / RUNS_PER_WIN
+
+    return {
+        "war": round(war, 2),
+        "pit_runs": round(pit_runs, 1),
+        "fip": round(player_fip, 2),
+    }
+
+
+def compute_fielding_war(fld_data: Dict, ctx: Dict) -> Dict[str, float]:
+    """Compute standalone fielding WAR for a player-position."""
+    pos = fld_data["position"]
+    p_inn = float(fld_data["innings"] or 0)
+    if p_inn == 0:
+        return {"fwar": 0.0, "err_runs": 0.0, "range_runs": 0.0, "dp_runs": 0.0}
+
+    lg_pos = ctx["lg_fld"].get(pos, {})
+    p_g = float(fld_data.get("games", 0) or 1)
+
+    expected_err = lg_pos.get("err_rate", 0.0) * p_inn
+    err_runs = (expected_err - float(fld_data.get("errors", 0))) * 0.8
+
+    p_rf = (float(fld_data.get("putouts", 0)) + float(fld_data.get("assists", 0))) / p_inn
+    lg_rf = lg_pos.get("rf_per_inn", 0.0)
+    range_runs = (p_rf - lg_rf) * p_inn * 0.1
+
+    p_dp_g = float(fld_data.get("double_plays", 0)) / p_g if p_g > 0 else 0
+    lg_dp_g = lg_pos.get("dp_per_g", 0.0)
+    dp_runs = (p_dp_g - lg_dp_g) * p_g * 0.3
+
+    fwar = (err_runs + range_runs + dp_runs) / RUNS_PER_WIN
+
+    return {
+        "fwar": round(fwar, 2),
+        "err_runs": round(err_runs, 1),
+        "range_runs": round(range_runs, 1),
+        "dp_runs": round(dp_runs, 1),
+    }
+
+
+def war_leaderboard(
+    conn,
+    league_year_id: int,
+    league_level: int,
+    replacement_pct: float = 0.80,
+    min_ab: int = 50,
+    min_ipo: int = 60,
+    weights: Optional[Dict[str, float]] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> Dict[str, Any]:
+    """Compute custom WAR leaderboard."""
+    w = {**DEFAULT_WEIGHTS, **(weights or {})}
+    ctx = compute_war_context(conn, league_year_id, league_level, replacement_pct)
+
+    # --- Position player WAR ---
     bat_sql = sa_text("""
         SELECT bs.player_id, p.firstName, p.lastName, p.ptype,
-               tm.team_abbrev,
+               tm.team_abbrev, bs.games,
                bs.at_bats, bs.hits, bs.doubles_hit, bs.triples,
                bs.home_runs, bs.walks, bs.strikeouts,
                bs.stolen_bases, bs.caught_stealing, bs.runs,
-               bs.plate_appearances, bs.hbp,
-               bs.sacrifice_flies, bs.gidp,
-               bs.ground_balls, bs.fly_balls, bs.popups,
-               bs.contact_barrel, bs.contact_solid, bs.contact_flare,
-               bs.contact_burner, bs.contact_under, bs.contact_topped, bs.contact_weak
+               bs.plate_appearances, bs.hbp, bs.gidp
         FROM player_batting_stats bs
         JOIN simbbPlayers p ON p.id = bs.player_id
         JOIN teams tm ON tm.id = bs.team_id
@@ -797,10 +951,11 @@ def war_leaderboard(
         "lyid": league_year_id, "level": league_level, "min_ab": min_ab,
     }).mappings().all()
 
-    # Fielding data keyed by player_id -> best position
+    # Fielding data keyed by player_id -> primary position (most innings)
     fld_sql = sa_text("""
         SELECT fs.player_id, fs.position_code,
-               fs.innings, fs.errors, fs.putouts, fs.assists
+               fs.games, fs.innings, fs.errors,
+               fs.putouts, fs.assists, fs.double_plays
         FROM player_fielding_stats fs
         JOIN teams tm ON tm.id = fs.team_id
         WHERE fs.league_year_id = :lyid AND tm.team_level = :level
@@ -810,91 +965,55 @@ def war_leaderboard(
         "lyid": league_year_id, "level": league_level,
     }).mappings().all()
 
-    # Build fielding map: player_id -> primary position (most innings)
     player_fld: Dict[int, Dict[str, Any]] = {}
     for fr in fld_rows:
         pid = int(fr["player_id"])
         if pid not in player_fld:
             player_fld[pid] = {
                 "position": fr["position_code"],
+                "games": float(fr["games"] or 0),
                 "innings": float(fr["innings"] or 0),
                 "errors": float(fr["errors"] or 0),
+                "putouts": float(fr["putouts"] or 0),
+                "assists": float(fr["assists"] or 0),
+                "double_plays": float(fr["double_plays"] or 0),
             }
 
     players = {}
     for row in bat_rows:
         pid = int(row["player_id"])
-        ab = float(row["at_bats"])
-        h = float(row["hits"])
-        d = float(row["doubles_hit"])
-        t = float(row["triples"])
-        hr = float(row["home_runs"])
-        bb = float(row["walks"])
-        sb = float(row["stolen_bases"])
-        cs = float(row["caught_stealing"])
-        hbp = float(row.get("hbp", 0) or 0)
-        games = float(row.get("games", 0) or 0)
-
-        pa = ab + bb + hbp
-        singles = h - d - t - hr
-        player_woba = ((WOBA_WEIGHTS["bb"] * bb + WOBA_WEIGHTS["hbp"] * hbp
-                        + WOBA_WEIGHTS["1b"] * singles + WOBA_WEIGHTS["2b"] * d
-                        + WOBA_WEIGHTS["3b"] * t + WOBA_WEIGHTS["hr"] * hr)
-                       / pa) if pa > 0 else 0.0
-
-        # wOBA-based batting runs
-        woba_above_repl = player_woba - repl_woba
-        batting_runs = (woba_above_repl / WOBA_SCALE) * pa if WOBA_SCALE > 0 else 0.0
-
-        # Baserunning runs
-        br_runs = (sb - 2.0 * cs) * 0.2
-
-        # Fielding runs
-        fld_runs = 0.0
-        pos = "DH"
         fld_data = player_fld.get(pid)
-        if fld_data and fld_data["innings"] > 0:
-            pos = fld_data["position"]
-            expected_err = lg_err_rate.get(pos, 0.0) * fld_data["innings"]
-            fld_runs = (expected_err - fld_data["errors"]) * 0.8
+        war_data = compute_batting_war(row, fld_data, ctx)
 
-        # Positional adjustment (prorated from 162 games)
-        pos_adj = POS_ADJ_162.get(pos.lower(), 0.0) * (games / 162.0)
-
-        total_runs = (
-            batting_runs * w["batting"]
-            + br_runs * w["baserunning"]
-            + fld_runs * w["fielding"]
-            + pos_adj
+        # Apply component weights
+        weighted_runs = (
+            war_data["batting_runs"] * w["batting"]
+            + war_data["br_runs"] * w["baserunning"]
+            + war_data["fld_runs"] * w["fielding"]
+            + war_data["pos_adj"]
         )
-        war = total_runs / RUNS_PER_WIN
-
-        # wRC+ for display
-        wrc_plus = 0.0
-        if lg_r_pa > 0 and WOBA_SCALE > 0 and pa > 0:
-            wrc_per_pa = (player_woba - lg_woba) / WOBA_SCALE + lg_r_pa
-            wrc_plus = (wrc_per_pa / lg_r_pa) * 100.0
+        weighted_war = round(weighted_runs / RUNS_PER_WIN, 2)
 
         players[pid] = {
             "player_id": pid,
             "name": f"{row['firstName']} {row['lastName']}".strip(),
             "team": row["team_abbrev"],
-            "position": pos.upper(),
+            "position": war_data["position"],
             "type": "position",
-            "war": round(war, 2),
-            "batting_runs": round(batting_runs, 1),
-            "br_runs": round(br_runs, 1),
-            "fld_runs": round(fld_runs, 1),
-            "pos_adj": round(pos_adj, 1),
+            "war": weighted_war,
+            "batting_runs": war_data["batting_runs"],
+            "br_runs": war_data["br_runs"],
+            "fld_runs": war_data["fld_runs"],
+            "pos_adj": war_data["pos_adj"],
             "pit_runs": 0.0,
-            "woba": round(player_woba, 3),
-            "wrc_plus": round(wrc_plus, 0),
+            "woba": war_data["woba"],
+            "wrc_plus": war_data["wrc_plus"],
         }
 
-    # --- Step 3: Pitcher WAR (FIP-based) ---
+    # --- Pitcher WAR ---
     pit_sql = sa_text("""
         SELECT ps.player_id, p.firstName, p.lastName, p.ptype,
-               tm.team_abbrev,
+               tm.team_abbrev, ps.games,
                ps.innings_pitched_outs, ps.earned_runs,
                ps.wins, ps.losses, ps.games_started,
                ps.home_runs_allowed, ps.walks, ps.strikeouts,
@@ -912,30 +1031,18 @@ def war_leaderboard(
 
     for row in pit_rows:
         pid = int(row["player_id"])
-        ipo = float(row["innings_pitched_outs"])
-        ip = ipo / 3.0
-        hra = float(row["home_runs_allowed"] or 0)
-        pit_bb = float(row["walks"] or 0)
-        pit_so = float(row["strikeouts"] or 0)
-        pit_hbp = float(row.get("hbp", 0) or 0)
+        war_data = compute_pitching_war(row, ctx)
 
-        player_fip = ((13.0 * hra + 3.0 * (pit_bb + pit_hbp) - 2.0 * pit_so)
-                      / ip + fip_constant) if ip > 0 else 99.0
-        pit_runs = (repl_fip - player_fip) * ip / 9.0
-
-        total_runs = pit_runs * w["pitching"]
-        war = total_runs / RUNS_PER_WIN
+        weighted_runs = war_data["pit_runs"] * w["pitching"]
+        weighted_war = round(weighted_runs / RUNS_PER_WIN, 2)
 
         gs = int(row["games_started"] or 0)
         pos = "SP" if gs > 0 else "RP"
 
         if pid in players:
-            # Two-way player: add pitching to existing
-            players[pid]["pit_runs"] = round(pit_runs, 1)
-            players[pid]["fip"] = round(player_fip, 2)
-            players[pid]["war"] = round(
-                players[pid]["war"] + war, 2
-            )
+            players[pid]["pit_runs"] = war_data["pit_runs"]
+            players[pid]["fip"] = war_data["fip"]
+            players[pid]["war"] = round(players[pid]["war"] + weighted_war, 2)
             players[pid]["type"] = "two-way"
         else:
             players[pid] = {
@@ -944,15 +1051,12 @@ def war_leaderboard(
                 "team": row["team_abbrev"],
                 "position": pos,
                 "type": "pitcher",
-                "war": round(war, 2),
-                "batting_runs": 0.0,
-                "br_runs": 0.0,
-                "fld_runs": 0.0,
-                "pos_adj": 0.0,
-                "pit_runs": round(pit_runs, 1),
-                "woba": 0.0,
-                "wrc_plus": 0.0,
-                "fip": round(player_fip, 2),
+                "war": weighted_war,
+                "batting_runs": 0.0, "br_runs": 0.0,
+                "fld_runs": 0.0, "pos_adj": 0.0,
+                "pit_runs": war_data["pit_runs"],
+                "woba": 0.0, "wrc_plus": 0.0,
+                "fip": war_data["fip"],
             }
 
     # --- Step 4: Sort and paginate ---
@@ -973,16 +1077,16 @@ def war_leaderboard(
         "page": page,
         "pages": pages,
         "league_averages": {
-            "ops": round(lg_ops, 3),
-            "woba": round(lg_woba, 3),
-            "r_pa": round(lg_r_pa, 4),
-            "era": round(lg_era, 2),
-            "fip": round(lg_fip, 2),
-            "fip_constant": round(fip_constant, 2),
+            "ops": round(ctx["lg_ops"], 3),
+            "woba": round(ctx["lg_woba"], 3),
+            "r_pa": round(ctx["lg_r_pa"], 4),
+            "era": round(ctx["lg_era"], 2),
+            "fip": round(ctx["lg_fip"], 2),
+            "fip_constant": round(ctx["fip_constant"], 2),
         },
         "replacement_pct": replacement_pct,
-        "repl_woba": round(repl_woba, 3),
-        "repl_fip": round(repl_fip, 2),
+        "repl_woba": round(ctx["repl_woba"], 3),
+        "repl_fip": round(ctx["repl_fip"], 2),
         "runs_per_win": RUNS_PER_WIN,
         "weights": w,
     }
