@@ -584,6 +584,15 @@ def _apply_visibility(
             display_format = "20-80"
             attrs_precise = True
         else:
+            # Save original pitch_ovr values before fuzzing — these come from the
+            # DB column (pre-computed overall), and must be fuzzed directly to match
+            # the scouting endpoint behaviour.
+            saved_pitch_ovrs = {}
+            for i in range(1, 6):
+                key = f"pitch{i}_ovr"
+                if ratings.get(key) is not None:
+                    saved_pitch_ovrs[key] = ratings[key]
+
             # Fuzz the existing 20-80 ratings
             for key, val in list(ratings.items()):
                 if val is None:
@@ -592,9 +601,16 @@ def _apply_visibility(
                     attr_name = key.replace("_display", "_base")
                     ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, attr_name)
 
-            # Recompute derived from fuzzed values
+            # Recompute derived from fuzzed values (position ratings, etc.)
             derived = _compute_derived_from_values(ratings, position_weights)
             ratings.update(derived)
+
+            # Override pitch_ovr with direct fuzz of the original DB-sourced
+            # value (matches scouting endpoint which fuzzes pitch_ovr independently
+            # rather than recomputing from fuzzed components).
+            for key, val in saved_pitch_ovrs.items():
+                ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, key)
+
             display_format = "20-80"
             attrs_precise = False
 

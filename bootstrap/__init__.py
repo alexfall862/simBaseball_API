@@ -634,6 +634,18 @@ def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
         else:
             ratings[attr_name] = None
 
+    # Override pitch overalls with the DB column values (matches scouting
+    # endpoint which reads simbbPlayers.pitch{i}_ovr directly).
+    for i in range(1, 6):
+        ovr_key = f"pitch{i}_ovr"
+        db_val = m.get(ovr_key)
+        if db_val is not None:
+            d = dist_for_level.get(ovr_key)
+            if d and d.get("mean") is not None:
+                ratings[ovr_key] = _to_20_80(db_val, d["mean"], d["std"])
+            else:
+                ratings[ovr_key] = None
+
     potentials = {}
     for col in pot_cols:
         potentials[col] = m.get(col)
