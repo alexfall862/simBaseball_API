@@ -380,13 +380,13 @@ def build_player_display(
         ratings[attr_name] = scaled
 
     # --- Position ratings via canonical displayovr pipeline ---
-    # Uses raw _base values from the original mapping (not _display) so all
-    # player types are on the same absolute scale for percentile ranking.
+    # Uses _display values with ptype-split breakpoints. Cross-ptype
+    # ratings are null (pitchers get null for fielding, hitters for pitching).
     if ovr_weights and breakpoints:
         from services.ovr_core import compute_all_position_ratings
         pos_ratings = compute_all_position_ratings(
-            mapping, ptype, current_level, ovr_weights, breakpoints,
-            key_suffix="_base",
+            ratings, ptype, current_level, ovr_weights, breakpoints,
+            key_suffix="_display",
         )
         ratings.update(pos_ratings)
 

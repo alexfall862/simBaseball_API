@@ -1966,28 +1966,40 @@ def _build_scouted_response(player, visibility, dist_by_level=None,
         response["potentials"] = potentials
 
     # --- Derive displayovr via canonical ovr_core.compute_displayovr() ---
-    # Uses raw _base values from the player dict (not fuzzed _display values)
-    # so the computation matches the _base-scale breakpoints. For fuzzed views,
-    # the displayovr is then fuzzed directly below.
-    from services.ovr_core import compute_displayovr, compute_all_position_ratings
+    # Uses the visible attributes (precise or fuzzed _display values).
+    # displayovr uses the listed position's breakpoints so it matches
+    # the position-specific rating.
+    from services.ovr_core import compute_displayovr
+    from services.attribute_visibility import _GRADE_TO_SCORE
 
-    weights = _ovr_weights if _ovr_weights is not None else {}
-    bp = _breakpoints if _breakpoints is not None else {}
-
-    displayovr_value = compute_displayovr(
-        player, ptype, _listed_pos, current_level,
-        weights, bp,
-        key_suffix="_base", is_free_agent=False,
-    )
-
-    # For fuzzed views, fuzz the displayovr value
     is_precise = (
         ("pro_attrs_precise" in unlocked or "draft_attrs_precise" in unlocked)
         and "attributes" in response
     )
-    if displayovr_value is not None and not is_precise:
-        from services.attribute_visibility import fuzz_20_80
-        displayovr_value = fuzz_20_80(displayovr_value, org_id, player_id, "displayovr")
+
+    visible_ratings = response.get("attributes", {})
+    if not visible_ratings:
+        lg = response.get("letter_grades", {})
+        if lg:
+            visible_ratings = {
+                f"{k}_display": _GRADE_TO_SCORE.get(v)
+                for k, v in lg.items() if v
+            }
+
+    displayovr_value = None
+    if visible_ratings:
+        weights = _ovr_weights if _ovr_weights is not None else {}
+        breakpoints = _breakpoints if _breakpoints is not None else {}
+        displayovr_value = compute_displayovr(
+            visible_ratings,
+            ptype,
+            _listed_pos,
+            current_level,
+            weights,
+            breakpoints,
+            key_suffix="_display",
+            is_free_agent=False,
+        )
 
     response["displayovr"] = displayovr_value
 

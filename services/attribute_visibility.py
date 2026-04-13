@@ -463,17 +463,6 @@ def _apply_visibility(
         pot_precise = has_precise_pot
 
     elif context == "pro_draft":
-        # Compute position ratings from _base values (bio has raw attributes
-        # for the build_player_display shape; player_dict top-level for bootstrap).
-        # Use _base so all ptypes are on the same absolute scale.
-        from services.ovr_core import compute_all_position_ratings as _cap_draft
-        _raw_src = player_dict.get("_raw_base") or bio or player_dict
-        _precise_pos = _cap_draft(
-            _raw_src, ptype, DRAFT_DISPLAY_LEVEL_ID,
-            ovr_weights or {}, breakpoints or {},
-            key_suffix="_base",
-        )
-
         if has_precise_attrs:
             # Precise 20-80 at draft level (Level 5) baseline
             # Re-convert raw values using Level 5 distributions
@@ -494,8 +483,12 @@ def _apply_visibility(
             # Pitch overalls from display components
             pitch_ovrs = _recompute_pitch_ovrs_from_display(ratings)
             ratings.update(pitch_ovrs)
-            # Position ratings from _base (precise)
-            ratings.update(_precise_pos)
+            # Position ratings from _display values, ptype-split
+            from services.ovr_core import compute_all_position_ratings as _cap_draft_p
+            ratings.update(_cap_draft_p(
+                ratings, ptype, DRAFT_DISPLAY_LEVEL_ID, ovr_weights or {}, breakpoints or {},
+                key_suffix="_display",
+            ))
             display_format = "20-80"
             attrs_precise = True
 
@@ -521,12 +514,12 @@ def _apply_visibility(
             # Pitch overalls from fuzzed display components
             pitch_ovrs = _recompute_pitch_ovrs_from_display(ratings)
             ratings.update(pitch_ovrs)
-            # Position ratings: fuzz the precise _base-derived values directly
-            for key, val in _precise_pos.items():
-                if val is not None:
-                    ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, key)
-                else:
-                    ratings[key] = val
+            # Position ratings from fuzzed _display values, ptype-split
+            from services.ovr_core import compute_all_position_ratings as _cap_draft_f
+            ratings.update(_cap_draft_f(
+                ratings, ptype, DRAFT_DISPLAY_LEVEL_ID, ovr_weights or {}, breakpoints or {},
+                key_suffix="_display",
+            ))
             display_format = "20-80"
             attrs_precise = False
 
@@ -570,22 +563,17 @@ def _apply_visibility(
 
     elif context == "pro_roster":
         if has_precise_attrs:
-            # Keep true 20-80 ratings as-is (already computed by _build_player_with_ratings).
-            # Position ratings were computed from _base values at build time
-            # and are already correct.
+            # Keep true 20-80 ratings as-is (already computed at build time).
             display_format = "20-80"
             attrs_precise = True
         else:
-            # Save original values that must be fuzzed directly (not recomputed
-            # from fuzzed components): pitch_ovr and position ratings.
-            saved_direct_fuzz = {}
+            # Save original pitch_ovr values before fuzzing — these come from the
+            # DB column and must be fuzzed directly.
+            saved_pitch_ovrs = {}
             for i in range(1, 6):
                 key = f"pitch{i}_ovr"
                 if ratings.get(key) is not None:
-                    saved_direct_fuzz[key] = ratings[key]
-            for key, val in list(ratings.items()):
-                if key.endswith("_rating") and val is not None:
-                    saved_direct_fuzz[key] = val
+                    saved_pitch_ovrs[key] = ratings[key]
 
             # Fuzz the existing 20-80 base attribute ratings
             for key, val in list(ratings.items()):
@@ -595,14 +583,23 @@ def _apply_visibility(
                     attr_name = key.replace("_display", "_base")
                     ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, attr_name)
 
-            # Fuzz pitch_ovr and position ratings directly from their precise
-            # values (computed from _base at build time). This avoids recomputing
-            # from fuzzed _display values which are on a ptype-relative scale.
-            for key, val in saved_direct_fuzz.items():
+            # Override pitch_ovr with direct fuzz of the original DB-sourced value
+            for key, val in saved_pitch_ovrs.items():
                 ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, key)
 
             display_format = "20-80"
             attrs_precise = False
+
+        # Recompute position ratings from (possibly fuzzed) _display values.
+        # Uses ptype-split breakpoints so same-ptype peers are compared.
+        # Cross-ptype ratings are null.
+        from services.ovr_core import compute_all_position_ratings
+        pos_ratings = compute_all_position_ratings(
+            ratings, ptype, player_level, ovr_weights or {}, breakpoints or {},
+            key_suffix="_display",
+            is_free_agent=bool(force_free_agent),
+        )
+        ratings.update(pos_ratings)
 
         # Potentials: fuzzed or precise
         if has_precise_pot:
@@ -629,9 +626,8 @@ def _apply_visibility(
     player_dict["potentials"] = potentials
 
     # --- displayovr: canonical compute_displayovr() against league breakpoints ---
-    # Uses raw _base values (from bio or player_dict top-level) so that the
-    # computation matches the _base-scale breakpoints. For fuzzed contexts,
-    # the precise displayovr is computed then fuzzed directly.
+    # Uses the ratings dict (_display values). displayovr uses the listed
+    # position's breakpoints so it matches the position-specific rating.
     from services.ovr_core import compute_displayovr
 
     if display_format == "hidden":
@@ -640,26 +636,16 @@ def _apply_visibility(
         is_fa = bool(force_free_agent)
         peer_level = level_key
 
-        # Source _base values: _raw_base dict (bootstrap shape), bio
-        # (build_player_display shape), or player_dict top-level
-        _raw_for_ovr = player_dict.get("_raw_base") or bio or player_dict
-
         displayovr_value = compute_displayovr(
-            _raw_for_ovr,
+            ratings,
             ptype,
             listed_pos_code,
             peer_level,
             ovr_weights or {},
             breakpoints or {},
-            key_suffix="_base",
+            key_suffix="_display",
             is_free_agent=is_fa,
         )
-
-        # For fuzzed contexts, fuzz the displayovr value directly
-        if displayovr_value is not None and not attrs_precise:
-            displayovr_value = fuzz_20_80(
-                displayovr_value, viewing_org_id, player_id, "displayovr"
-            )
 
     player_dict["displayovr"] = displayovr_value
     bio_for_disp = player_dict.get("bio")
@@ -672,9 +658,6 @@ def _apply_visibility(
         "attributes_precise": attrs_precise,
         "potentials_precise": pot_precise,
     }
-
-    # Strip internal _raw_base dict — not for frontend consumption
-    player_dict.pop("_raw_base", None)
 
     return player_dict
 
