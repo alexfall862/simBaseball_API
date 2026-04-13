@@ -280,9 +280,11 @@ def load_breakpoints(conn) -> Dict[Tuple, List[float]]:
     60s in-process TTL cache. Returns {} if the table has not been populated
     (callers must handle this — log a loud error and return None displayovr).
 
-    Cache keys are (level, ptype, rating_type) tuples. The rating_type is
-    'displayovr' for the player's listed-position overall, or a position
-    rating name like 'c_rating', 'sp_rating', etc.
+    Cache keys are (level, rating_type) tuples. All player types are pooled
+    together per level so that cross-position ratings (e.g. a hitter's
+    sp_rating) are ranked against the full population, not just same-ptype
+    peers. The rating_type is 'displayovr' for the listed-position overall,
+    or a position rating name like 'c_rating', 'sp_rating', etc.
     """
     with _cache_lock:
         if _breakpoints_cache["data"] is not None and _now() < _breakpoints_cache["expires_at"]:
@@ -291,21 +293,28 @@ def load_breakpoints(conn) -> Dict[Tuple, List[float]]:
     breakpoints: Dict[Tuple, List[float]] = {}
     try:
         rows = conn.execute(sa_text(
-            "SELECT level, ptype, rating_type, raw_overalls_json "
+            "SELECT level, rating_type, raw_overalls_json "
             "FROM displayovr_breakpoints"
         )).all()
         for row in rows:
-            level, ptype, rating_type, raw_json = row[0], row[1], row[2], row[3]
+            level, rating_type, raw_json = row[0], row[1], row[2]
             try:
                 arr = json.loads(raw_json) if raw_json else []
                 if isinstance(arr, list):
-                    breakpoints[(int(level), str(ptype), str(rating_type))] = [
-                        float(x) for x in arr
-                    ]
+                    key = (int(level), str(rating_type))
+                    # Pool across ptype rows if multiple exist for the same
+                    # (level, rating_type) — handles legacy data that still
+                    # has separate ptype rows before the next recompute.
+                    if key in breakpoints:
+                        merged = breakpoints[key] + [float(x) for x in arr]
+                        merged.sort()
+                        breakpoints[key] = merged
+                    else:
+                        breakpoints[key] = [float(x) for x in arr]
             except (TypeError, ValueError, json.JSONDecodeError):
                 log.warning(
                     "Skipping malformed displayovr_breakpoints row "
-                    "(level=%s, ptype=%s, rating_type=%s)", level, ptype, rating_type,
+                    "(level=%s, rating_type=%s)", level, rating_type,
                 )
     except Exception:
         log.exception("Failed to load displayovr_breakpoints")
@@ -448,7 +457,7 @@ def compute_displayovr(
         except (TypeError, ValueError):
             peer_level = FREE_AGENT_LEVEL
 
-    sorted_bp = breakpoints.get((peer_level, ptype, "displayovr"))
+    sorted_bp = breakpoints.get((peer_level, "displayovr"))
     if not sorted_bp:
         # No breakpoints for this peer group — return None rather than guess
         return None
@@ -495,7 +504,7 @@ def compute_all_position_ratings(
             results[rating_type] = None
             continue
 
-        sorted_bp = breakpoints.get((peer_level, ptype, rating_type))
+        sorted_bp = breakpoints.get((peer_level, rating_type))
         if not sorted_bp:
             results[rating_type] = None
             continue
@@ -589,15 +598,20 @@ def _load_all_active_players_as_display(conn, level: Optional[int] = None):
 
 def recompute_breakpoints(conn) -> Dict[Tuple, List[float]]:
     """
-    Rebuild league-wide raw_ovr breakpoints for every (level, ptype, rating_type)
+    Rebuild league-wide raw_ovr breakpoints for every (level, rating_type)
     group using the active weights from rating_overall_weights and each active
     player's _display (20-80 scaled) ratings.
+
+    All player types (Pitcher + Position) are pooled together per level.
+    Position-specific weight profiles handle the differentiation — a hitter
+    evaluated with SP weights will naturally score low and land near the bottom
+    of the combined population. This avoids the cross-ptype inflation problem
+    where a hitter ranked only against other hitters-as-SP appears average.
 
     Computes breakpoints for:
       - 'displayovr': each player evaluated at their listed position
       - per-position ratings (c_rating, sp_rating, ...): every player evaluated
-        at every position, so position ratings use the same percentile-rank
-        pipeline as displayovr
+        at every position
 
     Operating on _display values is critical: live read paths in
     _apply_visibility and _build_scouted_response also use _display values
@@ -618,15 +632,17 @@ def recompute_breakpoints(conn) -> Dict[Tuple, List[float]]:
         log.warning("recompute_breakpoints: no active players found")
         return {}
 
-    # --- displayovr breakpoints (listed position) ---
+    # All ptypes pooled together per (level, rating_type).
     groups: Dict[Tuple, List[float]] = {}
+
+    # --- displayovr breakpoints (listed position) ---
     for pid, level, ptype, listed_pos, ratings in players:
         raw_ovr = compute_raw_ovr(
             ratings, ptype, listed_pos, weights, key_suffix="_display",
         )
         if raw_ovr is None:
             continue
-        groups.setdefault((level, ptype, "displayovr"), []).append(raw_ovr)
+        groups.setdefault((level, "displayovr"), []).append(raw_ovr)
 
     # --- Per-position breakpoints ---
     # Evaluate every player at every position so that position ratings use
@@ -638,7 +654,7 @@ def recompute_breakpoints(conn) -> Dict[Tuple, List[float]]:
             )
             if raw_ovr is None:
                 continue
-            groups.setdefault((level, ptype, rating_type), []).append(raw_ovr)
+            groups.setdefault((level, rating_type), []).append(raw_ovr)
 
     # Sort each group's breakpoints
     breakpoints: Dict[Tuple, List[float]] = {}
@@ -647,17 +663,17 @@ def recompute_breakpoints(conn) -> Dict[Tuple, List[float]]:
         breakpoints[key] = vals
 
     # Persist to displayovr_breakpoints (DELETE + INSERT for simplicity)
+    # ptype is stored as 'ALL' since we pool across player types.
     try:
         conn.execute(sa_text("DELETE FROM displayovr_breakpoints"))
-        for (level, ptype, rating_type), vals in breakpoints.items():
+        for (level, rating_type), vals in breakpoints.items():
             conn.execute(sa_text("""
                 INSERT INTO displayovr_breakpoints
                     (level, ptype, rating_type, raw_overalls_json, player_count,
                      computed_at)
-                VALUES (:level, :ptype, :rating_type, :raw_json, :count, NOW())
+                VALUES (:level, 'ALL', :rating_type, :raw_json, :count, NOW())
             """), {
                 "level": level,
-                "ptype": ptype,
                 "rating_type": rating_type,
                 "raw_json": json.dumps(vals),
                 "count": len(vals),
