@@ -519,19 +519,17 @@ def compute_all_position_ratings(
 # Recompute breakpoints + stored displayovr
 # ---------------------------------------------------------------------------
 
-def _load_all_active_players_as_display(conn, level: Optional[int] = None):
+def _load_all_active_players_raw(conn, level: Optional[int] = None):
     """
-    Load all active players and run them through build_player_display() to
-    get their _display (20-80 scaled) ratings dict, plus current_level and
-    listed_position. Returns a list of (player_id, level, ptype, listed_pos,
-    ratings_dict) tuples.
+    Load all active players as raw mappings (with _base attribute keys),
+    plus current_level and listed_position. Returns a list of
+    (player_id, level, ptype, listed_pos, raw_mapping) tuples.
 
-    This is the canonical source for both breakpoint computation and stored
-    displayovr refresh — both must operate on the same _display scale that
-    live read paths use.
+    Uses raw _base values (universal 0-100ish scale) so that breakpoints
+    and live rating computation are on the same absolute scale regardless
+    of player type. This avoids the ptype-relative inflation that occurs
+    when using per-ptype-scaled _display values.
     """
-    from services.player_display import load_display_context, build_player_display
-
     level_filter = "AND c.current_level = :level" if level else ""
     params: Dict[str, Any] = {}
     if level:
@@ -564,13 +562,6 @@ def _load_all_active_players_as_display(conn, level: Optional[int] = None):
     except Exception:
         log.exception("ovr_core: failed to load listed positions")
 
-    # Build display context once (loads col_cats, dist_by_level, position_weights)
-    try:
-        ctx = load_display_context(conn)
-    except Exception:
-        log.exception("ovr_core: failed to load display context")
-        return []
-
     out = []
     for row in rows:
         try:
@@ -582,16 +573,8 @@ def _load_all_active_players_as_display(conn, level: Optional[int] = None):
         except (TypeError, ValueError, KeyError):
             continue
 
-        try:
-            mapping = dict(row)
-            display = build_player_display(mapping, ctx)
-            ratings = display.get("ratings", {}) or {}
-        except Exception:
-            log.exception("ovr_core: build_player_display failed for player %s", pid)
-            continue
-
         listed_pos = listed_positions.get(pid)
-        out.append((pid, player_level, ptype, listed_pos, ratings))
+        out.append((pid, player_level, ptype, listed_pos, dict(row)))
 
     return out
 
@@ -613,11 +596,9 @@ def recompute_breakpoints(conn) -> Dict[Tuple, List[float]]:
       - per-position ratings (c_rating, sp_rating, ...): every player evaluated
         at every position
 
-    Operating on _display values is critical: live read paths in
-    _apply_visibility and _build_scouted_response also use _display values
-    (because that's what fog-of-war fuzzing produces). Both stored breakpoints
-    and live derivation must be on the same scale for percentile rank lookup
-    to be meaningful.
+    Uses raw _base values (universal 0-100ish scale) so that all player
+    types are on the same absolute scale. This avoids ptype-relative
+    inflation that occurs with per-ptype-scaled _display values.
 
     Writes to the displayovr_breakpoints table. Returns the in-memory dict.
     Logs a loud error and returns {} if no weights are configured.
@@ -627,18 +608,19 @@ def recompute_breakpoints(conn) -> Dict[Tuple, List[float]]:
         log.error("recompute_breakpoints: rating_overall_weights is empty; aborting")
         return {}
 
-    players = _load_all_active_players_as_display(conn)
+    players = _load_all_active_players_raw(conn)
     if not players:
         log.warning("recompute_breakpoints: no active players found")
         return {}
 
     # All ptypes pooled together per (level, rating_type).
+    # Uses _base values so the scale is absolute across player types.
     groups: Dict[Tuple, List[float]] = {}
 
     # --- displayovr breakpoints (listed position) ---
-    for pid, level, ptype, listed_pos, ratings in players:
+    for pid, level, ptype, listed_pos, raw_mapping in players:
         raw_ovr = compute_raw_ovr(
-            ratings, ptype, listed_pos, weights, key_suffix="_display",
+            raw_mapping, ptype, listed_pos, weights, key_suffix="_base",
         )
         if raw_ovr is None:
             continue
@@ -648,9 +630,9 @@ def recompute_breakpoints(conn) -> Dict[Tuple, List[float]]:
     # Evaluate every player at every position so that position ratings use
     # the same percentile-rank math as displayovr.
     for pos_code, rating_type in POS_CODE_TO_RATING.items():
-        for pid, level, ptype, listed_pos, ratings in players:
+        for pid, level, ptype, listed_pos, raw_mapping in players:
             raw_ovr = compute_raw_ovr(
-                ratings, ptype, pos_code, weights, key_suffix="_display",
+                raw_mapping, ptype, pos_code, weights, key_suffix="_base",
             )
             if raw_ovr is None:
                 continue
@@ -690,8 +672,7 @@ def recompute_stored_displayovr(conn, level: Optional[int] = None) -> Dict[str, 
     """
     Full refresh: rebuild breakpoints, then recompute simbbPlayers.displayovr
     for every active player using compute_displayovr() against the fresh
-    breakpoints. All values come from each player's _display ratings (the
-    same scale live read paths use).
+    breakpoints. Uses raw _base values (same absolute scale as breakpoints).
 
     Returns {updated, by_level, error?}.
     """
@@ -707,17 +688,17 @@ def recompute_stored_displayovr(conn, level: Optional[int] = None) -> Dict[str, 
     # Re-load weights post-cache-invalidation (and to keep API symmetric)
     weights = load_weights(conn)
 
-    players = _load_all_active_players_as_display(conn, level=level)
+    players = _load_all_active_players_raw(conn, level=level)
     if not players:
         return {"updated": 0, "by_level": {}}
 
     updates: List[Tuple[int, str]] = []
     by_level: Dict[int, int] = {}
 
-    for pid, player_level, ptype, listed_pos, ratings in players:
+    for pid, player_level, ptype, listed_pos, raw_mapping in players:
         ovr = compute_displayovr(
-            ratings, ptype, listed_pos, player_level, weights, breakpoints,
-            key_suffix="_display", is_free_agent=False,
+            raw_mapping, ptype, listed_pos, player_level, weights, breakpoints,
+            key_suffix="_base", is_free_agent=False,
         )
         if ovr is None:
             continue

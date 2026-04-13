@@ -1966,41 +1966,28 @@ def _build_scouted_response(player, visibility, dist_by_level=None,
         response["potentials"] = potentials
 
     # --- Derive displayovr via canonical ovr_core.compute_displayovr() ---
-    # Strict math: compute weighted average over the visible (precise or fuzzed)
-    # attributes the org sees, then percentile-rank against league breakpoints.
-    from services.ovr_core import compute_displayovr
-    from services.attribute_visibility import _GRADE_TO_SCORE
+    # Uses raw _base values from the player dict (not fuzzed _display values)
+    # so the computation matches the _base-scale breakpoints. For fuzzed views,
+    # the displayovr is then fuzzed directly below.
+    from services.ovr_core import compute_displayovr, compute_all_position_ratings
 
-    # Determine attribute source and precision
+    weights = _ovr_weights if _ovr_weights is not None else {}
+    bp = _breakpoints if _breakpoints is not None else {}
+
+    displayovr_value = compute_displayovr(
+        player, ptype, _listed_pos, current_level,
+        weights, bp,
+        key_suffix="_base", is_free_agent=False,
+    )
+
+    # For fuzzed views, fuzz the displayovr value
     is_precise = (
         ("pro_attrs_precise" in unlocked or "draft_attrs_precise" in unlocked)
         and "attributes" in response
     )
-
-    visible_ratings = response.get("attributes", {})
-    if not visible_ratings:
-        lg = response.get("letter_grades", {})
-        if lg:
-            # Convert letter grades to numeric scores via _display keys
-            visible_ratings = {
-                f"{k}_display": _GRADE_TO_SCORE.get(v)
-                for k, v in lg.items() if v
-            }
-
-    displayovr_value = None
-    if visible_ratings:
-        weights = _ovr_weights if _ovr_weights is not None else {}
-        breakpoints = _breakpoints if _breakpoints is not None else {}
-        displayovr_value = compute_displayovr(
-            visible_ratings,
-            ptype,
-            _listed_pos,
-            current_level,
-            weights,
-            breakpoints,
-            key_suffix="_display",
-            is_free_agent=False,
-        )
+    if displayovr_value is not None and not is_precise:
+        from services.attribute_visibility import fuzz_20_80
+        displayovr_value = fuzz_20_80(displayovr_value, org_id, player_id, "displayovr")
 
     response["displayovr"] = displayovr_value
 

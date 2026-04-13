@@ -661,10 +661,12 @@ def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
 
     # Position ratings via the canonical displayovr pipeline:
     # weighted average -> percentile rank against breakpoints -> 20-80.
+    # Uses raw _base values (from the DB row mapping) so all player types
+    # are on the same absolute scale for cross-ptype percentile ranking.
     if ovr_weights and breakpoints:
         pos_ratings = compute_all_position_ratings(
-            ratings, ptype, current_level, ovr_weights, breakpoints,
-            key_suffix="_display",
+            m, ptype, current_level, ovr_weights, breakpoints,
+            key_suffix="_base",
         )
         ratings.update(pos_ratings)
 
@@ -709,6 +711,9 @@ def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
         "contract": contract,
         "ratings": ratings,
         "potentials": potentials,
+        # Raw _base attributes for displayovr / position rating computation
+        # in the fog-of-war pipeline. Stripped before sending to frontend.
+        "_raw_base": {k: m.get(k) for k in base_cols},
     }
 
 
