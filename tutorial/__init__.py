@@ -132,7 +132,7 @@ def get_article(category_id: str, article_id: str):
 
 
 # ── 3. Search ─────────────────────────────────────────────────────────
-@tutorial_bp.get("/baseball/tutorial/search")
+@tutorial_bp.get("/tutorial/search")
 def search_articles():
     """Simple server-side search across titles, summaries, tags, and body."""
     q = request.args.get("q", "").strip().lower()
