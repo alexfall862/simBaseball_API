@@ -236,6 +236,13 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Tutorial Content</div>
+      <a href="#" class="nav-item" data-section="tutorial-content">
+        <span class="nav-icon">&#128218;</span> Tutorial Editor
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Testing</div>
       <a href="#" class="nav-item" data-section="batting-lab">
         <span class="nav-icon">&#9879;</span> Batting Lab
@@ -4294,6 +4301,185 @@
 
           <!-- Data table -->
           <div id="blab-results-table" style="overflow-x:auto"></div>
+        </div>
+      </section>
+
+      <!-- Tutorial Content Editor -->
+      <section id="section-tutorial-content" class="section">
+        <!-- Toolbar -->
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <button id="btn-tut-refresh" class="btn btn-secondary">Refresh</button>
+            <button id="btn-tut-new-category" class="btn btn-primary">+ New Category</button>
+            <button id="btn-tut-edit-glossary" class="btn btn-secondary">Edit Glossary</button>
+            <span id="tut-status" class="text-muted" style="margin-left:auto"></span>
+          </div>
+        </div>
+
+        <!-- Category / Article list -->
+        <div id="tut-categories-list"></div>
+
+        <!-- Article Editor (hidden by default) -->
+        <div id="tut-article-editor" style="display:none">
+          <div class="card">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+              <button id="btn-tut-back" class="btn btn-secondary">&larr; Back</button>
+              <h3 id="tut-editor-title" style="margin:0">Edit Article</h3>
+              <button id="btn-tut-save" class="btn btn-primary" style="margin-left:auto">Save</button>
+              <button id="btn-tut-delete-article" class="btn btn-danger">Delete</button>
+            </div>
+            <div class="form-grid" style="margin-bottom:16px">
+              <div class="form-group">
+                <label>Article ID (slug)</label>
+                <input type="text" id="tut-art-id" class="input" readonly style="opacity:0.6" />
+              </div>
+              <div class="form-group">
+                <label>Title</label>
+                <input type="text" id="tut-art-title" class="input" />
+              </div>
+              <div class="form-group">
+                <label>Summary</label>
+                <input type="text" id="tut-art-summary" class="input" />
+              </div>
+              <div class="form-group">
+                <label>Tags (comma-separated)</label>
+                <input type="text" id="tut-art-tags" class="input" placeholder="beginner, hitting, attributes" />
+              </div>
+              <div class="form-group">
+                <label>League Filter</label>
+                <select id="tut-art-league" class="input">
+                  <option value="">Both (null)</option>
+                  <option value="MLB">MLB</option>
+                  <option value="College">College</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Related Articles (category/article, comma-sep)</label>
+                <input type="text" id="tut-art-related" class="input" placeholder="hitting/contact-vs-power, roster/setting-your-lineup" />
+              </div>
+            </div>
+            <div class="form-group" style="margin-bottom:12px">
+              <label>Markdown Content</label>
+              <textarea id="tut-art-markdown" class="input" style="width:100%;min-height:500px;font-family:monospace;font-size:13px;line-height:1.5;resize:vertical;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px"></textarea>
+            </div>
+            <div style="display:flex;gap:12px">
+              <button id="btn-tut-save-bottom" class="btn btn-primary">Save</button>
+              <span id="tut-save-status" class="text-muted"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- New Category Form (hidden by default) -->
+        <div id="tut-new-category-form" style="display:none">
+          <div class="card">
+            <h3 style="margin-bottom:16px">Create New Category</h3>
+            <div class="form-grid" style="margin-bottom:16px">
+              <div class="form-group">
+                <label>Category ID (slug)</label>
+                <input type="text" id="tut-newcat-id" class="input" placeholder="my-category" />
+              </div>
+              <div class="form-group">
+                <label>Title</label>
+                <input type="text" id="tut-newcat-title" class="input" placeholder="My Category" />
+              </div>
+              <div class="form-group">
+                <label>Icon Key</label>
+                <select id="tut-newcat-icon" class="input">
+                  <option value="compass">compass - Getting Started</option>
+                  <option value="chart">chart - Attributes / Stats</option>
+                  <option value="bat">bat - Hitting</option>
+                  <option value="target">target - Pitching</option>
+                  <option value="glove">glove - Fielding</option>
+                  <option value="clipboard">clipboard - Roster</option>
+                  <option value="brain">brain - Strategy</option>
+                  <option value="handshake">handshake - Free Agency</option>
+                  <option value="arrows">arrows - Trades</option>
+                  <option value="podium">podium - Draft</option>
+                  <option value="megaphone">megaphone - Recruiting</option>
+                  <option value="bank">bank - Financials</option>
+                  <option value="calendar">calendar - Season</option>
+                  <option value="bandage">bandage - Injuries</option>
+                  <option value="trophy">trophy - Playoffs</option>
+                  <option value="globe">globe - International</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Description</label>
+                <input type="text" id="tut-newcat-desc" class="input" placeholder="Short description for the card" />
+              </div>
+              <div class="form-group">
+                <label>League Filter</label>
+                <select id="tut-newcat-league" class="input">
+                  <option value="">Both (null)</option>
+                  <option value="MLB">MLB</option>
+                  <option value="College">College</option>
+                </select>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px">
+              <button id="btn-tut-newcat-save" class="btn btn-primary">Create Category</button>
+              <button id="btn-tut-newcat-cancel" class="btn btn-secondary">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Glossary Editor (hidden by default) -->
+        <div id="tut-glossary-editor" style="display:none">
+          <div class="card">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+              <button id="btn-tut-glossary-back" class="btn btn-secondary">&larr; Back</button>
+              <h3 style="margin:0">Edit Glossary</h3>
+              <button id="btn-tut-glossary-save" class="btn btn-primary" style="margin-left:auto">Save Glossary</button>
+            </div>
+            <p class="text-muted" style="margin-bottom:12px">Each row is a term and its definition. The frontend uses these for inline tooltips.</p>
+            <div id="tut-glossary-rows"></div>
+            <button id="btn-tut-glossary-add" class="btn btn-secondary" style="margin-top:12px">+ Add Term</button>
+          </div>
+        </div>
+
+        <!-- New Article Form (hidden by default) -->
+        <div id="tut-new-article-form" style="display:none">
+          <div class="card">
+            <h3 style="margin-bottom:16px">Create New Article</h3>
+            <div class="form-grid" style="margin-bottom:16px">
+              <div class="form-group">
+                <label>Category</label>
+                <input type="text" id="tut-newart-cat" class="input" readonly style="opacity:0.6" />
+              </div>
+              <div class="form-group">
+                <label>Article ID (slug)</label>
+                <input type="text" id="tut-newart-id" class="input" placeholder="my-article" />
+              </div>
+              <div class="form-group">
+                <label>Title</label>
+                <input type="text" id="tut-newart-title" class="input" />
+              </div>
+              <div class="form-group">
+                <label>Summary</label>
+                <input type="text" id="tut-newart-summary" class="input" />
+              </div>
+              <div class="form-group">
+                <label>Tags (comma-separated)</label>
+                <input type="text" id="tut-newart-tags" class="input" />
+              </div>
+              <div class="form-group">
+                <label>League Filter</label>
+                <select id="tut-newart-league" class="input">
+                  <option value="">Both (null)</option>
+                  <option value="MLB">MLB</option>
+                  <option value="College">College</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group" style="margin-bottom:12px">
+              <label>Markdown Content</label>
+              <textarea id="tut-newart-markdown" class="input" style="width:100%;min-height:300px;font-family:monospace;font-size:13px;line-height:1.5;resize:vertical;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px"></textarea>
+            </div>
+            <div style="display:flex;gap:12px">
+              <button id="btn-tut-newart-save" class="btn btn-primary">Create Article</button>
+              <button id="btn-tut-newart-cancel" class="btn btn-secondary">Cancel</button>
+            </div>
+          </div>
         </div>
       </section>
 

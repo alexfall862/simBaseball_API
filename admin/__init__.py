@@ -3686,3 +3686,386 @@ def admin_fa_orphan_scan():
     except Exception as e:
         logging.exception("admin_fa_orphan_scan failed")
         return jsonify(ok=False, error="scan_failed", message=str(e)), 500
+
+
+# ─── Tutorial Content Management ────────────────────────────────────────────
+
+import json as _json
+from pathlib import Path as _Path
+
+_TUTORIAL_DIR = _Path(__file__).resolve().parent.parent / "content" / "baseball-tutorial"
+
+
+def _tutorial_manifest_path():
+    return _TUTORIAL_DIR / "manifest.json"
+
+
+def _load_tutorial_manifest():
+    p = _tutorial_manifest_path()
+    if not p.exists():
+        return {"categories": [], "glossary": {}}
+    return _json.loads(p.read_text(encoding="utf-8"))
+
+
+def _save_tutorial_manifest(data):
+    p = _tutorial_manifest_path()
+    p.write_text(_json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _parse_tutorial_frontmatter(raw):
+    """Extract YAML-like frontmatter and body from markdown."""
+    fm = {}
+    body = raw
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+    if m:
+        for line in m.group(1).splitlines():
+            if ":" in line:
+                k, _, v = line.partition(":")
+                fm[k.strip()] = v.strip()
+        body = raw[m.end():]
+    return fm, body
+
+
+@admin_bp.get("/tutorial/manifest")
+def tutorial_get_manifest():
+    """Return the full tutorial manifest for the admin editor."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        manifest = _load_tutorial_manifest()
+        return jsonify(ok=True, manifest=manifest)
+    except Exception as e:
+        logging.exception("tutorial_get_manifest failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.get("/tutorial/article/<category_id>/<article_id>")
+def tutorial_get_article(category_id, article_id):
+    """Return article markdown content for editing."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        manifest = _load_tutorial_manifest()
+        cat = next((c for c in manifest["categories"] if c["id"] == category_id), None)
+        if not cat:
+            return jsonify(ok=False, error="category_not_found"), 404
+        art = next((a for a in cat.get("articles", []) if a["id"] == article_id), None)
+        if not art:
+            return jsonify(ok=False, error="article_not_found"), 404
+
+        fpath = _TUTORIAL_DIR / art["file"]
+        if not fpath.exists():
+            return jsonify(ok=True, article=art, markdown="", frontmatter={})
+
+        raw = fpath.read_text(encoding="utf-8")
+        fm, body = _parse_tutorial_frontmatter(raw)
+        return jsonify(ok=True, article=art, markdown=body, frontmatter=fm)
+    except Exception as e:
+        logging.exception("tutorial_get_article failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.put("/tutorial/article/<category_id>/<article_id>")
+def tutorial_save_article(category_id, article_id):
+    """Save article markdown content and manifest metadata."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        data = request.get_json(force=True)
+        markdown = data.get("markdown", "")
+        title = data.get("title", "")
+        summary = data.get("summary", "")
+        tags = data.get("tags", [])
+        league_filter = data.get("leagueFilter")
+        related = data.get("relatedArticles", [])
+        last_updated = data.get("lastUpdated", "")
+
+        manifest = _load_tutorial_manifest()
+        cat = next((c for c in manifest["categories"] if c["id"] == category_id), None)
+        if not cat:
+            return jsonify(ok=False, error="category_not_found"), 404
+        art = next((a for a in cat.get("articles", []) if a["id"] == article_id), None)
+        if not art:
+            return jsonify(ok=False, error="article_not_found"), 404
+
+        # Update manifest metadata
+        if title:
+            art["title"] = title
+        if summary:
+            art["summary"] = summary
+        art["tags"] = tags
+        art["leagueFilter"] = league_filter
+        art["relatedArticles"] = related
+
+        _save_tutorial_manifest(manifest)
+
+        # Write the markdown file with frontmatter
+        fpath = _TUTORIAL_DIR / art["file"]
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fm_block = f"---\ntitle: {title or art['title']}\nlastUpdated: {last_updated}\n---\n\n"
+        fpath.write_text(fm_block + markdown, encoding="utf-8")
+
+        return jsonify(ok=True)
+    except Exception as e:
+        logging.exception("tutorial_save_article failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.post("/tutorial/article/<category_id>")
+def tutorial_create_article(category_id):
+    """Create a new article in a category."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        data = request.get_json(force=True)
+        article_id = data.get("id", "").strip()
+        title = data.get("title", "").strip()
+        summary = data.get("summary", "").strip()
+        if not article_id or not title:
+            return jsonify(ok=False, error="id and title are required"), 400
+
+        # Validate slug
+        if not re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", article_id):
+            return jsonify(ok=False, error="id must be a URL-safe slug (lowercase, hyphens)"), 400
+
+        manifest = _load_tutorial_manifest()
+        cat = next((c for c in manifest["categories"] if c["id"] == category_id), None)
+        if not cat:
+            return jsonify(ok=False, error="category_not_found"), 404
+
+        # Check for duplicate
+        if any(a["id"] == article_id for a in cat.get("articles", [])):
+            return jsonify(ok=False, error="article_id_already_exists"), 409
+
+        file_path = f"{category_id}/{article_id}.md"
+        max_order = max((a["order"] for a in cat.get("articles", [])), default=0)
+
+        new_art = {
+            "id": article_id,
+            "file": file_path,
+            "title": title,
+            "summary": summary or title,
+            "order": max_order + 1,
+            "tags": data.get("tags", []),
+            "leagueFilter": data.get("leagueFilter"),
+            "relatedArticles": data.get("relatedArticles", []),
+        }
+        cat.setdefault("articles", []).append(new_art)
+        _save_tutorial_manifest(manifest)
+
+        # Create the markdown file
+        fpath = _TUTORIAL_DIR / file_path
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        today = data.get("lastUpdated", "")
+        fm_block = f"---\ntitle: {title}\nlastUpdated: {today}\n---\n\n"
+        fpath.write_text(fm_block + data.get("markdown", ""), encoding="utf-8")
+
+        return jsonify(ok=True, article=new_art), 201
+    except Exception as e:
+        logging.exception("tutorial_create_article failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.delete("/tutorial/article/<category_id>/<article_id>")
+def tutorial_delete_article(category_id, article_id):
+    """Delete an article from a category."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        manifest = _load_tutorial_manifest()
+        cat = next((c for c in manifest["categories"] if c["id"] == category_id), None)
+        if not cat:
+            return jsonify(ok=False, error="category_not_found"), 404
+
+        art = next((a for a in cat.get("articles", []) if a["id"] == article_id), None)
+        if not art:
+            return jsonify(ok=False, error="article_not_found"), 404
+
+        # Remove from manifest
+        cat["articles"] = [a for a in cat["articles"] if a["id"] != article_id]
+        _save_tutorial_manifest(manifest)
+
+        # Delete the file
+        fpath = _TUTORIAL_DIR / art["file"]
+        if fpath.exists():
+            fpath.unlink()
+
+        return jsonify(ok=True)
+    except Exception as e:
+        logging.exception("tutorial_delete_article failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.post("/tutorial/category")
+def tutorial_create_category():
+    """Create a new category."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        data = request.get_json(force=True)
+        cat_id = data.get("id", "").strip()
+        title = data.get("title", "").strip()
+        if not cat_id or not title:
+            return jsonify(ok=False, error="id and title are required"), 400
+
+        if not re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", cat_id):
+            return jsonify(ok=False, error="id must be a URL-safe slug"), 400
+
+        manifest = _load_tutorial_manifest()
+        if any(c["id"] == cat_id for c in manifest["categories"]):
+            return jsonify(ok=False, error="category_id_already_exists"), 409
+
+        max_order = max((c["order"] for c in manifest["categories"]), default=0)
+        new_cat = {
+            "id": cat_id,
+            "title": title,
+            "icon": data.get("icon", "compass"),
+            "description": data.get("description", ""),
+            "order": max_order + 1,
+            "leagueFilter": data.get("leagueFilter"),
+            "articles": [],
+        }
+        manifest["categories"].append(new_cat)
+        _save_tutorial_manifest(manifest)
+
+        # Create the directory
+        (_TUTORIAL_DIR / cat_id).mkdir(parents=True, exist_ok=True)
+
+        return jsonify(ok=True, category=new_cat), 201
+    except Exception as e:
+        logging.exception("tutorial_create_category failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.put("/tutorial/category/<category_id>")
+def tutorial_update_category(category_id):
+    """Update category metadata (title, icon, description, order, leagueFilter)."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        data = request.get_json(force=True)
+        manifest = _load_tutorial_manifest()
+        cat = next((c for c in manifest["categories"] if c["id"] == category_id), None)
+        if not cat:
+            return jsonify(ok=False, error="category_not_found"), 404
+
+        for field in ("title", "icon", "description", "order", "leagueFilter"):
+            if field in data:
+                cat[field] = data[field]
+
+        _save_tutorial_manifest(manifest)
+        return jsonify(ok=True, category=cat)
+    except Exception as e:
+        logging.exception("tutorial_update_category failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.delete("/tutorial/category/<category_id>")
+def tutorial_delete_category(category_id):
+    """Delete a category and all its articles."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        manifest = _load_tutorial_manifest()
+        cat = next((c for c in manifest["categories"] if c["id"] == category_id), None)
+        if not cat:
+            return jsonify(ok=False, error="category_not_found"), 404
+
+        # Delete all article files
+        for art in cat.get("articles", []):
+            fpath = _TUTORIAL_DIR / art["file"]
+            if fpath.exists():
+                fpath.unlink()
+
+        # Remove category directory if empty
+        cat_dir = _TUTORIAL_DIR / category_id
+        if cat_dir.is_dir():
+            try:
+                cat_dir.rmdir()
+            except OSError:
+                pass  # not empty, leave it
+
+        manifest["categories"] = [c for c in manifest["categories"] if c["id"] != category_id]
+        _save_tutorial_manifest(manifest)
+
+        return jsonify(ok=True)
+    except Exception as e:
+        logging.exception("tutorial_delete_category failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.put("/tutorial/glossary")
+def tutorial_update_glossary():
+    """Replace the glossary in the manifest."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        data = request.get_json(force=True)
+        glossary = data.get("glossary", {})
+        if not isinstance(glossary, dict):
+            return jsonify(ok=False, error="glossary must be an object"), 400
+
+        manifest = _load_tutorial_manifest()
+        manifest["glossary"] = glossary
+        _save_tutorial_manifest(manifest)
+        return jsonify(ok=True)
+    except Exception as e:
+        logging.exception("tutorial_update_glossary failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.put("/tutorial/reorder")
+def tutorial_reorder():
+    """Reorder categories and/or articles. Body: { categories: [{id, order}], articles: {catId: [{id, order}]} }"""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not _writes_allowed():
+        return jsonify(ok=False, error="write_mode_disabled"), 403
+    try:
+        data = request.get_json(force=True)
+        manifest = _load_tutorial_manifest()
+
+        # Reorder categories
+        cat_orders = {item["id"]: item["order"] for item in data.get("categories", [])}
+        for cat in manifest["categories"]:
+            if cat["id"] in cat_orders:
+                cat["order"] = cat_orders[cat["id"]]
+
+        # Reorder articles within categories
+        art_orders = data.get("articles", {})
+        for cat in manifest["categories"]:
+            if cat["id"] in art_orders:
+                order_map = {item["id"]: item["order"] for item in art_orders[cat["id"]]}
+                for art in cat.get("articles", []):
+                    if art["id"] in order_map:
+                        art["order"] = order_map[art["id"]]
+
+        _save_tutorial_manifest(manifest)
+        return jsonify(ok=True)
+    except Exception as e:
+        logging.exception("tutorial_reorder failed")
+        return jsonify(ok=False, error=str(e)), 500

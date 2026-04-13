@@ -1,0 +1,576 @@
+{
+  "categories": [
+    {
+      "id": "getting-started",
+      "title": "Getting Started",
+      "icon": "compass",
+      "description": "New to the sim? Start here",
+      "order": 1,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "welcome",
+          "file": "getting-started/welcome.md",
+          "title": "Welcome to the Sim",
+          "summary": "A quick overview of what this baseball simulation is all about",
+          "order": 1,
+          "tags": ["beginner"],
+          "leagueFilter": null,
+          "relatedArticles": ["hitting/contact-vs-power", "roster/setting-your-lineup"]
+        },
+        {
+          "id": "first-season",
+          "file": "getting-started/first-season.md",
+          "title": "Your First Season",
+          "summary": "A step-by-step walkthrough of your first season as a GM",
+          "order": 2,
+          "tags": ["beginner", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["roster/setting-your-lineup", "gameplan/offensive-strategy"]
+        },
+        {
+          "id": "understanding-timeline",
+          "file": "getting-started/understanding-timeline.md",
+          "title": "Understanding the Timeline",
+          "summary": "How weeks, subweeks, and seasons work in the sim",
+          "order": 3,
+          "tags": ["beginner", "schedule"],
+          "leagueFilter": null,
+          "relatedArticles": ["season/how-weeks-work", "season/schedule-overview"]
+        }
+      ]
+    },
+    {
+      "id": "attributes",
+      "title": "Player Attributes",
+      "icon": "chart",
+      "description": "How player ratings and skills work",
+      "order": 2,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "scouting-scale",
+          "file": "attributes/scouting-scale.md",
+          "title": "The 20-80 Scouting Scale",
+          "summary": "Understanding how the sim rates player abilities on the classic scouting scale",
+          "order": 1,
+          "tags": ["beginner", "attributes", "scouting"],
+          "leagueFilter": null,
+          "relatedArticles": ["attributes/potential-and-development", "hitting/contact-vs-power"]
+        },
+        {
+          "id": "potential-and-development",
+          "file": "attributes/potential-and-development.md",
+          "title": "Potential & Development",
+          "summary": "How players grow and develop over time — potential ceilings and development curves",
+          "order": 2,
+          "tags": ["intermediate", "attributes", "development"],
+          "leagueFilter": null,
+          "relatedArticles": ["attributes/scouting-scale", "draft/evaluating-prospects"]
+        },
+        {
+          "id": "overall-ratings",
+          "file": "attributes/overall-ratings.md",
+          "title": "Overall Ratings (OVR)",
+          "summary": "How the OVR composite rating is calculated and what it means",
+          "order": 3,
+          "tags": ["intermediate", "attributes"],
+          "leagueFilter": null,
+          "relatedArticles": ["attributes/scouting-scale", "roster/setting-your-lineup"]
+        }
+      ]
+    },
+    {
+      "id": "hitting",
+      "title": "Hitting",
+      "icon": "bat",
+      "description": "How batting works in the sim",
+      "order": 3,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "contact-vs-power",
+          "file": "hitting/contact-vs-power.md",
+          "title": "Contact vs. Power",
+          "summary": "Understanding the tradeoff between contact and power hitters",
+          "order": 1,
+          "tags": ["beginner", "hitting", "attributes"],
+          "leagueFilter": null,
+          "relatedArticles": ["hitting/plate-discipline", "roster/setting-your-lineup"]
+        },
+        {
+          "id": "plate-discipline",
+          "file": "hitting/plate-discipline.md",
+          "title": "Plate Discipline",
+          "summary": "How eye and discipline ratings affect at-bat outcomes",
+          "order": 2,
+          "tags": ["intermediate", "hitting", "attributes"],
+          "leagueFilter": null,
+          "relatedArticles": ["hitting/contact-vs-power", "hitting/clutch-hitting"]
+        },
+        {
+          "id": "how-at-bats-resolve",
+          "file": "hitting/how-at-bats-resolve.md",
+          "title": "How At-Bats Resolve",
+          "summary": "A look inside the engine — what happens pitch by pitch",
+          "order": 3,
+          "tags": ["advanced", "hitting", "engine"],
+          "leagueFilter": null,
+          "relatedArticles": ["hitting/contact-vs-power", "pitching/pitch-types"]
+        },
+        {
+          "id": "clutch-hitting",
+          "file": "hitting/clutch-hitting.md",
+          "title": "Clutch Hitting",
+          "summary": "How the clutch attribute affects performance in high-leverage situations",
+          "order": 4,
+          "tags": ["intermediate", "hitting", "attributes"],
+          "leagueFilter": null,
+          "relatedArticles": ["hitting/contact-vs-power", "gameplan/offensive-strategy"]
+        }
+      ]
+    },
+    {
+      "id": "pitching",
+      "title": "Pitching",
+      "icon": "target",
+      "description": "Pitching mechanics, fatigue, and strategy",
+      "order": 4,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "pitch-types",
+          "file": "pitching/pitch-types.md",
+          "title": "Pitch Types & Repertoire",
+          "summary": "How different pitch types work and why repertoire matters",
+          "order": 1,
+          "tags": ["beginner", "pitching", "attributes"],
+          "leagueFilter": null,
+          "relatedArticles": ["pitching/stamina-and-fatigue", "pitching/starting-rotation"]
+        },
+        {
+          "id": "stamina-and-fatigue",
+          "file": "pitching/stamina-and-fatigue.md",
+          "title": "Stamina & Fatigue",
+          "summary": "How the stamina system works — drain, recovery, and managing your staff",
+          "order": 2,
+          "tags": ["intermediate", "pitching", "stamina"],
+          "leagueFilter": null,
+          "relatedArticles": ["pitching/bullpen-management", "pitching/starting-rotation"]
+        },
+        {
+          "id": "bullpen-management",
+          "file": "pitching/bullpen-management.md",
+          "title": "Bullpen Management",
+          "summary": "How to configure your bullpen roles and usage patterns",
+          "order": 3,
+          "tags": ["intermediate", "pitching", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["pitching/stamina-and-fatigue", "gameplan/pitching-strategy"]
+        },
+        {
+          "id": "starting-rotation",
+          "file": "pitching/starting-rotation.md",
+          "title": "Starting Rotation",
+          "summary": "Setting up your rotation and understanding pitcher workload",
+          "order": 4,
+          "tags": ["beginner", "pitching", "roster"],
+          "leagueFilter": null,
+          "relatedArticles": ["pitching/stamina-and-fatigue", "pitching/bullpen-management"]
+        }
+      ]
+    },
+    {
+      "id": "fielding",
+      "title": "Fielding & Defense",
+      "icon": "glove",
+      "description": "Defensive ratings, positions, and strategy",
+      "order": 5,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "defensive-ratings",
+          "file": "fielding/defensive-ratings.md",
+          "title": "Defensive Ratings Explained",
+          "summary": "How fielding, arm, and range ratings combine to determine defensive value",
+          "order": 1,
+          "tags": ["beginner", "fielding", "attributes"],
+          "leagueFilter": null,
+          "relatedArticles": ["fielding/position-flexibility", "roster/setting-your-lineup"]
+        },
+        {
+          "id": "position-flexibility",
+          "file": "fielding/position-flexibility.md",
+          "title": "Position Flexibility",
+          "summary": "How players can play multiple positions and the penalties involved",
+          "order": 2,
+          "tags": ["intermediate", "fielding", "roster"],
+          "leagueFilter": null,
+          "relatedArticles": ["fielding/defensive-ratings", "roster/setting-your-lineup"]
+        }
+      ]
+    },
+    {
+      "id": "roster",
+      "title": "Roster Management",
+      "icon": "clipboard",
+      "description": "Building and managing your team",
+      "order": 6,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "setting-your-lineup",
+          "file": "roster/setting-your-lineup.md",
+          "title": "Setting Your Lineup",
+          "summary": "How to set your batting order and defensive positions",
+          "order": 1,
+          "tags": ["beginner", "roster", "lineup"],
+          "leagueFilter": null,
+          "relatedArticles": ["hitting/contact-vs-power", "fielding/defensive-ratings"]
+        },
+        {
+          "id": "roster-limits",
+          "file": "roster/roster-limits.md",
+          "title": "Roster Limits & Rules",
+          "summary": "Active roster, 40-man roster, minor league options, and roster moves",
+          "order": 2,
+          "tags": ["beginner", "roster", "rules"],
+          "leagueFilter": null,
+          "relatedArticles": ["roster/setting-your-lineup", "trades/making-trades"]
+        },
+        {
+          "id": "minor-league-system",
+          "file": "roster/minor-league-system.md",
+          "title": "The Minor League System",
+          "summary": "How the farm system works — levels, promotions, and player development",
+          "order": 3,
+          "tags": ["intermediate", "roster", "minors", "development"],
+          "leagueFilter": "MLB",
+          "relatedArticles": ["attributes/potential-and-development", "draft/evaluating-prospects"]
+        }
+      ]
+    },
+    {
+      "id": "gameplan",
+      "title": "Gameplan & Strategy",
+      "icon": "brain",
+      "description": "Configure how your team plays on the field",
+      "order": 7,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "offensive-strategy",
+          "file": "gameplan/offensive-strategy.md",
+          "title": "Offensive Strategy",
+          "summary": "Steal rates, hit-and-run, bunting, and other offensive settings",
+          "order": 1,
+          "tags": ["beginner", "gameplan", "offense"],
+          "leagueFilter": null,
+          "relatedArticles": ["hitting/contact-vs-power", "gameplan/pitching-strategy"]
+        },
+        {
+          "id": "pitching-strategy",
+          "file": "gameplan/pitching-strategy.md",
+          "title": "Pitching Strategy",
+          "summary": "Pitch counts, bullpen usage, and in-game pitching decisions",
+          "order": 2,
+          "tags": ["intermediate", "gameplan", "pitching"],
+          "leagueFilter": null,
+          "relatedArticles": ["pitching/bullpen-management", "pitching/stamina-and-fatigue"]
+        }
+      ]
+    },
+    {
+      "id": "free-agency",
+      "title": "Free Agency",
+      "icon": "handshake",
+      "description": "Signing free agents and managing contracts",
+      "order": 8,
+      "leagueFilter": "MLB",
+      "articles": [
+        {
+          "id": "how-free-agency-works",
+          "file": "free-agency/how-free-agency-works.md",
+          "title": "How Free Agency Works",
+          "summary": "The 3-phase auction system — bidding, negotiation, and signing",
+          "order": 1,
+          "tags": ["beginner", "free-agency", "contracts"],
+          "leagueFilter": null,
+          "relatedArticles": ["free-agency/evaluating-contracts", "financials/salary-cap"]
+        },
+        {
+          "id": "evaluating-contracts",
+          "file": "free-agency/evaluating-contracts.md",
+          "title": "Evaluating Contracts",
+          "summary": "How to decide what a player is worth and avoid bad deals",
+          "order": 2,
+          "tags": ["intermediate", "free-agency", "contracts", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["free-agency/how-free-agency-works", "financials/salary-cap"]
+        }
+      ]
+    },
+    {
+      "id": "trades",
+      "title": "Trades",
+      "icon": "arrows",
+      "description": "Making trades and evaluating trade value",
+      "order": 9,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "making-trades",
+          "file": "trades/making-trades.md",
+          "title": "Making Trades",
+          "summary": "How the trade system works — proposals, counteroffers, and AI logic",
+          "order": 1,
+          "tags": ["beginner", "trades"],
+          "leagueFilter": null,
+          "relatedArticles": ["trades/trade-value", "roster/roster-limits"]
+        },
+        {
+          "id": "trade-value",
+          "file": "trades/trade-value.md",
+          "title": "Understanding Trade Value",
+          "summary": "How the sim evaluates players in trades — WAR, potential, contract, and age",
+          "order": 2,
+          "tags": ["intermediate", "trades", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["trades/making-trades", "attributes/potential-and-development"]
+        }
+      ]
+    },
+    {
+      "id": "draft",
+      "title": "The Draft",
+      "icon": "podium",
+      "description": "Scouting and drafting amateur players",
+      "order": 10,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "draft-overview",
+          "file": "draft/draft-overview.md",
+          "title": "Draft Overview",
+          "summary": "How the amateur draft works — rounds, picks, and draft order",
+          "order": 1,
+          "tags": ["beginner", "draft"],
+          "leagueFilter": null,
+          "relatedArticles": ["draft/evaluating-prospects", "attributes/potential-and-development"]
+        },
+        {
+          "id": "evaluating-prospects",
+          "file": "draft/evaluating-prospects.md",
+          "title": "Evaluating Prospects",
+          "summary": "How to read scouting reports and identify the best draft picks",
+          "order": 2,
+          "tags": ["intermediate", "draft", "scouting"],
+          "leagueFilter": null,
+          "relatedArticles": ["draft/draft-overview", "attributes/scouting-scale"]
+        }
+      ]
+    },
+    {
+      "id": "recruiting",
+      "title": "Recruiting",
+      "icon": "megaphone",
+      "description": "How to recruit players in college baseball",
+      "order": 11,
+      "leagueFilter": "College",
+      "articles": [
+        {
+          "id": "recruiting-basics",
+          "file": "recruiting/recruiting-basics.md",
+          "title": "Recruiting Basics",
+          "summary": "How the college recruiting system works — visits, offers, and commitments",
+          "order": 1,
+          "tags": ["beginner", "recruiting", "college"],
+          "leagueFilter": null,
+          "relatedArticles": ["recruiting/building-a-class", "attributes/potential-and-development"]
+        },
+        {
+          "id": "building-a-class",
+          "file": "recruiting/building-a-class.md",
+          "title": "Building a Recruiting Class",
+          "summary": "Strategy for assembling a balanced recruiting class",
+          "order": 2,
+          "tags": ["intermediate", "recruiting", "college", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["recruiting/recruiting-basics", "roster/setting-your-lineup"]
+        }
+      ]
+    },
+    {
+      "id": "financials",
+      "title": "Financials",
+      "icon": "bank",
+      "description": "Budgets, salary cap, and financial management",
+      "order": 12,
+      "leagueFilter": "MLB",
+      "articles": [
+        {
+          "id": "salary-cap",
+          "file": "financials/salary-cap.md",
+          "title": "Salary Cap & Budget",
+          "summary": "How team budgets, luxury tax, and revenue sharing work",
+          "order": 1,
+          "tags": ["beginner", "financials", "budget"],
+          "leagueFilter": null,
+          "relatedArticles": ["free-agency/evaluating-contracts", "financials/revenue-and-attendance"]
+        },
+        {
+          "id": "revenue-and-attendance",
+          "file": "financials/revenue-and-attendance.md",
+          "title": "Revenue & Attendance",
+          "summary": "What drives your team's income and how winning affects the bottom line",
+          "order": 2,
+          "tags": ["intermediate", "financials"],
+          "leagueFilter": null,
+          "relatedArticles": ["financials/salary-cap"]
+        }
+      ]
+    },
+    {
+      "id": "season",
+      "title": "Season & Schedule",
+      "icon": "calendar",
+      "description": "How the season progresses and schedule works",
+      "order": 13,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "how-weeks-work",
+          "file": "season/how-weeks-work.md",
+          "title": "How Weeks Work",
+          "summary": "The subweek system — 4 subweeks per week and what happens in each",
+          "order": 1,
+          "tags": ["beginner", "season", "schedule"],
+          "leagueFilter": null,
+          "relatedArticles": ["getting-started/understanding-timeline", "season/schedule-overview"]
+        },
+        {
+          "id": "schedule-overview",
+          "file": "season/schedule-overview.md",
+          "title": "Schedule Overview",
+          "summary": "How the regular season schedule is structured",
+          "order": 2,
+          "tags": ["beginner", "season", "schedule"],
+          "leagueFilter": null,
+          "relatedArticles": ["season/how-weeks-work", "playoffs/playoff-structure"]
+        }
+      ]
+    },
+    {
+      "id": "injuries",
+      "title": "Injuries",
+      "icon": "bandage",
+      "description": "How injuries work and how to manage them",
+      "order": 14,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "injury-system",
+          "file": "injuries/injury-system.md",
+          "title": "The Injury System",
+          "summary": "How injuries happen, severity levels, and recovery timelines",
+          "order": 1,
+          "tags": ["beginner", "injuries"],
+          "leagueFilter": null,
+          "relatedArticles": ["injuries/managing-injuries", "pitching/stamina-and-fatigue"]
+        },
+        {
+          "id": "managing-injuries",
+          "file": "injuries/managing-injuries.md",
+          "title": "Managing Injuries",
+          "summary": "Strategies for dealing with injuries — IL stints, depth, and prevention",
+          "order": 2,
+          "tags": ["intermediate", "injuries", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["injuries/injury-system", "roster/roster-limits"]
+        }
+      ]
+    },
+    {
+      "id": "playoffs",
+      "title": "Playoffs & Postseason",
+      "icon": "trophy",
+      "description": "How the postseason bracket works",
+      "order": 15,
+      "leagueFilter": null,
+      "articles": [
+        {
+          "id": "playoff-structure",
+          "file": "playoffs/playoff-structure.md",
+          "title": "Playoff Structure",
+          "summary": "How teams qualify, bracket seeding, and series formats",
+          "order": 1,
+          "tags": ["beginner", "playoffs"],
+          "leagueFilter": null,
+          "relatedArticles": ["playoffs/postseason-strategy", "season/schedule-overview"]
+        },
+        {
+          "id": "postseason-strategy",
+          "file": "playoffs/postseason-strategy.md",
+          "title": "Postseason Strategy",
+          "summary": "How to adjust your gameplan and roster for playoff baseball",
+          "order": 2,
+          "tags": ["intermediate", "playoffs", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["playoffs/playoff-structure", "pitching/bullpen-management"]
+        }
+      ]
+    },
+    {
+      "id": "international-fa",
+      "title": "International FA",
+      "icon": "globe",
+      "description": "Signing international free agents",
+      "order": 16,
+      "leagueFilter": "MLB",
+      "articles": [
+        {
+          "id": "ifa-overview",
+          "file": "international-fa/ifa-overview.md",
+          "title": "IFA Overview",
+          "summary": "How the international free agent signing period works",
+          "order": 1,
+          "tags": ["beginner", "international", "free-agency"],
+          "leagueFilter": null,
+          "relatedArticles": ["international-fa/ifa-strategy", "draft/evaluating-prospects"]
+        },
+        {
+          "id": "ifa-strategy",
+          "file": "international-fa/ifa-strategy.md",
+          "title": "IFA Strategy",
+          "summary": "How to allocate your bonus pool and evaluate international prospects",
+          "order": 2,
+          "tags": ["intermediate", "international", "strategy"],
+          "leagueFilter": null,
+          "relatedArticles": ["international-fa/ifa-overview", "financials/salary-cap"]
+        }
+      ]
+    }
+  ],
+  "glossary": {
+    "OBP": "On-Base Percentage — how often a batter reaches base safely (hits + walks + HBP divided by plate appearances)",
+    "SLG": "Slugging Percentage — total bases divided by at-bats, measuring raw power output",
+    "OPS": "On-base Plus Slugging — OBP + SLG combined, a quick measure of overall offensive production",
+    "WHIP": "Walks + Hits per Inning Pitched — a measure of how many baserunners a pitcher allows",
+    "OVR": "Overall rating — a weighted composite of key attributes for a player's position",
+    "WAR": "Wins Above Replacement — how many wins a player adds compared to a replacement-level player",
+    "ERA": "Earned Run Average — average earned runs allowed per 9 innings pitched",
+    "FIP": "Fielding Independent Pitching — evaluates pitcher skill independent of defense behind them",
+    "BABIP": "Batting Average on Balls In Play — batting average excluding home runs and strikeouts",
+    "wRC+": "Weighted Runs Created Plus — park-adjusted offensive value where 100 is league average",
+    "K%": "Strikeout Rate — percentage of plate appearances that end in a strikeout",
+    "BB%": "Walk Rate — percentage of plate appearances that end in a walk",
+    "HR/9": "Home Runs per 9 Innings — rate of home runs allowed by a pitcher",
+    "IL": "Injured List — where players go when they are too injured to play",
+    "DFA": "Designated for Assignment — removing a player from the 40-man roster",
+    "MiLB": "Minor League Baseball — the farm system levels below the majors",
+    "IFA": "International Free Agent — amateur players signed from outside the US/Canada draft system",
+    "Arb": "Arbitration — salary negotiation process for players with 3-6 years of service time",
+    "FA": "Free Agent — a player not under contract who can sign with any team",
+    "DH": "Designated Hitter — a lineup spot that bats but does not play defense"
+  }
+}

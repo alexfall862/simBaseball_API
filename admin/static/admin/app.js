@@ -44,6 +44,7 @@
   function init() {
     cacheElements();
     setupEventListeners();
+    _setupTutorialListeners();
     loadSqlPresets();
     checkAuth();
     refreshDashboard();
@@ -450,6 +451,7 @@
       'draft-admin': 'Draft Administration',
       'ifa-admin': 'IFA Administration',
       'gameplan-audit': 'Gameplan Audit',
+      'tutorial-content': 'Tutorial Editor',
     };
     elements.pageTitle.textContent = titles[section] || section;
 
@@ -573,6 +575,9 @@
         loadBlabHistory();
         break;
       case 'gameplan-audit':
+        break;
+      case 'tutorial-content':
+        loadTutorialManifest();
         break;
     }
 
@@ -10953,11 +10958,420 @@
       .catch(err => { status.textContent = 'Error: ' + err; });
   }
 
+  // ─── Tutorial Content Management ──────────────────────────────────────────
+
+  let _tutManifest = null;
+  let _tutEditingCat = null;
+  let _tutEditingArt = null;
+
+  function _tutStatus(msg) {
+    const el = document.getElementById('tut-status');
+    if (el) el.textContent = msg;
+  }
+
+  function _tutShowView(view) {
+    // view: 'list' | 'editor' | 'new-category' | 'glossary' | 'new-article'
+    document.getElementById('tut-categories-list').style.display = view === 'list' ? '' : 'none';
+    document.getElementById('tut-article-editor').style.display = view === 'editor' ? '' : 'none';
+    document.getElementById('tut-new-category-form').style.display = view === 'new-category' ? '' : 'none';
+    document.getElementById('tut-glossary-editor').style.display = view === 'glossary' ? '' : 'none';
+    document.getElementById('tut-new-article-form').style.display = view === 'new-article' ? '' : 'none';
+  }
+
+  function loadTutorialManifest() {
+    _tutStatus('Loading…');
+    _tutShowView('list');
+    fetch(`${ADMIN_BASE}/tutorial/manifest`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { _tutStatus('Error: ' + (data.error || 'unknown')); return; }
+        _tutManifest = data.manifest;
+        _renderTutorialCategories();
+        _tutStatus(`${_tutManifest.categories.length} categories, ${_tutManifest.categories.reduce((s,c) => s + (c.articles||[]).length, 0)} articles`);
+      })
+      .catch(err => _tutStatus('Error: ' + err));
+  }
+
+  function _renderTutorialCategories() {
+    const container = document.getElementById('tut-categories-list');
+    const cats = (_tutManifest.categories || []).slice().sort((a,b) => a.order - b.order);
+    if (!cats.length) {
+      container.innerHTML = '<div class="card"><p class="text-muted">No categories yet.</p></div>';
+      return;
+    }
+
+    let html = '';
+    for (const cat of cats) {
+      const leagueBadge = cat.leagueFilter
+        ? `<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;background:${cat.leagueFilter==='MLB'?'var(--accent)':'var(--success)'};color:#fff;margin-left:8px">${cat.leagueFilter}</span>`
+        : '';
+      const articles = (cat.articles || []).slice().sort((a,b) => a.order - b.order);
+
+      html += `<div class="card" style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+          <h3 style="margin:0">${_esc(cat.title)}</h3>
+          <span class="text-muted">${_esc(cat.icon)}</span>
+          ${leagueBadge}
+          <span class="text-muted" style="font-size:12px">order: ${cat.order}</span>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <button class="btn btn-secondary btn-sm" onclick="App.tutEditCategory('${cat.id}')">Edit</button>
+            <button class="btn btn-primary btn-sm" onclick="App.tutNewArticle('${cat.id}')">+ Article</button>
+            <button class="btn btn-danger btn-sm" onclick="App.tutDeleteCategory('${cat.id}')">Delete</button>
+          </div>
+        </div>
+        <p class="text-muted" style="margin-bottom:12px">${_esc(cat.description)}</p>`;
+
+      if (articles.length) {
+        html += `<table class="data-table"><thead><tr>
+          <th>#</th><th>Title</th><th>ID</th><th>Tags</th><th>League</th><th>Action</th>
+        </tr></thead><tbody>`;
+        for (const art of articles) {
+          const artLeague = art.leagueFilter || '—';
+          html += `<tr>
+            <td>${art.order}</td>
+            <td>${_esc(art.title)}</td>
+            <td><code>${_esc(art.id)}</code></td>
+            <td>${(art.tags||[]).map(t => `<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;background:var(--bg-input);margin:1px">${_esc(t)}</span>`).join(' ')}</td>
+            <td>${artLeague}</td>
+            <td><button class="btn btn-secondary btn-sm" onclick="App.tutOpenArticle('${cat.id}','${art.id}')">Edit</button></td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+      } else {
+        html += '<p class="text-muted" style="font-size:13px">No articles yet.</p>';
+      }
+
+      html += '</div>';
+    }
+    container.innerHTML = html;
+  }
+
+  function _esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  // ── Open article for editing ──
+  function tutOpenArticle(catId, artId) {
+    _tutStatus('Loading article…');
+    fetch(`${ADMIN_BASE}/tutorial/article/${catId}/${artId}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { _tutStatus('Error: ' + (data.error || 'unknown')); return; }
+        _tutEditingCat = catId;
+        _tutEditingArt = artId;
+        const art = data.article;
+        document.getElementById('tut-art-id').value = artId;
+        document.getElementById('tut-art-title').value = art.title || '';
+        document.getElementById('tut-art-summary').value = art.summary || '';
+        document.getElementById('tut-art-tags').value = (art.tags || []).join(', ');
+        document.getElementById('tut-art-league').value = art.leagueFilter || '';
+        document.getElementById('tut-art-related').value = (art.relatedArticles || []).join(', ');
+        document.getElementById('tut-art-markdown').value = data.markdown || '';
+        document.getElementById('tut-editor-title').textContent = 'Edit: ' + (art.title || artId);
+        document.getElementById('tut-save-status').textContent = '';
+        _tutShowView('editor');
+        _tutStatus('');
+      })
+      .catch(err => _tutStatus('Error: ' + err));
+  }
+
+  // ── Save article ──
+  function tutSaveArticle() {
+    if (!_tutEditingCat || !_tutEditingArt) return;
+    const saveStatus = document.getElementById('tut-save-status');
+    saveStatus.textContent = 'Saving…';
+
+    const today = new Date().toISOString().slice(0, 10);
+    const tags = document.getElementById('tut-art-tags').value
+      .split(',').map(t => t.trim()).filter(Boolean);
+    const related = document.getElementById('tut-art-related').value
+      .split(',').map(t => t.trim()).filter(Boolean);
+
+    const body = {
+      title: document.getElementById('tut-art-title').value.trim(),
+      summary: document.getElementById('tut-art-summary').value.trim(),
+      tags,
+      leagueFilter: document.getElementById('tut-art-league').value || null,
+      relatedArticles: related,
+      lastUpdated: today,
+      markdown: document.getElementById('tut-art-markdown').value,
+    };
+
+    fetch(`${ADMIN_BASE}/tutorial/article/${_tutEditingCat}/${_tutEditingArt}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          saveStatus.textContent = 'Saved ✓';
+          saveStatus.style.color = 'var(--success)';
+        } else {
+          saveStatus.textContent = 'Error: ' + (data.error || 'unknown');
+          saveStatus.style.color = 'var(--danger)';
+        }
+      })
+      .catch(err => {
+        saveStatus.textContent = 'Error: ' + err;
+        saveStatus.style.color = 'var(--danger)';
+      });
+  }
+
+  // ── Delete article ──
+  function tutDeleteArticle() {
+    if (!_tutEditingCat || !_tutEditingArt) return;
+    if (!confirm(`Delete article "${_tutEditingArt}" from "${_tutEditingCat}"? This cannot be undone.`)) return;
+
+    fetch(`${ADMIN_BASE}/tutorial/article/${_tutEditingCat}/${_tutEditingArt}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          _tutEditingCat = null;
+          _tutEditingArt = null;
+          loadTutorialManifest();
+        } else {
+          alert('Delete failed: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(err => alert('Delete failed: ' + err));
+  }
+
+  // ── New article ──
+  function tutNewArticle(catId) {
+    document.getElementById('tut-newart-cat').value = catId;
+    document.getElementById('tut-newart-id').value = '';
+    document.getElementById('tut-newart-title').value = '';
+    document.getElementById('tut-newart-summary').value = '';
+    document.getElementById('tut-newart-tags').value = '';
+    document.getElementById('tut-newart-league').value = '';
+    document.getElementById('tut-newart-markdown').value = '';
+    _tutShowView('new-article');
+  }
+
+  function tutSaveNewArticle() {
+    const catId = document.getElementById('tut-newart-cat').value;
+    const artId = document.getElementById('tut-newart-id').value.trim();
+    const title = document.getElementById('tut-newart-title').value.trim();
+    if (!artId || !title) { alert('ID and Title are required'); return; }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const tags = document.getElementById('tut-newart-tags').value
+      .split(',').map(t => t.trim()).filter(Boolean);
+
+    const body = {
+      id: artId,
+      title,
+      summary: document.getElementById('tut-newart-summary').value.trim(),
+      tags,
+      leagueFilter: document.getElementById('tut-newart-league').value || null,
+      lastUpdated: today,
+      markdown: document.getElementById('tut-newart-markdown').value,
+    };
+
+    fetch(`${ADMIN_BASE}/tutorial/article/${catId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          loadTutorialManifest();
+        } else {
+          alert('Create failed: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(err => alert('Create failed: ' + err));
+  }
+
+  // ── New category ──
+  function tutShowNewCategory() {
+    document.getElementById('tut-newcat-id').value = '';
+    document.getElementById('tut-newcat-title').value = '';
+    document.getElementById('tut-newcat-desc').value = '';
+    document.getElementById('tut-newcat-icon').value = 'compass';
+    document.getElementById('tut-newcat-league').value = '';
+    _tutShowView('new-category');
+  }
+
+  function tutSaveNewCategory() {
+    const catId = document.getElementById('tut-newcat-id').value.trim();
+    const title = document.getElementById('tut-newcat-title').value.trim();
+    if (!catId || !title) { alert('ID and Title are required'); return; }
+
+    const body = {
+      id: catId,
+      title,
+      icon: document.getElementById('tut-newcat-icon').value,
+      description: document.getElementById('tut-newcat-desc').value.trim(),
+      leagueFilter: document.getElementById('tut-newcat-league').value || null,
+    };
+
+    fetch(`${ADMIN_BASE}/tutorial/category`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          loadTutorialManifest();
+        } else {
+          alert('Create failed: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(err => alert('Create failed: ' + err));
+  }
+
+  // ── Edit category (inline prompt) ──
+  function tutEditCategory(catId) {
+    const cat = (_tutManifest.categories || []).find(c => c.id === catId);
+    if (!cat) return;
+
+    const newTitle = prompt('Category title:', cat.title);
+    if (newTitle === null) return;
+    const newDesc = prompt('Description:', cat.description);
+    if (newDesc === null) return;
+    const newIcon = prompt('Icon key:', cat.icon);
+    if (newIcon === null) return;
+    const newOrder = prompt('Order:', cat.order);
+    if (newOrder === null) return;
+
+    const body = {
+      title: newTitle,
+      description: newDesc,
+      icon: newIcon,
+      order: parseInt(newOrder, 10) || cat.order,
+    };
+
+    fetch(`${ADMIN_BASE}/tutorial/category/${catId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) loadTutorialManifest();
+        else alert('Update failed: ' + (data.error || 'unknown'));
+      })
+      .catch(err => alert('Update failed: ' + err));
+  }
+
+  // ── Delete category ──
+  function tutDeleteCategory(catId) {
+    const cat = (_tutManifest.categories || []).find(c => c.id === catId);
+    if (!cat) return;
+    const count = (cat.articles || []).length;
+    if (!confirm(`Delete category "${cat.title}" and its ${count} article(s)? This cannot be undone.`)) return;
+
+    fetch(`${ADMIN_BASE}/tutorial/category/${catId}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) loadTutorialManifest();
+        else alert('Delete failed: ' + (data.error || 'unknown'));
+      })
+      .catch(err => alert('Delete failed: ' + err));
+  }
+
+  // ── Glossary editor ──
+  function tutOpenGlossary() {
+    if (!_tutManifest) return;
+    const glossary = _tutManifest.glossary || {};
+    const container = document.getElementById('tut-glossary-rows');
+    let html = '';
+    for (const [term, def] of Object.entries(glossary)) {
+      html += _glossaryRow(term, def);
+    }
+    container.innerHTML = html;
+    _tutShowView('glossary');
+  }
+
+  function _glossaryRow(term, def) {
+    return `<div class="tut-glossary-row" style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+      <input type="text" class="input tut-gl-term" value="${_esc(term)}" style="width:160px;font-weight:600" placeholder="Term" />
+      <input type="text" class="input tut-gl-def" value="${_esc(def)}" style="flex:1" placeholder="Definition" />
+      <button class="btn btn-danger btn-sm" onclick="this.parentElement.remove()">×</button>
+    </div>`;
+  }
+
+  function tutAddGlossaryRow() {
+    const container = document.getElementById('tut-glossary-rows');
+    container.insertAdjacentHTML('beforeend', _glossaryRow('', ''));
+  }
+
+  function tutSaveGlossary() {
+    const rows = document.querySelectorAll('.tut-glossary-row');
+    const glossary = {};
+    rows.forEach(row => {
+      const term = row.querySelector('.tut-gl-term').value.trim();
+      const def = row.querySelector('.tut-gl-def').value.trim();
+      if (term) glossary[term] = def;
+    });
+
+    fetch(`${ADMIN_BASE}/tutorial/glossary`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ glossary }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          _tutManifest.glossary = glossary;
+          _tutStatus('Glossary saved ✓');
+          _tutShowView('list');
+        } else {
+          alert('Save failed: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(err => alert('Save failed: ' + err));
+  }
+
+  // ── Tutorial event listeners ──
+  function _setupTutorialListeners() {
+    const btn = (id, fn) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', fn);
+    };
+    btn('btn-tut-refresh', loadTutorialManifest);
+    btn('btn-tut-new-category', tutShowNewCategory);
+    btn('btn-tut-edit-glossary', tutOpenGlossary);
+    btn('btn-tut-back', () => { _tutEditingCat = null; _tutEditingArt = null; loadTutorialManifest(); });
+    btn('btn-tut-save', tutSaveArticle);
+    btn('btn-tut-save-bottom', tutSaveArticle);
+    btn('btn-tut-delete-article', tutDeleteArticle);
+    btn('btn-tut-newcat-save', tutSaveNewCategory);
+    btn('btn-tut-newcat-cancel', () => _tutShowView('list'));
+    btn('btn-tut-glossary-back', () => _tutShowView('list'));
+    btn('btn-tut-glossary-save', tutSaveGlossary);
+    btn('btn-tut-glossary-add', tutAddGlossaryRow);
+    btn('btn-tut-newart-save', tutSaveNewArticle);
+    btn('btn-tut-newart-cancel', () => _tutShowView('list'));
+  }
+
   // Expose to global App for inline onclick handlers
   window.App = window.App || {};
   Object.assign(window.App, {
     faOpenOffer,
     faUpdateTotals,
+    tutOpenArticle,
+    tutNewArticle,
+    tutEditCategory,
+    tutDeleteCategory,
   });
 
   // Initialize on DOM ready
