@@ -5,7 +5,7 @@ import re
 
 from flask import Blueprint, jsonify, request
 
-tutorial_bp = Blueprint("tutorial", __name__)
+tutorial_bp = Blueprint("tutorial", __name__, strict_slashes=False)
 
 _CONTENT_DIR = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
