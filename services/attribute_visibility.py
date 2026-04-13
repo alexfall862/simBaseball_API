@@ -82,7 +82,8 @@ _FUZZED_NUMERIC_ACTIONS = frozenset({
 })
 
 # Level 5 key for draft prospect 20-80 conversion
-DRAFT_DISPLAY_LEVEL = "a"  # Single-A
+DRAFT_DISPLAY_LEVEL = "a"  # Single-A (string key for distribution config)
+DRAFT_DISPLAY_LEVEL_ID = 5  # Numeric level ID for breakpoint lookup
 
 
 # ---------------------------------------------------------------------------
@@ -274,76 +275,46 @@ def _load_scouting_actions_single(conn, org_id, player_id):
 # Derived rating computation (from fuzzed base values)
 # ---------------------------------------------------------------------------
 
-def _compute_derived_from_values(base_values, position_weights=None):
+def _recompute_pitch_ovrs_from_display(base_values):
     """
-    Compute pitch overalls and position ratings from a dict of base attribute
-    values (already fuzzed or precise 20-80 scores).
+    Recompute pitch{1-5}_ovr from fuzzed/precise _display component values.
 
-    This recomputes derived ratings from whatever values the org can see,
-    so that derived ratings are consistent with visible base attributes.
-
-    base_values: {attr_name: 20-80 score or None}
-    Returns: {derived_name: 20-80 score or None}
+    Used by fog-of-war to derive pitch overalls consistent with visible
+    component attributes. Returns {pitch{N}_ovr: int or None}.
     """
-    from rosters import _DEFAULT_POSITION_WEIGHTS
-
     derived = {}
-
-    def _w_avg(components):
-        total_w = 0.0
-        total_v = 0.0
-        for col, w in components.items():
-            if w <= 0:
-                continue
-            # Check derived first (pitch_ovr referenced by position weights)
-            v = derived.get(col)
-            if v is None:
-                v = base_values.get(col)
+    for i in range(1, 6):
+        prefix = f"pitch{i}_"
+        comps = [
+            base_values.get(prefix + comp + "_display")
+            for comp in ("consist", "pacc", "pbrk", "pcntrl")
+        ]
+        vals = []
+        for v in comps:
             if v is None:
                 continue
             try:
-                num = float(v)
+                vals.append(float(v))
             except (TypeError, ValueError):
                 continue
-            total_v += num * w
-            total_w += w
-        if total_w <= 0:
-            return None
-        return int(round(total_v / total_w))
-
-    # Pitch overalls
-    for i in range(1, 6):
-        prefix = f"pitch{i}_"
-        # Check if this pitch exists (has a non-None component)
-        has_pitch = any(
-            base_values.get(prefix + comp + "_display") is not None
-            for comp in ("consist", "pacc", "pbrk", "pcntrl")
-        )
-        if not has_pitch:
+        if not vals:
             continue
-        raw = _w_avg({
-            prefix + "consist_display": 0.25,
-            prefix + "pacc_display":    0.25,
-            prefix + "pbrk_display":    0.25,
-            prefix + "pcntrl_display":  0.25,
-        })
-        if raw is not None:
-            derived[f"pitch{i}_ovr"] = raw
-
-    # Position ratings
-    weights = position_weights or _DEFAULT_POSITION_WEIGHTS
-    for rating_type, wt_map in weights.items():
-        # Remap _base keys to _display keys for lookup
-        display_wt_map = {}
-        for attr_key, w in wt_map.items():
-            if attr_key.endswith("_base"):
-                display_wt_map[attr_key.replace("_base", "_display")] = w
-            else:
-                # pitch_ovr keys are already in derived
-                display_wt_map[attr_key] = w
-        derived[rating_type] = _w_avg(display_wt_map)
-
+        avg = sum(vals) / len(vals)
+        derived[f"pitch{i}_ovr"] = int(round(avg / 5.0) * 5)
     return derived
+
+
+# DEPRECATED: _compute_derived_from_values
+# The old function computed both pitch overalls AND position ratings from
+# display values using a simple weighted average. Position ratings are now
+# computed via the canonical displayovr pipeline (compute_all_position_ratings
+# in ovr_core.py) which uses percentile-ranking against league breakpoints.
+# Pitch overalls are handled by _recompute_pitch_ovrs_from_display above.
+# The old function is retained below (commented out) for reference.
+#
+# def _compute_derived_from_values(base_values, position_weights=None):
+#     """..."""
+#     ...  # see git history for the original implementation
 
 
 # ---------------------------------------------------------------------------
@@ -509,9 +480,15 @@ def _apply_visibility(
                 else:
                     ratings[out_name] = None
 
-            # Recompute derived from precise values
-            derived = _compute_derived_from_values(ratings, position_weights)
-            ratings.update(derived)
+            # Pitch overalls from display components
+            pitch_ovrs = _recompute_pitch_ovrs_from_display(ratings)
+            ratings.update(pitch_ovrs)
+            # Position ratings via displayovr pipeline
+            from services.ovr_core import compute_all_position_ratings as _cap_draft_p
+            ratings.update(_cap_draft_p(
+                ratings, ptype, DRAFT_DISPLAY_LEVEL_ID, ovr_weights or {}, breakpoints or {},
+                key_suffix="_display",
+            ))
             display_format = "20-80"
             attrs_precise = True
 
@@ -534,9 +511,15 @@ def _apply_visibility(
                 else:
                     ratings[out_name] = None
 
-            # Recompute derived from fuzzed values
-            derived = _compute_derived_from_values(ratings, position_weights)
-            ratings.update(derived)
+            # Pitch overalls from fuzzed display components
+            pitch_ovrs = _recompute_pitch_ovrs_from_display(ratings)
+            ratings.update(pitch_ovrs)
+            # Position ratings via displayovr pipeline
+            from services.ovr_core import compute_all_position_ratings as _cap_draft_f
+            ratings.update(_cap_draft_f(
+                ratings, ptype, DRAFT_DISPLAY_LEVEL_ID, ovr_weights or {}, breakpoints or {},
+                key_suffix="_display",
+            ))
             display_format = "20-80"
             attrs_precise = False
 
@@ -601,10 +584,6 @@ def _apply_visibility(
                     attr_name = key.replace("_display", "_base")
                     ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, attr_name)
 
-            # Recompute derived from fuzzed values (position ratings, etc.)
-            derived = _compute_derived_from_values(ratings, position_weights)
-            ratings.update(derived)
-
             # Override pitch_ovr with direct fuzz of the original DB-sourced
             # value (matches scouting endpoint which fuzzes pitch_ovr independently
             # rather than recomputing from fuzzed components).
@@ -613,6 +592,16 @@ def _apply_visibility(
 
             display_format = "20-80"
             attrs_precise = False
+
+        # Position ratings via the canonical displayovr pipeline (percentile-rank
+        # against breakpoints). Uses the fuzzed or precise _display values.
+        from services.ovr_core import compute_all_position_ratings
+        pos_ratings = compute_all_position_ratings(
+            ratings, ptype, player_level, ovr_weights or {}, breakpoints or {},
+            key_suffix="_display",
+            is_free_agent=bool(force_free_agent),
+        )
+        ratings.update(pos_ratings)
 
         # Potentials: fuzzed or precise
         if has_precise_pot:

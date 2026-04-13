@@ -566,7 +566,8 @@ def _compute_distributions_by_level(rows, rating_cols, include_derived=False, po
 # _to_20_80 is imported from services.player_display above
 
 
-def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=None):
+def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=None,
+                               ovr_weights=None, breakpoints=None):
     """
     Convert a row into a structured player dict.
     Delegates core bio/ratings/potentials to shared build_player_display(),
@@ -578,6 +579,8 @@ def _build_player_with_ratings(row, dist_by_level, col_cats, position_weights=No
         "col_cats": col_cats,
         "dist_by_level": dist_by_level,
         "position_weights": position_weights,
+        "ovr_weights": ovr_weights,
+        "breakpoints": breakpoints,
     }
     player = build_player_display(dict(m), ctx)
 
@@ -716,6 +719,10 @@ def get_team_ratings():
             dist_by_level, _ = _load_dist_by_level(conn, col_cats)
             position_weights = _load_position_weights(conn)
 
+            from services.ovr_core import load_weights as _lw, load_breakpoints as _lbp
+            _ovr_w = _lw(conn)
+            _bp = _lbp(conn)
+
             # Query only the players we need to return
             stmt = _build_ratings_base_stmt(
                 level_filter=level,
@@ -735,7 +742,8 @@ def get_team_ratings():
                 ), 200
 
             players_out = [
-                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
+                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights,
+                                           ovr_weights=_ovr_w, breakpoints=_bp)
                 for row in rows
             ]
 
@@ -806,6 +814,10 @@ def get_org_ratings(org_abbrev: str):
             dist_by_level, _ = _load_dist_by_level(conn, col_cats)
             position_weights = _load_position_weights(conn)
 
+            from services.ovr_core import load_weights as _lw2, load_breakpoints as _lbp2
+            _ovr_w2 = _lw2(conn)
+            _bp2 = _lbp2(conn)
+
             # Query only this org's players
             org_stmt = _build_ratings_base_stmt(
                 level_filter=level_filter,
@@ -824,7 +836,8 @@ def get_org_ratings(org_abbrev: str):
 
             # Build all player dicts first
             all_players = [
-                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
+                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights,
+                                           ovr_weights=_ovr_w2, breakpoints=_bp2)
                 for row in org_rows
             ]
 
@@ -896,6 +909,10 @@ def get_league_ratings():
             dist_by_level, _ = _load_dist_by_level(conn, col_cats)
             position_weights = _load_position_weights(conn)
 
+            from services.ovr_core import load_weights as _lw3, load_breakpoints as _lbp3
+            _ovr_w3 = _lw3(conn)
+            _bp3 = _lbp3(conn)
+
             stmt = _build_ratings_base_stmt(level_filter=level_filter)
             rows = conn.execute(stmt).all()
 
@@ -904,7 +921,8 @@ def get_league_ratings():
 
             # Build all player dicts, then apply fog-of-war
             all_players = [
-                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights)
+                _build_player_with_ratings(row, dist_by_level, col_cats, position_weights,
+                                           ovr_weights=_ovr_w3, breakpoints=_bp3)
                 for row in rows
             ]
             all_players = _apply_fog_of_war(
@@ -1048,6 +1066,10 @@ def get_org_roster(org_abbrev: str):
             dist_by_level, _ = _load_dist_by_level(conn, col_cats)
             position_weights = _load_position_weights(conn)
 
+            from services.ovr_core import load_weights as _lw4, load_breakpoints as _lbp4
+            _ovr_w4 = _lw4(conn)
+            _bp4 = _lbp4(conn)
+
             stmt = _build_ratings_base_stmt(
                 level_filter=level_filter,
                 org_abbrev=org_abbrev,
@@ -1064,7 +1086,8 @@ def get_org_roster(org_abbrev: str):
             deduped_rows = []
             for row in rows:
                 player = _build_player_with_ratings(
-                    row, dist_by_level, col_cats, position_weights
+                    row, dist_by_level, col_cats, position_weights,
+                    ovr_weights=_ovr_w4, breakpoints=_bp4,
                 )
                 pid = player.get("id")
                 if pid is not None and pid in seen_ids:
@@ -1237,6 +1260,10 @@ def get_all_rosters_grouped():
             dist_by_level, _ = _load_dist_by_level(conn, col_cats)
             position_weights = _load_position_weights(conn)
 
+            from services.ovr_core import load_weights as _lw5, load_breakpoints as _lbp5
+            _ovr_w5 = _lw5(conn)
+            _bp5 = _lbp5(conn)
+
             stmt = _build_ratings_base_stmt(
                 level_filter=level_filter,
                 org_abbrev=org_abbrev,
@@ -1257,7 +1284,8 @@ def get_all_rosters_grouped():
                 org_id = m["org_id"]
 
                 player = _build_player_with_ratings(
-                    row, dist_by_level, col_cats, position_weights
+                    row, dist_by_level, col_cats, position_weights,
+                    ovr_weights=_ovr_w5, breakpoints=_bp5,
                 )
                 pid = player.get("id")
 

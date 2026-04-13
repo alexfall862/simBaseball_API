@@ -581,7 +581,9 @@ def _classify_player_columns(col_names):
 
 
 def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
-                                  base_cols, pot_cols, bio_skip, col_names):
+                                  base_cols, pot_cols, bio_skip, col_names,
+                                  ovr_weights=None, breakpoints=None,
+                                  listed_pos_code=None):
     """
     Build a single bootstrap-shape player dict from a SQLAlchemy roster
     row. Used by /bootstrap/landing/<org_id>, /bootstrap/landing/all, and
@@ -596,16 +598,22 @@ def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
           "potentials": {<attr>_pot: letter grade},
         }
 
+    Position ratings (c_rating, sp_rating, etc.) are computed via the
+    canonical displayovr pipeline (percentile-rank against breakpoints)
+    so they use the same math as displayovr itself.
+
     Visibility fogging and stamina/injury attach are applied separately
     by the caller.
     """
     from rosters import _compute_derived_raw_ratings
+    from services.ovr_core import compute_all_position_ratings
 
     pitch_comp_re = _bootstrap_pitch_comp_re()
     m = row._mapping
 
     ptype = (m.get("ptype") or "").strip()
     league_level = m.get("league_level")
+    current_level = m.get("current_level")
 
     ptype_dist = dist_by_level.get(ptype) or dist_by_level.get("all") or {}
     dist_for_level = ptype_dist.get(league_level, {})
@@ -626,8 +634,13 @@ def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
         else:
             ratings[col.replace("_base", "_display")] = None
 
+    # Derived raw ratings — used for pitch_ovr, *_def_rating only.
+    # Position ratings (*_rating) are computed below via the displayovr pipeline.
     raw_derived = _compute_derived_raw_ratings(row, position_weights)
     for attr_name, raw_val in raw_derived.items():
+        if attr_name.endswith("_rating"):
+            # Skip old z-score position ratings — replaced by displayovr pipeline
+            continue
         d = dist_for_level.get(attr_name)
         if d and d.get("mean") is not None:
             ratings[attr_name] = _to_20_80(raw_val, d["mean"], d["std"])
@@ -645,6 +658,15 @@ def _build_bootstrap_player_dict(row, dist_by_level, position_weights,
                 ratings[ovr_key] = _to_20_80(db_val, d["mean"], d["std"])
             else:
                 ratings[ovr_key] = None
+
+    # Position ratings via the canonical displayovr pipeline:
+    # weighted average -> percentile rank against breakpoints -> 20-80.
+    if ovr_weights and breakpoints:
+        pos_ratings = compute_all_position_ratings(
+            ratings, ptype, current_level, ovr_weights, breakpoints,
+            key_suffix="_display",
+        )
+        ratings.update(pos_ratings)
 
     potentials = {}
     for col in pot_cols:
@@ -776,6 +798,29 @@ def build_bootstrap_players_for_viewer(conn, player_ids, viewer_org_id):
 
     position_weights = _load_position_weights(conn)
 
+    # Load displayovr weights and breakpoints for position ratings
+    from services.ovr_core import load_weights as _load_ovr_w
+    from services.ovr_core import load_breakpoints as _load_bp
+    ovr_weights = _load_ovr_w(conn)
+    bp = _load_bp(conn)
+
+    # Pre-load listed positions for position rating computation
+    listed_positions_raw = {}
+    try:
+        pid_list_pre = [r._mapping["id"] for r in rows]
+        if pid_list_pre:
+            ph_pre = ", ".join(f":p{i}" for i in range(len(pid_list_pre)))
+            prm_pre = {f"p{i}": pid for i, pid in enumerate(pid_list_pre)}
+            lp_pre_rows = conn.execute(text(
+                f"SELECT player_id, position_code "
+                f"FROM player_listed_position "
+                f"WHERE player_id IN ({ph_pre})"
+            ), prm_pre).all()
+            listed_positions_raw = {int(r[0]): str(r[1]) for r in lp_pre_rows}
+    except Exception:
+        log.debug("build_bootstrap_players_for_viewer: listed position pre-load failed",
+                  exc_info=True)
+
     col_names = list(rows[0]._mapping.keys())
     base_cols, pot_cols, _derived_cols, bio_skip = _classify_player_columns(col_names)
 
@@ -790,6 +835,9 @@ def build_bootstrap_players_for_viewer(conn, player_ids, viewer_org_id):
         player = _build_bootstrap_player_dict(
             row, dist_by_level, position_weights,
             base_cols, pot_cols, bio_skip, col_names,
+            ovr_weights=ovr_weights,
+            breakpoints=bp,
+            listed_pos_code=listed_positions_raw.get(pid),
         )
         players_by_id[pid] = player
         holder_org_ids[pid] = m.get("org_id")
@@ -798,19 +846,12 @@ def build_bootstrap_players_for_viewer(conn, player_ids, viewer_org_id):
     if not players_by_id:
         return {}
 
-    # Attach listed_position before fog so the visibility pipeline can
-    # use it for context determination if needed (matches bootstrap order).
+    # Attach listed_position display name before fog so the visibility
+    # pipeline can use it for context determination if needed.
     try:
         from services.listed_position import POSITION_DISPLAY
-        pid_list = list(players_by_id.keys())
-        ph = ", ".join(f":p{i}" for i in range(len(pid_list)))
-        prm = {f"p{i}": pid for i, pid in enumerate(pid_list)}
-        lp_rows = conn.execute(text(
-            f"SELECT player_id, position_code "
-            f"FROM player_listed_position "
-            f"WHERE player_id IN ({ph})"
-        ), prm).all()
-        lp_map = {r[0]: POSITION_DISPLAY.get(r[1], r[1]) for r in lp_rows}
+        lp_map = {pid: POSITION_DISPLAY.get(code, code)
+                  for pid, code in listed_positions_raw.items()}
         for pid, pl in players_by_id.items():
             pl["listed_position"] = lp_map.get(pid)
     except Exception:
@@ -914,6 +955,34 @@ def _get_all_rosters(conn, tables, org_ids):
 
     position_weights = _load_position_weights(conn)
 
+    from services.ovr_core import load_weights as _load_ovr_w2
+    from services.ovr_core import load_breakpoints as _load_bp2
+    ovr_weights = _load_ovr_w2(conn)
+    bp = _load_bp2(conn)
+
+    # Pre-load listed positions
+    listed_positions_all = {}
+    try:
+        from sqlalchemy import text as _sa_txt
+        _ly = conn.execute(_sa_txt(
+            "SELECT id FROM league_years WHERE league_year = "
+            "(SELECT season FROM timestamp_state WHERE id = 1)"
+        )).first()
+        if _ly:
+            _lyid = int(_ly[0])
+            _pids = list({r._mapping["id"] for r in rows})
+            if _pids:
+                _ph = ", ".join(f":p{i}" for i in range(len(_pids)))
+                _prm = {f"p{i}": pid for i, pid in enumerate(_pids)}
+                _prm["lyid"] = _lyid
+                _lp = conn.execute(_sa_txt(
+                    f"SELECT player_id, position_code FROM player_listed_position "
+                    f"WHERE league_year_id = :lyid AND player_id IN ({_ph})"
+                ), _prm).all()
+                listed_positions_all = {int(r[0]): str(r[1]) for r in _lp}
+    except Exception:
+        log.debug("_get_roster_map_all_orgs: listed position pre-load failed", exc_info=True)
+
     col_names = list(rows[0]._mapping.keys())
     base_cols, pot_cols, _derived_cols, bio_skip = _classify_player_columns(col_names)
 
@@ -932,6 +1001,9 @@ def _get_all_rosters(conn, tables, org_ids):
         player = _build_bootstrap_player_dict(
             row, dist_by_level, position_weights,
             base_cols, pot_cols, bio_skip, col_names,
+            ovr_weights=ovr_weights,
+            breakpoints=bp,
+            listed_pos_code=listed_positions_all.get(player_id),
         )
         all_rosters.setdefault(org_id, {}).setdefault(team_id, []).append(player)
 
@@ -1220,6 +1292,36 @@ def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
 
     position_weights = _load_position_weights(conn)
 
+    # Load displayovr weights and breakpoints for position rating computation
+    from services.ovr_core import load_weights as _load_ovr_weights_fn
+    from services.ovr_core import load_breakpoints as _load_bp_fn
+    ovr_weights = _load_ovr_weights_fn(conn)
+    bp = _load_bp_fn(conn)
+
+    # Pre-load listed positions for all players in this org
+    listed_positions = {}
+    try:
+        from sqlalchemy import text as _sa_text
+        _ly_row = conn.execute(_sa_text(
+            "SELECT id FROM league_years WHERE league_year = "
+            "(SELECT season FROM timestamp_state WHERE id = 1)"
+        )).first()
+        if _ly_row:
+            _lyid = int(_ly_row[0])
+            _player_ids = [r._mapping["id"] for r in rows]
+            if _player_ids:
+                _ph = ", ".join(f":p{i}" for i in range(len(_player_ids)))
+                _params = {f"p{i}": pid for i, pid in enumerate(_player_ids)}
+                _params["lyid"] = _lyid
+                _lp_rows = conn.execute(_sa_text(
+                    f"SELECT player_id, position_code FROM player_listed_position "
+                    f"WHERE league_year_id = :lyid AND player_id IN ({_ph})"
+                ), _params).all()
+                for _lp in _lp_rows:
+                    listed_positions[int(_lp[0])] = str(_lp[1])
+    except Exception:
+        log.debug("bootstrap: listed position pre-load failed", exc_info=True)
+
     col_names = list(rows[0]._mapping.keys())
     base_cols, pot_cols, _derived_cols, bio_skip = _classify_player_columns(col_names)
 
@@ -1236,6 +1338,9 @@ def _get_roster_map(conn, tables, org_id, viewer_org_id=None):
         player = _build_bootstrap_player_dict(
             row, dist_by_level, position_weights,
             base_cols, pot_cols, bio_skip, col_names,
+            ovr_weights=ovr_weights,
+            breakpoints=bp,
+            listed_pos_code=listed_positions.get(player_id),
         )
         roster_map.setdefault(team_id, []).append(player)
 

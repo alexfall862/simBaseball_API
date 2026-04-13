@@ -1,12 +1,16 @@
 --
 -- Table structure for table `displayovr_breakpoints`
 --
--- Stores league-wide raw_ovr cutoffs per (level, ptype) for the canonical
--- displayovr percentile-rank pipeline. Refreshed by:
+-- Stores league-wide raw_ovr cutoffs per (level, ptype, rating_type) for the
+-- canonical displayovr / position-rating percentile-rank pipeline. Refreshed by:
 --   * services/ovr_core.recompute_stored_displayovr()
 --   * Admin weight profile activation
 --   * Manual admin recompute endpoint
 --   * Engine subweek processing
+--
+-- rating_type values:
+--   'displayovr' -- listed-position overall (the player's own position)
+--   'c_rating', 'fb_rating', ... 'rp_rating' -- per-position ratings
 --
 
 DROP TABLE IF EXISTS `displayovr_breakpoints`;
@@ -15,9 +19,10 @@ DROP TABLE IF EXISTS `displayovr_breakpoints`;
 CREATE TABLE `displayovr_breakpoints` (
   `level` int NOT NULL,
   `ptype` varchar(16) NOT NULL,
+  `rating_type` varchar(32) NOT NULL DEFAULT 'displayovr',
   `raw_overalls_json` longtext NOT NULL,
   `player_count` int NOT NULL,
   `computed_at` datetime DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`level`, `ptype`)
+  PRIMARY KEY (`level`, `ptype`, `rating_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 /*!40101 SET character_set_client = @saved_cs_client */;

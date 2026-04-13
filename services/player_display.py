@@ -134,8 +134,18 @@ def compute_derived_raw_ratings(
     Compute raw (0-100ish) derived ratings for:
       - pitch1_ovr ... pitch5_ovr  (equal-weight average of components)
       - c_rating, fb_rating, etc.  (from position_weights or defaults)
+      - *_def_rating               (defense-only counterparts)
 
     Accepts a plain dict (or any mapping supporting .get()).
+
+    NOTE: The *_rating position ratings produced here are RAW weighted
+    averages. For DISPLAY purposes (bootstrap, rosters, scouting), use
+    ovr_core.compute_all_position_ratings() instead, which runs the
+    same percentile-rank pipeline as displayovr. This function's *_rating
+    output is still used by:
+      - game_payload.py (engine payloads need raw 0-100 values)
+      - listed_position.py (auto-position logic uses raw comparisons)
+      - rating_config.py seed (population distributions for breakpoints)
     """
     derived: Dict[str, Optional[float]] = {}
 
@@ -174,7 +184,8 @@ def compute_derived_raw_ratings(
         if raw is not None:
             derived[f"pitch{i}_ovr"] = raw
 
-    # Position ratings
+    # Position ratings (raw weighted averages — used by engine + seeding,
+    # NOT for display; see docstring above)
     weights = position_weights or _DEFAULT_POSITION_WEIGHTS
     for rating_type, wt_map in weights.items():
         derived[rating_type] = _w_avg(wt_map)
@@ -194,13 +205,6 @@ def compute_derived_raw_ratings(
         if rating_type not in FIELDING_RATING_TYPES:
             continue
         def_key = rating_type.replace("_rating", "_def_rating")
-        # DH has no real defensive responsibility. Its calibrated weight
-        # set is overwhelmingly offense, with at most a token speed weight
-        # left over after stripping. Re-normalizing one tiny weight to
-        # 100% would make dh_def_rating = speed_base, which is misleading.
-        # Force None so consumers treat DH as a flat zero column —
-        # placement logic should put the player with the lowest defensive
-        # opportunity cost there, not the fastest one.
         if rating_type == "dh_rating":
             derived[def_key] = None
             continue
@@ -261,16 +265,31 @@ def load_display_context(conn) -> Dict[str, Any]:
     col_cats = get_player_column_categories(conn.engine)
     dist_by_level, _source = load_dist_by_level(conn, col_cats)
     position_weights = load_position_weights(conn)
+
+    # Load displayovr weights and breakpoints for position rating computation
+    ovr_weights = None
+    breakpoints = None
+    try:
+        from services.ovr_core import load_weights, load_breakpoints
+        ovr_weights = load_weights(conn)
+        breakpoints = load_breakpoints(conn)
+    except Exception:
+        log.warning("load_display_context: failed to load ovr weights/breakpoints",
+                    exc_info=True)
+
     return {
         "col_cats": col_cats,
         "dist_by_level": dist_by_level,
         "position_weights": position_weights,
+        "ovr_weights": ovr_weights,
+        "breakpoints": breakpoints,
     }
 
 
 def build_player_display(
     mapping: Dict[str, Any],
     ctx: Dict[str, Any],
+    listed_pos_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Transform a raw player mapping into the standard display shape:
@@ -283,12 +302,18 @@ def build_player_display(
       "potentials": { contact_pot, power_pot, ... },
     }
 
+    Position ratings (c_rating, sp_rating, etc.) are computed via the
+    canonical displayovr pipeline (percentile-rank against breakpoints)
+    when ovr_weights and breakpoints are available in ctx.
+
     Level for distribution lookup uses the fallback chain:
         mapping["league_level"] → mapping["current_level"] → mapping["last_level"]
     """
     col_cats = ctx["col_cats"]
     dist_by_level = ctx["dist_by_level"]
     position_weights = ctx["position_weights"]
+    ovr_weights = ctx.get("ovr_weights")
+    breakpoints = ctx.get("breakpoints")
 
     rating_cols = col_cats["rating"]
     pot_cols = col_cats["pot"]
@@ -300,6 +325,7 @@ def build_player_display(
         or mapping.get("last_level")
     )
     level_key = _resolve_level_key(raw_level)
+    current_level = mapping.get("current_level")
     ptype = (mapping.get("ptype") or "").strip()
 
     # Distribution lookup: ptype → level → attr → {mean, std}
@@ -333,11 +359,16 @@ def build_player_display(
         out_name = col.replace("_base", "_display")
         ratings[out_name] = scaled
 
-    # --- Derived 20-80 ratings (position ratings & pitch overalls) ---
+    # --- Derived ratings: pitch overalls + defense-only ratings ---
+    # Position ratings (*_rating) are now computed below via the displayovr
+    # pipeline. This path only produces pitch_ovr and *_def_rating values.
     from services.rating_config import is_derived_rating, to_20_80_percentile
 
     raw_derived = compute_derived_raw_ratings(mapping, position_weights)
     for attr_name, raw_val in raw_derived.items():
+        if attr_name.endswith("_rating"):
+            # Skip old z-score position ratings — replaced by displayovr pipeline
+            continue
         d = dist_for_level.get(attr_name)
         if not d or d.get("mean") is None:
             scaled = None
@@ -347,6 +378,15 @@ def build_player_display(
             scaled = to_20_80(raw_val, d["mean"], d["std"])
 
         ratings[attr_name] = scaled
+
+    # --- Position ratings via canonical displayovr pipeline ---
+    if ovr_weights and breakpoints:
+        from services.ovr_core import compute_all_position_ratings
+        pos_ratings = compute_all_position_ratings(
+            ratings, ptype, current_level, ovr_weights, breakpoints,
+            key_suffix="_display",
+        )
+        ratings.update(pos_ratings)
 
     # --- Potentials ---
     potentials = {}
