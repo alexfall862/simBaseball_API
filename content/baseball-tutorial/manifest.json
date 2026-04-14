@@ -14,9 +14,14 @@
           "title": "Welcome to the Sim",
           "summary": "A quick overview of what this baseball simulation is all about",
           "order": 1,
-          "tags": ["beginner"],
+          "tags": [
+            "beginner"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["hitting/contact-vs-power", "roster/setting-your-lineup"]
+          "relatedArticles": [
+            "hitting/contact-vs-power",
+            "roster/setting-your-lineup"
+          ]
         },
         {
           "id": "first-season",
@@ -24,9 +29,15 @@
           "title": "Your First Season",
           "summary": "A step-by-step walkthrough of your first season as a GM",
           "order": 2,
-          "tags": ["beginner", "strategy"],
+          "tags": [
+            "beginner",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["roster/setting-your-lineup", "gameplan/offensive-strategy"]
+          "relatedArticles": [
+            "roster/setting-your-lineup",
+            "gameplan/offensive-strategy"
+          ]
         },
         {
           "id": "understanding-timeline",
@@ -34,9 +45,15 @@
           "title": "Understanding the Timeline",
           "summary": "How weeks, subweeks, and seasons work in the sim",
           "order": 3,
-          "tags": ["beginner", "schedule"],
+          "tags": [
+            "beginner",
+            "schedule"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["season/how-weeks-work", "season/schedule-overview"]
+          "relatedArticles": [
+            "season/how-weeks-work",
+            "season/schedule-overview"
+          ]
         }
       ]
     },
@@ -54,9 +71,16 @@
           "title": "The 20-80 Scouting Scale",
           "summary": "Understanding how the sim rates player abilities on the classic scouting scale",
           "order": 1,
-          "tags": ["beginner", "attributes", "scouting"],
+          "tags": [
+            "beginner",
+            "attributes",
+            "scouting"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["attributes/potential-and-development", "hitting/contact-vs-power"]
+          "relatedArticles": [
+            "attributes/potential-and-development",
+            "hitting/contact-vs-power"
+          ]
         },
         {
           "id": "potential-and-development",
@@ -64,9 +88,16 @@
           "title": "Potential & Development",
           "summary": "How players grow and develop over time — potential ceilings and development curves",
           "order": 2,
-          "tags": ["intermediate", "attributes", "development"],
+          "tags": [
+            "intermediate",
+            "attributes",
+            "development"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["attributes/scouting-scale", "draft/evaluating-prospects"]
+          "relatedArticles": [
+            "attributes/scouting-scale",
+            "draft/evaluating-prospects"
+          ]
         },
         {
           "id": "overall-ratings",
@@ -74,9 +105,15 @@
           "title": "Overall Ratings (OVR)",
           "summary": "How the OVR composite rating is calculated and what it means",
           "order": 3,
-          "tags": ["intermediate", "attributes"],
+          "tags": [
+            "intermediate",
+            "attributes"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["attributes/scouting-scale", "roster/setting-your-lineup"]
+          "relatedArticles": [
+            "attributes/scouting-scale",
+            "roster/setting-your-lineup"
+          ]
         }
       ]
     },
@@ -94,9 +131,16 @@
           "title": "Contact vs. Power",
           "summary": "Understanding the tradeoff between contact and power hitters",
           "order": 1,
-          "tags": ["beginner", "hitting", "attributes"],
+          "tags": [
+            "beginner",
+            "hitting",
+            "attributes"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["hitting/plate-discipline", "roster/setting-your-lineup"]
+          "relatedArticles": [
+            "hitting/plate-discipline",
+            "roster/setting-your-lineup"
+          ]
         },
         {
           "id": "plate-discipline",
@@ -104,9 +148,16 @@
           "title": "Plate Discipline",
           "summary": "How eye and discipline ratings affect at-bat outcomes",
           "order": 2,
-          "tags": ["intermediate", "hitting", "attributes"],
+          "tags": [
+            "intermediate",
+            "hitting",
+            "attributes"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["hitting/contact-vs-power", "hitting/clutch-hitting"]
+          "relatedArticles": [
+            "hitting/contact-vs-power",
+            "hitting/clutch-hitting"
+          ]
         },
         {
           "id": "how-at-bats-resolve",
@@ -114,9 +165,16 @@
           "title": "How At-Bats Resolve",
           "summary": "A look inside the engine — what happens pitch by pitch",
           "order": 3,
-          "tags": ["advanced", "hitting", "engine"],
+          "tags": [
+            "advanced",
+            "hitting",
+            "engine"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["hitting/contact-vs-power", "pitching/pitch-types"]
+          "relatedArticles": [
+            "hitting/contact-vs-power",
+            "pitching/pitch-types"
+          ]
         },
         {
           "id": "clutch-hitting",
@@ -124,9 +182,16 @@
           "title": "Clutch Hitting",
           "summary": "How the clutch attribute affects performance in high-leverage situations",
           "order": 4,
-          "tags": ["intermediate", "hitting", "attributes"],
+          "tags": [
+            "intermediate",
+            "hitting",
+            "attributes"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["hitting/contact-vs-power", "gameplan/offensive-strategy"]
+          "relatedArticles": [
+            "hitting/contact-vs-power",
+            "gameplan/offensive-strategy"
+          ]
         }
       ]
     },
@@ -144,9 +209,16 @@
           "title": "Pitch Types & Repertoire",
           "summary": "How different pitch types work and why repertoire matters",
           "order": 1,
-          "tags": ["beginner", "pitching", "attributes"],
+          "tags": [
+            "beginner",
+            "pitching",
+            "attributes"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["pitching/stamina-and-fatigue", "pitching/starting-rotation"]
+          "relatedArticles": [
+            "pitching/stamina-and-fatigue",
+            "pitching/starting-rotation"
+          ]
         },
         {
           "id": "stamina-and-fatigue",
@@ -154,9 +226,16 @@
           "title": "Stamina & Fatigue",
           "summary": "How the stamina system works — drain, recovery, and managing your staff",
           "order": 2,
-          "tags": ["intermediate", "pitching", "stamina"],
+          "tags": [
+            "intermediate",
+            "pitching",
+            "stamina"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["pitching/bullpen-management", "pitching/starting-rotation"]
+          "relatedArticles": [
+            "pitching/bullpen-management",
+            "pitching/starting-rotation"
+          ]
         },
         {
           "id": "bullpen-management",
@@ -164,9 +243,16 @@
           "title": "Bullpen Management",
           "summary": "How to configure your bullpen roles and usage patterns",
           "order": 3,
-          "tags": ["intermediate", "pitching", "strategy"],
+          "tags": [
+            "intermediate",
+            "pitching",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["pitching/stamina-and-fatigue", "gameplan/pitching-strategy"]
+          "relatedArticles": [
+            "pitching/stamina-and-fatigue",
+            "gameplan/pitching-strategy"
+          ]
         },
         {
           "id": "starting-rotation",
@@ -174,9 +260,16 @@
           "title": "Starting Rotation",
           "summary": "Setting up your rotation and understanding pitcher workload",
           "order": 4,
-          "tags": ["beginner", "pitching", "roster"],
+          "tags": [
+            "beginner",
+            "pitching",
+            "roster"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["pitching/stamina-and-fatigue", "pitching/bullpen-management"]
+          "relatedArticles": [
+            "pitching/stamina-and-fatigue",
+            "pitching/bullpen-management"
+          ]
         }
       ]
     },
@@ -194,9 +287,16 @@
           "title": "Defensive Ratings Explained",
           "summary": "How fielding, arm, and range ratings combine to determine defensive value",
           "order": 1,
-          "tags": ["beginner", "fielding", "attributes"],
+          "tags": [
+            "beginner",
+            "fielding",
+            "attributes"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["fielding/position-flexibility", "roster/setting-your-lineup"]
+          "relatedArticles": [
+            "fielding/position-flexibility",
+            "roster/setting-your-lineup"
+          ]
         },
         {
           "id": "position-flexibility",
@@ -204,9 +304,16 @@
           "title": "Position Flexibility",
           "summary": "How players can play multiple positions and the penalties involved",
           "order": 2,
-          "tags": ["intermediate", "fielding", "roster"],
+          "tags": [
+            "intermediate",
+            "fielding",
+            "roster"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["fielding/defensive-ratings", "roster/setting-your-lineup"]
+          "relatedArticles": [
+            "fielding/defensive-ratings",
+            "roster/setting-your-lineup"
+          ]
         }
       ]
     },
@@ -224,9 +331,16 @@
           "title": "Setting Your Lineup",
           "summary": "How to set your batting order and defensive positions",
           "order": 1,
-          "tags": ["beginner", "roster", "lineup"],
+          "tags": [
+            "beginner",
+            "roster",
+            "lineup"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["hitting/contact-vs-power", "fielding/defensive-ratings"]
+          "relatedArticles": [
+            "hitting/contact-vs-power",
+            "fielding/defensive-ratings"
+          ]
         },
         {
           "id": "roster-limits",
@@ -234,9 +348,16 @@
           "title": "Roster Limits & Rules",
           "summary": "Active roster, 40-man roster, minor league options, and roster moves",
           "order": 2,
-          "tags": ["beginner", "roster", "rules"],
+          "tags": [
+            "beginner",
+            "roster",
+            "rules"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["roster/setting-your-lineup", "trades/making-trades"]
+          "relatedArticles": [
+            "roster/setting-your-lineup",
+            "trades/making-trades"
+          ]
         },
         {
           "id": "minor-league-system",
@@ -244,9 +365,17 @@
           "title": "The Minor League System",
           "summary": "How the farm system works — levels, promotions, and player development",
           "order": 3,
-          "tags": ["intermediate", "roster", "minors", "development"],
+          "tags": [
+            "intermediate",
+            "roster",
+            "minors",
+            "development"
+          ],
           "leagueFilter": "MLB",
-          "relatedArticles": ["attributes/potential-and-development", "draft/evaluating-prospects"]
+          "relatedArticles": [
+            "attributes/potential-and-development",
+            "draft/evaluating-prospects"
+          ]
         }
       ]
     },
@@ -264,9 +393,16 @@
           "title": "Offensive Strategy",
           "summary": "Steal rates, hit-and-run, bunting, and other offensive settings",
           "order": 1,
-          "tags": ["beginner", "gameplan", "offense"],
+          "tags": [
+            "beginner",
+            "gameplan",
+            "offense"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["hitting/contact-vs-power", "gameplan/pitching-strategy"]
+          "relatedArticles": [
+            "hitting/contact-vs-power",
+            "gameplan/pitching-strategy"
+          ]
         },
         {
           "id": "pitching-strategy",
@@ -274,9 +410,16 @@
           "title": "Pitching Strategy",
           "summary": "Pitch counts, bullpen usage, and in-game pitching decisions",
           "order": 2,
-          "tags": ["intermediate", "gameplan", "pitching"],
+          "tags": [
+            "intermediate",
+            "gameplan",
+            "pitching"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["pitching/bullpen-management", "pitching/stamina-and-fatigue"]
+          "relatedArticles": [
+            "pitching/bullpen-management",
+            "pitching/stamina-and-fatigue"
+          ]
         }
       ]
     },
@@ -294,9 +437,16 @@
           "title": "How Free Agency Works",
           "summary": "The 3-phase auction system — bidding, negotiation, and signing",
           "order": 1,
-          "tags": ["beginner", "free-agency", "contracts"],
+          "tags": [
+            "beginner",
+            "free-agency",
+            "contracts"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["free-agency/evaluating-contracts", "financials/salary-cap"]
+          "relatedArticles": [
+            "free-agency/evaluating-contracts",
+            "financials/salary-cap"
+          ]
         },
         {
           "id": "evaluating-contracts",
@@ -304,9 +454,17 @@
           "title": "Evaluating Contracts",
           "summary": "How to decide what a player is worth and avoid bad deals",
           "order": 2,
-          "tags": ["intermediate", "free-agency", "contracts", "strategy"],
+          "tags": [
+            "intermediate",
+            "free-agency",
+            "contracts",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["free-agency/how-free-agency-works", "financials/salary-cap"]
+          "relatedArticles": [
+            "free-agency/how-free-agency-works",
+            "financials/salary-cap"
+          ]
         }
       ]
     },
@@ -324,9 +482,15 @@
           "title": "Making Trades",
           "summary": "How the trade system works — proposals, counteroffers, and AI logic",
           "order": 1,
-          "tags": ["beginner", "trades"],
+          "tags": [
+            "beginner",
+            "trades"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["trades/trade-value", "roster/roster-limits"]
+          "relatedArticles": [
+            "trades/trade-value",
+            "roster/roster-limits"
+          ]
         },
         {
           "id": "trade-value",
@@ -334,9 +498,16 @@
           "title": "Understanding Trade Value",
           "summary": "How the sim evaluates players in trades — WAR, potential, contract, and age",
           "order": 2,
-          "tags": ["intermediate", "trades", "strategy"],
+          "tags": [
+            "intermediate",
+            "trades",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["trades/making-trades", "attributes/potential-and-development"]
+          "relatedArticles": [
+            "trades/making-trades",
+            "attributes/potential-and-development"
+          ]
         }
       ]
     },
@@ -354,9 +525,15 @@
           "title": "Draft Overview",
           "summary": "How the amateur draft works — rounds, picks, and draft order",
           "order": 1,
-          "tags": ["beginner", "draft"],
+          "tags": [
+            "beginner",
+            "draft"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["draft/evaluating-prospects", "attributes/potential-and-development"]
+          "relatedArticles": [
+            "draft/evaluating-prospects",
+            "attributes/potential-and-development"
+          ]
         },
         {
           "id": "evaluating-prospects",
@@ -364,9 +541,16 @@
           "title": "Evaluating Prospects",
           "summary": "How to read scouting reports and identify the best draft picks",
           "order": 2,
-          "tags": ["intermediate", "draft", "scouting"],
+          "tags": [
+            "intermediate",
+            "draft",
+            "scouting"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["draft/draft-overview", "attributes/scouting-scale"]
+          "relatedArticles": [
+            "draft/draft-overview",
+            "attributes/scouting-scale"
+          ]
         }
       ]
     },
@@ -384,9 +568,16 @@
           "title": "Recruiting Basics",
           "summary": "How the college recruiting system works — visits, offers, and commitments",
           "order": 1,
-          "tags": ["beginner", "recruiting", "college"],
+          "tags": [
+            "beginner",
+            "recruiting",
+            "college"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["recruiting/building-a-class", "attributes/potential-and-development"]
+          "relatedArticles": [
+            "recruiting/building-a-class",
+            "attributes/potential-and-development"
+          ]
         },
         {
           "id": "building-a-class",
@@ -394,9 +585,17 @@
           "title": "Building a Recruiting Class",
           "summary": "Strategy for assembling a balanced recruiting class",
           "order": 2,
-          "tags": ["intermediate", "recruiting", "college", "strategy"],
+          "tags": [
+            "intermediate",
+            "recruiting",
+            "college",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["recruiting/recruiting-basics", "roster/setting-your-lineup"]
+          "relatedArticles": [
+            "recruiting/recruiting-basics",
+            "roster/setting-your-lineup"
+          ]
         }
       ]
     },
@@ -414,9 +613,16 @@
           "title": "Salary Cap & Budget",
           "summary": "How team budgets, luxury tax, and revenue sharing work",
           "order": 1,
-          "tags": ["beginner", "financials", "budget"],
+          "tags": [
+            "beginner",
+            "financials",
+            "budget"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["free-agency/evaluating-contracts", "financials/revenue-and-attendance"]
+          "relatedArticles": [
+            "free-agency/evaluating-contracts",
+            "financials/revenue-and-attendance"
+          ]
         },
         {
           "id": "revenue-and-attendance",
@@ -424,9 +630,14 @@
           "title": "Revenue & Attendance",
           "summary": "What drives your team's income and how winning affects the bottom line",
           "order": 2,
-          "tags": ["intermediate", "financials"],
+          "tags": [
+            "intermediate",
+            "financials"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["financials/salary-cap"]
+          "relatedArticles": [
+            "financials/salary-cap"
+          ]
         }
       ]
     },
@@ -444,9 +655,16 @@
           "title": "How Weeks Work",
           "summary": "The subweek system — 4 subweeks per week and what happens in each",
           "order": 1,
-          "tags": ["beginner", "season", "schedule"],
+          "tags": [
+            "beginner",
+            "season",
+            "schedule"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["getting-started/understanding-timeline", "season/schedule-overview"]
+          "relatedArticles": [
+            "getting-started/understanding-timeline",
+            "season/schedule-overview"
+          ]
         },
         {
           "id": "schedule-overview",
@@ -454,9 +672,16 @@
           "title": "Schedule Overview",
           "summary": "How the regular season schedule is structured",
           "order": 2,
-          "tags": ["beginner", "season", "schedule"],
+          "tags": [
+            "beginner",
+            "season",
+            "schedule"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["season/how-weeks-work", "playoffs/playoff-structure"]
+          "relatedArticles": [
+            "season/how-weeks-work",
+            "playoffs/playoff-structure"
+          ]
         }
       ]
     },
@@ -474,9 +699,15 @@
           "title": "The Injury System",
           "summary": "How injuries happen, severity levels, and recovery timelines",
           "order": 1,
-          "tags": ["beginner", "injuries"],
+          "tags": [
+            "beginner",
+            "injuries"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["injuries/managing-injuries", "pitching/stamina-and-fatigue"]
+          "relatedArticles": [
+            "injuries/managing-injuries",
+            "pitching/stamina-and-fatigue"
+          ]
         },
         {
           "id": "managing-injuries",
@@ -484,9 +715,16 @@
           "title": "Managing Injuries",
           "summary": "Strategies for dealing with injuries — IL stints, depth, and prevention",
           "order": 2,
-          "tags": ["intermediate", "injuries", "strategy"],
+          "tags": [
+            "intermediate",
+            "injuries",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["injuries/injury-system", "roster/roster-limits"]
+          "relatedArticles": [
+            "injuries/injury-system",
+            "roster/roster-limits"
+          ]
         }
       ]
     },
@@ -504,9 +742,15 @@
           "title": "Playoff Structure",
           "summary": "How teams qualify, bracket seeding, and series formats",
           "order": 1,
-          "tags": ["beginner", "playoffs"],
+          "tags": [
+            "beginner",
+            "playoffs"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["playoffs/postseason-strategy", "season/schedule-overview"]
+          "relatedArticles": [
+            "playoffs/postseason-strategy",
+            "season/schedule-overview"
+          ]
         },
         {
           "id": "postseason-strategy",
@@ -514,9 +758,16 @@
           "title": "Postseason Strategy",
           "summary": "How to adjust your gameplan and roster for playoff baseball",
           "order": 2,
-          "tags": ["intermediate", "playoffs", "strategy"],
+          "tags": [
+            "intermediate",
+            "playoffs",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["playoffs/playoff-structure", "pitching/bullpen-management"]
+          "relatedArticles": [
+            "playoffs/playoff-structure",
+            "pitching/bullpen-management"
+          ]
         }
       ]
     },
@@ -534,9 +785,16 @@
           "title": "IFA Overview",
           "summary": "How the international free agent signing period works",
           "order": 1,
-          "tags": ["beginner", "international", "free-agency"],
+          "tags": [
+            "beginner",
+            "international",
+            "free-agency"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["international-fa/ifa-strategy", "draft/evaluating-prospects"]
+          "relatedArticles": [
+            "international-fa/ifa-strategy",
+            "draft/evaluating-prospects"
+          ]
         },
         {
           "id": "ifa-strategy",
@@ -544,9 +802,16 @@
           "title": "IFA Strategy",
           "summary": "How to allocate your bonus pool and evaluate international prospects",
           "order": 2,
-          "tags": ["intermediate", "international", "strategy"],
+          "tags": [
+            "intermediate",
+            "international",
+            "strategy"
+          ],
           "leagueFilter": null,
-          "relatedArticles": ["international-fa/ifa-overview", "financials/salary-cap"]
+          "relatedArticles": [
+            "international-fa/ifa-overview",
+            "financials/salary-cap"
+          ]
         }
       ]
     }

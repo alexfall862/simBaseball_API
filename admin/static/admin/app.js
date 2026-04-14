@@ -11033,7 +11033,7 @@
             <td><code>${_esc(art.id)}</code></td>
             <td>${(art.tags||[]).map(t => `<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;background:var(--bg-input);margin:1px">${_esc(t)}</span>`).join(' ')}</td>
             <td>${artLeague}</td>
-            <td><button class="btn btn-secondary btn-sm" onclick="App.tutOpenArticle('${cat.id}','${art.id}')">Edit</button></td>
+            <td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.tutOpenArticle('${cat.id}','${art.id}')">Edit</button> <button class="btn btn-secondary btn-sm" onclick="App.tutDuplicateArticle('${cat.id}','${art.id}')">Dup</button></td>
           </tr>`;
         }
         html += '</tbody></table>';
@@ -11072,7 +11072,9 @@
         document.getElementById('tut-art-markdown').value = data.markdown || '';
         document.getElementById('tut-editor-title').textContent = 'Edit: ' + (art.title || artId);
         document.getElementById('tut-save-status').textContent = '';
+        document.getElementById('tut-validation-bar').style.display = 'none';
         _tutShowView('editor');
+        _tutRenderPreview();
         _tutStatus('');
       })
       .catch(err => _tutStatus('Error: ' + err));
@@ -11082,7 +11084,21 @@
   function tutSaveArticle() {
     if (!_tutEditingCat || !_tutEditingArt) return;
     const saveStatus = document.getElementById('tut-save-status');
-    saveStatus.textContent = 'Saving…';
+    const saveStatusBottom = document.getElementById('tut-save-status-bottom');
+    const _setStatus = (msg, color) => {
+      if (saveStatus) { saveStatus.textContent = msg; saveStatus.style.color = color || ''; }
+      if (saveStatusBottom) { saveStatusBottom.textContent = msg; saveStatusBottom.style.color = color || ''; }
+    };
+
+    // Validate first
+    const markdown = document.getElementById('tut-art-markdown').value;
+    const errors = _tutValidate(markdown);
+    _tutShowValidation(errors);
+    if (errors.length) {
+      _setStatus(`${errors.length} validation error(s) — fix before saving`, 'var(--danger)');
+      return;
+    }
+    _setStatus('Saving…', '');
 
     const today = new Date().toISOString().slice(0, 10);
     const tags = document.getElementById('tut-art-tags').value
@@ -11109,16 +11125,13 @@
       .then(r => r.json())
       .then(data => {
         if (data.ok) {
-          saveStatus.textContent = 'Saved ✓';
-          saveStatus.style.color = 'var(--success)';
+          _setStatus('Saved ✓', 'var(--success)');
         } else {
-          saveStatus.textContent = 'Error: ' + (data.error || 'unknown');
-          saveStatus.style.color = 'var(--danger)';
+          _setStatus('Error: ' + (data.error || 'unknown'), 'var(--danger)');
         }
       })
       .catch(err => {
-        saveStatus.textContent = 'Error: ' + err;
-        saveStatus.style.color = 'var(--danger)';
+        _setStatus('Error: ' + err, 'var(--danger)');
       });
   }
 
@@ -11142,6 +11155,50 @@
         }
       })
       .catch(err => alert('Delete failed: ' + err));
+  }
+
+  // ── Duplicate article ──
+  function tutDuplicateArticle(catId, artId) {
+    _tutStatus('Loading article for duplication…');
+    fetch(`${ADMIN_BASE}/tutorial/article/${catId}/${artId}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) { _tutStatus('Error: ' + (data.error || 'unknown')); return; }
+        const art = data.article;
+        const newId = prompt('New article ID (slug):', artId + '-copy');
+        if (!newId || !newId.trim()) { _tutStatus(''); return; }
+
+        const today = new Date().toISOString().slice(0, 10);
+        const body = {
+          id: newId.trim(),
+          title: art.title + ' (Copy)',
+          summary: art.summary,
+          tags: art.tags || [],
+          leagueFilter: art.leagueFilter,
+          relatedArticles: art.relatedArticles || [],
+          lastUpdated: today,
+          markdown: data.markdown || '',
+        };
+
+        fetch(`${ADMIN_BASE}/tutorial/article/${catId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body),
+        })
+          .then(r => r.json())
+          .then(res => {
+            if (res.ok) {
+              _tutStatus('Duplicated ✓');
+              loadTutorialManifest();
+            } else {
+              alert('Duplicate failed: ' + (res.error || 'unknown'));
+              _tutStatus('');
+            }
+          })
+          .catch(err => { alert('Duplicate failed: ' + err); _tutStatus(''); });
+      })
+      .catch(err => { _tutStatus('Error: ' + err); });
   }
 
   // ── New article ──
@@ -11341,6 +11398,398 @@
       .catch(err => alert('Save failed: ' + err));
   }
 
+  // ── Insert block templates ──
+  const _TUT_TEMPLATES = {
+    'glossary': '[term]{definition}',
+    'rating': ':::rating\nattribute: \nscale: 20-80\nexample: 50\ndescription: \n:::\n',
+    'callout-tip': ':::callout type=tip\n\n:::\n',
+    'callout-info': ':::callout type=info\n\n:::\n',
+    'callout-warning': ':::callout type=warning\n\n:::\n',
+    'callout-important': ':::callout type=important\n\n:::\n',
+    'compare': ':::compare\n| | Option A | Option B |\n|---|---|---|\n| Metric | Value | Value |\n:::\n',
+    'link': ':::link\ntarget: team\nlabel: Go to your team →\nleague: auto\n:::\n',
+    'detail': ':::detail title=""\n\n:::\n',
+    'player-hitter': ':::player-example\nposition: CF\nattributes:\n  contact: 50\n  power: 50\n  eye: 50\n  speed: 50\n  fielding: 50\ncaption: ""\n:::\n',
+    'player-pitcher': ':::player-example\nposition: SP\nattributes:\n  stuff: 50\n  control: 50\n  stamina: 50\n  velocity: 50\ncaption: ""\n:::\n',
+    'league-mlb': ':::league filter=MLB\n\n:::\n',
+    'league-college': ':::league filter=College\n\n:::\n',
+  };
+
+  function _tutInsertBlock(key) {
+    const ta = document.getElementById('tut-art-markdown');
+    if (!ta) return;
+    const template = _TUT_TEMPLATES[key];
+    if (!template) return;
+
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const text = ta.value;
+
+    // Ensure we're on a fresh line
+    const prefix = (start > 0 && text[start - 1] !== '\n') ? '\n\n' : (start > 1 && text[start - 2] !== '\n') ? '\n' : '';
+
+    ta.value = text.slice(0, start) + prefix + template + text.slice(end);
+    // Place cursor inside the block (after the opening line)
+    const cursorPos = start + prefix.length + template.indexOf('\n') + 1;
+    ta.selectionStart = ta.selectionEnd = cursorPos;
+    ta.focus();
+    _tutUpdatePreview();
+  }
+
+  // ── Live preview renderer ──
+  let _tutPreviewTimer = null;
+
+  function _tutUpdatePreview() {
+    clearTimeout(_tutPreviewTimer);
+    _tutPreviewTimer = setTimeout(_tutRenderPreview, 250);
+  }
+
+  function _tutRenderPreview() {
+    const ta = document.getElementById('tut-art-markdown');
+    const pane = document.getElementById('tut-preview-pane');
+    if (!ta || !pane) return;
+
+    const md = ta.value;
+    pane.innerHTML = _tutMdToHtml(md);
+  }
+
+  function _tutMdToHtml(md) {
+    // Split into segments: custom blocks (:::) and regular markdown
+    const lines = md.split('\n');
+    let html = '';
+    let i = 0;
+    let mdBuf = [];
+
+    function flushMd() {
+      if (mdBuf.length) {
+        html += _tutRenderBasicMd(mdBuf.join('\n'));
+        mdBuf = [];
+      }
+    }
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const blockMatch = line.match(/^:::(rating|callout|compare|link|detail|player-example|league)\b(.*)/);
+      if (blockMatch) {
+        flushMd();
+        const blockType = blockMatch[1];
+        const blockArgs = blockMatch[2].trim();
+        const blockLines = [];
+        i++;
+        while (i < lines.length && lines[i].trim() !== ':::') {
+          blockLines.push(lines[i]);
+          i++;
+        }
+        i++; // skip closing :::
+        html += _tutRenderBlock(blockType, blockArgs, blockLines);
+      } else {
+        mdBuf.push(line);
+        i++;
+      }
+    }
+    flushMd();
+    return html;
+  }
+
+  function _tutRenderBasicMd(text) {
+    // Minimal markdown -> HTML for preview
+    let html = '';
+    const paragraphs = text.split(/\n{2,}/);
+    for (const para of paragraphs) {
+      const trimmed = para.trim();
+      if (!trimmed) continue;
+
+      // Headings
+      if (trimmed.startsWith('#### ')) {
+        html += `<h4 style="color:var(--text-primary);margin:16px 0 8px;font-size:14px">${_tutInline(trimmed.slice(5))}</h4>`;
+      } else if (trimmed.startsWith('### ')) {
+        html += `<h3 style="color:var(--text-primary);margin:20px 0 10px;font-size:16px">${_tutInline(trimmed.slice(4))}</h3>`;
+      } else if (trimmed.startsWith('## ')) {
+        html += `<h2 style="color:var(--text-primary);margin:24px 0 12px;font-size:18px;border-bottom:1px solid var(--border);padding-bottom:6px">${_tutInline(trimmed.slice(3))}</h2>`;
+      } else if (trimmed.match(/^[-*] /m)) {
+        // Unordered list
+        const items = trimmed.split('\n').filter(l => l.match(/^[-*] /));
+        html += '<ul style="margin:8px 0 12px 20px;color:var(--text-secondary)">';
+        for (const item of items) html += `<li style="margin:3px 0">${_tutInline(item.replace(/^[-*] /, ''))}</li>`;
+        html += '</ul>';
+      } else if (trimmed.match(/^\d+\. /m)) {
+        // Ordered list
+        const items = trimmed.split('\n').filter(l => l.match(/^\d+\. /));
+        html += '<ol style="margin:8px 0 12px 20px;color:var(--text-secondary)">';
+        for (const item of items) html += `<li style="margin:3px 0">${_tutInline(item.replace(/^\d+\. /, ''))}</li>`;
+        html += '</ol>';
+      } else {
+        html += `<p style="margin:8px 0;color:var(--text-secondary)">${_tutInline(trimmed.replace(/\n/g, ' '))}</p>`;
+      }
+    }
+    return html;
+  }
+
+  function _tutInline(text) {
+    let s = _esc(text);
+    // Glossary tooltips [term]{definition}
+    s = s.replace(/\[([^\]]+)\]\{([^}]+)\}/g,
+      '<span style="color:var(--accent);border-bottom:1px dotted var(--accent);cursor:help" title="$2">$1</span>');
+    // Bold
+    s = s.replace(/\*\*(.+?)\*\*/g, '<strong style="color:var(--text-primary)">$1</strong>');
+    // Italic
+    s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    // Inline code
+    s = s.replace(/`([^`]+)`/g, '<code style="background:var(--bg-input);padding:1px 5px;border-radius:3px;font-size:12px">$1</code>');
+    return s;
+  }
+
+  function _tutRenderBlock(type, args, lines) {
+    const content = lines.join('\n');
+    switch (type) {
+      case 'rating': return _tutRenderRating(lines);
+      case 'callout': return _tutRenderCallout(args, content);
+      case 'compare': return _tutRenderCompare(lines);
+      case 'link': return _tutRenderLink(lines);
+      case 'detail': return _tutRenderDetail(args, content);
+      case 'player-example': return _tutRenderPlayerCard(lines);
+      case 'league': return _tutRenderLeague(args, content);
+      default: return `<div style="padding:8px;border:1px dashed var(--border);margin:8px 0;color:var(--text-muted)">Unknown block: ${type}</div>`;
+    }
+  }
+
+  function _tutParseFields(lines) {
+    const fields = {};
+    for (const line of lines) {
+      const m = line.match(/^(\w[\w-]*):\s*(.+)/);
+      if (m) fields[m[1]] = m[2].trim();
+    }
+    return fields;
+  }
+
+  function _tutRenderRating(lines) {
+    const f = _tutParseFields(lines);
+    const attr = f.attribute || '?';
+    const scale = f.scale || '20-80';
+    const [min, max] = scale.split('-').map(Number);
+    const example = parseInt(f.example || '50', 10);
+    const desc = f.description || '';
+    const pct = Math.max(0, Math.min(100, ((example - min) / (max - min)) * 100));
+    const color = pct < 30 ? 'var(--danger)' : pct < 50 ? 'var(--warning)' : pct < 75 ? 'var(--accent)' : 'var(--success)';
+
+    return `<div style="margin:12px 0;padding:14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="font-weight:600;color:var(--text-primary)">${_esc(attr)}</span>
+        <span style="background:${color};color:#fff;padding:2px 10px;border-radius:12px;font-size:13px;font-weight:700">${example}</span>
+      </div>
+      <div style="height:8px;background:var(--bg-input);border-radius:4px;overflow:hidden;margin-bottom:4px">
+        <div style="width:${pct}%;height:100%;background:${color};border-radius:4px;transition:width .3s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:6px">
+        <span>${min}</span><span>${max}</span>
+      </div>
+      <div style="font-size:13px;color:var(--text-secondary)">${_esc(desc)}</div>
+    </div>`;
+  }
+
+  function _tutRenderCallout(args, content) {
+    const typeMatch = args.match(/type=(\w+)/);
+    const ctype = typeMatch ? typeMatch[1] : 'info';
+    const colors = { tip: 'var(--success)', info: 'var(--info)', warning: 'var(--warning)', important: 'var(--danger)' };
+    const icons = { tip: '💡', info: 'ℹ️', warning: '⚠️', important: '❗' };
+    const color = colors[ctype] || colors.info;
+    const icon = icons[ctype] || icons.info;
+    const label = ctype.charAt(0).toUpperCase() + ctype.slice(1);
+
+    return `<div style="margin:12px 0;padding:12px 14px;background:var(--bg-card);border-left:4px solid ${color};border-radius:var(--radius-sm)">
+      <div style="font-size:12px;font-weight:700;color:${color};margin-bottom:6px">${icon} ${label}</div>
+      <div style="color:var(--text-secondary);font-size:13px">${_tutInline(content.trim())}</div>
+    </div>`;
+  }
+
+  function _tutRenderCompare(lines) {
+    // Parse markdown table
+    const tableLines = lines.filter(l => l.trim().startsWith('|'));
+    if (tableLines.length < 2) return '<div style="color:var(--text-muted);margin:8px 0">Compare block: no table found</div>';
+
+    let html = '<div style="margin:12px 0;overflow-x:auto"><table class="data-table" style="width:100%;font-size:13px">';
+    tableLines.forEach((line, idx) => {
+      if (line.replace(/[|\-\s]/g, '').length === 0) return; // separator row
+      const cells = line.split('|').slice(1, -1).map(c => c.trim());
+      const tag = idx === 0 ? 'th' : 'td';
+      html += '<tr>';
+      cells.forEach(cell => { html += `<${tag} style="padding:6px 10px">${_tutInline(cell)}</${tag}>`; });
+      html += '</tr>';
+    });
+    html += '</table></div>';
+    return html;
+  }
+
+  function _tutRenderLink(lines) {
+    const f = _tutParseFields(lines);
+    return `<div style="margin:12px 0">
+      <div style="display:inline-block;padding:10px 20px;background:var(--accent);color:#fff;border-radius:var(--radius-sm);font-weight:600;font-size:14px;cursor:default">
+        ${_esc(f.label || 'Link')} →
+      </div>
+      <span style="font-size:11px;color:var(--text-muted);margin-left:8px">→ ${_esc(f.target || '?')} (${_esc(f.league || 'auto')})</span>
+    </div>`;
+  }
+
+  function _tutRenderDetail(args, content) {
+    const titleMatch = args.match(/title="([^"]*)"/);
+    const title = titleMatch ? titleMatch[1] : 'Details';
+    return `<details style="margin:12px 0;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-card)">
+      <summary style="padding:10px 14px;cursor:pointer;font-weight:600;color:var(--text-primary);font-size:14px">${_esc(title)}</summary>
+      <div style="padding:10px 14px;border-top:1px solid var(--border);color:var(--text-secondary);font-size:13px">${_tutRenderBasicMd(content)}</div>
+    </details>`;
+  }
+
+  function _tutRenderPlayerCard(lines) {
+    const f = _tutParseFields(lines);
+    const position = f.position || '??';
+    const caption = (f.caption || '').replace(/^"|"$/g, '');
+    // Parse attributes (indented lines)
+    const attrs = {};
+    let inAttrs = false;
+    for (const line of lines) {
+      if (line.trim().startsWith('attributes:')) { inAttrs = true; continue; }
+      if (inAttrs) {
+        const am = line.match(/^\s+(\w+):\s*(\d+)/);
+        if (am) attrs[am[1]] = parseInt(am[2], 10);
+        else inAttrs = false;
+      }
+    }
+
+    let attrHtml = '';
+    for (const [k, v] of Object.entries(attrs)) {
+      const color = v >= 65 ? 'var(--accent)' : v >= 55 ? 'var(--success)' : v >= 45 ? 'var(--text-secondary)' : 'var(--danger)';
+      attrHtml += `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--bg-input)">
+        <span style="color:var(--text-muted);font-size:12px;text-transform:capitalize">${k}</span>
+        <span style="font-weight:700;color:${color};font-size:13px">${v}</span>
+      </div>`;
+    }
+
+    return `<div style="margin:12px 0;padding:14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);max-width:280px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="background:var(--accent);color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700">${_esc(position)}</span>
+        <span style="font-size:12px;color:var(--text-muted)">Example Player</span>
+      </div>
+      ${attrHtml}
+      ${caption ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:12px;color:var(--text-secondary);font-style:italic">${_esc(caption)}</div>` : ''}
+    </div>`;
+  }
+
+  function _tutRenderLeague(args, content) {
+    const filterMatch = args.match(/filter=(\w+)/);
+    const league = filterMatch ? filterMatch[1] : '?';
+    const color = league === 'MLB' ? 'var(--accent)' : 'var(--success)';
+    return `<div style="margin:12px 0;padding:12px 14px;border:1px dashed ${color};border-radius:var(--radius-sm);position:relative">
+      <span style="position:absolute;top:-8px;left:12px;background:var(--bg-dark);padding:0 6px;font-size:11px;font-weight:700;color:${color}">${_esc(league)}</span>
+      <div style="color:var(--text-secondary);font-size:13px">${_tutRenderBasicMd(content)}</div>
+    </div>`;
+  }
+
+  // ── Validation ──
+  function _tutValidate(md) {
+    const errors = [];
+    const lines = md.split('\n');
+    let i = 0;
+    let blockStack = [];
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const openMatch = line.match(/^:::(rating|callout|compare|link|detail|player-example|league)\b(.*)/);
+      if (openMatch) {
+        blockStack.push({ type: openMatch[1], args: openMatch[2].trim(), line: i + 1 });
+      } else if (line.trim() === ':::' && blockStack.length) {
+        const block = blockStack.pop();
+        // Validate block-specific fields
+        const blockLines = lines.slice(block.line, i);
+        _tutValidateBlock(block.type, block.args, blockLines, block.line, errors);
+      } else if (line.trim() === ':::' && !blockStack.length) {
+        errors.push(`Line ${i + 1}: Closing ::: without a matching opening block`);
+      }
+      i++;
+    }
+
+    // Unclosed blocks
+    for (const b of blockStack) {
+      errors.push(`Line ${b.line}: :::${b.type} block never closed (missing :::)`);
+    }
+
+    // Check glossary bracket matching
+    const glossaryRe = /\[([^\]]*)\]\{([^}]*)\}/g;
+    // Check for unmatched patterns
+    const partial1 = /\[[^\]]*\]\{[^}]*$/gm;
+    const partial2 = /\[[^\]]*\]$/gm;
+    let lineNum = 0;
+    for (const ln of lines) {
+      lineNum++;
+      if (ln.match(/\[[^\]]*\]\{/) && !ln.match(/\[[^\]]*\]\{[^}]*\}/)) {
+        errors.push(`Line ${lineNum}: Glossary tooltip has unclosed {definition}`);
+      }
+    }
+
+    return errors;
+  }
+
+  function _tutValidateBlock(type, args, lines, lineNum, errors) {
+    const fields = {};
+    for (const l of lines) {
+      const m = l.match(/^(\w[\w-]*):\s*(.+)/);
+      if (m) fields[m[1]] = m[2].trim();
+    }
+
+    switch (type) {
+      case 'rating':
+        for (const f of ['attribute', 'scale', 'example', 'description']) {
+          if (!fields[f]) errors.push(`Line ${lineNum}: :::rating missing required field "${f}"`);
+        }
+        break;
+      case 'callout': {
+        const m = args.match(/type=(\w+)/);
+        if (!m) errors.push(`Line ${lineNum}: :::callout missing type= (tip|info|warning|important)`);
+        else if (!['tip','info','warning','important'].includes(m[1]))
+          errors.push(`Line ${lineNum}: :::callout type="${m[1]}" is not valid (use tip|info|warning|important)`);
+        break;
+      }
+      case 'compare': {
+        const tableLines = lines.filter(l => l.trim().startsWith('|'));
+        if (tableLines.length < 2) errors.push(`Line ${lineNum}: :::compare must contain a markdown table`);
+        break;
+      }
+      case 'link':
+        for (const f of ['target', 'label', 'league']) {
+          if (!fields[f]) errors.push(`Line ${lineNum}: :::link missing required field "${f}"`);
+        }
+        break;
+      case 'detail': {
+        if (!args.match(/title="[^"]*"/)) errors.push(`Line ${lineNum}: :::detail missing title="..." attribute`);
+        break;
+      }
+      case 'player-example':
+        if (!fields.position) errors.push(`Line ${lineNum}: :::player-example missing "position" field`);
+        if (!lines.some(l => l.match(/^\s+\w+:\s*\d+/))) errors.push(`Line ${lineNum}: :::player-example has no attributes`);
+        break;
+      case 'league': {
+        const m = args.match(/filter=(\w+)/);
+        if (!m) errors.push(`Line ${lineNum}: :::league missing filter= (MLB|College)`);
+        else if (!['MLB','College'].includes(m[1]))
+          errors.push(`Line ${lineNum}: :::league filter="${m[1]}" is not valid (use MLB|College)`);
+        break;
+      }
+    }
+  }
+
+  function _tutShowValidation(errors) {
+    const bar = document.getElementById('tut-validation-bar');
+    if (!bar) return;
+    if (!errors.length) {
+      bar.style.display = 'none';
+      return;
+    }
+    bar.style.display = 'block';
+    bar.style.background = 'rgba(239,68,68,0.1)';
+    bar.style.border = '1px solid var(--danger)';
+    bar.style.color = 'var(--danger)';
+    bar.innerHTML = `<strong>⚠ ${errors.length} issue${errors.length > 1 ? 's' : ''} found:</strong><ul style="margin:6px 0 0 18px">${errors.map(e => `<li>${_esc(e)}</li>`).join('')}</ul>`;
+  }
+
   // ── Tutorial event listeners ──
   function _setupTutorialListeners() {
     const btn = (id, fn) => {
@@ -11361,6 +11810,27 @@
     btn('btn-tut-glossary-add', tutAddGlossaryRow);
     btn('btn-tut-newart-save', tutSaveNewArticle);
     btn('btn-tut-newart-cancel', () => _tutShowView('list'));
+
+    // Insert toolbar buttons
+    document.querySelectorAll('.tut-insert-btn').forEach(btn => {
+      btn.addEventListener('click', () => _tutInsertBlock(btn.dataset.tutInsert));
+    });
+
+    // Live preview on textarea input
+    const ta = document.getElementById('tut-art-markdown');
+    if (ta) {
+      ta.addEventListener('input', _tutUpdatePreview);
+      // Tab key inserts spaces instead of jumping focus
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const start = ta.selectionStart;
+          ta.value = ta.value.slice(0, start) + '  ' + ta.value.slice(ta.selectionEnd);
+          ta.selectionStart = ta.selectionEnd = start + 2;
+          _tutUpdatePreview();
+        }
+      });
+    }
   }
 
   // Expose to global App for inline onclick handlers
@@ -11370,6 +11840,7 @@
     faUpdateTotals,
     tutOpenArticle,
     tutNewArticle,
+    tutDuplicateArticle,
     tutEditCategory,
     tutDeleteCategory,
   });

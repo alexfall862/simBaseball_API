@@ -795,6 +795,8 @@ def fielding_leaderboard():
         return jsonify(error="missing_field",
                        message="league_year_id is required"), 400
 
+    from services.listed_position import POSITION_DISPLAY
+
     league_level = request.args.get("league_level", type=int)
     position_code = request.args.get("position_code")
     team_id = request.args.get("team_id", type=int)
@@ -915,7 +917,7 @@ def fielding_leaderboard():
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
                 "team_level": int(r["team_level"]),
-                "pos": r["position_code"],
+                "pos": POSITION_DISPLAY.get(r["position_code"], r["position_code"]),
                 "g": g, "inn": inn,
                 "po": po, "a": a, "e": e,
                 "tc": tc,
@@ -1199,6 +1201,7 @@ def player_stats(player_id: int):
     Optionally include per-game log via ?include=gamelog.
     """
     from sqlalchemy import text as sa_text
+    from services.listed_position import POSITION_DISPLAY
 
     league_year_id = request.args.get("league_year_id", type=int)
     include_gamelog = request.args.get("include", "") == "gamelog"
@@ -1437,7 +1440,7 @@ def player_stats(player_id: int):
                 "league_year_id": int(r["league_year_id"]),
                 "team_id": int(r["team_id"]),
                 "team_abbrev": r["team_abbrev"],
-                "pos": r["position_code"],
+                "pos": POSITION_DISPLAY.get(r["position_code"], r["position_code"]),
                 "g": int(r["games"]), "inn": int(r["innings"]),
                 "po": int(r["putouts"]), "a": int(r["assists"]),
                 "e": int(r["errors"]),
@@ -1650,6 +1653,7 @@ def position_usage():
     Query params: league_year_id (required), team_id, player_id, season_week
     """
     from sqlalchemy import text as sa_text
+    from services.listed_position import POSITION_DISPLAY
 
     league_year_id = request.args.get("league_year_id", type=int)
     if not league_year_id:
@@ -1699,7 +1703,7 @@ def position_usage():
             "name": f"{r['firstName']} {r['lastName']}",
             "team_id": int(r["team_id"]),
             "team_abbrev": r["team_abbrev"],
-            "position_code": r["position_code"],
+            "position_code": POSITION_DISPLAY.get(r["position_code"], r["position_code"]),
             "starts": int(r["total_starts"]),
             "vs_l_starts": int(r["vs_l"]),
             "vs_r_starts": int(r["vs_r"]),
@@ -1724,6 +1728,7 @@ def player_splits():
     Query params: league_year_id (required), player_id or team_id
     """
     from sqlalchemy import text as sa_text
+    from services.listed_position import POSITION_DISPLAY
 
     league_year_id = request.args.get("league_year_id", type=int)
     if not league_year_id:
@@ -1763,7 +1768,7 @@ def player_splits():
         splits = [{
             "player_id": int(r["player_id"]),
             "name": f"{r['firstName']} {r['lastName']}",
-            "position_code": r["position_code"],
+            "position_code": POSITION_DISPLAY.get(r["position_code"], r["position_code"]),
             "vs_hand": r["vs_hand"],
             "starts": int(r["total_starts"]),
         } for r in rows]
@@ -1787,6 +1792,8 @@ def player_gamelog(player_id: int):
     Query params: league_year_id (required)
     """
     from sqlalchemy import text as sa_text
+
+    from services.listed_position import POSITION_DISPLAY
 
     league_year_id = request.args.get("league_year_id", type=int)
     if not league_year_id:
@@ -1863,7 +1870,7 @@ def player_gamelog(player_id: int):
                 "week": int(r["season_week"]), "subweek": r["season_subweek"],
                 "opponent": r["opponent"],
                 "result": f"{'W' if r['team_score'] > r['opp_score'] else 'L'} {r['team_score']}-{r['opp_score']}",
-                "pos": r["position_code"], "bo": int(r["batting_order"]),
+                "pos": POSITION_DISPLAY.get(r["position_code"], r["position_code"]), "bo": int(r["batting_order"]),
                 "ab": ab, "r": int(r["runs"]), "h": h,
                 "2b": d, "3b": t, "hr": hr,
                 "rbi": int(r["rbi"]), "bb": bb, "so": int(r["strikeouts"]),

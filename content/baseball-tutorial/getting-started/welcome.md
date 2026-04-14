@@ -1,6 +1,6 @@
 ---
 title: Welcome to the Sim
-lastUpdated: 2026-04-12
+lastUpdated: 2026-04-13
 ---
 
 ## What Is This?

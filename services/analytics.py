@@ -2176,10 +2176,12 @@ def defensive_position_importance(
         "lyid": league_year_id, "level": league_level, "min_inn": min_innings,
     }).mappings().all()
 
+    from services.listed_position import POSITION_DISPLAY
+
     # Group by position
     by_pos: Dict[str, List] = {}
     for row in rows:
-        pos = row["position_code"]
+        pos = POSITION_DISPLAY.get(row["position_code"], row["position_code"])
         stats = _derive_defensive_stats(row)
         if stats is None:
             continue

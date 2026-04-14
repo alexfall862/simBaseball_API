@@ -4321,14 +4321,22 @@
 
         <!-- Article Editor (hidden by default) -->
         <div id="tut-article-editor" style="display:none">
-          <div class="card">
-            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+          <!-- Header bar -->
+          <div class="card" style="margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:12px">
               <button id="btn-tut-back" class="btn btn-secondary">&larr; Back</button>
               <h3 id="tut-editor-title" style="margin:0">Edit Article</h3>
-              <button id="btn-tut-save" class="btn btn-primary" style="margin-left:auto">Save</button>
-              <button id="btn-tut-delete-article" class="btn btn-danger">Delete</button>
+              <span id="tut-save-status" class="text-muted" style="margin-left:8px"></span>
+              <div style="margin-left:auto;display:flex;gap:8px">
+                <button id="btn-tut-save" class="btn btn-primary">Save</button>
+                <button id="btn-tut-delete-article" class="btn btn-danger">Delete</button>
+              </div>
             </div>
-            <div class="form-grid" style="margin-bottom:16px">
+          </div>
+
+          <!-- Metadata fields -->
+          <div class="card" style="margin-bottom:12px">
+            <div class="form-grid">
               <div class="form-group">
                 <label>Article ID (slug)</label>
                 <input type="text" id="tut-art-id" class="input" readonly style="opacity:0.6" />
@@ -4358,13 +4366,63 @@
                 <input type="text" id="tut-art-related" class="input" placeholder="hitting/contact-vs-power, roster/setting-your-lineup" />
               </div>
             </div>
-            <div class="form-group" style="margin-bottom:12px">
-              <label>Markdown Content</label>
-              <textarea id="tut-art-markdown" class="input" style="width:100%;min-height:500px;font-family:monospace;font-size:13px;line-height:1.5;resize:vertical;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px"></textarea>
+          </div>
+
+          <!-- Insert toolbar -->
+          <div class="card" style="margin-bottom:12px;padding:8px 12px">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span class="text-muted" style="font-size:11px;margin-right:4px">INSERT:</span>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="glossary" title="Glossary tooltip [term]{definition}">Glossary</button>
+              <span style="color:var(--border)">|</span>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="rating" title="Rating visualizer scale bar">Rating</button>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="player-hitter" title="Mock hitter player card">Player (Hitter)</button>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="player-pitcher" title="Mock pitcher player card">Player (Pitcher)</button>
+              <span style="color:var(--border)">|</span>
+              <button class="btn btn-sm tut-insert-btn" style="border-left:3px solid var(--success)" data-tut-insert="callout-tip" title="Green tip callout">Tip</button>
+              <button class="btn btn-sm tut-insert-btn" style="border-left:3px solid var(--info)" data-tut-insert="callout-info" title="Blue info callout">Info</button>
+              <button class="btn btn-sm tut-insert-btn" style="border-left:3px solid var(--warning)" data-tut-insert="callout-warning" title="Amber warning callout">Warning</button>
+              <button class="btn btn-sm tut-insert-btn" style="border-left:3px solid var(--danger)" data-tut-insert="callout-important" title="Red important callout">Important</button>
+              <span style="color:var(--border)">|</span>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="compare" title="Responsive comparison table">Compare</button>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="link" title="Sim navigation button">Sim Link</button>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="detail" title="Collapsible detail section">Detail</button>
+              <span style="color:var(--border)">|</span>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="league-mlb" title="MLB-only content block">MLB Only</button>
+              <button class="btn btn-sm tut-insert-btn" data-tut-insert="league-college" title="College-only content block">College Only</button>
             </div>
-            <div style="display:flex;gap:12px">
+          </div>
+
+          <!-- Validation bar -->
+          <div id="tut-validation-bar" style="display:none;margin-bottom:12px;padding:8px 14px;border-radius:var(--radius-sm);font-size:13px"></div>
+
+          <!-- Split pane: editor + preview -->
+          <div style="display:flex;gap:12px;align-items:stretch">
+            <!-- Editor pane -->
+            <div style="flex:1;min-width:0">
+              <div class="card" style="height:100%;display:flex;flex-direction:column">
+                <div style="display:flex;align-items:center;margin-bottom:8px">
+                  <label style="font-weight:600;font-size:13px">Markdown</label>
+                </div>
+                <textarea id="tut-art-markdown" class="input" style="flex:1;width:100%;min-height:600px;font-family:'Cascadia Code','Fira Code','Consolas',monospace;font-size:13px;line-height:1.6;resize:vertical;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;tab-size:2"></textarea>
+              </div>
+            </div>
+            <!-- Preview pane -->
+            <div style="flex:1;min-width:0">
+              <div class="card" style="height:100%;display:flex;flex-direction:column">
+                <div style="display:flex;align-items:center;margin-bottom:8px">
+                  <label style="font-weight:600;font-size:13px">Preview</label>
+                  <span class="text-muted" style="font-size:11px;margin-left:8px">Approximate rendering</span>
+                </div>
+                <div id="tut-preview-pane" style="flex:1;min-height:600px;overflow-y:auto;padding:16px;background:var(--bg-dark);border:1px solid var(--border);border-radius:var(--radius-sm);line-height:1.7;font-size:14px"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom save bar -->
+          <div class="card" style="margin-top:12px">
+            <div style="display:flex;gap:12px;align-items:center">
               <button id="btn-tut-save-bottom" class="btn btn-primary">Save</button>
-              <span id="tut-save-status" class="text-muted"></span>
+              <span id="tut-save-status-bottom" class="text-muted"></span>
             </div>
           </div>
         </div>

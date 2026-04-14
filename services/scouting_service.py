@@ -45,8 +45,8 @@ _COST_CONFIG_KEYS = {
     "draft_attrs_fuzzed":        ("draft_attrs_fuzzed_cost",         10),
     "draft_attrs_precise":       ("draft_attrs_precise_cost",        20),
     "draft_potential_precise":   ("draft_potential_precise_cost",     15),
-    "pro_attrs_precise":         ("pro_attrs_precise_cost",          15),
-    "pro_potential_precise":     ("pro_potential_precise_cost",       15),
+    "pro_attrs_precise":         ("pro_attrs_precise_cost",          10),
+    "pro_potential_precise":     ("pro_potential_precise_cost",       50),
 }
 
 # 20-80 score -> letter grade mapping (kept for backward compat imports)
@@ -95,9 +95,9 @@ def get_or_create_budget(conn, org_id, league_year_id):
 
     config = get_scouting_config(conn)
 
-    # MLB orgs get larger budget than college
+    # Determine budget by org type
     if MLB_ORG_MIN <= org_id <= MLB_ORG_MAX:
-        total = int(config.get("mlb_budget_per_year", 1000))
+        total = int(config.get("mlb_budget_per_year", 2000))
     else:
         total = int(config.get("college_budget_per_year", 2000))
 
