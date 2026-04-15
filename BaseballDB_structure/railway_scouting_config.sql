@@ -42,15 +42,7 @@ CREATE TABLE `scouting_config` (
 
 --
 -- Dumping data for table `scouting_config`
---
 
-LOCK TABLES `scouting_config` WRITE;
-/*!40000 ALTER TABLE `scouting_config` DISABLE KEYS */;
-INSERT INTO `scouting_config` VALUES (1,'mlb_budget_per_year','1000','Scouting points per MLB org per league year'),(2,'college_budget_per_year','500','Scouting points per college org per league year'),(3,'hs_report_cost','10','Cost: HS text scouting report'),(4,'hs_potential_cost_legacy','25','DEPRECATED: replaced by recruit_potential_fuzzed_cost + recruit_potential_precise_cost'),(5,'pro_numeric_cost_legacy','15','DEPRECATED: replaced by draft_attrs_fuzzed_cost + draft_attrs_precise_cost'),(6,'recruit_potential_fuzzed_cost','15','Cost: fuzzed potential for HS recruit'),(7,'recruit_potential_precise_cost','25','Cost: precise potential for HS recruit'),(8,'college_potential_precise_cost','15','Cost: precise potential for college player'),(9,'draft_attrs_fuzzed_cost','10','Cost: fuzzed 20-80 for draft-eligible player'),(10,'draft_attrs_precise_cost','20','Cost: precise 20-80 for draft-eligible player'),(11,'draft_potential_precise_cost','15','Cost: precise potential for draft-eligible player'),(12,'pro_attrs_precise_cost','15','Cost: precise 20-80 for pro roster player'),(13,'pro_potential_precise_cost','15','Cost: precise potential for pro roster player');
-/*!40000 ALTER TABLE `scouting_config` ENABLE KEYS */;
-UNLOCK TABLES;
-SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
-/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
 /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
 /*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;

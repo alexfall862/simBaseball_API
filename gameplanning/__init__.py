@@ -905,9 +905,9 @@ def put_rotation(team_id: int):
             seen_slots.add(slot_num)
         if not isinstance(pid, int):
             errors.append(f"slots[{i}].player_id is required (int)")
-        elif pid in seen_players:
+        elif pid != 0 and pid in seen_players:
             errors.append(f"duplicate player_id: {pid}")
-        else:
+        elif pid != 0:
             seen_players.add(pid)
 
     if errors:

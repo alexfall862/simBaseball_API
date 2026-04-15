@@ -9891,7 +9891,7 @@
     const selects = document.querySelectorAll('.gpa-rot-pitcher');
     const slots = [];
     selects.forEach((sel, i) => {
-      if (i < size && sel.value) slots.push({ slot: i + 1, player_id: parseInt(sel.value) });
+      if (i < size) slots.push({ slot: i + 1, player_id: sel.value ? parseInt(sel.value) : 0 });
     });
     _gpaPut(`/gameplanning/team/${_gpaTeamId}/rotation`, { rotation_size: size, slots }, 'Rotation');
   }

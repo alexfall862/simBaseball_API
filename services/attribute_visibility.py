@@ -318,12 +318,22 @@ def _recompute_pitch_ovrs_from_display(base_values):
 
 
 # ---------------------------------------------------------------------------
-# Derived displayovr from visible ratings
+# Letter-grade → numeric conversion for derived ratings
 # ---------------------------------------------------------------------------
 
-# NOTE: _derive_raw_ovr and percentile_rank_displayovr were deleted in the
-# canonical displayovr refactor. All displayovr derivation now goes through
-# services.ovr_core.compute_displayovr() in _apply_visibility below.
+def _letter_grades_to_numeric(letter_ratings):
+    """
+    Convert a ratings dict with letter-grade _display values to numeric
+    20-80 midpoints via _GRADE_TO_SCORE.
+
+    Returns a new dict with only the successfully converted entries,
+    suitable for compute_all_position_ratings() / compute_displayovr().
+    """
+    numeric = {}
+    for key, val in letter_ratings.items():
+        if key.endswith("_display") and val in _GRADE_TO_SCORE:
+            numeric[key] = _GRADE_TO_SCORE[val]
+    return numeric
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +383,9 @@ def _apply_visibility(
     # Level key used for displayovr peer-group ranking
     level_key = player_dict.get("league_level") or player_dict.get("current_level")
 
+    # Letter-grade contexts precompute displayovr from grade midpoints
+    _precomputed_displayovr = None
+
     if context == "college_recruiting":
         # Attributes: hidden
         for col in rating_cols:
@@ -418,11 +431,27 @@ def _apply_visibility(
             letter_ratings[out_name] = fuzzed
 
         ratings = letter_ratings
-        # Clear derived ratings (letter grade context has no numeric derived)
-        for key in list(ratings.keys()):
-            if key.endswith("_rating") or key.endswith("_ovr"):
-                pass  # these won't exist in letter_ratings dict
-        # No derived ratings in letter grade mode
+
+        # Derive numeric position ratings and displayovr from letter-grade
+        # midpoints so the response shape matches pro rosters.
+        numeric_attrs = _letter_grades_to_numeric(letter_ratings)
+        pitch_ovrs = _recompute_pitch_ovrs_from_display(numeric_attrs)
+        numeric_attrs.update(pitch_ovrs)
+        ratings.update(pitch_ovrs)
+
+        from services.ovr_core import compute_all_position_ratings as _cap_college
+        pos_ratings = _cap_college(
+            numeric_attrs, ptype, level_key, ovr_weights or {}, breakpoints or {},
+            key_suffix="_display",
+        )
+        ratings.update(pos_ratings)
+
+        from services.ovr_core import compute_displayovr as _cdovr_college
+        _precomputed_displayovr = _cdovr_college(
+            numeric_attrs, ptype, listed_pos_code, level_key,
+            ovr_weights or {}, breakpoints or {},
+            key_suffix="_display",
+        )
 
         # Potentials: fuzzed or precise
         if has_precise_pot:
@@ -502,6 +531,28 @@ def _apply_visibility(
                 )
                 letter_ratings[out_name] = fuzzed
             ratings = letter_ratings
+
+            # Derive numeric position ratings and displayovr from midpoints
+            numeric_attrs = _letter_grades_to_numeric(letter_ratings)
+            pitch_ovrs = _recompute_pitch_ovrs_from_display(numeric_attrs)
+            numeric_attrs.update(pitch_ovrs)
+            ratings.update(pitch_ovrs)
+
+            from services.ovr_core import compute_all_position_ratings as _cap_draft_d
+            pos_ratings = _cap_draft_d(
+                numeric_attrs, ptype, DRAFT_DISPLAY_LEVEL_ID,
+                ovr_weights or {}, breakpoints or {},
+                key_suffix="_display",
+            )
+            ratings.update(pos_ratings)
+
+            from services.ovr_core import compute_displayovr as _cdovr_draft
+            _precomputed_displayovr = _cdovr_draft(
+                numeric_attrs, ptype, listed_pos_code, DRAFT_DISPLAY_LEVEL_ID,
+                ovr_weights or {}, breakpoints or {},
+                key_suffix="_display",
+            )
+
             display_format = "letter_grade"
             attrs_precise = False
 
@@ -591,6 +642,8 @@ def _apply_visibility(
 
     if display_format == "hidden":
         displayovr_value = None
+    elif _precomputed_displayovr is not None:
+        displayovr_value = _precomputed_displayovr
     else:
         is_fa = bool(force_free_agent)
         peer_level = level_key
