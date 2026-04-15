@@ -370,19 +370,8 @@ def _apply_visibility(
     rating_cols = col_cats.get("rating", [])
     pot_cols = col_cats.get("pot", [])
 
-    # Determine the level key for distribution lookups
+    # Level key used for displayovr peer-group ranking
     level_key = player_dict.get("league_level") or player_dict.get("current_level")
-
-    # Get distribution for this player's ptype + level
-    ptype_dist = dist_config.get(ptype) or dist_config.get("all") or {}
-    dist_for_level = ptype_dist.get(level_key, {})
-
-    # For draft prospects, use Level 5 (Single-A) distributions
-    draft_dist = ptype_dist.get(DRAFT_DISPLAY_LEVEL, {})
-
-    # We need raw _base values from bio for letter grade / re-conversion.
-    # The original _build_player_with_ratings puts _base cols in bio,
-    # and the 20-80 values in ratings as *_display keys.
 
     if context == "college_recruiting":
         # Attributes: hidden
@@ -415,24 +404,14 @@ def _apply_visibility(
         pot_precise = has_precise_pot
 
     elif context == "college_roster":
-        # Attributes: fuzzed letter grades (ceiling — can never be precise)
+        # Attributes: fuzzed letter grades (ceiling — can never be precise).
+        # Use existing 20-80 _display values (already computed in build step)
+        # and convert to letter grades, then fuzz.
         letter_ratings = {}
         for col in rating_cols:
-            raw_val = bio.get(col)
             out_name = col.replace("_base", "_display")
-
-            # Get distribution for letter grade conversion
-            m_pitch = PITCH_COMPONENT_RE.match(col)
-            if m_pitch:
-                dist_key = f"pitch_{m_pitch.group(1)}"
-            else:
-                dist_key = col
-            d = dist_for_level.get(dist_key, {})
-            mean = d.get("mean", 30.0)
-            std = d.get("std", 12.0)
-
-            # Convert raw -> 20-80 -> letter grade -> fuzz
-            true_grade = base_to_letter_grade(raw_val, mean, std)
+            score_20_80 = ratings.get(out_name)
+            true_grade = _score_to_letter(score_20_80)
             fuzzed = fuzz_letter_grade(
                 true_grade, viewing_org_id, player_id, col
             )
@@ -464,21 +443,8 @@ def _apply_visibility(
 
     elif context == "pro_draft":
         if has_precise_attrs:
-            # Precise 20-80 at draft level (Level 5) baseline
-            # Re-convert raw values using Level 5 distributions
-            for col in rating_cols:
-                raw_val = bio.get(col)
-                out_name = col.replace("_base", "_display")
-                m_pitch = PITCH_COMPONENT_RE.match(col)
-                if m_pitch:
-                    dist_key = f"pitch_{m_pitch.group(1)}"
-                else:
-                    dist_key = col
-                d = draft_dist.get(dist_key, {})
-                if d:
-                    ratings[out_name] = _to_20_80(raw_val, d.get("mean"), d.get("std"))
-                else:
-                    ratings[out_name] = None
+            # Precise 20-80: keep existing _display values (already computed
+            # in build step) and recompute derived ratings from them.
 
             # Pitch overalls from display components
             pitch_ovrs = _recompute_pitch_ovrs_from_display(ratings)
@@ -493,23 +459,23 @@ def _apply_visibility(
             attrs_precise = True
 
         elif has_fuzzed_numeric:
-            # Fuzzed 20-80 at Level 5 baseline
-            for col in rating_cols:
-                raw_val = bio.get(col)
-                out_name = col.replace("_base", "_display")
-                m_pitch = PITCH_COMPONENT_RE.match(col)
-                if m_pitch:
-                    dist_key = f"pitch_{m_pitch.group(1)}"
-                else:
-                    dist_key = col
-                d = draft_dist.get(dist_key, {})
-                if d:
-                    true_score = _to_20_80(raw_val, d.get("mean"), d.get("std"))
-                    ratings[out_name] = fuzz_20_80(
-                        true_score, viewing_org_id, player_id, col
-                    )
-                else:
-                    ratings[out_name] = None
+            # Fuzzed 20-80: fuzz existing _display values (already computed
+            # in build step), matching the pro_roster fuzz approach.
+            saved_pitch_ovrs = {}
+            for i in range(1, 6):
+                key = f"pitch{i}_ovr"
+                if ratings.get(key) is not None:
+                    saved_pitch_ovrs[key] = ratings[key]
+
+            for key, val in list(ratings.items()):
+                if val is None:
+                    continue
+                if key.endswith("_display"):
+                    attr_name = key.replace("_display", "_base")
+                    ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, attr_name)
+
+            for key, val in saved_pitch_ovrs.items():
+                ratings[key] = fuzz_20_80(val, viewing_org_id, player_id, key)
 
             # Pitch overalls from fuzzed display components
             pitch_ovrs = _recompute_pitch_ovrs_from_display(ratings)
@@ -524,20 +490,13 @@ def _apply_visibility(
             attrs_precise = False
 
         else:
-            # Default: fuzzed letter grades (college public view)
+            # Default: fuzzed letter grades (college public view).
+            # Use existing 20-80 _display values → letter grade → fuzz.
             letter_ratings = {}
             for col in rating_cols:
-                raw_val = bio.get(col)
                 out_name = col.replace("_base", "_display")
-                m_pitch = PITCH_COMPONENT_RE.match(col)
-                if m_pitch:
-                    dist_key = f"pitch_{m_pitch.group(1)}"
-                else:
-                    dist_key = col
-                d = dist_for_level.get(dist_key, {})
-                mean = d.get("mean", 30.0)
-                std = d.get("std", 12.0)
-                true_grade = base_to_letter_grade(raw_val, mean, std)
+                score_20_80 = ratings.get(out_name)
+                true_grade = _score_to_letter(score_20_80)
                 fuzzed = fuzz_letter_grade(
                     true_grade, viewing_org_id, player_id, col
                 )

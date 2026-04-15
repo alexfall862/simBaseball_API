@@ -2057,7 +2057,7 @@ def player_career(player_id: int):
 # ---------------------------------------------------------------------------
 
 @stats_bp.get("/stats/player/<int:player_id>/splits")
-def player_splits(player_id: int):
+def player_game_splits(player_id: int):
     """
     Batting and pitching splits: home/away and by opponent.
 
