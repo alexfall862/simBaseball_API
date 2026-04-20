@@ -1084,6 +1084,19 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
         ).scalar()
         result["your_investment"] = own_pts
 
+        # Current-week allocation (what the user can still edit)
+        this_week_pts = conn.execute(
+            text("""
+                SELECT COALESCE(points, 0)
+                FROM recruiting_investments
+                WHERE org_id = :org AND player_id = :pid
+                  AND league_year_id = :ly AND week = :week
+            """),
+            {"org": viewing_org_id, "pid": player_id,
+             "ly": league_year_id, "week": current_week},
+        ).scalar() or 0
+        result["your_investment_this_week"] = this_week_pts
+
     return result
 
 
@@ -1122,7 +1135,7 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     ).all()
     board_pids = {r[0] for r in board_rows}
 
-    # Players this org has invested in
+    # Players this org has invested in (cumulative all weeks)
     invested = conn.execute(
         text("""
             SELECT ri.player_id, SUM(ri.points) AS your_points
@@ -1133,6 +1146,18 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
         {"org": org_id, "ly": league_year_id},
     ).all()
     your_points = {r[0]: int(r[1]) for r in invested}
+
+    # Current-week allocation (what the user can still edit)
+    this_week_rows = conn.execute(
+        text("""
+            SELECT ri.player_id, ri.points
+            FROM recruiting_investments ri
+            WHERE ri.org_id = :org AND ri.league_year_id = :ly
+              AND ri.week = :week
+        """),
+        {"org": org_id, "ly": league_year_id, "week": current_week},
+    ).all()
+    your_points_this_week = {r[0]: int(r[1]) for r in this_week_rows}
 
     # Merge both sources
     player_ids = list(board_pids | set(your_points.keys()))
@@ -1222,6 +1247,7 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
                 "star_rating": rm["star_rating"],
                 "rank_overall": rm["rank_overall"],
                 "your_points": your_points.get(pid, 0),
+                "your_points_this_week": your_points_this_week.get(pid, 0),
             }
         else:
             # Board player without rankings yet
@@ -1232,6 +1258,7 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
                 "star_rating": None,
                 "rank_overall": None,
                 "your_points": your_points.get(pid, 0),
+                "your_points_this_week": your_points_this_week.get(pid, 0),
             }
 
         entry["on_board"] = pid in board_pids
