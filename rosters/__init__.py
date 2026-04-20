@@ -2193,7 +2193,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
     with engine.connect() as conn:
         # --- Resolve org ---
         org_row = conn.execute(
-            select(orgs.c.id, orgs.c.org_abbrev)
+            select(orgs.c.id, orgs.c.org_abbrev, orgs.c.cash)
             .where(orgs.c.org_abbrev == org_abbrev)
             .limit(1)
         ).first()
@@ -2202,6 +2202,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
 
         org_m = org_row._mapping
         org_id = org_m["id"]
+        seed_cash = float(org_m["cash"] or 0)
 
         # --- Resolve league_year ---
         ly_row = conn.execute(
@@ -2220,8 +2221,8 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
         league_year_id = ly_m["id"]
         weeks_in_season = int(ly_m["weeks_in_season"])
 
-        # --- Starting balance: all prior years ---
-        starting_balance = conn.execute(
+        # --- Starting balance: seed capital + all prior-year ledger entries ---
+        prior_ledger = conn.execute(
             select(func.coalesce(func.sum(ledger.c.amount), 0))
             .select_from(
                 ledger.join(
@@ -2236,6 +2237,7 @@ def get_org_financial_summary(org_abbrev: str, league_year: int):
                 )
             )
         ).scalar_one()
+        starting_balance = seed_cash + float(prior_ledger)
 
         # --- Year-level entries (no game_week_id) for this league_year ---
         year_level_rows = conn.execute(
