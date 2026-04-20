@@ -91,6 +91,10 @@ GET /transactions/waivers?league_year_id={leagueYearId}&org_id={orgId}
       "age": 28,
       "displayovr": 62,
       "contract_id": 888,
+      "contract_years": 4,
+      "contract_current_year": 2,
+      "contract_years_remaining": 2,
+      "contract_salary": 8500000.00,
       "releasing_org_id": 5,
       "releasing_org_abbrev": "BOS",
       "placed_week": 15,
@@ -111,6 +115,10 @@ GET /transactions/waivers?league_year_id={leagueYearId}&org_id={orgId}
 |-------|------|-------------|
 | `waiver_claim_id` | int | Use this as the ID for claim/withdraw/detail endpoints |
 | `player_name` | string | Pre-formatted `"FirstName LastName"` |
+| `contract_years` | int or null | Total contract length (e.g., 4 = a 4-year deal) |
+| `contract_current_year` | int or null | Which year of the contract the player is in (1-based) |
+| `contract_years_remaining` | int or null | Years left after this season (`contract_years - contract_current_year`) |
+| `contract_salary` | float or null | Current-year salary. This is the gross salary for the current contract year — the claiming org takes on this and all future years at full value. |
 | `releasing_org_abbrev` | string | The org that released the player (e.g., `"BOS"`) |
 | `placed_week` | int | Week the player was released |
 | `expires_week` | int | Week the waiver resolves (always `placed_week + 1`) |

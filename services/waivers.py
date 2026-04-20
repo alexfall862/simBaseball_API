@@ -621,10 +621,16 @@ def get_waiver_wire(
 
     rows = conn.execute(sa_text("""
         SELECT wc.*, p.firstName, p.lastName, p.ptype, p.age,
-               o.org_abbrev AS releasing_org_abbrev
+               o.org_abbrev AS releasing_org_abbrev,
+               c.years AS contract_years,
+               c.current_year AS contract_current_year,
+               cd.salary AS contract_salary
         FROM waiver_claims wc
         JOIN simbbPlayers p ON p.id = wc.player_id
         JOIN organizations o ON o.id = wc.releasing_org_id
+        LEFT JOIN contracts c ON c.id = wc.contract_id
+        LEFT JOIN contractDetails cd ON cd.contractID = c.id
+            AND cd.year = c.current_year
         WHERE wc.league_year_id = :lyid AND wc.status = 'active'
         ORDER BY wc.expires_week ASC, wc.created_at ASC
     """), {"lyid": league_year_id}).mappings().all()
@@ -658,6 +664,8 @@ def get_waiver_wire(
     result = []
     for r in rows:
         wid = r["id"]
+        contract_years = r["contract_years"]
+        current_year = r["contract_current_year"]
         result.append({
             "waiver_claim_id": wid,
             "player_id": r["player_id"],
@@ -666,6 +674,10 @@ def get_waiver_wire(
             "age": r["age"],
             "displayovr": displayovr_map.get(r["player_id"]),
             "contract_id": r["contract_id"],
+            "contract_years": contract_years,
+            "contract_current_year": current_year,
+            "contract_years_remaining": (contract_years - current_year) if contract_years and current_year else None,
+            "contract_salary": float(r["contract_salary"]) if r["contract_salary"] else None,
             "releasing_org_id": r["releasing_org_id"],
             "releasing_org_abbrev": r["releasing_org_abbrev"],
             "placed_week": r["placed_week"],
@@ -688,10 +700,16 @@ def get_waiver_detail(
 
     row = conn.execute(sa_text("""
         SELECT wc.*, p.firstName, p.lastName, p.ptype, p.age,
-               o.org_abbrev AS releasing_org_abbrev
+               o.org_abbrev AS releasing_org_abbrev,
+               c.years AS contract_years,
+               c.current_year AS contract_current_year,
+               cd.salary AS contract_salary
         FROM waiver_claims wc
         JOIN simbbPlayers p ON p.id = wc.player_id
         JOIN organizations o ON o.id = wc.releasing_org_id
+        LEFT JOIN contracts c ON c.id = wc.contract_id
+        LEFT JOIN contractDetails cd ON cd.contractID = c.id
+            AND cd.year = c.current_year
         WHERE wc.id = :wid
     """), {"wid": waiver_claim_id}).mappings().first()
 
@@ -700,6 +718,8 @@ def get_waiver_detail(
 
     displayovr_map = _build_waiver_displayovr_map(conn, [row["player_id"]], org_id)
 
+    contract_years = row["contract_years"]
+    current_year = row["contract_current_year"]
     result = {
         "waiver_claim_id": row["id"],
         "player_id": row["player_id"],
@@ -708,6 +728,10 @@ def get_waiver_detail(
         "age": row["age"],
         "displayovr": displayovr_map.get(row["player_id"]),
         "contract_id": row["contract_id"],
+        "contract_years": contract_years,
+        "contract_current_year": current_year,
+        "contract_years_remaining": (contract_years - current_year) if contract_years and current_year else None,
+        "contract_salary": float(row["contract_salary"]) if row["contract_salary"] else None,
         "releasing_org_id": row["releasing_org_id"],
         "releasing_org_abbrev": row["releasing_org_abbrev"],
         "placed_week": row["placed_week"],
