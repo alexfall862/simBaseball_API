@@ -28,6 +28,11 @@ from services.scouting_service import (
     base_to_letter_grade,
     ALL_ACTION_TYPES,
 )
+from services.scouting_dept import (
+    get_dept_status,
+    purchase_next_tier,
+    rollback_last_purchase,
+)
 from services.scouting_stats import generate_scouting_stats
 from services.scouting_reports import generate_text_report
 from services.attribute_visibility import (
@@ -2039,4 +2044,115 @@ def api_scouting_actions(org_id):
         return jsonify(error="db_error", message=str(e)), 500
     except Exception as e:
         log.exception("scouting error")
+        return jsonify(error="server_error", message=str(e)), 500
+
+
+# -------------------------------------------------------------------
+# Endpoint: Scouting Department Status
+# -------------------------------------------------------------------
+
+@scouting_bp.get("/scouting/department/<int:org_id>")
+def api_scouting_dept_status(org_id):
+    """
+    Return scouting department expansion status for an org.
+
+    Shows current tier, purchased bonus points, next tier info,
+    purchase history, and the full tier schedule.
+    """
+    league_year_id = request.args.get("league_year_id", type=int)
+    if not league_year_id:
+        return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            status = get_dept_status(conn, org_id, league_year_id)
+        return jsonify(status), 200
+
+    except SQLAlchemyError as e:
+        log.exception("scouting dept db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting dept error")
+        return jsonify(error="server_error", message=str(e)), 500
+
+
+# -------------------------------------------------------------------
+# Endpoint: Purchase Next Scouting Department Tier
+# -------------------------------------------------------------------
+
+@scouting_bp.post("/scouting/department/purchase")
+def api_scouting_dept_purchase():
+    """
+    Purchase the next scouting department expansion tier.
+
+    Body: { org_id, league_year_id, executed_by? }
+
+    Deducts cash, adds bonus scouting points, logs the transaction.
+    """
+    body = request.get_json(silent=True) or {}
+    required = ["org_id", "league_year_id"]
+    missing = [k for k in required if k not in body]
+    if missing:
+        return jsonify(error="missing_fields", fields=missing), 400
+
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = purchase_next_tier(
+                conn,
+                org_id=int(body["org_id"]),
+                league_year_id=int(body["league_year_id"]),
+                executed_by=body.get("executed_by"),
+            )
+        return jsonify(result), 200
+
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError as e:
+        log.exception("scouting dept purchase db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting dept purchase error")
+        return jsonify(error="server_error", message=str(e)), 500
+
+
+# -------------------------------------------------------------------
+# Endpoint: Rollback Last Scouting Department Purchase
+# -------------------------------------------------------------------
+
+@scouting_bp.post("/scouting/department/rollback")
+def api_scouting_dept_rollback():
+    """
+    Roll back the most recent scouting department purchase.
+
+    Body: { org_id, league_year_id, executed_by? }
+
+    Only allowed if the org hasn't spent points from that tier's bonus.
+    Refunds the cash and removes the bonus points.
+    """
+    body = request.get_json(silent=True) or {}
+    required = ["org_id", "league_year_id"]
+    missing = [k for k in required if k not in body]
+    if missing:
+        return jsonify(error="missing_fields", fields=missing), 400
+
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = rollback_last_purchase(
+                conn,
+                org_id=int(body["org_id"]),
+                league_year_id=int(body["league_year_id"]),
+                executed_by=body.get("executed_by"),
+            )
+        return jsonify(result), 200
+
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError as e:
+        log.exception("scouting dept rollback db error")
+        return jsonify(error="db_error", message=str(e)), 500
+    except Exception as e:
+        log.exception("scouting dept rollback error")
         return jsonify(error="server_error", message=str(e)), 500

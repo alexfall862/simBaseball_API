@@ -1761,6 +1761,18 @@ def rollback_transaction(conn, transaction_id: int,
         from services.fa_auction import rollback_auction_signing
         rollback_auction_signing(conn, details)
 
+    elif tx_type == "scouting_purchase":
+        # Handled by scouting_dept.rollback_last_purchase via its own
+        # endpoint; if called from the generic rollback path, delegate.
+        if not details.get("rollback"):
+            from services.scouting_dept import rollback_last_purchase
+            rollback_last_purchase(
+                conn,
+                org_id=tx["primary_org_id"],
+                league_year_id=tx["league_year_id"],
+                executed_by=executed_by,
+            )
+
     else:
         raise ValueError(f"Rollback not supported for transaction type '{tx_type}'")
 

@@ -1021,16 +1021,19 @@ def get_player_recruiting_status(conn, player_id, league_year_id,
         {"pid": player_id, "ly": league_year_id},
     ).first()
 
-    # Competitor team IDs and total interest
+    # Competitor team IDs and total interest — only include investments from
+    # prior weeks so current-week allocations stay hidden until week advance
     org_investments = conn.execute(
         text("""
             SELECT ri.org_id, t.id AS team_id, SUM(ri.points) AS total_pts
             FROM recruiting_investments ri
             JOIN teams t ON t.orgID = ri.org_id AND t.team_level = 3
             WHERE ri.player_id = :pid AND ri.league_year_id = :ly
+              AND ri.week < :current_week
             GROUP BY ri.org_id, t.id
         """),
-        {"pid": player_id, "ly": league_year_id},
+        {"pid": player_id, "ly": league_year_id,
+         "current_week": current_week},
     ).all()
 
     total_interest = sum(float(r[2]) for r in org_investments)
@@ -1181,6 +1184,9 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
     commit_map = {r[0]: r._mapping for r in commitments}
 
     # Batch fetch per-org investment totals with team IDs for competitor logos
+    # Only include prior-week investments so current-week allocations stay
+    # hidden until week advance
+    interest_params = {**params, "current_week": current_week}
     interest_rows = conn.execute(
         text(f"""
             SELECT ri.player_id, ri.org_id, t.id AS team_id,
@@ -1189,9 +1195,10 @@ def get_org_recruiting_board(conn, org_id, league_year_id):
             JOIN teams t ON t.orgID = ri.org_id AND t.team_level = 3
             WHERE ri.league_year_id = :ly
               AND ri.player_id IN ({placeholders})
+              AND ri.week < :current_week
             GROUP BY ri.player_id, ri.org_id, t.id
         """),
-        params,
+        interest_params,
     ).all()
     # per_player_orgs: {player_id: [(org_id, team_id, total_pts), ...]}
     per_player_orgs = {}

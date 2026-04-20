@@ -43,8 +43,8 @@ _COST_CONFIG_KEYS = {
     "recruit_potential_precise":  ("recruit_potential_precise_cost", 50),
     "college_potential_precise":  ("college_potential_precise_cost",  15),
     "draft_attrs_fuzzed":        ("draft_attrs_fuzzed_cost",         10),
-    "draft_attrs_precise":       ("draft_attrs_precise_cost",        20),
-    "draft_potential_precise":   ("draft_potential_precise_cost",     15),
+    "draft_attrs_precise":       ("draft_attrs_precise_cost",        10),
+    "draft_potential_precise":   ("draft_potential_precise_cost",     50),
     "pro_attrs_precise":         ("pro_attrs_precise_cost",          10),
     "pro_potential_precise":     ("pro_potential_precise_cost",       50),
 }
@@ -79,6 +79,7 @@ def get_or_create_budget(conn, org_id, league_year_id):
     """
     Ensure a scouting_budgets row exists for (org_id, league_year_id).
     Auto-creates with the default budget from scouting_config if missing.
+    total_points includes any scouting department expansion bonuses.
     Returns dict with total_points, spent_points.
     """
     row = conn.execute(
@@ -95,11 +96,22 @@ def get_or_create_budget(conn, org_id, league_year_id):
 
     config = get_scouting_config(conn)
 
-    # Determine budget by org type
+    # Determine base budget by org type
     if MLB_ORG_MIN <= org_id <= MLB_ORG_MAX:
-        total = int(config.get("mlb_budget_per_year", 2000))
+        base = int(config.get("mlb_budget_per_year", 2000))
     else:
-        total = int(config.get("college_budget_per_year", 2000))
+        base = int(config.get("college_budget_per_year", 2000))
+
+    # Add any existing department expansion bonuses
+    bonus = conn.execute(
+        text("""
+            SELECT COALESCE(SUM(bonus_points), 0)
+            FROM scouting_dept_purchases
+            WHERE org_id = :org_id AND league_year_id = :ly_id AND rolled_back = 0
+        """),
+        {"org_id": org_id, "ly_id": league_year_id},
+    ).scalar_one()
+    total = base + int(bonus)
 
     conn.execute(
         text("""
