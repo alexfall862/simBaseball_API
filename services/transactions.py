@@ -1125,38 +1125,91 @@ def execute_trade(conn, trade_details: Dict[str, Any], league_year_id: int,
 
     share_mutations = []
 
-    def _move_player(player_id: int, from_org: int, to_org: int):
-        """Transfer all active contracts for a player from one org to another."""
-        player_contracts = _get_all_player_contracts(conn, player_id)
-        if not player_contracts:
-            raise ValueError(f"No active contracts found for player {player_id}")
+    # -- Bulk-fetch all data needed for player moves in 3 queries ----------
+    all_player_ids = list(set(players_to_b + players_to_a))
+    if not all_player_ids:
+        raise ValueError("Trade must include at least one player")
 
+    # 1) All active contracts for traded players
+    all_contracts_rows = conn.execute(
+        select(contracts)
+        .where(and_(
+            contracts.c.playerID.in_(all_player_ids),
+            contracts.c.isFinished == 0,
+        ))
+    ).all()
+    if not all_contracts_rows:
+        raise ValueError("No active contracts found for any traded players")
+
+    # Build {player_id: [contract_dicts]}
+    contracts_by_player: Dict[int, list] = {}
+    contract_ids = []
+    contract_current_year: Dict[int, int] = {}
+    for r in all_contracts_rows:
+        m = dict(r._mapping)
+        contracts_by_player.setdefault(m["playerID"], []).append(m)
+        contract_ids.append(m["id"])
+        contract_current_year[m["id"]] = m["current_year"]
+
+    # Validate every traded player has at least one contract
+    for pid in all_player_ids:
+        if pid not in contracts_by_player:
+            raise ValueError(f"No active contracts found for player {pid}")
+
+    # 2) All future detail rows for those contracts
+    all_details_rows = conn.execute(
+        select(details_tbl.c.id, details_tbl.c.contractID, details_tbl.c.year)
+        .where(details_tbl.c.contractID.in_(contract_ids))
+    ).all()
+
+    # Filter to future years and group by contract
+    details_by_contract: Dict[int, list] = {}
+    all_detail_ids = []
+    for r in all_details_rows:
+        m = r._mapping
+        cid = m["contractID"]
+        if m["year"] >= contract_current_year[cid]:
+            details_by_contract.setdefault(cid, []).append(
+                {"id": m["id"], "year": m["year"]}
+            )
+            all_detail_ids.append(m["id"])
+
+    # 3) All existing shares for those details (from either org)
+    both_orgs = [org_a, org_b]
+    all_shares_rows = conn.execute(
+        select(
+            shares_tbl.c.contractDetailsID,
+            shares_tbl.c.orgID,
+            shares_tbl.c.salary_share,
+            shares_tbl.c.isHolder,
+        )
+        .where(and_(
+            shares_tbl.c.contractDetailsID.in_(all_detail_ids),
+            shares_tbl.c.orgID.in_(both_orgs),
+        ))
+    ).all() if all_detail_ids else []
+
+    # Build {(detail_id, org_id): {salary_share, isHolder}}
+    shares_lookup: Dict[tuple, dict] = {}
+    for r in all_shares_rows:
+        m = r._mapping
+        shares_lookup[(m["contractDetailsID"], m["orgID"])] = {
+            "salary_share": float(m["salary_share"]),
+            "isHolder": int(m["isHolder"]),
+        }
+
+    # -- Apply moves using pre-fetched data --------------------------------
+    def _move_player(player_id: int, from_org: int, to_org: int):
         retention_info = retention_map.get(str(player_id), {})
         retention_pct = Decimal(str(retention_info.get("retention_pct", 0)))
+        new_share_val = Decimal("1.00") - retention_pct
 
-        for pc in player_contracts:
-            # Get future-year details (current_year onward)
-            future_details = conn.execute(
-                select(details_tbl.c.id, details_tbl.c.year)
-                .where(and_(
-                    details_tbl.c.contractID == pc["id"],
-                    details_tbl.c.year >= pc["current_year"],
-                ))
-            ).all()
-
-            for fd in future_details:
-                detail_id = fd._mapping["id"]
-
-                # Snapshot old share state before mutation
-                old_share_row = conn.execute(
-                    select(shares_tbl.c.salary_share, shares_tbl.c.isHolder)
-                    .where(and_(
-                        shares_tbl.c.contractDetailsID == detail_id,
-                        shares_tbl.c.orgID == from_org,
-                    ))
-                ).first()
-                old_salary_share = float(old_share_row._mapping["salary_share"]) if old_share_row else 1.0
-                old_is_holder = int(old_share_row._mapping["isHolder"]) if old_share_row else 1
+        for pc in contracts_by_player[player_id]:
+            for fd in details_by_contract.get(pc["id"], []):
+                detail_id = fd["id"]
+                old = shares_lookup.get((detail_id, from_org))
+                old_salary_share = old["salary_share"] if old else 1.0
+                old_is_holder = old["isHolder"] if old else 1
 
                 # Update old org share: isHolder=0, salary_share=retention_pct
                 conn.execute(
@@ -1165,20 +1218,16 @@ def execute_trade(conn, trade_details: Dict[str, Any], league_year_id: int,
                         shares_tbl.c.contractDetailsID == detail_id,
                         shares_tbl.c.orgID == from_org,
                     ))
-                    .values(
-                        isHolder=0,
-                        salary_share=retention_pct,
-                    )
+                    .values(isHolder=0, salary_share=retention_pct)
                 )
 
-                # Insert new org share: isHolder=1
-                new_share = Decimal("1.00") - retention_pct
+                # Insert new org share
                 new_share_result = conn.execute(
                     shares_tbl.insert().values(
                         contractDetailsID=detail_id,
                         orgID=to_org,
                         isHolder=1,
-                        salary_share=new_share,
+                        salary_share=new_share_val,
                     )
                 )
 
@@ -1279,11 +1328,15 @@ def create_trade_proposal(conn, proposing_org_id: int, receiving_org_id: int,
 
 
 def get_trade_proposals(conn, org_id: int = None,
-                        status: str = None) -> List[Dict[str, Any]]:
-    """List trade proposals with optional filters."""
+                        status: str = None,
+                        limit: int = 50,
+                        offset: int = 0) -> Dict[str, Any]:
+    """List trade proposals with optional filters and pagination.
+
+    Returns {"proposals": [...], "total": int, "limit": int, "offset": int}.
+    """
     t = _tables_from_conn(conn)
     tp = t["trade_proposals"]
-    stmt = select(tp)
 
     conditions = []
     if org_id is not None:
@@ -1292,10 +1345,19 @@ def get_trade_proposals(conn, org_id: int = None,
         )
     if status is not None:
         conditions.append(tp.c.status == status)
+
+    # Total count (for pagination metadata)
+    count_stmt = select(func.count()).select_from(tp)
+    if conditions:
+        count_stmt = count_stmt.where(and_(*conditions))
+    total = conn.execute(count_stmt).scalar_one()
+
+    # Paginated rows
+    stmt = select(tp)
     if conditions:
         stmt = stmt.where(and_(*conditions))
+    stmt = stmt.order_by(tp.c.proposed_at.desc()).limit(limit).offset(offset)
 
-    stmt = stmt.order_by(tp.c.proposed_at.desc())
     rows = conn.execute(stmt).all()
     results = []
     for r in rows:
@@ -1303,7 +1365,7 @@ def get_trade_proposals(conn, org_id: int = None,
         if isinstance(d.get("proposal"), str):
             d["proposal"] = json.loads(d["proposal"])
         results.append(d)
-    return results
+    return {"proposals": results, "total": total, "limit": limit, "offset": offset}
 
 
 def get_trade_proposal(conn, proposal_id: int) -> Dict[str, Any]:
@@ -1328,11 +1390,16 @@ def _update_proposal_status(conn, proposal_id: int, new_status: str,
     """Generic status transition for trade proposals."""
     t = _tables_from_conn(conn)
     tp = t["trade_proposals"]
-    current = get_trade_proposal(conn, proposal_id)
 
-    if current["status"] not in valid_from:
+    # Validate current status with a lightweight column fetch
+    row = conn.execute(
+        select(tp.c.status).where(tp.c.id == proposal_id)
+    ).first()
+    if not row:
+        raise ValueError(f"Trade proposal {proposal_id} not found")
+    if row._mapping["status"] not in valid_from:
         raise ValueError(
-            f"Cannot transition from '{current['status']}' to '{new_status}'"
+            f"Cannot transition from '{row._mapping['status']}' to '{new_status}'"
         )
 
     values = {"status": new_status}
@@ -1544,29 +1611,59 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
 
 
 def get_roster_status(conn, org_id: int) -> List[Dict[str, Any]]:
-    """Return roster count vs limit for each level for an org."""
+    """Return roster count vs limit for each level for an org (single query)."""
     t = _tables_from_conn(conn)
     levels = t["levels"]
+    contracts = t["contracts"]
+    details = t["details"]
+    shares = t["shares"]
+
+    # Left-join levels to roster counts so levels with 0 players still appear
+    count_subq = (
+        select(
+            contracts.c.current_level.label("level_id"),
+            func.count(func.distinct(contracts.c.playerID)).label("cnt"),
+        )
+        .select_from(
+            contracts
+            .join(details, details.c.contractID == contracts.c.id)
+            .join(shares, shares.c.contractDetailsID == details.c.id)
+        )
+        .where(and_(
+            contracts.c.isFinished == 0,
+            shares.c.orgID == org_id,
+            shares.c.isHolder == 1,
+        ))
+        .group_by(contracts.c.current_level)
+        .subquery()
+    )
+
     rows = conn.execute(
-        select(levels.c.id, levels.c.league_level, levels.c.max_roster)
+        select(
+            levels.c.id,
+            levels.c.league_level,
+            levels.c.min_roster,
+            levels.c.max_roster,
+            func.coalesce(count_subq.c.cnt, 0).label("cnt"),
+        )
+        .outerjoin(count_subq, count_subq.c.level_id == levels.c.id)
         .order_by(levels.c.id.desc())
     ).all()
 
-    result = []
-    for r in rows:
-        lm = r._mapping
-        level_id = lm["id"]
-        roster = _get_roster_count(conn, org_id, level_id)
-        result.append({
-            "level_id": level_id,
-            "level_name": lm["league_level"],
-            "count": roster["count"],
-            "min_roster": roster["min_roster"],
-            "max_roster": roster["max_roster"],
-            "over_limit": roster["over_limit"],
-            "under_limit": roster["under_limit"],
-        })
-    return result
+    return [
+        {
+            "level_id": r._mapping["id"],
+            "level_name": r._mapping["league_level"],
+            "count": r._mapping["cnt"],
+            "min_roster": r._mapping["min_roster"],
+            "max_roster": r._mapping["max_roster"],
+            "over_limit": r._mapping["cnt"] > r._mapping["max_roster"]
+                          if r._mapping["max_roster"] else False,
+            "under_limit": r._mapping["cnt"] < r._mapping["min_roster"]
+                           if r._mapping["min_roster"] else False,
+        }
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

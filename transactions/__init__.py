@@ -401,11 +401,16 @@ def api_trade_propose():
 def api_trade_proposals_list():
     org_id = request.args.get("org_id", type=int)
     status = request.args.get("status")
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            proposals = get_trade_proposals(conn, org_id=org_id, status=status)
-        return jsonify(proposals), 200
+            result = get_trade_proposals(
+                conn, org_id=org_id, status=status,
+                limit=min(limit, 200), offset=offset,
+            )
+        return jsonify(result), 200
     except SQLAlchemyError:
         return jsonify(error="db_error", message="Database error"), 500
 
