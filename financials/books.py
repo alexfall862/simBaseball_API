@@ -94,6 +94,10 @@ def run_year_start_books(engine, league_year: int) -> Dict[str, Any]:
 
       - Media payouts from org_media_shares using media_share * media_total.
       - Signing bonuses / buyouts from contracts (if bonus > 0 and leagueYearSigned == league_year).
+
+    Idempotent: media and bonuses each claim their own column on league_years
+    (media_run_at, bonuses_run_at) via a single-statement UPDATE so concurrent
+    callers can't both pass the guard and double-insert.
     """
     tables = _get_tables(engine)
     ly_tbl = tables["league_years"]
@@ -103,8 +107,8 @@ def run_year_start_books(engine, league_year: int) -> Dict[str, Any]:
 
     media_created = 0
     bonuses_created = 0
-    skipped_media = 0
-    skipped_bonuses = 0
+    media_status = "processed"
+    bonuses_status = "processed"
 
     with engine.begin() as conn:
         ly_row = _get_league_year_row(conn, tables, league_year)
@@ -112,111 +116,105 @@ def run_year_start_books(engine, league_year: int) -> Dict[str, Any]:
         media_total = Decimal(ly_row["media_total"])
 
         # ---- MEDIA PAYOUTS ----
-        # Now using media_share (e.g. 0.045) instead of media_amount
-        media_rows = conn.execute(
-            select(
-                media_tbl.c.org_id,
-                media_tbl.c.media_share,
-            ).where(media_tbl.c.league_year_id == league_year_id)
-        ).all()
+        media_claim = conn.execute(
+            text(
+                "UPDATE league_years SET media_run_at = NOW() "
+                "WHERE id = :ly_id AND media_run_at IS NULL"
+            ),
+            {"ly_id": league_year_id},
+        )
 
-        for row in media_rows:
-            m = row._mapping
-            org_id = m["org_id"]
-            share = Decimal(m["media_share"])  # e.g. 0.045
-            amount = media_total * share       # actual dollars
+        if media_claim.rowcount == 0:
+            media_status = "already_processed"
+        else:
+            media_rows = conn.execute(
+                select(
+                    media_tbl.c.org_id,
+                    media_tbl.c.media_share,
+                ).where(media_tbl.c.league_year_id == league_year_id)
+            ).all()
 
-            # Skip if already have a media entry for this org/year
-            existing = conn.execute(
-                select(ledger.c.id)
-                .where(
-                    and_(
-                        ledger.c.org_id == org_id,
-                        ledger.c.league_year_id == league_year_id,
-                        ledger.c.entry_type == "media",
-                    )
-                )
-                .limit(1)
-            ).first()
-            if existing:
-                skipped_media += 1
-                continue
+            media_inserts = []
+            for row in media_rows:
+                m = row._mapping
+                org_id = m["org_id"]
+                share = Decimal(m["media_share"])
+                amount = media_total * share
 
-            conn.execute(
-                ledger.insert().values(
-                    org_id=org_id,
-                    league_year_id=league_year_id,
-                    game_week_id=None,
-                    entry_type="media",
-                    amount=amount,
-                    contract_id=None,
-                    player_id=None,
-                    note=f"Media payout for league_year {league_year}",
-                )
-            )
-            media_created += 1
+                media_inserts.append({
+                    "org_id": org_id,
+                    "league_year_id": league_year_id,
+                    "game_week_id": None,
+                    "entry_type": "media",
+                    "amount": amount,
+                    "contract_id": None,
+                    "player_id": None,
+                    "note": f"Media payout for league_year {league_year}",
+                })
+
+            if media_inserts:
+                conn.execute(ledger.insert(), media_inserts)
+                media_created = len(media_inserts)
 
         # ---- BONUSES / BUYOUTS ----
-        bonus_rows = conn.execute(
-            select(
-                contracts.c.id.label("contract_id"),
-                contracts.c.playerID.label("player_id"),
-                contracts.c.signingOrg.label("org_id"),
-                contracts.c.isBuyout.label("isBuyout"),
-                contracts.c.bonus.label("bonus"),
-            ).where(
-                and_(
-                    contracts.c.leagueYearSigned == league_year,
-                    contracts.c.bonus > 0,
-                )
-            )
-        ).all()
+        bonuses_claim = conn.execute(
+            text(
+                "UPDATE league_years SET bonuses_run_at = NOW() "
+                "WHERE id = :ly_id AND bonuses_run_at IS NULL"
+            ),
+            {"ly_id": league_year_id},
+        )
 
-        for row in bonus_rows:
-            m = row._mapping
-            contract_id = m["contract_id"]
-            player_id = m["player_id"]
-            org_id = m["org_id"]
-            is_buyout = bool(m["isBuyout"])
-            bonus_amt = Decimal(m["bonus"])
-
-            entry_type = "buyout" if is_buyout else "bonus"
-
-            existing = conn.execute(
-                select(ledger.c.id)
-                .where(
+        if bonuses_claim.rowcount == 0:
+            bonuses_status = "already_processed"
+        else:
+            bonus_rows = conn.execute(
+                select(
+                    contracts.c.id.label("contract_id"),
+                    contracts.c.playerID.label("player_id"),
+                    contracts.c.signingOrg.label("org_id"),
+                    contracts.c.isBuyout.label("isBuyout"),
+                    contracts.c.bonus.label("bonus"),
+                ).where(
                     and_(
-                        ledger.c.contract_id == contract_id,
-                        ledger.c.league_year_id == league_year_id,
-                        ledger.c.entry_type == entry_type,
+                        contracts.c.leagueYearSigned == league_year,
+                        contracts.c.bonus > 0,
                     )
                 )
-                .limit(1)
-            ).first()
-            if existing:
-                skipped_bonuses += 1
-                continue
+            ).all()
 
-            conn.execute(
-                ledger.insert().values(
-                    org_id=org_id,
-                    league_year_id=league_year_id,
-                    game_week_id=None,
-                    entry_type=entry_type,
-                    amount=-bonus_amt,
-                    contract_id=contract_id,
-                    player_id=player_id,
-                    note=f"{entry_type} for contract {contract_id} (leagueYearSigned={league_year})",
-                )
-            )
-            bonuses_created += 1
+            bonus_inserts = []
+            for row in bonus_rows:
+                m = row._mapping
+                contract_id = m["contract_id"]
+                player_id = m["player_id"]
+                org_id = m["org_id"]
+                is_buyout = bool(m["isBuyout"])
+                bonus_amt = Decimal(m["bonus"])
+
+                entry_type = "buyout" if is_buyout else "bonus"
+
+                bonus_inserts.append({
+                    "org_id": org_id,
+                    "league_year_id": league_year_id,
+                    "game_week_id": None,
+                    "entry_type": entry_type,
+                    "amount": -bonus_amt,
+                    "contract_id": contract_id,
+                    "player_id": player_id,
+                    "note": f"{entry_type} for contract {contract_id} (leagueYearSigned={league_year})",
+                })
+
+            if bonus_inserts:
+                conn.execute(ledger.insert(), bonus_inserts)
+                bonuses_created = len(bonus_inserts)
 
     return {
         "league_year": league_year,
+        "media_status": media_status,
         "media_entries_created": media_created,
-        "media_entries_skipped": skipped_media,
+        "bonuses_status": bonuses_status,
         "bonus_entries_created": bonuses_created,
-        "bonus_entries_skipped": skipped_bonuses,
     }
 
 # --------------------------------------------------------
@@ -230,8 +228,10 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
       - Pro-rated salary expenses (per contract, per org share).
       - Performance revenue using up-to-3-year rolling wins.
 
-    Idempotent-ish: if any salary/performance entries already exist for that week,
-    it will skip and report 'already_processed'.
+    Idempotent: claims the week atomically by setting game_weeks.books_run_at
+    via a single UPDATE ... WHERE books_run_at IS NULL. Concurrent callers
+    coming from /admin/run-week-books, run_all_levels, or advance_week can
+    no longer both pass the guard and double-insert ledger rows.
     """
     tables = _get_tables(engine)
     ly_tbl = tables["league_years"]
@@ -254,23 +254,23 @@ def run_week_books(engine, league_year: int, week_index: int) -> Dict[str, Any]:
             gw_row = _get_game_week_row(conn, tables, league_year_id, week_index)
             game_week_id = gw_row["id"]
 
-            # ---- Guard: already processed? ----
-            existing_count = conn.execute(
-                select(func.count(ledger.c.id)).where(
-                    and_(
-                        ledger.c.league_year_id == league_year_id,
-                        ledger.c.game_week_id == game_week_id,
-                        ledger.c.entry_type.in_(("salary", "performance")),
-                    )
-                )
-            ).scalar_one()
+            # ---- Atomic claim: only one caller can flip books_run_at from NULL ----
+            # Single-statement UPDATE serializes concurrent run_week_books calls
+            # at the row level; rowcount==0 means another caller has already
+            # claimed (and committed, or will commit) this week.
+            claim = conn.execute(
+                text(
+                    "UPDATE game_weeks SET books_run_at = NOW() "
+                    "WHERE id = :gw_id AND books_run_at IS NULL"
+                ),
+                {"gw_id": game_week_id},
+            )
 
-            if existing_count and existing_count > 0:
+            if claim.rowcount == 0:
                 return {
                     "league_year": league_year,
                     "week_index": week_index,
                     "status": "already_processed",
-                    "existing_entries": int(existing_count),
                 }
 
             # ---- SALARY EXPENSES ----
@@ -531,6 +531,9 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
 
     Balance is computed as SUM(amount) over all ledger entries for that org
     whose league_year <= target year (i.e., net to date).
+
+    Idempotent: claims league_years.interest_run_at atomically; concurrent
+    callers can no longer both pass the per-org existence check.
     """
     tables = _get_tables(engine)
     ly_tbl = tables["league_years"]
@@ -538,7 +541,6 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
     ledger = tables["ledger"]
 
     created = 0
-    skipped = 0
 
     with engine.begin() as conn:
         try:
@@ -546,11 +548,20 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
             target_ly_id = ly_row["id"]
             target_year = ly_row["league_year"]
 
-            # Map league_year_id -> league_year to filter by year <= target_year
-            ly_rows = conn.execute(
-                select(ly_tbl.c.id, ly_tbl.c.league_year)
-            ).all()
-            id_to_year = {r._mapping["id"]: r._mapping["league_year"] for r in ly_rows}
+            # ---- Atomic claim ----
+            claim = conn.execute(
+                text(
+                    "UPDATE league_years SET interest_run_at = NOW() "
+                    "WHERE id = :ly_id AND interest_run_at IS NULL"
+                ),
+                {"ly_id": target_ly_id},
+            )
+            if claim.rowcount == 0:
+                return {
+                    "league_year": league_year,
+                    "status": "already_processed",
+                    "interest_rate": float(INTEREST_RATE),
+                }
 
             org_rows = conn.execute(
                 select(orgs_tbl.c.id, orgs_tbl.c.cash)
@@ -559,22 +570,6 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
             org_seed = {r._mapping["id"]: Decimal(r._mapping["cash"] or 0) for r in org_rows}
 
             for org_id in org_ids:
-                # Skip if we've already applied interest for this org in this year
-                existing = conn.execute(
-                    select(ledger.c.id)
-                    .where(
-                        and_(
-                            ledger.c.org_id == org_id,
-                            ledger.c.league_year_id == target_ly_id,
-                            ledger.c.entry_type.in_(("interest_income", "interest_expense")),
-                        )
-                    )
-                    .limit(1)
-                ).first()
-                if existing:
-                    skipped += 1
-                    continue
-
                 # Compute net balance: seed capital + all ledger entries up to this year
                 ledger_balance = conn.execute(
                     select(func.coalesce(func.sum(ledger.c.amount), 0))
@@ -622,8 +617,8 @@ def run_year_end_interest(engine, league_year: int) -> Dict[str, Any]:
 
     return {
         "league_year": league_year,
+        "status": "processed",
         "interest_entries_created": created,
-        "interest_entries_skipped": skipped,
         "interest_rate": float(INTEREST_RATE),
     }
 
@@ -996,20 +991,18 @@ def process_playoff_revenue(engine, league_year: int) -> Dict[str, Any]:
         performance_budget = Decimal(ly_row["performance_budget"])
         media_total = Decimal(ly_row["media_total"])
 
-        # ---- Guard: already processed? ----
-        existing = conn.execute(
-            select(func.count(ledger.c.id)).where(
-                and_(
-                    ledger.c.league_year_id == league_year_id,
-                    ledger.c.entry_type.in_(("playoff_gate", "playoff_media")),
-                )
-            )
-        ).scalar_one()
-        if existing and existing > 0:
+        # ---- Atomic claim: only one caller can flip playoff_revenue_run_at from NULL ----
+        claim = conn.execute(
+            text(
+                "UPDATE league_years SET playoff_revenue_run_at = NOW() "
+                "WHERE id = :ly_id AND playoff_revenue_run_at IS NULL"
+            ),
+            {"ly_id": league_year_id},
+        )
+        if claim.rowcount == 0:
             return {
                 "league_year": league_year,
                 "status": "already_processed",
-                "existing_entries": int(existing),
             }
 
         # ---- Read config ----

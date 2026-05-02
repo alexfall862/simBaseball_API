@@ -893,6 +893,14 @@ def advance_recruiting_week(conn, league_year_id):
         result["new_week"] = 1
         return result
 
+    # CPU orgs place this week's investments BEFORE resolution, so their
+    # allocations count toward the week that's about to settle.
+    from services.cpu_recruiting import run_cpu_recruiting
+    cpu_summary = run_cpu_recruiting(
+        conn, league_year_id, current_week, config
+    )
+    result["cpu"] = cpu_summary
+
     # Resolve the just-completed week
     week_result = resolve_recruiting_week(
         conn, league_year_id, current_week, config
