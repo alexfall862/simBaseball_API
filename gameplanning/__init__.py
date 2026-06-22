@@ -867,10 +867,19 @@ def get_rotation(team_id: int):
 
         slots = [{"slot": _row_to_dict(r)["slot"], "player_id": int(_row_to_dict(r)["player_id"])} for r in slot_rows]
 
+        # current_slot is the slot that LAST pitched (0 = none yet). The next
+        # starter is the following slot, wrapping at rotation_size. Expose it so
+        # clients don't compute current_slot+1, which overruns the rotation and
+        # shows e.g. "Slot 6" for a 5-man rotation (MLB-11).
+        cur_slot = state.get("current_slot", 0) or 0
+        rot_size = rot["rotation_size"]
+        next_slot = ((cur_slot % rot_size) + 1) if rot_size else None
+
         return jsonify({
             "team_id": team_id,
             "rotation_size": rot["rotation_size"],
             "current_slot": state.get("current_slot", 0),
+            "next_slot": next_slot,
             "last_game_id": int(state["last_game_id"]) if state.get("last_game_id") is not None else None,
             "slots": slots,
         }), 200
@@ -979,10 +988,14 @@ def put_rotation(team_id: int):
             state = _row_to_dict(state_row) if state_row else {}
 
         slots = [{"slot": _row_to_dict(r)["slot"], "player_id": int(_row_to_dict(r)["player_id"])} for r in slot_rows]
+        cur_slot = state.get("current_slot", 0) or 0
+        rot_size = rot["rotation_size"]
+        next_slot = ((cur_slot % rot_size) + 1) if rot_size else None
         return jsonify({
             "team_id": team_id,
             "rotation_size": rot["rotation_size"],
             "current_slot": state.get("current_slot", 0),
+            "next_slot": next_slot,
             "last_game_id": int(state["last_game_id"]) if state.get("last_game_id") is not None else None,
             "slots": slots,
         }), 200

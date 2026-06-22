@@ -447,6 +447,28 @@ def submit_weekly_investments(conn, org_id, league_year_id, week, investments):
     errors = []
     points_used = existing_total
 
+    # Process point reductions/removals before increases. The budget gate below
+    # tracks `points_used` incrementally, so if a player's increase is validated
+    # before another player's reduction frees up points, a valid reallocation is
+    # wrongly rejected as "Exceeds weekly budget" (CBL-07). Sorting by net delta
+    # (most-negative first) guarantees freed points are released in time.
+    _existing_by_player = {
+        row[0]: row[1]
+        for row in conn.execute(
+            text("""
+                SELECT player_id, points
+                FROM recruiting_investments
+                WHERE org_id = :org AND league_year_id = :ly AND week = :week
+            """),
+            {"org": org_id, "ly": league_year_id, "week": week},
+        ).all()
+    }
+    investments = sorted(
+        investments,
+        key=lambda inv: (inv.get("points") or 0)
+        - _existing_by_player.get(inv.get("player_id"), 0),
+    )
+
     for inv in investments:
         pid = inv["player_id"]
         pts = inv["points"]
@@ -575,6 +597,11 @@ def resolve_recruiting_week(conn, league_year_id, week, config=None):
         config = get_recruiting_config(conn)
 
     exponent = _cfg_float(config, "lottery_exponent", 1.3)
+    # Minimum share of the leader's points an org must hold to be eligible to
+    # win the lottery. Matches the 50%-of-leader competitor-display threshold so
+    # a team that can win is always shown as a competitor, and a sub-threshold
+    # AI team can no longer "snipe" a recruit with half the points (CBL-11).
+    lottery_floor_pct = _cfg_float(config, "lottery_floor_pct", 0.50)
     snipe_pct = _cfg_float(config, "snipe_threshold_pct", 0.80)
     snipe_weeks = _cfg_int(config, "snipe_cooldown_weeks", 2)
     snipe_mult = _cfg_float(config, "snipe_threshold_mult", 1.3)
@@ -692,10 +719,15 @@ def resolve_recruiting_week(conn, league_year_id, week, config=None):
 
         # Check if threshold met
         if total_interest >= threshold:
-            # Run weighted lottery
+            # Run weighted lottery — only orgs within lottery_floor_pct of the
+            # leader are eligible to win (CBL-11). The leader always qualifies,
+            # so weights is never empty.
+            floor_pts = lottery_floor_pct * leader_pts
             weights = []
             for r in org_totals:
-                oid, pts = r[0], r[1]
+                oid, pts = r[0], float(r[1])
+                if pts < floor_pts:
+                    continue
                 weights.append((oid, pts ** exponent))
 
             winner_org = _weighted_lottery(weights)

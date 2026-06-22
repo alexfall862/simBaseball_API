@@ -16,6 +16,7 @@ from services.transactions import (
     demote_player,
     place_on_ir,
     activate_from_ir,
+    apply_redshirt,
     release_player,
     buyout_player,
     get_free_agents,
@@ -162,6 +163,30 @@ def api_ir_activate():
         engine = get_engine()
         with engine.begin() as conn:
             result = activate_from_ir(
+                conn,
+                contract_id=int(body["contract_id"]),
+                league_year_id=int(lyid),
+                executed_by=body.get("executed_by"),
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@transactions_bp.post("/transactions/redshirt")
+def api_redshirt():
+    body, err = _require_json("contract_id")
+    if err:
+        return err
+    lyid = _league_year_id_from_body(body)
+    if not lyid:
+        return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = apply_redshirt(
                 conn,
                 contract_id=int(body["contract_id"]),
                 league_year_id=int(lyid),

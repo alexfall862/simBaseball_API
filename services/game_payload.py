@@ -146,7 +146,7 @@ _PBP_STRIP_KEYS = frozenset({
     "At_Bat_Modifiers",
     "Interaction_Data",
     "Timing_Diagnostics",
-    "Catch_Probability",
+    "Catch Probability",  # engine key is space-separated, not "Catch_Probability"
     "Pre_R1",
     "Pre_R2",
     "Pre_R3",
@@ -161,6 +161,24 @@ def _trim_play_by_play(pbp_raw):
         {k: v for k, v in play.items() if k not in _PBP_STRIP_KEYS}
         for play in pbp_raw
     ]
+
+
+def _prepare_result_json(result, game_result_data, league_level):
+    """
+    Build (boxscore_str, pbp_str) for storage.
+
+    PBP/boxscore are stored for MLB (level 9) only — lower levels generate the
+    bulk of games and this data is never viewed. PBP is trimmed of bulky
+    engine-internal diagnostics first (see _PBP_STRIP_KEYS).
+    """
+    if league_level != 9:
+        return None, None
+    boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
+    pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
+    boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
+    pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
+    pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
+    return boxscore_str, pbp_str
 
 
 def _load_position_weights(conn):
@@ -2320,17 +2338,8 @@ def _store_game_results(
              else game_row["game_type"]) or "regular"
         )
 
-        # Only store PBP/boxscore for MLB (level 9) — lower levels
-        # generate the bulk of games and this data is never viewed.
-        if league_level == 9:
-            boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
-            pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
-            boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
-            pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
-            pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
-        else:
-            boxscore_str = None
-            pbp_str = None
+        boxscore_str, pbp_str = _prepare_result_json(
+            result, game_result_data, league_level)
 
         try:
             conn.execute(insert_sql, {
@@ -2492,17 +2501,8 @@ def _store_game_results_bulk(
         season_subweek = str((game_row.get("season_subweek") if isinstance(game_row, dict) else game_row["season_subweek"]) or "a")
         game_type = str((game_row.get("game_type") if isinstance(game_row, dict) else game_row["game_type"]) or "regular")
 
-        # Only store PBP/boxscore for MLB (level 9) — lower levels
-        # generate the bulk of games and this data is never viewed.
-        if league_level == 9:
-            boxscore_raw = result.get("boxscore") or game_result_data.get("boxscore")
-            pbp_raw = result.get("play_by_play") or game_result_data.get("play_by_play")
-            boxscore_str = json.dumps(boxscore_raw) if boxscore_raw else None
-            pbp_trimmed = _trim_play_by_play(pbp_raw) if pbp_raw else None
-            pbp_str = json.dumps(pbp_trimmed) if pbp_trimmed else None
-        else:
-            boxscore_str = None
-            pbp_str = None
+        boxscore_str, pbp_str = _prepare_result_json(
+            result, game_result_data, league_level)
 
         all_params.append({
             "game_id": game_id,

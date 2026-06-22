@@ -788,3 +788,48 @@ textarea {
 @media (max-width: 768px) {
   .trade-builder { flex-direction: column; }
 }
+
+/* ── Game Viewer: narrative play-by-play ── */
+.gv-inning {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.gv-inning-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: var(--bg-input);
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+}
+.gv-ab {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.gv-ab:last-child { border-bottom: none; }
+.gv-ab-desc { color: var(--text-primary); }
+.gv-rbi {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--success);
+  color: #062b1f;
+}
+.gv-events {
+  margin-top: 6px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border-light);
+}
+.gv-event {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre;
+}

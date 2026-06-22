@@ -960,14 +960,47 @@ def _build_dh_pool(
     remaining_ids: List[int],
     players_by_id: Dict[int, Dict[str, Any]],
     starter_id: int,
+    plans_by_position: Dict[str, List[Dict[str, Any]]] | None = None,
 ) -> List[int]:
     """
-    DH pool = everyone still unassigned, plus the starter if they exist on
-    the roster (so a two-way pitcher can bat as DH).
+    DH pool = every non-pitcher still unassigned, plus any pitcher explicitly
+    designated as a two-way DH, plus the starter if eligible.
+
+    Ordinary pitchers are excluded so a bullpen arm can never randomly grab the
+    DH slot over position players (MLB-22/26/28). A pitcher is DH-eligible only
+    when the team puts them in a 'dh' depth-chart row — that explicit
+    designation is how a genuine two-way player (Ohtani) opts in to hitting.
+    As a safety net, if filtering leaves no eligible hitter at all we fall back
+    to the full pool, because a DH league must never send an empty DH slot to
+    the engine.
     """
-    pool = list(remaining_ids)
-    if starter_id in players_by_id and starter_id not in pool:
+    dh_eligible_pitchers = set()
+    for row in (plans_by_position or {}).get("dh", []):
+        try:
+            dh_eligible_pitchers.add(int(row["player_id"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+
+    def _eligible(pid: int) -> bool:
+        p = players_by_id.get(pid)
+        if not p:
+            return False
+        if (p.get("ptype") or "").lower() == "pitcher":
+            return pid in dh_eligible_pitchers
+        return True
+
+    pool = [pid for pid in remaining_ids if _eligible(pid)]
+    if (starter_id in players_by_id and starter_id not in pool
+            and _eligible(starter_id)):
         pool.append(starter_id)
+
+    if not pool:
+        # Last-resort safety: no eligible hitter remains (extreme injuries).
+        # Fall back to the full pool so the DH slot is never empty.
+        pool = list(remaining_ids)
+        if starter_id in players_by_id and starter_id not in pool:
+            pool.append(starter_id)
+
     return pool
 
 
@@ -1044,7 +1077,7 @@ def build_defense_and_lineup(
     # field positions too.
     dh_locked_early = use_dh and "dh" in locked_positions
     if dh_locked_early:
-        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id, plans_by_position)
         dh_pid = _select_dh_player(
             plans_by_position, players_by_id, dh_pool, cross_position_locks,
         )
@@ -1074,7 +1107,7 @@ def build_defense_and_lineup(
 
     # DH assignment (if not already handled by the locked-first pass above).
     if use_dh and defense["dh"] is None:
-        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id, plans_by_position)
         dh_pid = _select_dh_player(
             plans_by_position, players_by_id, dh_pool, cross_position_locks,
         )
@@ -1151,7 +1184,7 @@ def build_defense_and_lineup_from_cache(
 
     dh_locked_early = use_dh and "dh" in locked_positions
     if dh_locked_early:
-        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id, plans_by_position)
         dh_pid = _select_dh_player(
             plans_by_position, players_by_id, dh_pool, cross_position_locks,
         )
@@ -1180,7 +1213,7 @@ def build_defense_and_lineup_from_cache(
                 remaining_ids.remove(chosen)
 
     if use_dh and defense["dh"] is None:
-        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id)
+        dh_pool = _build_dh_pool(remaining_ids, players_by_id, starter_id, plans_by_position)
         dh_pid = _select_dh_player(
             plans_by_position, players_by_id, dh_pool, cross_position_locks,
         )

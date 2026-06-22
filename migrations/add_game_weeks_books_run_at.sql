@@ -11,9 +11,26 @@
 --
 -- Backfill: any game_week that already has salary/performance ledger
 -- entries is treated as previously processed.
+--
+-- Idempotent: ADD COLUMN is wrapped in an information_schema check so a
+-- partial prior run can be safely retried. The backfill is naturally
+-- idempotent via COALESCE.
 
-ALTER TABLE game_weeks
-    ADD COLUMN books_run_at DATETIME NULL DEFAULT NULL AFTER label;
+SET SQL_SAFE_UPDATES = 0;
+
+-- ---- ADD COLUMN (idempotent) ----
+
+SET @sql := IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'game_weeks'
+       AND COLUMN_NAME = 'books_run_at') = 0,
+    'ALTER TABLE game_weeks ADD COLUMN books_run_at DATETIME NULL DEFAULT NULL AFTER label',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- ---- BACKFILL ----
 
 UPDATE game_weeks gw
 JOIN (
@@ -23,3 +40,5 @@ JOIN (
       AND entry_type IN ('salary', 'performance')
 ) ran ON ran.game_week_id = gw.id
 SET gw.books_run_at = COALESCE(gw.books_run_at, gw.created_at);
+
+SET SQL_SAFE_UPDATES = 1;

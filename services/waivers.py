@@ -75,6 +75,61 @@ def _build_waiver_displayovr_map(conn, player_ids, viewing_org_id):
             return {}
 
 
+def _build_waiver_display_map(conn, player_ids, viewing_org_id):
+    """Return {player_id: full per-org-fuzzed display dict} for waiver players.
+
+    Same canonical pipeline as the FA pool, so the waiver list/detail can render
+    a full player card (bio/ratings/potentials), not just displayovr (MLB-02).
+    """
+    if not player_ids:
+        return {}
+    try:
+        from services.player_display import load_display_context, build_player_display
+
+        rows = conn.execute(sa_text(
+            f"SELECT * FROM simbbPlayers WHERE id IN ({','.join(str(int(p)) for p in player_ids)})"
+        )).mappings().all()
+
+        display_ctx = load_display_context(conn)
+        display_list = []
+        for r in rows:
+            m = dict(r)
+            m["current_level"] = m.get("current_level") or 9
+            display_list.append(build_player_display(m, display_ctx))
+
+        if viewing_org_id is None:
+            # No viewer — precise stored values, no fuzz.
+            return {int(p["id"]): p for p in display_list}
+
+        from services.attribute_visibility import get_visible_players_batch
+        holding_org_ids = {p["id"]: 0 for p in display_list}
+        player_levels = {p["id"]: 9 for p in display_list}
+        visible = get_visible_players_batch(
+            conn, display_list, viewing_org_id,
+            holding_org_ids, player_levels,
+            display_ctx["dist_by_level"], display_ctx["col_cats"],
+            display_ctx["position_weights"],
+            force_free_agent=True,
+        )
+        return {int(p["id"]): p for p in visible}
+    except Exception:
+        log.exception("_build_waiver_display_map failed; card fields omitted")
+        return {}
+
+
+def _waiver_card_fields(display_map, player_id):
+    """Pull the player-card block (displayovr + bio/ratings/potentials) for a
+    waiver entry from a _build_waiver_display_map() result."""
+    d = display_map.get(player_id) or {}
+    return {
+        "displayovr": d.get("displayovr"),
+        "bio": d.get("bio"),
+        "ratings": d.get("ratings"),
+        "potentials": d.get("potentials"),
+        "visibility_context": d.get("visibility_context"),
+    }
+
+
 # ── Constants (mirror contract_ops.py) ────────────────────────────────
 MINOR_SALARY = Decimal("40000")
 PRE_ARB_SALARY = Decimal("800000")
@@ -635,9 +690,10 @@ def get_waiver_wire(
         ORDER BY wc.expires_week ASC, wc.created_at ASC
     """), {"lyid": league_year_id}).mappings().all()
 
-    # Compute per-org-fuzzed displayovr via canonical pipeline
+    # Build full per-org-fuzzed player-card data (bio/ratings/potentials +
+    # displayovr) via the canonical pipeline so the frontend can pop a card.
     player_ids = [r["player_id"] for r in rows]
-    displayovr_map = _build_waiver_displayovr_map(conn, player_ids, org_id)
+    display_map = _build_waiver_display_map(conn, player_ids, org_id)
 
     # Count bids per waiver
     waiver_ids = [r["id"] for r in rows]
@@ -672,7 +728,7 @@ def get_waiver_wire(
             "player_name": f"{r['firstName']} {r['lastName']}",
             "ptype": r["ptype"],
             "age": r["age"],
-            "displayovr": displayovr_map.get(r["player_id"]),
+            **_waiver_card_fields(display_map, r["player_id"]),
             "contract_id": r["contract_id"],
             "contract_years": contract_years,
             "contract_current_year": current_year,
@@ -716,7 +772,7 @@ def get_waiver_detail(
     if not row:
         return None
 
-    displayovr_map = _build_waiver_displayovr_map(conn, [row["player_id"]], org_id)
+    display_map = _build_waiver_display_map(conn, [row["player_id"]], org_id)
 
     contract_years = row["contract_years"]
     current_year = row["contract_current_year"]
@@ -726,7 +782,7 @@ def get_waiver_detail(
         "player_name": f"{row['firstName']} {row['lastName']}",
         "ptype": row["ptype"],
         "age": row["age"],
-        "displayovr": displayovr_map.get(row["player_id"]),
+        **_waiver_card_fields(display_map, row["player_id"]),
         "contract_id": row["contract_id"],
         "contract_years": contract_years,
         "contract_current_year": current_year,

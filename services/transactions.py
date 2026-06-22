@@ -134,6 +134,8 @@ def _get_roster_count(conn, org_id: int, level_id: int) -> Dict[str, Any]:
             contracts.c.isFinished == 0,
             shares.c.orgID == org_id,
             shares.c.isHolder == 1,
+            # IR players don't count against the active roster limit (MLB-07)
+            func.coalesce(contracts.c.onIR, 0) == 0,
         ))
     ).scalar_one()
 
@@ -232,6 +234,25 @@ def _get_holder_org(conn, contract_id: int) -> Optional[int]:
 # 2a. Core Roster Moves
 # ---------------------------------------------------------------------------
 
+def _assert_valid_level(conn, level_id: int) -> None:
+    """Raise ValueError if level_id has no row in the levels table.
+
+    Roster/ratings queries INNER JOIN the levels table, so moving a player to a
+    level that doesn't exist (e.g. a frontend "Unassigned" sentinel) silently
+    drops them from every roster view — an unrecoverable orphan (MLB-20). All
+    level-changing moves validate the target here so an orphan can never form.
+    """
+    t = _tables_from_conn(conn)
+    exists = conn.execute(
+        select(func.count()).select_from(t["levels"]).where(t["levels"].c.id == level_id)
+    ).scalar_one()
+    if not exists:
+        raise ValueError(
+            f"Invalid roster level {level_id}: not a real level. "
+            f"Players cannot be moved to an unassigned/non-existent level."
+        )
+
+
 def promote_player(conn, contract_id: int, target_level_id: int,
                    league_year_id: int, executed_by: str = None) -> Dict[str, Any]:
     """Move player to a higher level."""
@@ -240,6 +261,7 @@ def promote_player(conn, contract_id: int, target_level_id: int,
 
     if c["isFinished"]:
         raise ValueError("Cannot promote on a finished contract")
+    _assert_valid_level(conn, target_level_id)
 
     current_level = c["current_level"]
     if target_level_id <= current_level:
@@ -308,6 +330,7 @@ def demote_player(conn, contract_id: int, target_level_id: int,
 
     if c["isFinished"]:
         raise ValueError("Cannot demote on a finished contract")
+    _assert_valid_level(conn, target_level_id)
 
     current_level = c["current_level"]
     if target_level_id >= current_level:
@@ -410,13 +433,55 @@ def activate_from_ir(conn, contract_id: int, league_year_id: int,
     if org_id is None:
         raise ValueError("No holder org found for this contract")
 
+    # Repair orphaned players: if the contract sits at an invalid level (e.g. it
+    # was moved to "Unassigned" while on IR), restore the level recorded when it
+    # was placed on IR so the player reappears on a roster instead of vanishing
+    # (MLB-20). The most recent ir_place transaction carries the prior level.
+    restore_values = {"onIR": 0}
+    active_level = c["current_level"]
+    valid_level = conn.execute(
+        select(func.count()).select_from(t["levels"])
+        .where(t["levels"].c.id == active_level)
+    ).scalar_one()
+    if not valid_level:
+        ir_row = conn.execute(
+            select(t["tx_log"].c.details)
+            .where(and_(
+                t["tx_log"].c.contract_id == contract_id,
+                t["tx_log"].c.transaction_type == "ir_place",
+            ))
+            .order_by(t["tx_log"].c.id.desc())
+            .limit(1)
+        ).first()
+        prior_level = None
+        if ir_row and ir_row[0]:
+            details = ir_row[0]
+            if isinstance(details, str):
+                import json
+                try:
+                    details = json.loads(details)
+                except ValueError:
+                    details = {}
+            prior_level = (details or {}).get("level")
+        if not prior_level or not conn.execute(
+            select(func.count()).select_from(t["levels"])
+            .where(t["levels"].c.id == prior_level)
+        ).scalar_one():
+            raise ValueError(
+                f"Player is at an invalid roster level ({active_level}) and no "
+                f"prior level could be recovered. Assign them to a valid level "
+                f"before activating."
+            )
+        restore_values["current_level"] = prior_level
+        active_level = prior_level
+
     conn.execute(
         update(t["contracts"])
         .where(t["contracts"].c.id == contract_id)
-        .values(onIR=0)
+        .values(**restore_values)
     )
 
-    roster = _get_roster_count(conn, org_id, c["current_level"])
+    roster = _get_roster_count(conn, org_id, active_level)
 
     tx_id = _log_transaction(
         conn,
@@ -425,7 +490,7 @@ def activate_from_ir(conn, contract_id: int, league_year_id: int,
         primary_org_id=org_id,
         contract_id=contract_id,
         player_id=c["playerID"],
-        details={"level": c["current_level"]},
+        details={"level": active_level},
         executed_by=executed_by,
     )
 
@@ -436,8 +501,63 @@ def activate_from_ir(conn, contract_id: int, league_year_id: int,
         "roster_warning": roster if roster["over_limit"] else None,
         "player": {
             **_get_player_summary(conn, c["playerID"]),
-            "current_level": c["current_level"],
+            "current_level": active_level,
             "on_ir": False,
+        },
+    }
+
+
+def apply_redshirt(conn, contract_id: int, league_year_id: int,
+                   executed_by: str = None) -> Dict[str, Any]:
+    """Redshirt a (college) player.
+
+    Mirrors the seeded redshirt model where a redshirt is a contract with
+    ``isExtension = 1`` and one extra year of length (CBL-06). Flags the
+    contract as a redshirt and extends its remaining length by one year so the
+    player preserves a year of eligibility. Rejected if already redshirted.
+    """
+    t = _tables_from_conn(conn)
+    c = _get_contract_or_raise(conn, contract_id)
+
+    if c["isFinished"]:
+        raise ValueError("Cannot redshirt a finished contract")
+    if c.get("isExtension"):
+        raise ValueError("Player is already redshirted")
+
+    org_id = _get_holder_org(conn, contract_id)
+    if org_id is None:
+        raise ValueError("No holder org found for this contract")
+
+    old_years = int(c.get("years") or 0)
+    new_years = old_years + 1
+
+    conn.execute(
+        update(t["contracts"])
+        .where(t["contracts"].c.id == contract_id)
+        .values(isExtension=1, years=new_years)
+    )
+
+    tx_id = _log_transaction(
+        conn,
+        transaction_type="redshirt",
+        league_year_id=league_year_id,
+        primary_org_id=org_id,
+        contract_id=contract_id,
+        player_id=c["playerID"],
+        details={"years_from": old_years, "years_to": new_years},
+        executed_by=executed_by,
+    )
+
+    return {
+        "transaction_id": tx_id,
+        "contract_id": contract_id,
+        "player_id": c["playerID"],
+        "is_redshirt": True,
+        "years": new_years,
+        "player": {
+            **_get_player_summary(conn, c["playerID"]),
+            "current_level": c["current_level"],
+            "on_ir": bool(c.get("onIR") or 0),
         },
     }
 
@@ -1633,6 +1753,8 @@ def get_roster_status(conn, org_id: int) -> List[Dict[str, Any]]:
             contracts.c.isFinished == 0,
             shares.c.orgID == org_id,
             shares.c.isHolder == 1,
+            # IR players don't count against the active roster limit (MLB-07)
+            func.coalesce(contracts.c.onIR, 0) == 0,
         ))
         .group_by(contracts.c.current_level)
         .subquery()

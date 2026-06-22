@@ -427,6 +427,7 @@
       'tx-amateur': 'Amateur Seeding',
       'schedule-gen': 'Schedule Generator',
       'schedule-viewer': 'Schedule Viewer',
+      'game-viewer': 'Game Viewer',
       migrations: 'Migrations',
       'analytics-batting': 'Batting Correlations',
       'analytics-pitching': 'Pitching Correlations',
@@ -512,6 +513,9 @@
         loadScheduleReport();
         break;
       case 'schedule-viewer':
+        break;
+      case 'game-viewer':
+        initGameViewer();
         break;
       case 'analytics-batting':
       case 'analytics-pitching':
@@ -7193,11 +7197,309 @@
     loadPendingGames(lyid, level);
   });
 
+  document.getElementById('btn-po-procadv')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Processing results and advancing...';
+    fetch(`${API_BASE}/playoffs/process-and-advance`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: parseInt(level) }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      const parts = [`Processed ${data.processed} result(s)`];
+      const adv = data.advanced || {};
+      if (level === '3') {
+        if (adv.cws?.status === 'complete') parts.push('CWS complete');
+        else if (adv.cws?.rounds_advanced?.length) parts.push(`CWS → ${adv.cws.rounds_advanced.join(', ')}`);
+        if (adv.conf?.advanced?.length) parts.push(`${adv.conf.advanced.length} conf(s) advanced`);
+        if (adv.conf?.completed?.length) parts.push(`${adv.conf.completed.length} conf(s) complete`);
+      } else if (adv.status === 'complete') {
+        parts.push(adv.message || 'Complete');
+      } else if (adv.round_advanced) {
+        parts.push(`Advanced to ${adv.round_advanced}`);
+      }
+      status.textContent = parts.join(' · ');
+      loadPlayoffBracket(lyid, level);
+      loadPendingGames(lyid, level);
+    }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-po-health')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    const div = document.getElementById('po-health');
+    div.style.display = '';
+    div.innerHTML = '<span class="muted">Checking bracket health...</span>';
+    fetch(`${API_BASE}/playoffs/health/${lyid}/${level}`, { credentials: 'include' })
+      .then(r => r.json()).then(data => {
+        if (data.error) { div.innerHTML = `<span style="color:#e57373">Error: ${data.message || data.error}</span>`; return; }
+        if (data.ok) {
+          div.innerHTML = '<span style="color:#66bb6a;font-weight:600">✓ No bracket integrity issues found.</span>';
+          return;
+        }
+        let html = '<table class="data-table"><thead><tr><th>Severity</th><th>Issue</th></tr></thead><tbody>';
+        data.issues.forEach(i => {
+          const color = i.severity === 'error' ? '#e57373' : '#ffb74d';
+          html += `<tr><td style="color:${color};font-weight:600">${i.severity}</td><td>${i.message}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        div.innerHTML = html;
+      }).catch(e => div.innerHTML = `<span style="color:#e57373">${e.message}</span>`);
+  });
+
+  function loadPlayoffStatus(lyid, level) {
+    const banner = document.getElementById('po-banner');
+    if (!banner) return;
+    fetch(`${API_BASE}/playoffs/status/${lyid}/${level}`, { credentials: 'include' })
+      .then(r => r.json()).then(data => {
+        if (data.error || !data.has_bracket) { banner.style.display = 'none'; return; }
+        const colors = {
+          simulate: ['#3a2f10', '#ffd54f'],
+          advance: ['#102a3a', '#4fc3f7'],
+          complete: ['#10301a', '#66bb6a'],
+          none: ['#2a2a2a', '#aaa'],
+        };
+        const [bg, fg] = colors[data.next_action] || colors.none;
+        banner.style.background = bg;
+        banner.style.color = fg;
+        banner.textContent = data.message;
+        banner.style.display = '';
+      }).catch(() => { banner.style.display = 'none'; });
+  }
+
+  // --- Field / seed editor (manual seeding overrides) ---
+  let poEditState = null;  // { format, level, pool }
+  let ctEditState = null;  // { fields }
+
+  function teamSelectHtml(pool, selectedId, cls) {
+    let opts = '';
+    pool.forEach(p => {
+      const sel = p.team_id === selectedId ? ' selected' : '';
+      opts += `<option value="${p.team_id}"${sel}>${p.team_abbrev}</option>`;
+    });
+    return `<select class="${cls}">${opts}</select>`;
+  }
+
+  function recCells(pool, teamId) {
+    const pe = pool.find(p => p.team_id === teamId) || {};
+    return `<td class="rec-w">${pe.wins ?? '-'}</td><td class="rec-l">${pe.losses ?? '-'}</td><td class="rec-pct">${pe.win_pct ?? '-'}</td>`;
+  }
+
+  function renderFieldEditorTable(teams, pool, cls) {
+    let h = '<table class="data-table"><thead><tr><th style="width:90px">Seed</th><th>Team</th><th>W</th><th>L</th><th>Pct</th></tr></thead><tbody>';
+    teams.forEach(t => {
+      h += `<tr>
+        <td><input type="number" min="1" class="${cls}-seed" value="${t.seed}" style="width:70px"></td>
+        <td>${teamSelectHtml(pool, t.team_id, cls + '-team')}</td>
+        ${recCells(pool, t.team_id)}
+      </tr>`;
+    });
+    return h + '</tbody></table>';
+  }
+
+  // Live-update the record columns when a team is swapped.
+  document.getElementById('po-fieldedit')?.addEventListener('change', (e) => {
+    if (!poEditState || e.target.tagName !== 'SELECT') return;
+    const row = e.target.closest('tr');
+    const pe = poEditState.pool.find(p => p.team_id === parseInt(e.target.value));
+    if (!row || !pe) return;
+    const w = row.querySelector('.rec-w'), l = row.querySelector('.rec-l'), pct = row.querySelector('.rec-pct');
+    if (w) w.textContent = pe.wins;
+    if (l) l.textContent = pe.losses;
+    if (pct) pct.textContent = pe.win_pct;
+  });
+
+  // Renumber seeds 1..N within each editor table (ordered by current seed value).
+  function resequenceTables(containerSel) {
+    document.querySelectorAll(`${containerSel} table`).forEach(tbl => {
+      Array.from(tbl.querySelectorAll('input[type=number]'))
+        .map((el, i) => ({ el, v: parseInt(el.value) || 0, i }))
+        .sort((a, b) => a.v - b.v || a.i - b.i)
+        .forEach((o, idx) => { o.el.value = idx + 1; });
+    });
+  }
+  document.getElementById('btn-po-resequence')?.addEventListener('click', () => resequenceTables('#po-fieldedit'));
+  document.getElementById('btn-ct-resequence')?.addEventListener('click', () => resequenceTables('#ct-fieldedit'));
+  document.getElementById('btn-po-fieldedit-reset')?.addEventListener('click', () => document.getElementById('btn-po-preview')?.click());
+  document.getElementById('btn-ct-fieldedit-reset')?.addEventListener('click', () => document.getElementById('btn-ct-preview')?.click());
+
+  function collectEditorTable(seedCls, teamCls, pool) {
+    const seeds = Array.from(document.querySelectorAll('.' + seedCls));
+    const teamsSel = Array.from(document.querySelectorAll('.' + teamCls));
+    const out = [];
+    for (let i = 0; i < seeds.length; i++) {
+      const tid = parseInt(teamsSel[i].value);
+      const team = pool.find(p => p.team_id === tid);
+      out.push({ team_id: tid, seed: parseInt(seeds[i].value), team_abbrev: team ? team.team_abbrev : '' });
+    }
+    return out;
+  }
+
+  function seedsValid(list, size) {
+    const s = list.map(t => t.seed).sort((a, b) => a - b);
+    if (s.length !== size) return false;
+    for (let i = 0; i < size; i++) if (s[i] !== i + 1) return false;
+    return new Set(list.map(t => t.team_id)).size === size;
+  }
+
+  document.getElementById('btn-po-preview')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const level = document.getElementById('po-level').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Loading field...';
+    fetch(`${API_BASE}/playoffs/field/${lyid}/${level}`, { credentials: 'include' })
+      .then(r => r.json()).then(data => {
+        if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+        status.textContent = '';
+        const card = document.getElementById('po-fieldedit-card');
+        const div = document.getElementById('po-fieldedit');
+        document.getElementById('po-fieldedit-status').textContent = '';
+        let html = '';
+        if (data.format === 'mlb') {
+          poEditState = { format: 'mlb', level: parseInt(level), pool: data.pool };
+          ['AL', 'NL'].forEach(conf => {
+            const confPool = data.pool.filter(p => p.conference === conf);
+            html += `<h5>${conf}</h5>` + renderFieldEditorTable(data.field[conf], confPool, `po-mlb-${conf}`);
+          });
+        } else {
+          poEditState = { format: data.format, level: parseInt(level), pool: data.pool };
+          html += renderFieldEditorTable(data.field, data.pool, 'po-flat');
+        }
+        div.innerHTML = html;
+        card.style.display = '';
+      }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-po-fieldedit-cancel')?.addEventListener('click', () => {
+    document.getElementById('po-fieldedit-card').style.display = 'none';
+    poEditState = null;
+  });
+
+  document.getElementById('btn-po-generate-edited')?.addEventListener('click', () => {
+    if (!poEditState) return;
+    const lyid = document.getElementById('po-lyid').value;
+    const level = poEditState.level;
+    const estatus = document.getElementById('po-fieldedit-status');
+    let field;
+    if (poEditState.format === 'mlb') {
+      field = {};
+      for (const conf of ['AL', 'NL']) {
+        const confPool = poEditState.pool.filter(p => p.conference === conf);
+        const teams = collectEditorTable(`po-mlb-${conf}-seed`, `po-mlb-${conf}-team`, confPool);
+        if (!seedsValid(teams, 6)) { estatus.textContent = `${conf}: seeds must be 1..6 with unique teams`; return; }
+        field[conf] = teams;
+      }
+    } else {
+      const teams = collectEditorTable('po-flat-seed', 'po-flat-team', poEditState.pool);
+      if (!seedsValid(teams, 8)) { estatus.textContent = 'Seeds must be 1..8 with unique teams'; return; }
+      field = teams;
+    }
+    estatus.textContent = 'Generating...';
+    fetch(`${API_BASE}/playoffs/generate`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: level, field }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { estatus.textContent = `Error: ${data.message || data.error}`; return; }
+      estatus.textContent = `Created ${(data.series_created || []).length} series`;
+      document.getElementById('po-fieldedit-card').style.display = 'none';
+      poEditState = null;
+      loadPlayoffBracket(lyid, level);
+      loadPendingGames(lyid, level);
+    }).catch(e => estatus.textContent = e.message);
+  });
+
+  document.getElementById('btn-ct-preview')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const status = document.getElementById('po-status');
+    status.textContent = 'Loading conference fields...';
+    fetch(`${API_BASE}/playoffs/conf-tournaments/field/${lyid}`, { credentials: 'include' })
+      .then(r => r.json()).then(data => {
+        if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+        status.textContent = '';
+        ctEditState = { fields: data.fields };
+        const card = document.getElementById('ct-fieldedit-card');
+        const div = document.getElementById('ct-fieldedit');
+        document.getElementById('ct-fieldedit-status').textContent = '';
+        const confs = Object.keys(data.fields || {}).sort();
+        if (!confs.length) {
+          div.innerHTML = '<p class="muted">No eligible conferences (each needs 2+ teams).</p>';
+          card.style.display = ''; return;
+        }
+        let html = '';
+        confs.forEach(conf => {
+          const teams = data.fields[conf];
+          html += `<details style="margin-bottom:8px" open><summary style="cursor:pointer;font-weight:600">${conf} (${teams.length})</summary>`;
+          html += `<table class="data-table" data-conf="${conf}" style="margin-left:12px"><thead><tr><th style="width:90px">Seed</th><th>Team</th><th>Conf</th><th>Overall</th></tr></thead><tbody>`;
+          teams.forEach(t => {
+            html += `<tr data-team="${t.team_id}" data-abbrev="${t.team_abbrev}">
+              <td><input type="number" min="1" class="ct-seed" value="${t.seed}" style="width:70px"></td>
+              <td>${t.team_abbrev}</td>
+              <td>${t.conf_wins}-${t.conf_losses}</td>
+              <td>${t.wins}-${t.losses} (${t.win_pct})</td></tr>`;
+          });
+          html += '</tbody></table></details>';
+        });
+        div.innerHTML = html;
+        card.style.display = '';
+      }).catch(e => status.textContent = e.message);
+  });
+
+  document.getElementById('btn-ct-fieldedit-cancel')?.addEventListener('click', () => {
+    document.getElementById('ct-fieldedit-card').style.display = 'none';
+    ctEditState = null;
+  });
+
+  document.getElementById('btn-ct-generate-edited')?.addEventListener('click', () => {
+    if (!ctEditState) return;
+    const lyid = document.getElementById('po-lyid').value;
+    const estatus = document.getElementById('ct-fieldedit-status');
+    const fields = {};
+    const tables = document.querySelectorAll('#ct-fieldedit table[data-conf]');
+    for (const tbl of tables) {
+      const conf = tbl.getAttribute('data-conf');
+      const rows = Array.from(tbl.querySelectorAll('tbody tr'));
+      const teams = rows.map(r => ({
+        team_id: parseInt(r.getAttribute('data-team')),
+        team_abbrev: r.getAttribute('data-abbrev'),
+        seed: parseInt(r.querySelector('.ct-seed').value),
+      }));
+      const size = teams.length;
+      const s = teams.map(t => t.seed).sort((a, b) => a - b);
+      let ok = s.length === size;
+      for (let i = 0; i < size; i++) if (s[i] !== i + 1) ok = false;
+      if (!ok) { estatus.textContent = `${conf}: seeds must be 1..${size} with no gaps or duplicates`; return; }
+      fields[conf] = teams;
+    }
+    estatus.textContent = 'Generating...';
+    fetch(`${API_BASE}/playoffs/conf-tournaments/generate`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), fields }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { estatus.textContent = `Error: ${data.message || data.error}`; return; }
+      estatus.textContent = `Created ${data.total_series} series across ${(data.conferences || []).length} conferences`;
+      document.getElementById('ct-fieldedit-card').style.display = 'none';
+      ctEditState = null;
+      loadPlayoffBracket(lyid, '3');
+      loadPendingGames(lyid, '3');
+    }).catch(e => estatus.textContent = e.message);
+  });
+
   // --- Conference Tournament controls (show only for College / level 3) ---
   function updateCtControlsVisibility() {
     const level = document.getElementById('po-level')?.value;
     const ct = document.getElementById('ct-controls');
     if (ct) ct.style.display = level === '3' ? 'flex' : 'none';
+    // Hide any open editors / stale status when the level changes.
+    ['po-fieldedit-card', 'ct-fieldedit-card', 'po-banner', 'po-health'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    });
+    poEditState = null;
+    ctEditState = null;
   }
   document.getElementById('po-level')?.addEventListener('change', updateCtControlsVisibility);
   updateCtControlsVisibility();
@@ -7260,6 +7562,7 @@
   });
 
   function loadPlayoffBracket(lyid, level) {
+    loadPlayoffStatus(lyid, level);
     fetch(`${API_BASE}/playoffs/bracket/${lyid}/${level}`, { credentials: 'include' })
       .then(r => r.json())
       .then(data => {
@@ -7271,11 +7574,12 @@
           let ctHtml = '';
           for (const [conf, cdata] of Object.entries(data.conf_tournaments).sort((a, b) => a[0].localeCompare(b[0]))) {
             const roundNames = Object.keys(cdata.rounds).sort();
-            const totalRounds = roundNames.length;
-            // Find if conference is complete (last round has a winner)
-            const lastRound = roundNames[roundNames.length - 1];
-            const lastSeries = cdata.rounds[lastRound] || [];
-            const confWinner = lastSeries.length === 1 && lastSeries[0].winner ? lastSeries[0].winner.abbrev : null;
+            // Use the true bracket depth from the backend, not the number of
+            // rounds generated so far, so labels are right mid-tournament.
+            const totalRounds = cdata.total_rounds || roundNames.length;
+            // Champion only exists once the actual final round is complete.
+            const finalSeries = cdata.rounds[`CT_R${totalRounds}`] || [];
+            const confWinner = finalSeries.length === 1 && finalSeries[0].winner ? finalSeries[0].winner.abbrev : null;
             const confStatus = confWinner ? ` — Champion: ${confWinner}` : '';
             ctHtml += `<details style="margin-bottom:8px"><summary style="cursor:pointer;font-weight:600">${conf}${confStatus}</summary>`;
             for (const rnd of roundNames) {
@@ -7314,9 +7618,14 @@
           return;
         }
         card.style.display = '';
+        const CWS_ROUND_LABELS = {
+          CWS_W1: 'Winners — Round 1', CWS_W2: 'Winners — Round 2', CWS_W3: 'Winners — Final',
+          CWS_L1: 'Losers — Round 1', CWS_L2: 'Losers — Round 2', CWS_L3: 'Losers — Round 3',
+          CWS_L4: 'Losers — Final', CWS_F1: 'Championship', CWS_F2: 'Championship (if necessary)',
+        };
         let html = '';
         for (const [round, series] of Object.entries(data.rounds)) {
-          html += `<h5 style="margin-top:16px">${round}</h5>`;
+          html += `<h5 style="margin-top:16px">${CWS_ROUND_LABELS[round] || round}</h5>`;
           html += '<table class="data-table"><thead><tr><th>Matchup</th><th>Score</th><th>Status</th><th>Winner</th></tr></thead><tbody>';
           series.forEach(s => {
             const scoreA = s.wins_a, scoreB = s.wins_b;
@@ -7335,6 +7644,10 @@
         }
 
         if (data.cws_bracket) {
+          const alive = data.cws_bracket.filter(t => !t.eliminated);
+          if (data.cws_bracket.length > 1 && alive.length === 1) {
+            html += `<p style="margin-top:16px;font-weight:600;color:var(--text-primary)">🏆 CWS Champion: ${alive[0].team_abbrev}</p>`;
+          }
           html += '<h5 style="margin-top:16px">CWS Bracket</h5>';
           html += '<table class="data-table"><thead><tr><th>Seed</th><th>Team</th><th>Qual</th><th>Losses</th><th>Side</th></tr></thead><tbody>';
           data.cws_bracket.forEach(t => {
@@ -7359,20 +7672,45 @@
           return;
         }
         card.style.display = '';
-        let html = '<table class="data-table"><thead><tr><th>Game ID</th><th>Round</th><th>Matchup</th><th>Series</th><th>Week</th><th>Subweek</th></tr></thead><tbody>';
+        let html = '<table class="data-table"><thead><tr><th>Game ID</th><th>Round</th><th>Matchup</th><th>Series</th><th>Reschedule</th></tr></thead><tbody>';
         data.games.forEach(g => {
           const series = `${g.wins_a}-${g.wins_b} (Bo${g.series_length})`;
-          html += `<tr>
+          const subOpts = ['a', 'b', 'c', 'd'].map(s =>
+            `<option value="${s}"${s === g.season_subweek ? ' selected' : ''}>${s}</option>`).join('');
+          html += `<tr data-gid="${g.game_id}">
             <td>${g.game_id}</td>
             <td>${g.round}</td>
             <td>${g.away_abbrev} @ ${g.home_abbrev}</td>
             <td>${series}</td>
-            <td>${g.season_week}</td>
-            <td>${g.season_subweek}</td>
+            <td style="white-space:nowrap">
+              wk <input type="number" min="1" class="resched-week" value="${g.season_week}" style="width:56px">
+              <select class="resched-sub">${subOpts}</select>
+              <button class="btn btn-secondary btn-resched" data-gid="${g.game_id}">Move</button>
+            </td>
           </tr>`;
         });
         html += '</tbody></table>';
         div.innerHTML = html;
+
+        div.querySelectorAll('.btn-resched').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const row = btn.closest('tr');
+            const gid = parseInt(btn.getAttribute('data-gid'));
+            const week = parseInt(row.querySelector('.resched-week').value);
+            const subweek = row.querySelector('.resched-sub').value;
+            const pstatus = document.getElementById('po-status');
+            pstatus.textContent = `Rescheduling game ${gid}...`;
+            fetch(`${API_BASE}/playoffs/reschedule-game`, {
+              method: 'POST', credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ game_id: gid, season_week: week, season_subweek: subweek }),
+            }).then(r => r.json()).then(d => {
+              if (d.error) { pstatus.textContent = `Error: ${d.message || d.error}`; return; }
+              pstatus.textContent = `Game ${gid} moved to week ${d.season_week}${d.season_subweek}`;
+              loadPendingGames(lyid, level);
+            }).catch(e => pstatus.textContent = e.message);
+          });
+        });
       });
   }
 
@@ -9851,7 +10189,7 @@
 
     if (!_gpaEditMode) {
       let html = slots.length ? '<div style="overflow-x:auto"><table class="data-table"><thead><tr><th>Slot</th><th>Pitcher</th></tr></thead><tbody>' +
-        slots.map(s => `<tr><td>${s.slot}${s.slot===rot.current_slot?' <span style="color:#2196f3">(next)</span>':''}</td><td>${s.player_name} (${s.player_id})</td></tr>`).join('') +
+        slots.map(s => `<tr><td>${s.slot}${s.slot===rot.next_slot?' <span style="color:#2196f3">(next)</span>':''}</td><td>${s.player_name} (${s.player_id})</td></tr>`).join('') +
         '</tbody></table></div>' : '<span style="color:var(--text-secondary)">No rotation</span>';
       html += `<div style="color:var(--text-secondary);font-size:0.85em;margin-top:4px">Size: ${rot.rotation_size||0} | Slot: ${rot.current_slot||0} | Updated: ${rot.rotation_updated||'-'}</div>`;
       el.innerHTML = html;
@@ -11044,6 +11382,114 @@
       html += '</div>';
     }
     container.innerHTML = html;
+  }
+
+  // ── Game Viewer: narrative play-by-play (v2 format) ──
+  let _gvWired = false;
+  function initGameViewer() {
+    if (_gvWired) return;
+    _gvWired = true;
+    const btn = document.getElementById('btn-gv-load');
+    if (btn) btn.addEventListener('click', loadGamePbp);
+    const input = document.getElementById('gv-game-id');
+    if (input) input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') loadGamePbp();
+    });
+  }
+
+  function loadGamePbp() {
+    const gid = parseInt(document.getElementById('gv-game-id').value, 10);
+    const status = document.getElementById('gv-status');
+    const card = document.getElementById('gv-feed-card');
+    if (!gid) { status.textContent = 'Enter a game ID.'; return; }
+    const includeEvents = document.getElementById('gv-pitches').value === '1';
+    status.textContent = `Loading game ${gid}…`;
+    card.style.display = 'none';
+
+    const params = new URLSearchParams({
+      format: 'v2', granularity: 'at_bat',
+      include_events: includeEvents ? '1' : '0',
+    });
+    fetch(`/api/v1/games/${gid}/play-by-play?${params}`, { credentials: 'include' })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        if (data.error) { status.textContent = data.message || data.error; return; }
+        const atBats = data.at_bats || [];
+        if (!atBats.length) {
+          status.textContent =
+            `No play-by-play stored for game ${gid} (MLB-only; may be archived).`;
+          return;
+        }
+        status.textContent = '';
+        renderGamePbp(data, atBats, includeEvents);
+        card.style.display = '';
+      })
+      .catch(err => { status.textContent = 'Error: ' + err.message; });
+  }
+
+  function renderGamePbp(data, atBats, includeEvents) {
+    const teams = data.teams || {};
+    const away = teams.away || 'AWY';
+    const home = teams.home || 'HOM';
+    document.getElementById('gv-feed-title').textContent =
+      `Play-by-Play — Game ${data.game_id} (${away} @ ${home})`;
+
+    // Group at-bats by (inning, half), preserving order.
+    const groups = [];
+    let cur = null;
+    for (const ab of atBats) {
+      const key = `${ab.inning}|${ab.half}`;
+      if (!cur || cur.key !== key) {
+        cur = { key, inning: ab.inning, half: ab.half, abs: [] };
+        groups.push(cur);
+      }
+      cur.abs.push(ab);
+    }
+
+    const halfLabel = h => (h === 'top' ? 'Top' : h === 'bottom' ? 'Bot' : (h || ''));
+    let html = '';
+    for (const g of groups) {
+      const last = g.abs[g.abs.length - 1];
+      const sc = last.score_after || {};
+      const scoreStr = (sc.away != null && sc.home != null)
+        ? `${away} ${sc.away} – ${home} ${sc.home}` : '';
+      html += `<div class="gv-inning">
+        <div class="gv-inning-head">
+          <span>${halfLabel(g.half)} ${g.inning}</span>
+          <span class="text-muted">${scoreStr}</span>
+        </div>`;
+      for (const ab of g.abs) {
+        const rbi = (ab.rbi && ab.rbi > 0)
+          ? ` <span class="gv-rbi">${ab.rbi} RBI</span>` : '';
+        html += `<div class="gv-ab">
+          <div class="gv-ab-desc">${_esc(ab.description)}${rbi}</div>`;
+        if (includeEvents && ab.events && ab.events.length) {
+          html += `<div class="gv-events">` +
+            ab.events.map(_gvEventRow).join('') + `</div>`;
+        }
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+    document.getElementById('gv-feed').innerHTML = html;
+  }
+
+  function _gvEventRow(e) {
+    let line;
+    if (e.kind === 'pitch') {
+      const c = e.count || {};
+      const p = e.pitch || {};
+      const bits = [p.pitch, p.result, p.swing].filter(Boolean).join(' · ');
+      line = `${c.balls != null ? c.balls : 0}-${c.strikes != null ? c.strikes : 0}  ${bits || 'pitch'}`;
+    } else if (e.kind === 'steal') {
+      const who = e.runner && e.runner.name ? e.runner.name : 'runner';
+      line = `⚾ steal (${who}): ${(e.result || '').replace(/_/g, ' ')}`;
+    } else if (e.kind === 'pickoff') {
+      line = `⚾ pickoff: ${(e.result || '').replace(/_/g, ' ')}`;
+    } else {
+      line = e.kind || '';
+    }
+    return `<div class="gv-event">${_esc(line)}</div>`;
   }
 
   function _esc(s) {

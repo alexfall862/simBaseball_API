@@ -39,6 +39,9 @@
       <a href="#" class="nav-item" data-section="schedule-viewer">
         <span class="nav-icon">&#128065;</span> Schedule Viewer
       </a>
+      <a href="#" class="nav-item" data-section="game-viewer">
+        <span class="nav-icon">&#9918;</span> Game Viewer
+      </a>
       <a href="#" class="nav-item" data-section="simulate">
         <span class="nav-icon">&#9654;</span> Simulate Week
       </a>
@@ -3235,6 +3238,41 @@
       </section>
 
       <!-- ============================================================ -->
+      <!-- GAME VIEWER (play-by-play narrative)                        -->
+      <!-- ============================================================ -->
+      <section id="section-game-viewer" class="section">
+        <div class="card">
+          <h3>Game Viewer</h3>
+          <p class="text-muted" style="margin-bottom: 12px">
+            Read a game as a narrative play-by-play feed. MLB (level 9) games only —
+            lower levels do not store play-by-play.
+          </p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="gv-game-id">Game ID</label>
+              <input type="number" id="gv-game-id" placeholder="e.g. 12345" min="1" />
+            </div>
+            <div class="form-group">
+              <label for="gv-pitches">Show pitch detail</label>
+              <select id="gv-pitches">
+                <option value="0">Narrative only</option>
+                <option value="1">Include pitch/event detail</option>
+              </select>
+            </div>
+            <div class="form-group" style="align-self: flex-end">
+              <button class="btn btn-primary" id="btn-gv-load">Load Game</button>
+            </div>
+          </div>
+          <div id="gv-status" class="text-muted" style="margin-top: 8px"></div>
+        </div>
+
+        <div class="card" id="gv-feed-card" style="display: none">
+          <h3 id="gv-feed-title">Play-by-Play</h3>
+          <div id="gv-feed"></div>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
       <!-- STAMINA SECTIONS                                             -->
       <!-- ============================================================ -->
 
@@ -3662,18 +3700,48 @@
                 <option value="3">College (3)</option>
               </select>
             </div>
+            <button id="btn-po-preview" class="btn btn-secondary">Preview / Edit Field</button>
             <button id="btn-po-generate" class="btn btn-primary">Generate Bracket</button>
             <button id="btn-po-process" class="btn btn-secondary">Process Results</button>
             <button id="btn-po-advance" class="btn btn-secondary">Advance Round</button>
+            <button id="btn-po-procadv" class="btn btn-primary">Process &amp; Advance</button>
+            <button id="btn-po-health" class="btn btn-secondary">Health Check</button>
             <button id="btn-po-refresh" class="btn btn-secondary">Refresh</button>
             <button id="btn-po-wipe" class="btn btn-danger">Wipe Playoffs</button>
           </div>
           <div id="ct-controls" class="filter-row" style="display:none;gap:12px;flex-wrap:wrap;align-items:end;margin-top:8px">
+            <button id="btn-ct-preview" class="btn btn-secondary">Preview / Edit Seeds</button>
             <button id="btn-ct-generate" class="btn btn-primary">Generate Conf Tournaments</button>
             <button id="btn-ct-advance" class="btn btn-secondary">Advance Conf Tournaments</button>
             <button id="btn-ct-wipe" class="btn btn-danger">Wipe Conf Tournaments</button>
           </div>
+          <div id="po-banner" style="display:none;margin-top:8px;padding:8px 12px;border-radius:6px;font-weight:600"></div>
+          <div id="po-health" style="display:none;margin-top:8px"></div>
           <div id="po-status" class="status-msg"></div>
+        </div>
+        <div class="card" id="po-fieldedit-card" style="display:none">
+          <h4>Edit Field &amp; Seeds</h4>
+          <p class="muted" style="margin:0 0 8px">Adjust seeds and swap teams, then generate the bracket from your edits. Seeds must be 1..N with no gaps or duplicates.</p>
+          <div id="po-fieldedit"></div>
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button id="btn-po-generate-edited" class="btn btn-primary">Generate from Edited Field</button>
+            <button id="btn-po-resequence" class="btn btn-secondary">Auto-resequence Seeds</button>
+            <button id="btn-po-fieldedit-reset" class="btn btn-secondary">Reset to Computed</button>
+            <button id="btn-po-fieldedit-cancel" class="btn btn-secondary">Cancel</button>
+            <span id="po-fieldedit-status" class="status-msg"></span>
+          </div>
+        </div>
+        <div class="card" id="ct-fieldedit-card" style="display:none">
+          <h4>Edit Conference Seeds</h4>
+          <p class="muted" style="margin:0 0 8px">Reorder seeds within each conference, then generate. All teams qualify; seeds must be 1..N per conference.</p>
+          <div id="ct-fieldedit"></div>
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button id="btn-ct-generate-edited" class="btn btn-primary">Generate from Edited Seeds</button>
+            <button id="btn-ct-resequence" class="btn btn-secondary">Auto-resequence Seeds</button>
+            <button id="btn-ct-fieldedit-reset" class="btn btn-secondary">Reset to Computed</button>
+            <button id="btn-ct-fieldedit-cancel" class="btn btn-secondary">Cancel</button>
+            <span id="ct-fieldedit-status" class="status-msg"></span>
+          </div>
         </div>
         <div class="card" id="po-field-card" style="display:none">
           <h4>Playoff Field</h4>

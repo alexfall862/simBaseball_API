@@ -2,6 +2,7 @@
 
 import threading
 import gzip
+import json
 from flask import Blueprint, jsonify, current_app, request, redirect, Response
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -383,6 +384,103 @@ def advance_week_endpoint():
             error="unexpected_error",
             message=str(e)
         ), 500
+
+
+@games_bp.post("/games/run-week")
+def run_week_endpoint():
+    """One-click weekly management: simulate the week, then run all weekly
+    admin tasks and advance.
+
+    This is the single consolidated operation that replaces clicking
+    simulate-week and then advance-week (and the various books buttons)
+    separately. It runs, in order:
+      1. Simulate the week's games (build_week_payloads) — self-healing on
+         re-sim via the resim rollback, so re-running is safe.
+      2. advance_week(): runs week financial books (claimed via
+         game_weeks.books_run_at), ticks injuries (claimed via
+         game_weeks.injuries_ticked_at), processes expired waivers, advances
+         the FA auction, refreshes listed positions, and increments the week.
+
+    Every mutating sub-step is idempotency-guarded by its own claim column, so
+    clicking this twice for the same week is a safe no-op for books/injuries
+    and a self-healing replay for the sim — eliminating the double-tick that
+    healed injuries early (MLB-18/19/29).
+
+    Request body:
+      {"league_year_id": 2026, "season_week": 6, "league_level": 9}
+      league_level is optional; omit to run all levels.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    league_year_id = body.get("league_year_id")
+    season_week = body.get("season_week")
+    league_level = body.get("league_level")
+
+    if league_year_id is None or season_week is None:
+        return jsonify(
+            error="missing_field",
+            message="league_year_id and season_week are required",
+        ), 400
+    try:
+        league_year_id = int(league_year_id)
+        season_week = int(season_week)
+        if league_level is not None:
+            league_level = int(league_level)
+    except (TypeError, ValueError) as e:
+        return jsonify(error="invalid_type", message=str(e)), 400
+
+    engine = get_engine()
+    steps = {}
+
+    # --- Step 1: simulate the week ---
+    try:
+        update_timestamp({"week": season_week, "run_games": True})
+        with engine.connect() as conn:
+            sim_result = build_week_payloads(
+                conn=conn,
+                league_year_id=league_year_id,
+                season_week=season_week,
+                league_level=league_level,
+            )
+        subweeks = sim_result.get("subweeks", {})
+        for subweek_key in ["a", "b", "c", "d"]:
+            if subweeks.get(subweek_key):
+                set_subweek_completed(subweek_key, broadcast=False)
+        set_run_games(False, broadcast=True)
+        steps["simulate"] = {"ran": True, "total_games": sim_result.get("total_games", 0)}
+    except ValueError as e:
+        # No games for this week is not fatal to the overall operation; still
+        # allow the advance step to run (books/injuries are guarded no-ops).
+        set_run_games(False, broadcast=True)
+        steps["simulate"] = {"ran": False, "error": str(e)}
+    except Exception as e:
+        set_run_games(False, broadcast=True)
+        current_app.logger.exception("run_week: simulation failed")
+        return jsonify(
+            status="error", failed_step="simulate", message=str(e), steps=steps,
+        ), 500
+
+    # --- Step 2: advance (books + injuries + waivers + FA + positions + week++) ---
+    try:
+        advanced = advance_week(broadcast=True)
+        steps["advance"] = {"ran": bool(advanced)}
+        if not advanced:
+            return jsonify(
+                status="error", failed_step="advance",
+                message="advance_week reported failure", steps=steps,
+            ), 500
+    except Exception as e:
+        current_app.logger.exception("run_week: advance failed")
+        return jsonify(
+            status="error", failed_step="advance", message=str(e), steps=steps,
+        ), 500
+
+    return jsonify(
+        status="ok",
+        league_year_id=league_year_id,
+        season_week=season_week,
+        league_level=league_level,
+        steps=steps,
+    ), 200
 
 
 @games_bp.post("/games/reset-week")
@@ -2011,27 +2109,69 @@ def get_game_boxscore(game_id: int):
 
 @games_bp.get("/games/<int:game_id>/play-by-play")
 def get_game_play_by_play(game_id: int):
-    """Return the play-by-play JSON blob for a single game."""
+    """
+    Return the play-by-play for a single game.
+
+    Query params:
+      - format ("raw" default | "v2"): "v2" returns the normalized,
+        human-readable shape (snake_case, clean nulls, a per-at-bat
+        ``description``). "raw" returns the stored engine blob verbatim.
+      - granularity ("at_bat" default | "action"): v2 only — group into
+        at-bats (with descriptions) or return a flat normalized action list.
+      - include_events ("1" default | "0"): v2 at_bat only — drop the
+        per-action ``events`` stream for a lighter narrative payload.
+      - inning (int), half ("top"/"bottom"): v2 filters.
+    """
     from sqlalchemy import text as sa_text
     import json as _json
+
+    fmt = request.args.get("format", "raw")
+    granularity = request.args.get("granularity", "at_bat")
+    include_events = request.args.get("include_events", "1") == "1"
 
     engine = get_engine()
     try:
         with engine.connect() as conn:
-            row = conn.execute(sa_text(
-                "SELECT play_by_play_json FROM game_results WHERE game_id = :gid"
-            ), {"gid": game_id}).first()
+            row = conn.execute(sa_text("""
+                SELECT gr.play_by_play_json,
+                       ht.team_abbrev AS home_abbrev,
+                       at2.team_abbrev AS away_abbrev
+                FROM game_results gr
+                JOIN teams ht ON ht.id = gr.home_team_id
+                JOIN teams at2 ON at2.id = gr.away_team_id
+                WHERE gr.game_id = :gid
+            """), {"gid": game_id}).mappings().first()
 
         if not row:
             return jsonify(error="not_found",
                            message=f"No results for game {game_id}"), 404
 
-        pbp = row[0]
-        if pbp is None:
-            return jsonify(game_id=game_id, play_by_play=[]), 200
+        pbp = row["play_by_play_json"]
+        data = (_json.loads(pbp) if isinstance(pbp, str) else pbp) if pbp is not None else []
 
-        data = _json.loads(pbp) if isinstance(pbp, str) else pbp
-        return jsonify(game_id=game_id, play_by_play=data), 200
+        if fmt != "v2":
+            return jsonify(game_id=game_id, play_by_play=data), 200
+
+        from services.pbp_normalize import normalize_game
+        result = normalize_game(
+            data, game_id, row["home_abbrev"], row["away_abbrev"],
+            granularity=granularity, include_events=include_events,
+        )
+
+        # Optional inning/half filters on the normalized output.
+        inning = request.args.get("inning", type=int)
+        half = request.args.get("half")
+        half = half.lower() if half else None
+        if inning is not None or half is not None:
+            key = "actions" if granularity == "action" else "at_bats"
+            items = result.get(key, [])
+            result[key] = [
+                it for it in items
+                if (inning is None or it.get("inning") == inning)
+                and (half is None or it.get("half") == half)
+            ]
+
+        return jsonify(result), 200
 
     except SQLAlchemyError as e:
         current_app.logger.exception("get_game_play_by_play: db error")
@@ -2118,6 +2258,466 @@ def get_game_results_list():
     except SQLAlchemyError as e:
         current_app.logger.exception("get_game_results_list: db error")
         return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Export suite auth + rate limit (see docs/bulk_export_design.md §5)
+# ---------------------------------------------------------------------------
+# API key is enforced only when EXPORT_API_KEYS is configured (comma-separated),
+# so the suite stays usable in dev until keys are provisioned. A per-key (or
+# per-IP) token-bucket rate limit always applies as a DB guardrail. The bucket
+# is per-process (in-memory); a guardrail, not a hard cross-worker quota.
+import os as _os
+import time as _time
+import threading as _threading
+from functools import wraps as _wraps
+
+_EXPORT_BUCKETS: dict = {}
+_EXPORT_LOCK = _threading.Lock()
+_EXPORT_RATE_PER_MIN = float(_os.environ.get("EXPORT_RATE_PER_MIN", "60"))
+_EXPORT_BURST = float(_os.environ.get("EXPORT_BURST", "20"))
+
+
+def _export_api_keys() -> set:
+    raw = _os.environ.get("EXPORT_API_KEYS", "")
+    return {k.strip() for k in raw.split(",") if k.strip()}
+
+
+def _export_rate_ok(bucket_key: str) -> bool:
+    now = _time.monotonic()
+    with _EXPORT_LOCK:
+        tokens, last = _EXPORT_BUCKETS.get(bucket_key, (_EXPORT_BURST, now))
+        tokens = min(_EXPORT_BURST, tokens + (now - last) * (_EXPORT_RATE_PER_MIN / 60.0))
+        if tokens < 1.0:
+            _EXPORT_BUCKETS[bucket_key] = (tokens, now)
+            return False
+        _EXPORT_BUCKETS[bucket_key] = (tokens - 1.0, now)
+        return True
+
+
+def require_export_access(fn):
+    @_wraps(fn)
+    def wrapper(*args, **kwargs):
+        keys = _export_api_keys()
+        auth = request.headers.get("Authorization", "")
+        provided = auth[7:].strip() if auth.startswith("Bearer ") else None
+        provided = provided or request.headers.get("X-Export-Key") or request.args.get("api_key")
+        if keys:
+            if not provided or provided not in keys:
+                return jsonify(error="unauthorized",
+                               message="A valid export API key is required"), 401
+            bucket_key = f"key:{provided}"
+        else:
+            bucket_key = f"ip:{request.remote_addr or 'anon'}"
+        if not _export_rate_ok(bucket_key):
+            return jsonify(error="rate_limited",
+                           message="Export rate limit exceeded; slow down"), 429
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@games_bp.get("/games/export")
+@require_export_access
+def export_game_results():
+    """Bulk, single-request export of completed games with per-game home/away
+    team aggregates (runs, AB, H, 2B, 3B, HR, BB, HBP, SO, SF, IP, ER).
+
+    Designed so an external tool can fetch everything it needs in ONE request
+    per refresh instead of crawling per-game boxscore endpoints.
+
+    Query params:
+      - league_year_id : filter to a season (maps to game_results.season). Also
+                         constrains the line aggregates for index-friendly speed.
+      - season_week, league_level, team_id : optional filters.
+      - game_type      : default 'regular'. Pass 'all' for every type.
+      - since          : incremental cursor — only games with game_id > since.
+                         game_id is autoincrement, so it's a gap-free watermark.
+                         The response returns max_game_id to pass back next time.
+      - limit          : max games (default 1000). limit=0 → uncapped.
+      - format         : 'json' (default) or 'csv'.
+
+    Venue is the home team's ballpark_name. innings_pitched is reported both as
+    raw outs (*_innings_pitched_outs) and X.Y notation (*_innings_pitched).
+    """
+    from sqlalchemy import text as sa_text
+    import csv as _csv
+    import io as _io
+    from flask import Response
+
+    league_year_id = request.args.get("league_year_id", type=int)
+    season_week = request.args.get("season_week", type=int)
+    league_level = request.args.get("league_level", type=int)
+    team_id = request.args.get("team_id", type=int)
+    game_type = request.args.get("game_type", "regular")
+    since = request.args.get("since", 0, type=int)
+    limit = request.args.get("limit", 1000, type=int)
+    fmt = (request.args.get("format", "json") or "json").lower()
+
+    where = ["gr.game_id > :since"]
+    params = {"since": since or 0}
+    if league_year_id:
+        where.append("gr.season = :season")
+        params["season"] = league_year_id
+    if season_week:
+        where.append("gr.season_week = :sw")
+        params["sw"] = season_week
+    if league_level:
+        where.append("gr.league_level = :ll")
+        params["ll"] = league_level
+    if team_id:
+        where.append("(gr.home_team_id = :tid OR gr.away_team_id = :tid)")
+        params["tid"] = team_id
+    if game_type and game_type.lower() != "all":
+        where.append("gr.game_type = :gt")
+        params["gt"] = game_type
+    where_sql = " WHERE " + " AND ".join(where)
+
+    limit_sql = ""
+    if limit and limit > 0:
+        limit_sql = " LIMIT :limit"
+        params["limit"] = limit
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            # sacrifice_flies is added by a later migration; include it only if
+            # present so the export works whether or not the migration is applied.
+            has_sf = conn.execute(sa_text("""
+                SELECT COUNT(*) FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'game_batting_lines'
+                  AND COLUMN_NAME = 'sacrifice_flies'
+            """)).scalar()
+            sf_sel = "SUM(sacrifice_flies)" if has_sf else "NULL"
+
+            # Constrain the line aggregates to the same season for speed
+            # (idx_gbl_ly_game / idx_gpl_ly_game) when a season is given.
+            bat_where = " WHERE league_year_id = :season" if league_year_id else ""
+            pit_where = bat_where
+
+            sql = f"""
+                SELECT gr.game_id, gr.season, gr.season_week, gr.season_subweek,
+                       gr.league_level, gr.game_type, gr.completed_at,
+                       gr.home_team_id, gr.away_team_id,
+                       gr.home_score, gr.away_score, gr.game_outcome,
+                       ht.team_abbrev AS home_abbrev, ht.team_city AS home_city,
+                       ht.team_name AS home_name, ht.ballpark_name AS venue,
+                       at2.team_abbrev AS away_abbrev, at2.team_city AS away_city,
+                       at2.team_name AS away_name,
+                       hb.ab AS home_ab, hb.r AS home_r, hb.h AS home_h,
+                       hb.d AS home_2b, hb.t AS home_3b, hb.hr AS home_hr,
+                       hb.bb AS home_bb, hb.hbp AS home_hbp, hb.so AS home_so,
+                       hb.sf AS home_sf,
+                       ab.ab AS away_ab, ab.r AS away_r, ab.h AS away_h,
+                       ab.d AS away_2b, ab.t AS away_3b, ab.hr AS away_hr,
+                       ab.bb AS away_bb, ab.hbp AS away_hbp, ab.so AS away_so,
+                       ab.sf AS away_sf,
+                       hp.ipo AS home_ipo, hp.er AS home_er,
+                       ap.ipo AS away_ipo, ap.er AS away_er
+                FROM game_results gr
+                JOIN teams ht ON ht.id = gr.home_team_id
+                JOIN teams at2 ON at2.id = gr.away_team_id
+                LEFT JOIN (
+                    SELECT game_id, team_id, SUM(at_bats) ab, SUM(runs) r,
+                           SUM(hits) h, SUM(doubles_hit) d, SUM(triples) t,
+                           SUM(home_runs) hr, SUM(walks) bb, SUM(hbp) hbp,
+                           SUM(strikeouts) so, {sf_sel} sf
+                    FROM game_batting_lines{bat_where}
+                    GROUP BY game_id, team_id
+                ) hb ON hb.game_id = gr.game_id AND hb.team_id = gr.home_team_id
+                LEFT JOIN (
+                    SELECT game_id, team_id, SUM(at_bats) ab, SUM(runs) r,
+                           SUM(hits) h, SUM(doubles_hit) d, SUM(triples) t,
+                           SUM(home_runs) hr, SUM(walks) bb, SUM(hbp) hbp,
+                           SUM(strikeouts) so, {sf_sel} sf
+                    FROM game_batting_lines{bat_where}
+                    GROUP BY game_id, team_id
+                ) ab ON ab.game_id = gr.game_id AND ab.team_id = gr.away_team_id
+                LEFT JOIN (
+                    SELECT game_id, team_id, SUM(innings_pitched_outs) ipo,
+                           SUM(earned_runs) er
+                    FROM game_pitching_lines{pit_where}
+                    GROUP BY game_id, team_id
+                ) hp ON hp.game_id = gr.game_id AND hp.team_id = gr.home_team_id
+                LEFT JOIN (
+                    SELECT game_id, team_id, SUM(innings_pitched_outs) ipo,
+                           SUM(earned_runs) er
+                    FROM game_pitching_lines{pit_where}
+                    GROUP BY game_id, team_id
+                ) ap ON ap.game_id = gr.game_id AND ap.team_id = gr.away_team_id
+                {where_sql}
+                ORDER BY gr.game_id ASC{limit_sql}
+            """
+            rows = conn.execute(sa_text(sql), params).mappings().all()
+
+        def _ip(outs):
+            if outs is None:
+                return None
+            outs = int(outs)
+            return f"{outs // 3}.{outs % 3}"
+
+        def _i(v):
+            return int(v) if v is not None else None
+
+        games = []
+        max_game_id = since or 0
+        for r in rows:
+            gid = int(r["game_id"])
+            max_game_id = max(max_game_id, gid)
+            games.append({
+                "game_id": gid,
+                "season": _i(r["season"]),
+                "season_week": _i(r["season_week"]),
+                "season_subweek": r["season_subweek"],
+                "league_level": _i(r["league_level"]),
+                "game_type": r["game_type"],
+                "completed_at": str(r["completed_at"]) if r["completed_at"] else None,
+                "venue": r["venue"],
+                "home_team_id": _i(r["home_team_id"]),
+                "home_team_abbrev": r["home_abbrev"],
+                "home_team_name": (f"{r['home_city']} {r['home_name']}").strip(),
+                "away_team_id": _i(r["away_team_id"]),
+                "away_team_abbrev": r["away_abbrev"],
+                "away_team_name": (f"{r['away_city']} {r['away_name']}").strip(),
+                "home_runs": _i(r["home_score"]),
+                "away_runs": _i(r["away_score"]),
+                "home_at_bats": _i(r["home_ab"]), "away_at_bats": _i(r["away_ab"]),
+                "home_hits": _i(r["home_h"]), "away_hits": _i(r["away_h"]),
+                "home_doubles": _i(r["home_2b"]), "away_doubles": _i(r["away_2b"]),
+                "home_triples": _i(r["home_3b"]), "away_triples": _i(r["away_3b"]),
+                "home_home_runs": _i(r["home_hr"]), "away_home_runs": _i(r["away_hr"]),
+                "home_walks": _i(r["home_bb"]), "away_walks": _i(r["away_bb"]),
+                "home_hit_by_pitch": _i(r["home_hbp"]), "away_hit_by_pitch": _i(r["away_hbp"]),
+                "home_strikeouts": _i(r["home_so"]), "away_strikeouts": _i(r["away_so"]),
+                "home_sacrifice_flies": _i(r["home_sf"]), "away_sacrifice_flies": _i(r["away_sf"]),
+                "home_innings_pitched": _ip(r["home_ipo"]),
+                "away_innings_pitched": _ip(r["away_ipo"]),
+                "home_innings_pitched_outs": _i(r["home_ipo"]),
+                "away_innings_pitched_outs": _i(r["away_ipo"]),
+                "home_earned_runs": _i(r["home_er"]), "away_earned_runs": _i(r["away_er"]),
+            })
+
+        if fmt == "csv":
+            buf = _io.StringIO()
+            fieldnames = list(games[0].keys()) if games else ["game_id"]
+            writer = _csv.DictWriter(buf, fieldnames=fieldnames)
+            writer.writeheader()
+            for g in games:
+                writer.writerow(g)
+            return Response(
+                buf.getvalue(),
+                mimetype="text/csv",
+                headers={
+                    "Content-Disposition": (
+                        f"attachment; filename=games_export_{league_year_id or 'all'}"
+                        f"_{since or 0}.csv"
+                    ),
+                    "X-Max-Game-Id": str(max_game_id),
+                },
+            )
+
+        return jsonify(
+            games=games,
+            count=len(games),
+            max_game_id=max_game_id,
+            has_more=bool(limit and limit > 0 and len(games) == limit),
+        ), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.exception("export_game_results: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@games_bp.get("/games/export/cursor")
+@require_export_access
+def export_cursor_endpoint():
+    """Lightweight 'is there new data?' check for incremental consumers.
+
+    Returns the highest game_id and the count of games matching the filter, so
+    a client can store max_game_id and only pull when it advances.
+    Params: league_year_id, season_week, league_level, team_id, game_type.
+    """
+    from services.game_export import export_cursor
+    filters = {
+        "season": request.args.get("league_year_id", type=int),
+        "season_week": request.args.get("season_week", type=int),
+        "league_level": request.args.get("league_level", type=int),
+        "team_id": request.args.get("team_id", type=int),
+        "game_type": request.args.get("game_type", "regular"),
+    }
+    try:
+        result = export_cursor(get_engine(), filters)
+        return jsonify(result), 200
+    except SQLAlchemyError as e:
+        current_app.logger.exception("export_cursor: db error")
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@games_bp.get("/games/export/boxscores")
+@require_export_access
+def export_boxscores_endpoint():
+    """Bulk per-game STRUCTURED box scores (all levels): game meta + linescore +
+    per-player batting/pitching/fielding lines + substitutions. Streams NDJSON
+    (one game per line) by default; incremental via since=<game_id>.
+
+    Params: league_year_id, season_week, league_level, team_id, game_type
+    (default 'regular', 'all' for every type), since (default 0),
+    limit (default 1000, 0=uncapped), format (ndjson default | json).
+
+    NDJSON: the final line is {"_meta": {max_game_id, count, has_more}} — and
+    since games are game_id-ascending, the last game's id is also the watermark.
+    """
+    from flask import Response, stream_with_context
+    from services.game_export import iter_boxscore_games
+
+    filters = {
+        "season": request.args.get("league_year_id", type=int),
+        "season_week": request.args.get("season_week", type=int),
+        "league_level": request.args.get("league_level", type=int),
+        "team_id": request.args.get("team_id", type=int),
+        "game_type": request.args.get("game_type", "regular"),
+    }
+    since = request.args.get("since", 0, type=int)
+    limit = request.args.get("limit", 1000, type=int)
+    fmt = (request.args.get("format", "ndjson") or "ndjson").lower()
+    engine = get_engine()
+
+    if fmt == "json":
+        # Collected array — intended for small/bounded pulls.
+        games = list(iter_boxscore_games(engine, filters=filters, since=since, limit=limit))
+        max_id = max((g["game_id"] for g in games), default=since or 0)
+        return jsonify(
+            games=games, count=len(games), max_game_id=max_id,
+            has_more=bool(limit and limit > 0 and len(games) == limit),
+        ), 200
+
+    def generate():
+        count = 0
+        max_id = since or 0
+        try:
+            for g in iter_boxscore_games(engine, filters=filters, since=since, limit=limit):
+                count += 1
+                max_id = max(max_id, g["game_id"])
+                yield json.dumps(g, default=str) + "\n"
+        except SQLAlchemyError:
+            current_app.logger.exception("export_boxscores: db error mid-stream")
+            yield json.dumps({"_error": "database_error"}) + "\n"
+            return
+        meta = {"_meta": {"max_game_id": max_id, "count": count,
+                          "has_more": bool(limit and limit > 0 and count == limit)}}
+        yield json.dumps(meta) + "\n"
+
+    return Response(stream_with_context(generate()),
+                    mimetype="application/x-ndjson",
+                    headers={"X-Accel-Buffering": "no"})
+
+
+@games_bp.get("/games/export/play-by-play")
+@require_export_access
+def export_play_by_play_endpoint():
+    """Bulk normalized v2 play-by-play (MLB only — PBP is stored for level 9
+    only). Streams NDJSON, one game per line; incremental via since=<game_id>.
+
+    Params: league_year_id, season_week, team_id, since (0),
+    limit (default 500, 0=uncapped), granularity (at_bat default | action),
+    include_events (0|1), format (ndjson default | json).
+    """
+    from flask import Response, stream_with_context
+    from services.pbp_normalize import normalize_game
+
+    season = request.args.get("league_year_id", type=int)
+    season_week = request.args.get("season_week", type=int)
+    team_id = request.args.get("team_id", type=int)
+    since = request.args.get("since", 0, type=int)
+    limit = request.args.get("limit", 500, type=int)
+    granularity = request.args.get("granularity", "at_bat")
+    include_events = request.args.get("include_events", "0") == "1"
+    fmt = (request.args.get("format", "ndjson") or "ndjson").lower()
+    engine = get_engine()
+
+    where = ["gr.league_level = 9", "gr.play_by_play_json IS NOT NULL", "gr.game_id > :since"]
+    params = {"since": since or 0}
+    if season:
+        where.append("gr.season = :season"); params["season"] = season
+    if season_week:
+        where.append("gr.season_week = :sw"); params["sw"] = season_week
+    if team_id:
+        where.append("(gr.home_team_id = :tid OR gr.away_team_id = :tid)"); params["tid"] = team_id
+    where_sql = " AND ".join(where)
+
+    def _norm(row):
+        try:
+            raw = row["play_by_play_json"]
+            plays = json.loads(raw) if isinstance(raw, str) else raw
+            if not plays:
+                return None
+            return normalize_game(
+                plays, int(row["game_id"]), row["home_abbrev"], row["away_abbrev"],
+                granularity=granularity, include_events=include_events,
+            )
+        except Exception:
+            current_app.logger.exception("export_pbp: normalize failed for game %s", row["game_id"])
+            return None
+
+    def _fetch_chunk(after, take):
+        from sqlalchemy import text as sa_text
+        with engine.connect() as conn:
+            return conn.execute(sa_text(f"""
+                SELECT gr.game_id, gr.play_by_play_json,
+                       ht.team_abbrev AS home_abbrev, at2.team_abbrev AS away_abbrev
+                FROM game_results gr
+                JOIN teams ht ON ht.id = gr.home_team_id
+                JOIN teams at2 ON at2.id = gr.away_team_id
+                WHERE {where_sql.replace(':since', ':after')}
+                ORDER BY gr.game_id ASC
+                LIMIT :take
+            """), {**params, "after": after, "take": take}).mappings().all()
+
+    def _iter():
+        after = since or 0
+        emitted = 0
+        while True:
+            if limit and limit > 0 and emitted >= limit:
+                break
+            take = 50 if not (limit and limit > 0) else min(50, limit - emitted)
+            rows = _fetch_chunk(after, take)
+            if not rows:
+                break
+            for r in rows:
+                obj = _norm(r)
+                after = int(r["game_id"])
+                emitted += 1
+                if obj is not None:
+                    yield obj, after
+            if len(rows) < take:
+                break
+
+    if fmt == "json":
+        out = []
+        max_id = since or 0
+        for obj, gid in _iter():
+            out.append(obj); max_id = max(max_id, gid)
+        return jsonify(games=out, count=len(out), max_game_id=max_id,
+                       has_more=bool(limit and limit > 0 and len(out) == limit)), 200
+
+    def generate():
+        count = 0
+        max_id = since or 0
+        try:
+            for obj, gid in _iter():
+                count += 1
+                max_id = max(max_id, gid)
+                yield json.dumps(obj, default=str) + "\n"
+        except SQLAlchemyError:
+            current_app.logger.exception("export_pbp: db error mid-stream")
+            yield json.dumps({"_error": "database_error"}) + "\n"
+            return
+        yield json.dumps({"_meta": {"max_game_id": max_id, "count": count,
+                                    "has_more": bool(limit and limit > 0 and count == limit)}}) + "\n"
+
+    return Response(stream_with_context(generate()),
+                    mimetype="application/x-ndjson",
+                    headers={"X-Accel-Buffering": "no"})
 
 
 @games_bp.get("/games/debug/synthetic")
@@ -2512,7 +3112,18 @@ def _run_all_levels_task(task_id: str, league_year_id: int,
 
             with timed_stage("weekly_tick_injuries", week=week):
                 try:
-                    healed = _tick_injuries(engine)
+                    # Claim the week's injury tick so it can't be double-applied
+                    # if advance_week also runs for this week (MLB-18/19/29).
+                    gw_id_for_tick = None
+                    if league_year_id is not None:
+                        with engine.connect() as _gwconn:
+                            _gwrow = _gwconn.execute(_sa_text(
+                                "SELECT id FROM game_weeks "
+                                "WHERE league_year_id = :lyid AND week_index = :w"
+                            ), {"lyid": int(league_year_id), "w": week}).first()
+                            if _gwrow:
+                                gw_id_for_tick = int(_gwrow[0])
+                    healed = _tick_injuries(engine, gw_id_for_tick)
                 except Exception as inj_err:
                     logger.warning(
                         "run_all_levels: injury tick failed at week %d: %s",

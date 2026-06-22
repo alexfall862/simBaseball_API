@@ -919,10 +919,28 @@ def advance_week(broadcast: bool = True) -> bool:
             except Exception:
                 pass
 
-            # Decrement injury weeks and clean up healed players
+            # Decrement injury weeks and clean up healed players. Resolve the
+            # completed week's game_weeks row so the tick is claimed atomically
+            # and can't be double-applied by the all-levels runner (MLB-18/19/29).
             try:
-                healed = _tick_injuries(engine)
-                logger.info(f"Injury tick for week {current_week}: {healed} players healed")
+                from sqlalchemy import text as _text2
+                gw_id_for_tick = None
+                ly_row_tick = conn.execute(
+                    _text2("SELECT id FROM league_years WHERE league_year = :yr"),
+                    {"yr": league_year},
+                ).first()
+                if ly_row_tick:
+                    gw_row_tick = conn.execute(
+                        _text2("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = :w"),
+                        {"lyid": int(ly_row_tick[0]), "w": current_week},
+                    ).first()
+                    if gw_row_tick:
+                        gw_id_for_tick = int(gw_row_tick[0])
+                healed = _tick_injuries(engine, gw_id_for_tick)
+                if healed == -1:
+                    logger.info(f"Injury tick for week {current_week}: already ticked, skipped")
+                else:
+                    logger.info(f"Injury tick for week {current_week}: {healed} players healed")
             except Exception as e:
                 logger.exception(f"Injury tick failed for week {current_week}, continuing")
 
@@ -1016,9 +1034,14 @@ def reset_week_games(broadcast: bool = True) -> bool:
 _CAREER_MALUS_FRACTION = 0.2
 
 
-def _tick_injuries(engine) -> int:
+def _tick_injuries(engine, game_week_id: int | None = None) -> int:
     """
     Decrement weeks_remaining on **all** active injury events by 1.
+
+    When ``game_week_id`` is supplied the tick is claimed atomically against
+    ``game_weeks.injuries_ticked_at`` so the same week can never be decremented
+    twice if two flows process it (advance_week + the all-levels season runner).
+    Returns -1 without decrementing if the week was already ticked (MLB-18/19/29).
 
     After decrementing, for each injured player we check whether ANY events
     still have weeks_remaining > 0.  If so, we update ``player_injury_state``
@@ -1035,6 +1058,17 @@ def _tick_injuries(engine) -> int:
     from sqlalchemy import text as sa_text
 
     with engine.begin() as conn:
+        # 0) Idempotency guard: claim this game-week's injury tick. If another
+        #    flow already ticked it, rowcount is 0 and we skip — preventing the
+        #    double-decrement that healed injuries early (MLB-18/19/29).
+        if game_week_id is not None:
+            claimed = conn.execute(sa_text("""
+                UPDATE game_weeks SET injuries_ticked_at = NOW()
+                WHERE id = :gw AND injuries_ticked_at IS NULL
+            """), {"gw": int(game_week_id)}).rowcount
+            if not claimed:
+                return -1
+
         # 1) Decrement weeks on ALL active injury events for injured players
         #    (not just the single current_event_id)
         conn.execute(sa_text("""

@@ -43,7 +43,9 @@ def batting_leaderboard():
     order = request.args.get("order", "").lower()
     min_pa = request.args.get("min_pa", 0, type=int)
     page = request.args.get("page", 1, type=int)
-    page_size = min(request.args.get("page_size", 50, type=int), 200)
+    _ps = request.args.get("page_size", 50, type=int)
+    # page_size=0 → uncapped full export (MLB-17); otherwise cap at 200
+    page_size = 1_000_000 if _ps == 0 else min(_ps, 200)
 
     # SQL expressions for every sortable stat
     _pa = "(bs.at_bats + bs.walks + bs.hbp)"
@@ -448,7 +450,9 @@ def pitching_leaderboard():
     min_ip_innings = request.args.get("min_ip", 0, type=int)
     min_ipo = min_ip_innings * 3
     page = request.args.get("page", 1, type=int)
-    page_size = min(request.args.get("page_size", 50, type=int), 200)
+    _ps = request.args.get("page_size", 50, type=int)
+    # page_size=0 → uncapped full export (MLB-17); otherwise cap at 200
+    page_size = 1_000_000 if _ps == 0 else min(_ps, 200)
 
     # SQL expressions for derived stats
     _ipo = "ps.innings_pitched_outs"
@@ -804,7 +808,9 @@ def fielding_leaderboard():
     order = request.args.get("order", "").lower()
     min_inn = request.args.get("min_inn", 0, type=int)
     page = request.args.get("page", 1, type=int)
-    page_size = min(request.args.get("page_size", 50, type=int), 200)
+    _ps = request.args.get("page_size", 50, type=int)
+    # page_size=0 → uncapped full export (MLB-17); otherwise cap at 200
+    page_size = 1_000_000 if _ps == 0 else min(_ps, 200)
 
     _tc = "(fs.putouts + fs.assists + fs.errors)"
     _fpct = f"IF({_tc} > 0, (fs.putouts + fs.assists) / {_tc}, 0)"

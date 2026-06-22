@@ -200,6 +200,68 @@ def generate_next_series_game(conn, series_id: int) -> Optional[Dict[str, Any]]:
 
 
 # =====================================================================
+# Seed persistence (manual-override support)
+# =====================================================================
+
+def _persist_seeds(
+    conn, league_year_id: int, league_level: int, field: Any,
+) -> None:
+    """
+    Persist a seeded field to ``playoff_seeds`` so later rounds honor manual
+    seeding overrides instead of re-deriving from records.
+
+    ``field`` may be a dict ``{conference: [team, ...]}`` (MLB) or a flat list
+    (other formats).  Each team needs ``team_id`` and ``seed``; ``conference``
+    and ``qualifier`` are optional.  Existing rows for this (year, level) are
+    cleared first so the call is safe to repeat.
+    """
+    conn.execute(sa_text("""
+        DELETE FROM playoff_seeds
+        WHERE league_year_id = :lyid AND league_level = :level
+    """), {"lyid": league_year_id, "level": league_level})
+
+    groups = field.items() if isinstance(field, dict) else [("", field)]
+    for conf, teams in groups:
+        for t in teams:
+            conn.execute(sa_text("""
+                INSERT INTO playoff_seeds
+                    (league_year_id, league_level, conference, seed, team_id, qualifier)
+                VALUES (:lyid, :level, :conf, :seed, :tid, :qual)
+            """), {
+                "lyid": league_year_id, "level": league_level,
+                "conf": conf or (t.get("conference") or ""),
+                "seed": int(t["seed"]), "tid": int(t["team_id"]),
+                "qual": t.get("qualifier"),
+            })
+
+
+def _get_persisted_seeds(
+    conn, league_year_id: int, league_level: int, conference: str = "",
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Return ``{seed: {team_id, seed, team_abbrev}}`` for a persisted field, or an
+    empty dict if none was stored (pre-migration brackets fall back to records).
+    """
+    rows = conn.execute(sa_text("""
+        SELECT ps.seed, ps.team_id, t.team_abbrev
+        FROM playoff_seeds ps
+        JOIN teams t ON t.id = ps.team_id
+        WHERE ps.league_year_id = :lyid AND ps.league_level = :level
+          AND ps.conference = :conf
+        ORDER BY ps.seed
+    """), {"lyid": league_year_id, "level": league_level, "conf": conference}).mappings().all()
+
+    return {
+        int(r["seed"]): {
+            "team_id": int(r["team_id"]),
+            "seed": int(r["seed"]),
+            "team_abbrev": r["team_abbrev"],
+        }
+        for r in rows
+    }
+
+
+# =====================================================================
 # MLB Playoffs (Level 9)
 # =====================================================================
 
@@ -308,6 +370,20 @@ def create_mlb_bracket(
 
     Returns summary of created series.
     """
+    existing = conn.execute(sa_text("""
+        SELECT COUNT(*) FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 9
+    """), {"lyid": league_year_id}).scalar()
+    if existing:
+        raise ValueError(
+            "MLB bracket already exists for this league year — "
+            "wipe playoffs (MLB) before regenerating."
+        )
+
+    # Persist the (possibly hand-edited) seeding so the DS round reads the bye
+    # teams from here instead of re-deriving seeds 1 & 2 from records.
+    _persist_seeds(conn, league_year_id, 9, field)
+
     engine = get_engine()
     created = []
 
@@ -583,10 +659,14 @@ def _advance_mlb_round(
             # Sort by seed (higher seed number = lower seed)
             wc_winner_seeds.sort(key=lambda x: x[1])
 
-            # Get bye teams (seeds 1 and 2) - they're in the field but NOT in WC series
-            # Query teams table for seeds 1 and 2 from the field
-            field = determine_mlb_playoff_field(conn, league_year_id)
-            conf_field = {t["seed"]: t for t in field[conf]}
+            # Get bye teams (seeds 1 and 2) — they're in the field but NOT in
+            # any WC series.  Read them from the persisted seeding so manual
+            # overrides are honored; fall back to records for pre-migration
+            # brackets that never persisted a field.
+            conf_field = _get_persisted_seeds(conn, league_year_id, 9, conf)
+            if not conf_field:
+                field = determine_mlb_playoff_field(conn, league_year_id)
+                conf_field = {t["seed"]: t for t in field[conf]}
 
             seed_1 = conf_field[1]
             seed_2 = conf_field[2]
@@ -804,6 +884,15 @@ def create_milb_bracket(
     Create quarterfinal matchups for minor league playoffs.
     QF: 1v8, 2v7, 3v6, 4v5 — all Bo7.
     """
+    existing = conn.execute(sa_text("""
+        SELECT COUNT(*) FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = :level
+    """), {"lyid": league_year_id, "level": league_level}).scalar()
+    if existing:
+        raise ValueError(
+            "Playoff bracket already exists for this level — wipe it before regenerating."
+        )
+
     engine = get_engine()
     seeds = {t["seed"]: t for t in field}
     created = []
@@ -998,6 +1087,7 @@ def determine_conf_tournament_fields(
 
 def create_conf_tournaments(
     conn, league_year_id: int, start_week: int = 25,
+    fields: Optional[Dict[str, List[Dict]]] = None,
 ) -> Dict[str, Any]:
     """
     Create all conference tournament brackets in one call.
@@ -1006,8 +1096,21 @@ def create_conf_tournaments(
       - All teams qualify (maximise field).
       - Bracket math determines byes (top seeds skip play-in round).
       - Single-elimination Bo1 games.
+
+    ``fields`` may be supplied to override the computed seeding (admin editor);
+    when omitted the field is derived from conference records.
     """
-    fields = determine_conf_tournament_fields(conn, league_year_id)
+    existing = conn.execute(sa_text("""
+        SELECT COUNT(*) FROM conf_tournament_field WHERE league_year_id = :lyid
+    """), {"lyid": league_year_id}).scalar()
+    if existing:
+        raise ValueError(
+            "Conference tournaments already exist for this league year — "
+            "wipe them before regenerating."
+        )
+
+    if fields is None:
+        fields = determine_conf_tournament_fields(conn, league_year_id)
     summary: List[Dict] = []
     total_series = 0
 
@@ -1099,7 +1202,7 @@ def create_conf_tournaments(
 
 
 def advance_conf_tournaments(
-    conn, league_year_id: int,
+    conn, league_year_id: int, start_week: int = 25,
 ) -> Dict[str, Any]:
     """
     Advance all conference tournaments that have completed their current round.
@@ -1265,25 +1368,48 @@ def get_conf_tournament_winners(
     conn, league_year_id: int,
 ) -> Dict[str, int]:
     """
-    Return ``{conference_name: winner_team_id}`` for all completed conference
-    tournament finals.  The final round for each conference is the MAX round
-    number (CT_R5 > CT_R4 > … > CT_R1 lexicographically).
+    Return ``{conference_name: winner_team_id}`` only for conferences whose
+    tournament has actually finished.
+
+    A conference's true final round is ``CT_R{total_rounds}`` where
+    ``total_rounds`` comes from the bracket math for its field size — NOT the
+    highest round that currently exists.  Keying off ``MAX(round)`` would treat
+    a completed *intermediate* round (e.g. a semifinal, still with multiple
+    series) as the final and return several "champions" per conference, only
+    one of which survives the dict collapse.  This guard prevents premature /
+    wrong CWS auto-bids when the field is built before tournaments complete.
     """
-    rows = conn.execute(sa_text("""
-        SELECT ps.conference, ps.winner_team_id
-        FROM playoff_series ps
-        INNER JOIN (
-            SELECT conference, MAX(round) AS final_round
-            FROM playoff_series
-            WHERE league_year_id = :lyid AND league_level = 3
-              AND round LIKE 'CT_R%%'
-            GROUP BY conference
-        ) mx ON mx.conference = ps.conference AND mx.final_round = ps.round
-        WHERE ps.league_year_id = :lyid AND ps.league_level = 3
-          AND ps.status = 'complete'
+    # Expected final round per conference, derived from field size.
+    field_rows = conn.execute(sa_text("""
+        SELECT conference, COUNT(*) AS n
+        FROM conf_tournament_field
+        WHERE league_year_id = :lyid
+        GROUP BY conference
     """), {"lyid": league_year_id}).mappings().all()
 
-    return {r["conference"]: int(r["winner_team_id"]) for r in rows}
+    final_round: Dict[str, str] = {}
+    for r in field_rows:
+        info = _ct_bracket_info(int(r["n"]))
+        if info["total_rounds"] > 0:
+            final_round[r["conference"]] = f"{CT_ROUND_PREFIX}{info['total_rounds']}"
+
+    if not final_round:
+        return {}
+
+    rows = conn.execute(sa_text("""
+        SELECT conference, round, winner_team_id
+        FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 3
+          AND round LIKE 'CT_R%%' AND status = 'complete'
+          AND winner_team_id IS NOT NULL
+    """), {"lyid": league_year_id}).mappings().all()
+
+    winners: Dict[str, int] = {}
+    for r in rows:
+        conf = r["conference"]
+        if final_round.get(conf) == r["round"]:
+            winners[conf] = int(r["winner_team_id"])
+    return winners
 
 
 def wipe_conf_tournaments(
@@ -1295,7 +1421,11 @@ def wipe_conf_tournaments(
     """
     params = {"lyid": league_year_id}
 
-    # 1. Identify gamelist IDs from CT playoff_series
+    # 1. Identify gamelist IDs from CT playoff_series.
+    #    Scope strictly to this league year's season and to weeks BEFORE the CWS
+    #    begins.  A CT pairing (same conference) can recur as a CWS matchup
+    #    (seed pairing), and the same two teams could meet at level 3 in another
+    #    season — matching on team pair alone would delete those games too.
     game_ids_rows = conn.execute(sa_text("""
         SELECT gl.id
         FROM gamelist gl
@@ -1305,6 +1435,17 @@ def wipe_conf_tournaments(
           AND ((gl.home_team = ps.team_a_id AND gl.away_team = ps.team_b_id)
             OR (gl.home_team = ps.team_b_id AND gl.away_team = ps.team_a_id))
         WHERE gl.game_type = 'playoff' AND gl.league_level = 3
+          AND gl.season IN (
+              SELECT s.id FROM seasons s
+              JOIN league_years ly ON ly.league_year = s.year
+              WHERE ly.id = :lyid
+          )
+          AND gl.season_week >= ps.start_week
+          AND gl.season_week < COALESCE((
+              SELECT MIN(start_week) FROM playoff_series
+              WHERE league_year_id = :lyid AND league_level = 3
+                AND round LIKE 'CWS_%%'
+          ), 999999)
     """), params).all()
     game_ids = [int(r[0]) for r in game_ids_rows]
 
@@ -1518,6 +1659,15 @@ def create_cws_bracket(
     Double elimination: losers drop to losers bracket; 2 losses = eliminated.
     First round: 1v8, 2v7, 3v6, 4v5 — single games.
     """
+    existing = conn.execute(sa_text("""
+        SELECT COUNT(*) FROM cws_bracket WHERE league_year_id = :lyid
+    """), {"lyid": league_year_id}).scalar()
+    if existing:
+        raise ValueError(
+            "CWS bracket already exists for this league year — "
+            "wipe playoffs (College / level 3) before regenerating."
+        )
+
     # Insert bracket entries
     for t in field:
         conn.execute(sa_text("""
@@ -1528,7 +1678,7 @@ def create_cws_bracket(
                 (:lyid, :tid, :seed, :qual, 0, 0, 'winners')
         """), {
             "lyid": league_year_id, "tid": t["team_id"],
-            "seed": t["seed"], "qual": t["qualifier"],
+            "seed": t["seed"], "qual": t.get("qualifier", "at_large"),
         })
 
     # Create first-round single games (winners bracket)
@@ -1634,6 +1784,7 @@ def _cws_update_bracket(
                 UPDATE cws_bracket
                 SET losses = losses + 1, bracket_side = 'eliminated', eliminated = 1
                 WHERE league_year_id = :lyid AND team_id = :tid
+                  AND eliminated = 0
             """), {"lyid": league_year_id, "tid": tid})
         else:
             conn.execute(sa_text("""
@@ -1920,6 +2071,38 @@ _CWS_BUILDERS: Dict[str, Any] = {
 # CWS state-machine advancement
 # ---------------------------------------------------------------------------
 
+def _cws_finalize_if_done(conn, league_year_id: int) -> None:
+    """
+    Eliminate the championship loser once the final game has been played so a
+    lone survivor can be crowned.
+
+    The transition table stops at CWS_F2, and no builder consumes F2 results,
+    so without this step the if-necessary championship (where the losers-bracket
+    team forces a deciding game) would leave both finalists non-eliminated and
+    the tournament could never resolve.  Idempotent — re-eliminating an already
+    eliminated team is a no-op thanks to the ``eliminated = 0`` guard in
+    ``_cws_update_bracket``.
+    """
+    f2 = conn.execute(sa_text("""
+        SELECT team_a_id, team_b_id, winner_team_id
+        FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 3
+          AND round = 'CWS_F2' AND status = 'complete'
+          AND winner_team_id IS NOT NULL
+        LIMIT 1
+    """), {"lyid": league_year_id}).mappings().first()
+
+    if not f2:
+        return
+
+    winner_id = int(f2["winner_team_id"])
+    loser_id = (
+        int(f2["team_b_id"]) if winner_id == int(f2["team_a_id"])
+        else int(f2["team_a_id"])
+    )
+    _cws_update_bracket(conn, league_year_id, [loser_id], eliminate=True)
+
+
 def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
     """
     Advance the CWS double-elimination bracket.
@@ -1979,6 +2162,11 @@ def advance_cws_round(conn, league_year_id: int) -> Dict[str, Any]:
         )
 
     if not created_all:
+        # No new rounds fired — the bracket may be at its conclusion.  If the
+        # deciding game (CWS_F2) has been played, eliminate its loser so the
+        # lone survivor can be crowned.
+        _cws_finalize_if_done(conn, league_year_id)
+
         # Check if tournament is complete (1 or fewer non-eliminated teams)
         remaining = conn.execute(sa_text("""
             SELECT COUNT(*) AS cnt FROM cws_bracket
@@ -2049,6 +2237,15 @@ def get_bracket(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
                     ct_data[conf]["rounds"].setdefault(rnd_name, []).append(s)
         for rnd_name in ct_round_keys:
             del result["rounds"][rnd_name]
+        # Attach each conference's true bracket depth (from field size) so the
+        # UI can label rounds correctly even while the tournament is in
+        # progress (don't infer depth from the rounds that happen to exist yet).
+        for conf in ct_data:
+            n = conn.execute(sa_text("""
+                SELECT COUNT(*) FROM conf_tournament_field
+                WHERE league_year_id = :lyid AND conference = :conf
+            """), {"lyid": league_year_id, "conf": conf}).scalar()
+            ct_data[conf]["total_rounds"] = _ct_bracket_info(int(n or 0))["total_rounds"]
         result["conf_tournaments"] = ct_data
 
         cws = conn.execute(sa_text("""
@@ -2211,6 +2408,7 @@ def wipe_playoffs(
         "gamelist": 0,
         "playoff_series": 0,
         "cws_bracket": 0,
+        "playoff_seeds": 0,
     }
 
     if game_ids:
@@ -2245,6 +2443,13 @@ def wipe_playoffs(
         WHERE league_year_id = :lyid AND league_level = :level
     """), params)
     deleted["playoff_series"] = res.rowcount
+
+    # 2b. persisted seeds
+    res = conn.execute(sa_text("""
+        DELETE FROM playoff_seeds
+        WHERE league_year_id = :lyid AND league_level = :level
+    """), params)
+    deleted["playoff_seeds"] = res.rowcount
 
     # 3. cws_bracket + conf_tournament_field (level 3 only)
     if league_level == 3:

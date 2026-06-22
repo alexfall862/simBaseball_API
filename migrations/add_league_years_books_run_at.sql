@@ -10,12 +10,55 @@
 --
 -- Backfill: any league_year that already has the relevant ledger entries
 -- is treated as previously processed.
+--
+-- Idempotent: each ADD COLUMN is wrapped in a check against
+-- information_schema.COLUMNS so a partial prior run can be safely retried.
 
-ALTER TABLE league_years
-    ADD COLUMN media_run_at         DATETIME NULL DEFAULT NULL AFTER weeks_in_season,
-    ADD COLUMN bonuses_run_at       DATETIME NULL DEFAULT NULL AFTER media_run_at,
-    ADD COLUMN playoff_revenue_run_at DATETIME NULL DEFAULT NULL AFTER bonuses_run_at,
-    ADD COLUMN interest_run_at      DATETIME NULL DEFAULT NULL AFTER playoff_revenue_run_at;
+SET SQL_SAFE_UPDATES = 0;
+
+-- ---- ADD COLUMNS (idempotent) ----
+
+SET @sql := IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'league_years'
+       AND COLUMN_NAME = 'media_run_at') = 0,
+    'ALTER TABLE league_years ADD COLUMN media_run_at DATETIME NULL DEFAULT NULL AFTER weeks_in_season',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'league_years'
+       AND COLUMN_NAME = 'bonuses_run_at') = 0,
+    'ALTER TABLE league_years ADD COLUMN bonuses_run_at DATETIME NULL DEFAULT NULL AFTER media_run_at',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'league_years'
+       AND COLUMN_NAME = 'playoff_revenue_run_at') = 0,
+    'ALTER TABLE league_years ADD COLUMN playoff_revenue_run_at DATETIME NULL DEFAULT NULL AFTER bonuses_run_at',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'league_years'
+       AND COLUMN_NAME = 'interest_run_at') = 0,
+    'ALTER TABLE league_years ADD COLUMN interest_run_at DATETIME NULL DEFAULT NULL AFTER playoff_revenue_run_at',
+    'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- ---- BACKFILL ----
 
 -- Backfill media: any year with at least one media ledger row
 UPDATE league_years ly
@@ -52,3 +95,5 @@ JOIN (
     WHERE entry_type IN ('interest_income', 'interest_expense')
 ) i ON i.league_year_id = ly.id
 SET ly.interest_run_at = COALESCE(ly.interest_run_at, ly.created_at);
+
+SET SQL_SAFE_UPDATES = 1;
