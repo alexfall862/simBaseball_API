@@ -2407,11 +2407,11 @@ def export_game_results():
                        hb.ab AS home_ab, hb.r AS home_r, hb.h AS home_h,
                        hb.d AS home_2b, hb.t AS home_3b, hb.hr AS home_hr,
                        hb.bb AS home_bb, hb.hbp AS home_hbp, hb.so AS home_so,
-                       hb.sf AS home_sf,
+                       hb.sf AS home_sf, hb.sb AS home_sb, hb.cs AS home_cs,
                        ab.ab AS away_ab, ab.r AS away_r, ab.h AS away_h,
                        ab.d AS away_2b, ab.t AS away_3b, ab.hr AS away_hr,
                        ab.bb AS away_bb, ab.hbp AS away_hbp, ab.so AS away_so,
-                       ab.sf AS away_sf,
+                       ab.sf AS away_sf, ab.sb AS away_sb, ab.cs AS away_cs,
                        hp.ipo AS home_ipo, hp.er AS home_er,
                        ap.ipo AS away_ipo, ap.er AS away_er
                 FROM game_results gr
@@ -2421,7 +2421,8 @@ def export_game_results():
                     SELECT game_id, team_id, SUM(at_bats) ab, SUM(runs) r,
                            SUM(hits) h, SUM(doubles_hit) d, SUM(triples) t,
                            SUM(home_runs) hr, SUM(walks) bb, SUM(hbp) hbp,
-                           SUM(strikeouts) so, {sf_sel} sf
+                           SUM(strikeouts) so, {sf_sel} sf,
+                           SUM(stolen_bases) sb, SUM(caught_stealing) cs
                     FROM game_batting_lines{bat_where}
                     GROUP BY game_id, team_id
                 ) hb ON hb.game_id = gr.game_id AND hb.team_id = gr.home_team_id
@@ -2429,7 +2430,8 @@ def export_game_results():
                     SELECT game_id, team_id, SUM(at_bats) ab, SUM(runs) r,
                            SUM(hits) h, SUM(doubles_hit) d, SUM(triples) t,
                            SUM(home_runs) hr, SUM(walks) bb, SUM(hbp) hbp,
-                           SUM(strikeouts) so, {sf_sel} sf
+                           SUM(strikeouts) so, {sf_sel} sf,
+                           SUM(stolen_bases) sb, SUM(caught_stealing) cs
                     FROM game_batting_lines{bat_where}
                     GROUP BY game_id, team_id
                 ) ab ON ab.game_id = gr.game_id AND ab.team_id = gr.away_team_id
@@ -2489,6 +2491,8 @@ def export_game_results():
                 "home_walks": _i(r["home_bb"]), "away_walks": _i(r["away_bb"]),
                 "home_hit_by_pitch": _i(r["home_hbp"]), "away_hit_by_pitch": _i(r["away_hbp"]),
                 "home_strikeouts": _i(r["home_so"]), "away_strikeouts": _i(r["away_so"]),
+                "home_steals": _i(r["home_sb"]), "away_steals": _i(r["away_sb"]),
+                "home_caught_stealing": _i(r["home_cs"]), "away_caught_stealing": _i(r["away_cs"]),
                 "home_sacrifice_flies": _i(r["home_sf"]), "away_sacrifice_flies": _i(r["away_sf"]),
                 "home_innings_pitched": _ip(r["home_ipo"]),
                 "away_innings_pitched": _ip(r["away_ipo"]),

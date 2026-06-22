@@ -63,6 +63,23 @@ def create_allstar_event(
         UPDATE special_events SET status = 'roster_ready' WHERE id = :eid
     """), {"eid": event_id})
 
+    # Record selections as durable `all_star` awards so a player's All-Star
+    # history survives independently of the (wipe-able) special_events tables.
+    # Only the lineup/bench/pitchers actually rostered are recorded.
+    try:
+        from services.awards import record_all_star_selections
+        selections_by_label = {
+            home["label"]: _all_player_ids(home),
+            away["label"]: _all_player_ids(away),
+        }
+        record_all_star_selections(
+            conn, league_year_id, league_level, selections_by_label,
+        )
+    except Exception:
+        # Award recording is best-effort; never block event creation on it.
+        log.warning("allstar: failed to record all_star awards for event %d",
+                    event_id, exc_info=True)
+
     log.info("allstar: created event %d (level %d) with manual rosters", event_id, league_level)
 
     return {
@@ -70,6 +87,14 @@ def create_allstar_event(
         "league_year_id": league_year_id,
         "league_level": league_level,
     }
+
+
+def _all_player_ids(side: Dict[str, Any]) -> List[int]:
+    """Every player_id on a side (pitchers + lineup + bench), for award recording."""
+    ids = list(side.get("starting_pitchers", [])) + list(side.get("relief_pitchers", []))
+    ids += [e["player_id"] for e in side.get("lineup", [])]
+    ids += list(side.get("bench", []))
+    return [int(p) for p in ids]
 
 
 def _validate_side(side: Dict[str, Any], name: str):

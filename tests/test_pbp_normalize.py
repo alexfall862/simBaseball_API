@@ -193,6 +193,17 @@ def test_real_sample_normalizes():
     total_events = sum(len(ab["events"]) for ab in at_bats)
     assert total_events == len(raw), f"{total_events} events != {len(raw)} raw actions"
 
+    # Embedded events are the lean, FLAT shape (docs/EXPORT_API.md S4), not the
+    # rich nested action. A pitch event must expose flat balls/strikes/pitch and
+    # never the nested `count`/object `pitch` or context fields.
+    pitch_ev = next(e for ab in at_bats for e in ab["events"] if e["kind"] == "pitch")
+    assert set(pitch_ev.keys()) == {"kind", "balls", "strikes", "pitch", "swing", "result"}
+    assert not isinstance(pitch_ev["pitch"], dict)
+    base_ev = next((e for ab in at_bats for e in ab["events"]
+                    if e["kind"] in ("steal", "pickoff")), None)
+    if base_ev is not None:
+        assert set(base_ev.keys()) == {"kind", "result", "runner"}
+
     # The known home run in the sample is captured.
     assert any(ab["result"] == "home_run" for ab in at_bats)
 

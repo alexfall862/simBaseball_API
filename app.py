@@ -288,6 +288,12 @@ def create_app(config_object=Config):
         app.logger.exception("Failed to register wbc blueprint: %s", e)
 
     try:
+        from awards import awards_bp
+        app.register_blueprint(awards_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register awards blueprint: %s", e)
+
+    try:
         from recruiting import recruiting_bp
         app.register_blueprint(recruiting_bp, url_prefix="/api/v1")
     except Exception as e:

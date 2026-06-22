@@ -11477,10 +11477,8 @@
   function _gvEventRow(e) {
     let line;
     if (e.kind === 'pitch') {
-      const c = e.count || {};
-      const p = e.pitch || {};
-      const bits = [p.pitch, p.result, p.swing].filter(Boolean).join(' · ');
-      line = `${c.balls != null ? c.balls : 0}-${c.strikes != null ? c.strikes : 0}  ${bits || 'pitch'}`;
+      const bits = [e.pitch, e.result, e.swing].filter(Boolean).join(' · ');
+      line = `${e.balls != null ? e.balls : 0}-${e.strikes != null ? e.strikes : 0}  ${bits || 'pitch'}`;
     } else if (e.kind === 'steal') {
       const who = e.runner && e.runner.name ? e.runner.name : 'runner';
       line = `⚾ steal (${who}): ${(e.result || '').replace(/_/g, ' ')}`;

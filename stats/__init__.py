@@ -1317,6 +1317,17 @@ def player_stats(player_id: int):
                 ORDER BY pie.created_at DESC
             """), inj_params).mappings().all()
 
+            # Awards (career — durable across seasons). Best-effort: never let
+            # the awards table break the stats endpoint.
+            awards_data = {"awards": [], "summary": {}, "total_wins": 0}
+            try:
+                from services.awards import get_player_awards
+                awards_data = get_player_awards(conn, player_id)
+            except Exception:
+                logging.getLogger("app").warning(
+                    "player_stats: failed to load awards for %d", player_id,
+                    exc_info=True)
+
             # Game log (optional)
             gamelog_bat = []
             gamelog_pit = []
@@ -1451,6 +1462,15 @@ def player_stats(player_id: int):
                 "po": int(r["putouts"]), "a": int(r["assists"]),
                 "e": int(r["errors"]),
             } for r in fielding],
+            # Career awards. `awards` is the full list (filtered to the requested
+            # season when ?league_year_id= is supplied); `award_summary` and
+            # `total_awards` always reflect the whole career for headline display.
+            "awards": [
+                a for a in awards_data["awards"]
+                if not league_year_id or a["league_year_id"] == league_year_id
+            ],
+            "award_summary": awards_data["summary"],
+            "total_awards": awards_data["total_wins"],
         }
 
         if include_gamelog:

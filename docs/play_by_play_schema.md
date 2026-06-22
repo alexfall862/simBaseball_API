@@ -176,7 +176,7 @@ optional (`include_events=1`); the at-bat summary fields are always present.
         { "kind": "pitch",   "balls": 1, "strikes": 0, "pitch": "Fastball",
           "swing": "take", "result": "ball" },
         { "kind": "pickoff", "result": "unsuccessful_pickoff", "runner": {"id":2002,"name":"Jordan Park"} },
-        { "kind": "steal",   "result": "caught_stealing", "base": "2B",
+        { "kind": "steal",   "result": "caught_stealing",
           "runner": {"id":2003,"name":"Casey Reed"} }
       ],
       "description": "Jordan Park reaches on a single (flare to deep right), error on Max Knox."

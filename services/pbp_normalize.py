@@ -459,10 +459,47 @@ def _finalize_at_bat(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         ],
         "runners_after": last.get("runners_after"),
         "score_after": last.get("score_after"),
-        "events": events,
+        "events": [_event_view(e) for e in events],
     }
     ab["description"] = describe(ab)
     return ab
+
+
+def _event_view(action: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Lean, flat projection of a normalized action for embedding inside an
+    at-bat's ``events`` stream.
+
+    The enclosing at-bat already carries batter/pitcher/inning/result_detail, so
+    an event only needs the per-action delta. Matches the documented contract
+    (docs/EXPORT_API.md S4):
+
+      * pitch    -> {kind, balls, strikes, pitch, swing, result}
+                    where ``result`` is the *pitch-level* outcome (e.g. "Ball",
+                    "Strike", or a contact tier like "flare").
+      * steal /
+        pickoff  -> {kind, result, runner}
+                    where ``result`` is the baserunning enum (e.g.
+                    "stolen_base", "caught_stealing") and ``runner`` is the
+                    actor (may be null; see S5 #6).
+    """
+    kind = action.get("kind")
+    if kind == "pitch":
+        pitch = action.get("pitch") or {}
+        count = action.get("count") or {}
+        return {
+            "kind": "pitch",
+            "balls": count.get("balls"),
+            "strikes": count.get("strikes"),
+            "pitch": pitch.get("pitch"),
+            "swing": pitch.get("swing"),
+            "result": pitch.get("result"),
+        }
+    return {
+        "kind": kind,
+        "result": action.get("result"),
+        "runner": action.get("runner"),
+    }
 
 
 # --------------------------------------------------------------------------- #
