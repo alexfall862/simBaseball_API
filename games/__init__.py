@@ -2394,6 +2394,7 @@ def export_game_results():
             # (idx_gbl_ly_game / idx_gpl_ly_game) when a season is given.
             bat_where = " WHERE league_year_id = :season" if league_year_id else ""
             pit_where = bat_where
+            fld_where = bat_where
 
             sql = f"""
                 SELECT gr.game_id, gr.season, gr.season_week, gr.season_subweek,
@@ -2408,12 +2409,15 @@ def export_game_results():
                        hb.d AS home_2b, hb.t AS home_3b, hb.hr AS home_hr,
                        hb.bb AS home_bb, hb.hbp AS home_hbp, hb.so AS home_so,
                        hb.sf AS home_sf, hb.sb AS home_sb, hb.cs AS home_cs,
+                       hb.rbi AS home_rbi, hb.itphr AS home_itphr, hb.pa AS home_pa,
                        ab.ab AS away_ab, ab.r AS away_r, ab.h AS away_h,
                        ab.d AS away_2b, ab.t AS away_3b, ab.hr AS away_hr,
                        ab.bb AS away_bb, ab.hbp AS away_hbp, ab.so AS away_so,
                        ab.sf AS away_sf, ab.sb AS away_sb, ab.cs AS away_cs,
+                       ab.rbi AS away_rbi, ab.itphr AS away_itphr, ab.pa AS away_pa,
                        hp.ipo AS home_ipo, hp.er AS home_er,
-                       ap.ipo AS away_ipo, ap.er AS away_er
+                       ap.ipo AS away_ipo, ap.er AS away_er,
+                       hf.e AS home_e, af.e AS away_e
                 FROM game_results gr
                 JOIN teams ht ON ht.id = gr.home_team_id
                 JOIN teams at2 ON at2.id = gr.away_team_id
@@ -2422,7 +2426,9 @@ def export_game_results():
                            SUM(hits) h, SUM(doubles_hit) d, SUM(triples) t,
                            SUM(home_runs) hr, SUM(walks) bb, SUM(hbp) hbp,
                            SUM(strikeouts) so, {sf_sel} sf,
-                           SUM(stolen_bases) sb, SUM(caught_stealing) cs
+                           SUM(stolen_bases) sb, SUM(caught_stealing) cs,
+                           SUM(rbi) rbi, SUM(inside_the_park_hr) itphr,
+                           SUM(plate_appearances) pa
                     FROM game_batting_lines{bat_where}
                     GROUP BY game_id, team_id
                 ) hb ON hb.game_id = gr.game_id AND hb.team_id = gr.home_team_id
@@ -2431,7 +2437,9 @@ def export_game_results():
                            SUM(hits) h, SUM(doubles_hit) d, SUM(triples) t,
                            SUM(home_runs) hr, SUM(walks) bb, SUM(hbp) hbp,
                            SUM(strikeouts) so, {sf_sel} sf,
-                           SUM(stolen_bases) sb, SUM(caught_stealing) cs
+                           SUM(stolen_bases) sb, SUM(caught_stealing) cs,
+                           SUM(rbi) rbi, SUM(inside_the_park_hr) itphr,
+                           SUM(plate_appearances) pa
                     FROM game_batting_lines{bat_where}
                     GROUP BY game_id, team_id
                 ) ab ON ab.game_id = gr.game_id AND ab.team_id = gr.away_team_id
@@ -2447,6 +2455,16 @@ def export_game_results():
                     FROM game_pitching_lines{pit_where}
                     GROUP BY game_id, team_id
                 ) ap ON ap.game_id = gr.game_id AND ap.team_id = gr.away_team_id
+                LEFT JOIN (
+                    SELECT game_id, team_id, SUM(errors) e
+                    FROM game_fielding_lines{fld_where}
+                    GROUP BY game_id, team_id
+                ) hf ON hf.game_id = gr.game_id AND hf.team_id = gr.home_team_id
+                LEFT JOIN (
+                    SELECT game_id, team_id, SUM(errors) e
+                    FROM game_fielding_lines{fld_where}
+                    GROUP BY game_id, team_id
+                ) af ON af.game_id = gr.game_id AND af.team_id = gr.away_team_id
                 {where_sql}
                 ORDER BY gr.game_id ASC{limit_sql}
             """
@@ -2493,6 +2511,12 @@ def export_game_results():
                 "home_strikeouts": _i(r["home_so"]), "away_strikeouts": _i(r["away_so"]),
                 "home_steals": _i(r["home_sb"]), "away_steals": _i(r["away_sb"]),
                 "home_caught_stealing": _i(r["home_cs"]), "away_caught_stealing": _i(r["away_cs"]),
+                "home_rbi": _i(r["home_rbi"]), "away_rbi": _i(r["away_rbi"]),
+                "home_inside_the_park_hr": _i(r["home_itphr"]),
+                "away_inside_the_park_hr": _i(r["away_itphr"]),
+                "home_plate_appearances": _i(r["home_pa"]),
+                "away_plate_appearances": _i(r["away_pa"]),
+                "home_errors": _i(r["home_e"]), "away_errors": _i(r["away_e"]),
                 "home_sacrifice_flies": _i(r["home_sf"]), "away_sacrifice_flies": _i(r["away_sf"]),
                 "home_innings_pitched": _ip(r["home_ipo"]),
                 "away_innings_pitched": _ip(r["away_ipo"]),

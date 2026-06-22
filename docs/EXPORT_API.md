@@ -104,9 +104,10 @@ home_team_id, home_team_abbrev, home_team_name, away_team_id, away_team_abbrev, 
 home_runs, away_runs, home_at_bats, away_at_bats, home_hits, away_hits, home_doubles,
 away_doubles, home_triples, away_triples, home_home_runs, away_home_runs, home_walks, away_walks,
 home_hit_by_pitch, away_hit_by_pitch, home_strikeouts, away_strikeouts, home_steals, away_steals,
-home_caught_stealing, away_caught_stealing, home_sacrifice_flies,
-away_sacrifice_flies, home_innings_pitched, away_innings_pitched, home_innings_pitched_outs,
-away_innings_pitched_outs, home_earned_runs, away_earned_runs`
+home_caught_stealing, away_caught_stealing, home_rbi, away_rbi, home_inside_the_park_hr,
+away_inside_the_park_hr, home_plate_appearances, away_plate_appearances, home_errors, away_errors,
+home_sacrifice_flies, away_sacrifice_flies, home_innings_pitched, away_innings_pitched,
+home_innings_pitched_outs, away_innings_pitched_outs, home_earned_runs, away_earned_runs`
 
 Notes: `home_runs`/`away_runs` are **final scores** (home runs are `home_home_runs`).
 `*_innings_pitched` is `"X.Y"` notation (Y = thirds, 0–2); `*_innings_pitched_outs` is the raw
