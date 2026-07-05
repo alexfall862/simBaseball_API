@@ -7561,11 +7561,24 @@
     }).catch(e => status.textContent = e.message);
   });
 
+  let lastBracketData = null;
+  let lastBracketLevel = null;
+  let lastSkeleton = null;
+
   function loadPlayoffBracket(lyid, level) {
     loadPlayoffStatus(lyid, level);
+    // Prefetch the full bracket skeleton for PNG export (complete shape incl.
+    // TBD rounds). Best-effort — the export buttons re-fetch if it's missing.
+    lastSkeleton = null;
+    fetch(`${API_BASE}/playoffs/bracket-skeleton/${lyid}/${level}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(sk => { lastSkeleton = sk; })
+      .catch(() => {});
     fetch(`${API_BASE}/playoffs/bracket/${lyid}/${level}`, { credentials: 'include' })
       .then(r => r.json())
       .then(data => {
+        lastBracketData = data;
+        lastBracketLevel = String(level);
         // --- Conference Tournaments (level 3 only) ---
         const ctCard = document.getElementById('ct-bracket-card');
         const ctDiv = document.getElementById('ct-bracket');
@@ -7581,7 +7594,7 @@
             const finalSeries = cdata.rounds[`CT_R${totalRounds}`] || [];
             const confWinner = finalSeries.length === 1 && finalSeries[0].winner ? finalSeries[0].winner.abbrev : null;
             const confStatus = confWinner ? ` — Champion: ${confWinner}` : '';
-            ctHtml += `<details style="margin-bottom:8px"><summary style="cursor:pointer;font-weight:600">${conf}${confStatus}</summary>`;
+            ctHtml += `<details style="margin-bottom:8px"><summary style="cursor:pointer;font-weight:600">${conf}${confStatus} <button class="btn btn-secondary btn-png-conf" data-conf="${conf}" style="margin-left:8px;padding:2px 8px;font-size:11px;vertical-align:middle">PNG</button></summary>`;
             for (const rnd of roundNames) {
               const rndNum = parseInt(rnd.replace('CT_R', ''));
               let label = rnd;
@@ -7606,6 +7619,13 @@
             ctHtml += '</details>';
           }
           ctDiv.innerHTML = ctHtml;
+          ctDiv.querySelectorAll('.btn-png-conf').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              generateConfBracketPng(btn.getAttribute('data-conf'));
+            });
+          });
         } else if (ctCard) {
           ctCard.style.display = 'none';
         }
@@ -7660,6 +7680,304 @@
         div.innerHTML = html;
       });
   }
+
+  // ===== Bracket PNG export (client-side canvas, full skeleton) =====
+  //
+  // Brackets are drawn from the /playoffs/bracket-skeleton endpoint, which
+  // returns the COMPLETE bracket shape (every round through the final, with TBD
+  // placeholder slots for rounds not yet created). Connector lines are only
+  // drawn for fixed single-elim trees (kind === 'tree'); MLB and conference
+  // brackets reseed each round, so they render as labelled columns.
+
+  function _bracketTitleForLevel(level) {
+    const lvl = String(level);
+    if (lvl === '9') return 'MLB Playoffs';
+    if (lvl === '3') return 'College World Series';
+    const names = { '5': 'Single-A', '6': 'High-A', '7': 'Double-A', '8': 'Triple-A' };
+    return (names[lvl] || `Level ${lvl}`) + ' Playoffs';
+  }
+
+  function _skTeamCell(team, wins) {
+    if (!team) return { abbrev: 'TBD', seed: null, wins: null, tbd: true };
+    return { abbrev: team.abbrev, seed: team.seed, wins: wins };
+  }
+
+  function _skSlotToCard(slot) {
+    const scored = slot.series_length > 1 && slot.status !== 'not_created';
+    return {
+      a: _skTeamCell(slot.team_a, slot.wins_a),
+      b: _skTeamCell(slot.team_b, slot.wins_b),
+      winner: slot.winner ? slot.winner.abbrev : null,
+      showScore: scored,
+      games: slot.games || [],
+    };
+  }
+
+  function _skRounds(bracket) {
+    return bracket.rounds.map(r => ({ label: r.label, series: r.matches.map(_skSlotToCard) }));
+  }
+
+  function _skBracketTitle(bracket) {
+    return bracket.key === 'main' ? _bracketTitleForLevel(lastBracketLevel) : bracket.title;
+  }
+
+  function _renderSkeletonBracket(bracket) {
+    const title = _skBracketTitle(bracket);
+    const canvas = drawBracketCanvas(title, _skRounds(bracket), { connectors: bracket.kind === 'tree' });
+    return { canvas, filename: `bracket_${_slug(title)}.png` };
+  }
+
+  // Ensure the skeleton for the current league-year/level is loaded, then run cb.
+  function _withSkeleton(cb) {
+    if (lastSkeleton && lastSkeleton.brackets) { cb(); return; }
+    const lyid = document.getElementById('po-lyid')?.value;
+    if (!lyid || !lastBracketLevel) { alert('Load a bracket first.'); return; }
+    fetch(`${API_BASE}/playoffs/bracket-skeleton/${lyid}/${lastBracketLevel}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(sk => { lastSkeleton = sk; cb(); })
+      .catch(e => alert('Could not load bracket: ' + e.message));
+  }
+
+  function generatePlayoffBracketPng() {
+    _withSkeleton(() => {
+      const wantKey = String(lastBracketLevel) === '3' ? 'CWS' : 'main';
+      const bracket = (lastSkeleton.brackets || []).find(b => b.key === wantKey);
+      if (!bracket) { alert('No bracket to export yet — generate the bracket first.'); return; }
+      const out = _renderSkeletonBracket(bracket);
+      _downloadCanvasPng(out.canvas, out.filename);
+    });
+  }
+
+  function generateConfBracketPng(conf) {
+    _withSkeleton(() => {
+      const bracket = (lastSkeleton.brackets || []).find(b => b.key === conf);
+      if (!bracket) { alert('No bracket data for ' + conf); return; }
+      const out = _renderSkeletonBracket(bracket);
+      _downloadCanvasPng(out.canvas, out.filename);
+    });
+  }
+
+  function generateAllBracketPngs() {
+    _withSkeleton(() => {
+      const brackets = lastSkeleton.brackets || [];
+      if (!brackets.length) { alert('No brackets to export yet — generate the bracket first.'); return; }
+      const items = brackets.map(_renderSkeletonBracket);
+      // Stagger the downloads — browsers throttle/block rapid programmatic saves.
+      items.forEach((b, i) => setTimeout(() => _downloadCanvasPng(b.canvas, b.filename), i * 400));
+    });
+  }
+
+  function _slug(s) {
+    return String(s).replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '') || 'bracket';
+  }
+
+  function _downloadCanvasPng(canvas, filename) {
+    canvas.toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }, 'image/png');
+  }
+
+  function _roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  const CARD_LEFT_W = 100;   // seed + abbrev zone
+  const GAME_CELL_W = 18;    // per-game score column width
+
+  function _drawTeamRow(ctx, x, y, w, h, team, isWinner) {
+    const cy = y + h / 2;
+    ctx.textBaseline = 'middle';
+    ctx.font = '500 11px system-ui, sans-serif';
+    ctx.fillStyle = '#6b7280';
+    ctx.textAlign = 'left';
+    ctx.fillText(team.seed ? String(team.seed) : '-', x + 11, cy);
+    ctx.font = (isWinner ? '700 ' : '500 ') + '14px system-ui, sans-serif';
+    ctx.fillStyle = team.tbd ? '#6b7280' : (isWinner ? '#34d399' : '#e5e7eb');
+    ctx.fillText(team.abbrev || 'TBD', x + 34, cy);
+  }
+
+  // Per-game line scores (or the series win total as a fallback) in the right
+  // zone of a card, spanning both team rows.
+  function _drawScores(ctx, sx, y, h, s) {
+    const topCy = y + h / 4;
+    const botCy = y + h * 3 / 4;
+    if (s.games && s.games.length) {
+      ctx.font = '600 12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      s.games.forEach((g, i) => {
+        const cx = sx + 4 + i * GAME_CELL_W + GAME_CELL_W / 2;
+        ctx.fillStyle = g.win_a ? '#34d399' : '#9ca3af';
+        ctx.fillText(String(g.a), cx, topCy);
+        ctx.fillStyle = g.win_b ? '#34d399' : '#9ca3af';
+        ctx.fillText(String(g.b), cx, botCy);
+      });
+    } else if (s.showScore) {
+      ctx.font = '700 13px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = s.winner === s.a.abbrev ? '#34d399' : '#9ca3af';
+      if (s.a.wins != null) ctx.fillText(String(s.a.wins), sx + 6, topCy);
+      ctx.fillStyle = s.winner === s.b.abbrev ? '#34d399' : '#9ca3af';
+      if (s.b.wins != null) ctx.fillText(String(s.b.wins), sx + 6, botCy);
+    }
+  }
+
+  function _drawCard(ctx, x, y, w, h, s) {
+    _roundRectPath(ctx, x, y, w, h, 6);
+    ctx.fillStyle = '#1b2433';
+    ctx.fill();
+    ctx.strokeStyle = '#374151';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // horizontal divider between the two team rows
+    ctx.beginPath();
+    ctx.moveTo(x, y + h / 2);
+    ctx.lineTo(x + w, y + h / 2);
+    ctx.strokeStyle = '#374151';
+    ctx.stroke();
+    _drawTeamRow(ctx, x, y, CARD_LEFT_W, h / 2, s.a, s.winner === s.a.abbrev);
+    _drawTeamRow(ctx, x, y + h / 2, CARD_LEFT_W, h / 2, s.b, s.winner === s.b.abbrev);
+    const hasScores = (s.games && s.games.length) || s.showScore;
+    if (hasScores && w > CARD_LEFT_W + 4) {
+      // vertical divider before the score zone
+      ctx.beginPath();
+      ctx.moveTo(x + CARD_LEFT_W, y + 6);
+      ctx.lineTo(x + CARD_LEFT_W, y + h - 6);
+      ctx.strokeStyle = '#2b3647';
+      ctx.stroke();
+      _drawScores(ctx, x + CARD_LEFT_W, y, h, s);
+    }
+  }
+
+  function drawBracketCanvas(title, rounds, opts) {
+    const allowConnectors = !opts || opts.connectors !== false;
+    const SC = 2;
+    const pad = 36;
+    const cardH = 56, colGap = 64, vGap = 22;
+    const titleH = 52, labelH = 28;
+    // Card width adapts to the longest series in this bracket so per-game
+    // line scores fit; falls back to a small wins column, else just the teams.
+    let maxGames = 0, anyWins = false;
+    rounds.forEach(r => r.series.forEach(c => {
+      maxGames = Math.max(maxGames, (c.games || []).length);
+      if (c.showScore) anyWins = true;
+    }));
+    const scoreW = maxGames > 0 ? (8 + maxGames * GAME_CELL_W)
+                 : (anyWins ? 24 : 0);
+    const cardW = CARD_LEFT_W + scoreW + 8;
+    const numRounds = rounds.length;
+    const maxCards = Math.max(1, ...rounds.map(r => r.series.length));
+    const slotH = cardH + vGap;
+    const contentH = maxCards * slotH;
+
+    const titleFont = '700 24px system-ui, sans-serif';
+    const labelFont = '600 13px system-ui, sans-serif';
+    const colsW = numRounds * cardW + Math.max(0, numRounds - 1) * colGap;
+    // Make sure the canvas is wide enough for the title and every round label,
+    // not just the bracket columns — otherwise long titles get clipped.
+    const measureCtx = document.createElement('canvas').getContext('2d');
+    measureCtx.font = titleFont;
+    let neededW = Math.max(colsW, measureCtx.measureText(title).width);
+    measureCtx.font = labelFont;
+    rounds.forEach((r, i) => {
+      const right = i * (cardW + colGap) + measureCtx.measureText(r.label.toUpperCase()).width;
+      if (right > neededW) neededW = right;
+    });
+    const W = pad * 2 + Math.ceil(neededW);
+    const H = pad * 2 + titleH + labelH + contentH;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(W * SC);
+    canvas.height = Math.round(H * SC);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(SC, SC);
+
+    ctx.fillStyle = '#0f1623';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#f3f4f6';
+    ctx.font = titleFont;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillText(title, pad, pad + 14);
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillRect(pad, pad + 34, 48, 3);
+
+    const contentTop = pad + titleH + labelH;
+    const xOf = r => pad + r * (cardW + colGap);
+
+    // A clean single-elimination tree (each round = half the previous) gets
+    // connector lines; anything irregular (MLB, CWS double-elim, byes) is
+    // drawn as plain columns so we never draw a misleading feeder line.
+    let cleanTree = allowConnectors && numRounds > 1;
+    for (let i = 1; i < numRounds && cleanTree; i++) {
+      if (rounds[i - 1].series.length !== rounds[i].series.length * 2) { cleanTree = false; break; }
+    }
+
+    const positions = [];
+    for (let r = 0; r < numRounds; r++) {
+      const n = rounds[r].series.length;
+      const col = [];
+      if (cleanTree && r > 0) {
+        const prev = positions[r - 1];
+        for (let i = 0; i < n; i++) col.push((prev[2 * i] + prev[2 * i + 1]) / 2);
+      } else {
+        const top = contentTop + (contentH - n * slotH) / 2;
+        for (let i = 0; i < n; i++) col.push(top + i * slotH + cardH / 2);
+      }
+      positions.push(col);
+    }
+
+    ctx.font = labelFont;
+    ctx.fillStyle = '#9ca3af';
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    for (let r = 0; r < numRounds; r++) {
+      ctx.fillText(rounds[r].label.toUpperCase(), xOf(r), contentTop - 12);
+    }
+
+    if (cleanTree) {
+      ctx.strokeStyle = '#374151';
+      ctx.lineWidth = 1.5;
+      for (let r = 0; r < numRounds - 1; r++) {
+        const x1 = xOf(r) + cardW;
+        const x2 = xOf(r + 1);
+        const midX = (x1 + x2) / 2;
+        for (let i = 0; i < positions[r].length; i++) {
+          const y1 = positions[r][i];
+          const target = positions[r + 1][Math.floor(i / 2)];
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(midX, y1);
+          ctx.lineTo(midX, target);
+          ctx.lineTo(x2, target);
+          ctx.stroke();
+        }
+      }
+    }
+
+    for (let r = 0; r < numRounds; r++) {
+      rounds[r].series.forEach((s, i) => {
+        _drawCard(ctx, xOf(r), positions[r][i] - cardH / 2, cardW, cardH, s);
+      });
+    }
+
+    return canvas;
+  }
+
+  document.getElementById('btn-po-png')?.addEventListener('click', generatePlayoffBracketPng);
+  document.getElementById('btn-bracket-png-all')?.addEventListener('click', generateAllBracketPngs);
 
   function loadPendingGames(lyid, level) {
     fetch(`${API_BASE}/playoffs/pending-games/${lyid}/${level}`, { credentials: 'include' })

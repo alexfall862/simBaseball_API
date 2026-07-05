@@ -2270,6 +2270,365 @@ def get_bracket(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
 
 
 # =====================================================================
+# Full bracket skeleton (every round incl. TBD slots) for graphics
+# =====================================================================
+#
+# Unlike get_bracket (which only returns series that already exist), this emits
+# the COMPLETE bracket shape: every round through the final, with not-yet-played
+# rounds as TBD placeholder slots.  Initial-round participants are read from the
+# persisted seed tables (playoff_seeds / conf_tournament_field / cws_bracket) and
+# the created series, so no standings recomputation is needed.  Future-round
+# participants are left TBD because MLB and conference brackets RESEED each round
+# (winners re-paired best-vs-worst) — there is no fixed feeder mapping to draw.
+# Each bracket carries a ``kind`` so the renderer knows whether connector lines
+# are meaningful: 'tree' (fixed single-elim, e.g. MiLB) vs 'reseed' / 'double_elim'.
+
+_CWS_SKELETON_ROUNDS = [
+    ("CWS_W1", "Winners R1", 4),
+    ("CWS_W2", "Winners R2", 2),
+    ("CWS_L1", "Losers R1", 2),
+    ("CWS_W3", "Winners Final", 1),
+    ("CWS_L2", "Losers R2", 2),
+    ("CWS_L3", "Losers R3", 1),
+    ("CWS_L4", "Losers Final", 1),
+    ("CWS_F1", "Championship", 1),
+    ("CWS_F2", "Championship (if nec.)", 1),
+]
+
+
+def _sk_team(abbrev, seed):
+    """A known bracket participant, or None for a TBD slot."""
+    if abbrev is None:
+        return None
+    return {"abbrev": abbrev, "seed": int(seed) if seed else None}
+
+
+def _sk_tbd(series_length, team_a=None, team_b=None):
+    return {
+        "series_id": None, "team_a": team_a, "team_b": team_b,
+        "wins_a": 0, "wins_b": 0, "series_length": int(series_length),
+        "status": "not_created", "winner": None, "games": [],
+    }
+
+
+def _sk_from_series(s, games_by_series=None):
+    return {
+        "series_id": int(s["id"]),
+        "team_a": _sk_team(s["abbrev_a"], s["seed_a"]),
+        "team_b": _sk_team(s["abbrev_b"], s["seed_b"]),
+        "wins_a": int(s["wins_a"]),
+        "wins_b": int(s["wins_b"]),
+        "series_length": int(s["series_length"]),
+        "status": s["status"],
+        "winner": _sk_team(s["winner_abbrev"], None) if s["winner_team_id"] else None,
+        # Per-game line scores from team_a's perspective: {a, b, win_a, win_b}.
+        "games": (games_by_series or {}).get(int(s["id"]), []),
+    }
+
+
+def _sk_round(round_name, label, series_length, conf, inits, existing, games_by_series=None):
+    """Overlay any created series for (round_name, conf) onto the TBD template."""
+    rows = existing.get((round_name, conf or ""), [])
+    matches = []
+    for i, (a, b) in enumerate(inits):
+        if i < len(rows):
+            matches.append(_sk_from_series(rows[i], games_by_series))
+        else:
+            matches.append(_sk_tbd(series_length, a, b))
+    # Defensive: more created series than the template expected — show them all.
+    for j in range(len(inits), len(rows)):
+        matches.append(_sk_from_series(rows[j], games_by_series))
+    return {"round": round_name, "label": label, "matches": matches}
+
+
+def _ct_label(rnd_num, total_rounds):
+    if rnd_num == total_rounds:
+        return "Final"
+    if rnd_num == total_rounds - 1:
+        return "Semifinal"
+    if rnd_num == total_rounds - 2:
+        return "Quarterfinal"
+    return f"Round {rnd_num}"
+
+
+def _sk_mlb_seedmap(conn, league_year_id):
+    """{conf: {seed: abbrev}} from persisted seeds, falling back to the field."""
+    out: Dict[str, Dict[int, str]] = {}
+    try:
+        prows = conn.execute(sa_text("""
+            SELECT psd.conference, psd.seed, t.team_abbrev
+            FROM playoff_seeds psd
+            JOIN teams t ON t.id = psd.team_id
+            WHERE psd.league_year_id = :lyid AND psd.league_level = 9
+        """), {"lyid": league_year_id}).mappings().all()
+        for r in prows:
+            out.setdefault(r["conference"], {})[int(r["seed"])] = r["team_abbrev"]
+    except Exception:
+        out = {}
+    if not out:
+        try:
+            field = determine_mlb_playoff_field(conn, league_year_id)
+            for conf, teams in field.items():
+                out[conf] = {int(t["seed"]): t["team_abbrev"] for t in teams}
+        except Exception:
+            pass
+    return out
+
+
+def _sk_build_mlb(conn, league_year_id, existing, games_by_series):
+    if not any(rnd in ("WC", "DS", "CS", "WS") for (rnd, _c) in existing):
+        return None
+    seedmap = _sk_mlb_seedmap(conn, league_year_id)
+    wc, ds, cs = [], [], []
+    for conf in ("AL", "NL"):
+        sm = seedmap.get(conf, {})
+        wc += _sk_round("WC", "Wild Card", 3, conf, [
+            (_sk_team(sm.get(3), 3), _sk_team(sm.get(6), 6)),
+            (_sk_team(sm.get(4), 4), _sk_team(sm.get(5), 5)),
+        ], existing, games_by_series)["matches"]
+        ds += _sk_round("DS", "Division Series", 5, conf, [
+            (_sk_team(sm.get(1), 1), None),
+            (_sk_team(sm.get(2), 2), None),
+        ], existing, games_by_series)["matches"]
+        cs += _sk_round("CS", "Championship Series", 7, conf,
+                        [(None, None)], existing, games_by_series)["matches"]
+    ws = _sk_round("WS", "World Series", 7, "", [(None, None)], existing, games_by_series)
+    rounds = [
+        {"round": "WC", "label": "Wild Card", "matches": wc},
+        {"round": "DS", "label": "Division Series", "matches": ds},
+        {"round": "CS", "label": "Championship Series", "matches": cs},
+        ws,
+    ]
+    return {"key": "main", "title": "MLB Playoffs", "kind": "reseed", "rounds": rounds}
+
+
+def _sk_build_milb(existing, games_by_series):
+    qf = existing.get(("QF", ""), [])
+    if not qf:
+        return None
+    sm: Dict[int, str] = {}
+    for s in qf:
+        if s["seed_a"]:
+            sm[int(s["seed_a"])] = s["abbrev_a"]
+        if s["seed_b"]:
+            sm[int(s["seed_b"])] = s["abbrev_b"]
+    qf_inits = [
+        (_sk_team(sm.get(1), 1), _sk_team(sm.get(8), 8)),
+        (_sk_team(sm.get(2), 2), _sk_team(sm.get(7), 7)),
+        (_sk_team(sm.get(3), 3), _sk_team(sm.get(6), 6)),
+        (_sk_team(sm.get(4), 4), _sk_team(sm.get(5), 5)),
+    ]
+    rounds = [
+        _sk_round("QF", "Quarterfinal", 7, "", qf_inits, existing, games_by_series),
+        _sk_round("SF", "Semifinal", 7, "", [(None, None), (None, None)], existing, games_by_series),
+        _sk_round("F", "Final", 7, "", [(None, None)], existing, games_by_series),
+    ]
+    return {"key": "main", "title": "Playoffs", "kind": "tree", "rounds": rounds}
+
+
+def _sk_build_conferences(conn, league_year_id, existing, games_by_series):
+    rows = conn.execute(sa_text("""
+        SELECT ctf.conference, ctf.seed, ctf.has_bye, t.team_abbrev
+        FROM conf_tournament_field ctf
+        JOIN teams t ON t.id = ctf.team_id
+        WHERE ctf.league_year_id = :lyid
+        ORDER BY ctf.conference, ctf.seed
+    """), {"lyid": league_year_id}).mappings().all()
+
+    by_conf: Dict[str, List] = {}
+    for r in rows:
+        by_conf.setdefault(r["conference"], []).append(r)
+
+    brackets = []
+    for conf, teams in by_conf.items():
+        info = _ct_bracket_info(len(teams))
+        tr = info["total_rounds"]
+        if tr == 0:
+            continue
+        num_byes = info["num_byes"]
+        seed_ab = {int(t["seed"]): t["team_abbrev"] for t in teams}
+
+        # Round 1: play-in among non-bye seeds (or everyone), paired best-vs-worst.
+        if num_byes > 0:
+            playing = sorted(int(t["seed"]) for t in teams if int(t["seed"]) > num_byes)
+        else:
+            playing = sorted(int(t["seed"]) for t in teams)
+        r1_inits = []
+        lo, hi = 0, len(playing) - 1
+        while lo < hi:
+            sa_, sb_ = playing[lo], playing[hi]
+            r1_inits.append((_sk_team(seed_ab[sa_], sa_), _sk_team(seed_ab[sb_], sb_)))
+            lo += 1
+            hi -= 1
+        rounds = [_sk_round("CT_R1", _ct_label(1, tr), 1, conf, r1_inits, existing, games_by_series)]
+
+        # Round 2: the bye teams (known) re-enter here and are reseeded against
+        # the R1 winners (TBD). The reseed sorts by seed and pairs best-vs-worst;
+        # byes are the top seeds, so they always sort ahead of every R1 winner —
+        # giving each bye a determinate R2 slot (and two byes can even meet).
+        if tr >= 2:
+            if num_byes > 0:
+                bye_seeds = sorted(int(t["seed"]) for t in teams if int(t["seed"]) <= num_byes)
+                participants = [_sk_team(seed_ab[s], s) for s in bye_seeds]
+                participants += [None] * len(r1_inits)   # R1 winners — still TBD
+                r2_inits = []
+                lo, hi = 0, len(participants) - 1
+                while lo < hi:
+                    r2_inits.append((participants[lo], participants[hi]))
+                    lo += 1
+                    hi -= 1
+            else:
+                r2_inits = [(None, None)] * (1 << (tr - 2))
+            rounds.append(_sk_round("CT_R2", _ct_label(2, tr), 1, conf, r2_inits, existing, games_by_series))
+
+        # Round 3+ are all post-R2 winners — nothing determinate to show yet.
+        for r in range(3, tr + 1):
+            cnt = 1 << (tr - r)
+            rounds.append(_sk_round(f"CT_R{r}", _ct_label(r, tr), 1, conf,
+                                    [(None, None)] * cnt, existing, games_by_series))
+
+        brackets.append({"key": conf, "title": f"{conf} Tournament",
+                         "kind": "reseed", "rounds": rounds})
+    return brackets
+
+
+def _sk_build_cws(conn, league_year_id, existing, games_by_series):
+    cws = conn.execute(sa_text("""
+        SELECT cb.seed, t.team_abbrev
+        FROM cws_bracket cb
+        JOIN teams t ON t.id = cb.team_id
+        WHERE cb.league_year_id = :lyid
+        ORDER BY cb.seed
+    """), {"lyid": league_year_id}).mappings().all()
+    has_series = any(rnd.startswith("CWS_") for (rnd, _c) in existing)
+    if not cws and not has_series:
+        return None
+
+    seed_ab = {int(c["seed"]): c["team_abbrev"] for c in cws}
+    rounds = []
+    for round_name, label, count in _CWS_SKELETON_ROUNDS:
+        if round_name == "CWS_W1":
+            inits = [
+                (_sk_team(seed_ab.get(1), 1), _sk_team(seed_ab.get(8), 8)),
+                (_sk_team(seed_ab.get(2), 2), _sk_team(seed_ab.get(7), 7)),
+                (_sk_team(seed_ab.get(3), 3), _sk_team(seed_ab.get(6), 6)),
+                (_sk_team(seed_ab.get(4), 4), _sk_team(seed_ab.get(5), 5)),
+            ]
+        else:
+            inits = [(None, None)] * count
+        rounds.append(_sk_round(round_name, label, 1, "", inits, existing, games_by_series))
+    return {"key": "CWS", "title": "College World Series",
+            "kind": "double_elim", "rounds": rounds}
+
+
+def _load_series_games(conn, league_year_id, league_level, series_rows):
+    """
+    Map each playoff series id → its ordered per-game line scores.
+
+    There is no FK from games to playoff_series, so games are matched by the
+    unordered team pair and sequenced by week/subweek.  When the same pair meets
+    twice (CWS double-elim), each game is assigned to the most recent series of
+    that pair whose start_week is at or before the game's week.  Scores are
+    normalized to team_a's perspective: {a, b, win_a, win_b}.
+    """
+    games = conn.execute(sa_text("""
+        SELECT gl.home_team AS home_id, gl.away_team AS away_id,
+               gl.season_week, gl.season_subweek,
+               gr.home_score, gr.away_score, gr.winning_team_id
+        FROM gamelist gl
+        JOIN game_results gr ON gr.game_id = gl.id
+        WHERE gl.game_type = 'playoff' AND gl.league_level = :level
+          AND gl.season = (
+              SELECT s.id FROM seasons s
+              JOIN league_years ly ON ly.league_year = s.year
+              WHERE ly.id = :lyid LIMIT 1
+          )
+        ORDER BY gl.season_week, gl.season_subweek
+    """), {"level": league_level, "lyid": league_year_id}).mappings().all()
+
+    # Index series by unordered team pair, sorted by start_week.
+    pair_series: Dict[frozenset, List] = {}
+    for s in series_rows:
+        key = frozenset((int(s["team_a_id"]), int(s["team_b_id"])))
+        pair_series.setdefault(key, []).append(s)
+    for lst in pair_series.values():
+        lst.sort(key=lambda r: int(r["start_week"]))
+
+    out: Dict[int, List] = {}
+    for g in games:
+        key = frozenset((int(g["home_id"]), int(g["away_id"])))
+        cands = pair_series.get(key)
+        if not cands:
+            continue
+        chosen = cands[0]
+        for s in cands:
+            if int(s["start_week"]) <= int(g["season_week"]):
+                chosen = s
+            else:
+                break
+        if int(g["home_id"]) == int(chosen["team_a_id"]):
+            a, b = int(g["home_score"]), int(g["away_score"])
+        else:
+            a, b = int(g["away_score"]), int(g["home_score"])
+        win = g["winning_team_id"]
+        out.setdefault(int(chosen["id"]), []).append({
+            "a": a, "b": b,
+            "win_a": win is not None and int(win) == int(chosen["team_a_id"]),
+            "win_b": win is not None and int(win) == int(chosen["team_b_id"]),
+        })
+    return out
+
+
+def build_bracket_skeleton(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
+    """
+    Build the COMPLETE bracket structure (every round through the final,
+    unplayed rounds as TBD slots) for graphic rendering.
+
+    Returns ``{league_year_id, league_level, brackets: [{key, title, kind,
+    rounds: [{round, label, matches: [slot]}]}]}``.  Each *slot* is either a
+    real series (overlaid from playoff_series, including per-game ``games``
+    scores) or a TBD placeholder.
+    """
+    rows = conn.execute(sa_text("""
+        SELECT ps.*, ta.team_abbrev AS abbrev_a, tb.team_abbrev AS abbrev_b,
+               tw.team_abbrev AS winner_abbrev
+        FROM playoff_series ps
+        JOIN teams ta ON ta.id = ps.team_a_id
+        JOIN teams tb ON tb.id = ps.team_b_id
+        LEFT JOIN teams tw ON tw.id = ps.winner_team_id
+        WHERE ps.league_year_id = :lyid AND ps.league_level = :level
+        ORDER BY ps.series_number
+    """), {"lyid": league_year_id, "level": league_level}).mappings().all()
+
+    existing: Dict[Tuple[str, str], List] = {}
+    for s in rows:
+        existing.setdefault((s["round"], s["conference"] or ""), []).append(s)
+
+    games_by_series = _load_series_games(conn, league_year_id, league_level, rows)
+
+    brackets: List[Dict] = []
+    if league_level == 9:
+        b = _sk_build_mlb(conn, league_year_id, existing, games_by_series)
+        if b:
+            brackets.append(b)
+    elif 5 <= league_level <= 8:
+        b = _sk_build_milb(existing, games_by_series)
+        if b:
+            brackets.append(b)
+    elif league_level == 3:
+        brackets.extend(_sk_build_conferences(conn, league_year_id, existing, games_by_series))
+        cws = _sk_build_cws(conn, league_year_id, existing, games_by_series)
+        if cws:
+            brackets.append(cws)
+
+    return {
+        "league_year_id": league_year_id,
+        "league_level": league_level,
+        "brackets": brackets,
+    }
+
+
+# =====================================================================
 # Pending / Catch-up queries
 # =====================================================================
 

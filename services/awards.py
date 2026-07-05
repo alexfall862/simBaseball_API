@@ -197,8 +197,12 @@ def _get_award_type(conn, award_code: str) -> Optional[Dict[str, Any]]:
 def _snapshot_team_id(conn, player_id: int) -> Optional[int]:
     """Player's current active-contract team, for denormalized display."""
     return conn.execute(sa_text("""
-        SELECT team_id FROM contracts
-        WHERE player_id = :pid AND status = 'active'
+        SELECT t.id
+        FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+        WHERE c.playerID = :pid AND c.isActive = 1
         LIMIT 1
     """), {"pid": player_id}).scalar()
 

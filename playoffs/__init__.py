@@ -19,6 +19,7 @@ from services.playoffs import (
     advance_round,
     advance_cws_round,
     get_bracket,
+    build_bracket_skeleton,
     get_pending_playoff_games,
     process_completed_playoff_games,
     wipe_playoffs,
@@ -291,6 +292,21 @@ def get_bracket_endpoint(league_year_id: int, league_level: int):
     try:
         with engine.connect() as conn:
             result = get_bracket(conn, league_year_id, league_level)
+        return jsonify(result), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.get("/playoffs/bracket-skeleton/<int:league_year_id>/<int:league_level>")
+def get_bracket_skeleton_endpoint(league_year_id: int, league_level: int):
+    """
+    Full bracket skeleton (every round through the final, with TBD placeholder
+    slots for unplayed rounds) for graphic rendering.
+    """
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            result = build_bracket_skeleton(conn, league_year_id, league_level)
         return jsonify(result), 200
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500

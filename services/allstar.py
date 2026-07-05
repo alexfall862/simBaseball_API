@@ -247,8 +247,12 @@ def simulate_allstar_game(conn, event_id: int) -> Dict[str, Any]:
     home_players = sides[home_label]
     first_home_pid = home_players[0]["player_id"]
     home_team_id = conn.execute(sa_text("""
-        SELECT c.team_id FROM contracts c
-        WHERE c.player_id = :pid AND c.status = 'active'
+        SELECT t.id
+        FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+        WHERE c.playerID = :pid AND c.isActive = 1
         LIMIT 1
     """), {"pid": first_home_pid}).scalar()
     ballpark = get_ballpark_info(conn, home_team_id) if home_team_id else {}
@@ -357,11 +361,12 @@ def _build_allstar_side(
 
     # Look up each player's real org for strategy borrowing
     org_rows = conn.execute(sa_text("""
-        SELECT c.player_id, tm.orgID
+        SELECT c.playerID AS player_id, cts.orgID
         FROM contracts c
-        JOIN teams tm ON tm.id = c.team_id
-        WHERE c.player_id IN ({})
-          AND c.status = 'active'
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        WHERE c.playerID IN ({})
+          AND c.isActive = 1
     """.format(",".join(str(pid) for pid in player_ids)))).mappings().all()
 
     org_by_player = {int(r["player_id"]): int(r["orgID"]) for r in org_rows}
@@ -478,10 +483,12 @@ def get_event_rosters(conn, event_id: int) -> Dict[str, Any]:
         FROM special_event_rosters ser
         JOIN simbbPlayers p ON p.id = ser.player_id
         LEFT JOIN (
-            SELECT c.player_id, tm.team_abbrev
+            SELECT c.playerID AS player_id, tm.team_abbrev
             FROM contracts c
-            JOIN teams tm ON tm.id = c.team_id
-            WHERE c.status = 'active'
+            JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+            JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+            JOIN teams tm ON tm.orgID = cts.orgID AND tm.team_level = c.current_level
+            WHERE c.isActive = 1
         ) t ON t.player_id = ser.player_id
         WHERE ser.event_id = :eid
         ORDER BY ser.team_label, ser.is_starter DESC, ser.position_code
