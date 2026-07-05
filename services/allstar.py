@@ -19,6 +19,15 @@ ALLSTAR_PULLTEND = "quick"
 
 LINEUP_POSITIONS = ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH"]
 
+# Roster position codes -> engine `defense` dict keys. The engine determines
+# fielder eligibility from defense.values(), so every non-pitcher (including the
+# DH) must land in this dict under its engine key, or it is rejected as
+# ineligible for any role.
+_ROSTER_POS_TO_DEFENSE_KEY = {
+    "C": "c", "1B": "fb", "2B": "sb", "3B": "tb", "SS": "ss",
+    "LF": "lf", "CF": "cf", "RF": "rf", "DH": "dh",
+}
+
 
 # =====================================================================
 # Event Creation (manual rosters)
@@ -267,9 +276,11 @@ def simulate_allstar_game(conn, event_id: int) -> Dict[str, Any]:
         league_level, league_year_id, use_dh,
     )
 
-    # Compose game payload
+    # Compose game payload. The engine echoes game_id back and its response
+    # model requires a non-null integer, so use the event_id as a stable
+    # synthetic id (All-Star games are not scheduled into gamelist).
     game_payload = {
-        "game_id": None,
+        "game_id": event_id,
         "league_level_id": league_level,
         "league_year_id": league_year_id,
         "season_week": 0,
@@ -440,10 +451,14 @@ def _build_allstar_side(
         elif pos == "BENCH":
             bench_ids.append(pid)
         else:
-            # Lineup player with defensive position
+            # Lineup player: batting order + engine-keyed defense slot. The DH
+            # belongs in defense["dh"] too — the engine derives fielder
+            # eligibility from defense.values(), so a DH left out would be
+            # rejected as ineligible for any role.
             lineup_ids.append(pid)
-            if pos != "DH":
-                defense[pos] = pid
+            dkey = _ROSTER_POS_TO_DEFENSE_KEY.get(pos)
+            if dkey:
+                defense[dkey] = pid
 
     # Fallback: if no starter marked, use first SP
     if starter_id is None:
@@ -451,6 +466,10 @@ def _build_allstar_side(
         if sp_ids:
             starter_id = sp_ids[0]
             available_pitcher_ids = [pid for pid in available_pitcher_ids if pid != starter_id]
+
+    # Mirror the regular payload's defense shape: the SP occupies the
+    # `startingpitcher` slot alongside the field positions.
+    defense["startingpitcher"] = starter_id
 
     return {
         "team_id": 0,

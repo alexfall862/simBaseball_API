@@ -1,0 +1,1 @@
+2026-07-04 21:36:15 | ERROR | ENGINE FAILURE | level=9 week=0 subweek=a games=1 | RequestException: 500 Server Error: Internal Server Error for url: http://localhost:5001/simulate/batch
