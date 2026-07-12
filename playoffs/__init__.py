@@ -257,11 +257,9 @@ def generate_playoffs():
                 result = create_mlb_bracket(conn, league_year_id, field, start_week)
                 result["field"] = field
             elif league_level == 3:
-                if override is not None:
-                    _validate_flat_field(conn, override, 8, 3)
-                    field = override
-                else:
-                    field = determine_cws_field(conn, league_year_id)
+                # The 64-team NCAA field is computed server-side (conference
+                # auto-bids + at-large, national seeds 1-16). Not hand-editable.
+                field = determine_cws_field(conn, league_year_id)
                 result = create_cws_bracket(conn, league_year_id, field, start_week)
                 result["field"] = field
             elif 5 <= league_level <= 8:
@@ -326,9 +324,9 @@ def preview_field(league_year_id: int, league_level: int):
                 return jsonify(format="mlb", field=field,
                                pool=_team_pool(conn, league_year_id, 9)), 200
             elif league_level == 3:
+                # Read-only 64-team NCAA field preview (no editable pool).
                 field = determine_cws_field(conn, league_year_id)
-                return jsonify(format="cws", field=field,
-                               pool=_team_pool(conn, league_year_id, 3)), 200
+                return jsonify(format="ncaa", field=field), 200
             elif 5 <= league_level <= 8:
                 field = determine_milb_playoff_field(conn, league_year_id, league_level)
                 return jsonify(format="milb", field=field,

@@ -1230,6 +1230,31 @@ def admin_add_recruiting_columns():
         return jsonify(ok=False, error="migration_failed", message=str(e)), 500
 
 
+@admin_bp.post("/migrations/add-ncaa-tournament")
+def admin_add_ncaa_tournament():
+    """
+    Create playoff_seeds (if missing) and add the multi-stage tracking columns
+    to cws_bracket for the 64-team NCAA college postseason.  Idempotent.
+
+    POST /admin/migrations/add-ncaa-tournament
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+
+    try:
+        from db import get_engine
+        from migrations.add_ncaa_tournament import migrate_add_ncaa_tournament
+
+        engine = get_engine()
+        result = migrate_add_ncaa_tournament(engine)
+        return jsonify(ok=True, **result)
+
+    except Exception as e:
+        logging.exception("admin_add_ncaa_tournament failed")
+        return jsonify(ok=False, error="migration_failed", message=str(e)), 500
+
+
 @admin_bp.post("/debug/cancel-orphan-auction/<int:player_id>")
 def admin_cancel_orphan_auction(player_id):
     """

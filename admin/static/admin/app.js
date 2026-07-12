@@ -7126,7 +7126,10 @@
     }).then(r => r.json()).then(data => {
       if (data.error) { status.textContent = `Error: ${data.message}`; return; }
       status.textContent = `Created ${(data.series_created || []).length} series`;
-      if (data.field) renderPlayoffField(data.field);
+      if (data.field) {
+        if (String(level) === '3') renderNcaaField(data.field);
+        else renderPlayoffField(data.field);
+      }
       loadPlayoffBracket(lyid, level);
       loadPendingGames(lyid, level);
     }).catch(e => status.textContent = e.message);
@@ -7353,6 +7356,14 @@
       .then(r => r.json()).then(data => {
         if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
         status.textContent = '';
+        // College: 64-team NCAA field is computed server-side (not editable) —
+        // show a read-only preview instead of the seed editor.
+        if (data.format === 'ncaa') {
+          poEditState = null;
+          document.getElementById('po-fieldedit-card').style.display = 'none';
+          renderNcaaField(data.field);
+          return;
+        }
         const card = document.getElementById('po-fieldedit-card');
         const div = document.getElementById('po-fieldedit');
         document.getElementById('po-fieldedit-status').textContent = '';
@@ -7494,7 +7505,7 @@
     const ct = document.getElementById('ct-controls');
     if (ct) ct.style.display = level === '3' ? 'flex' : 'none';
     // Hide any open editors / stale status when the level changes.
-    ['po-fieldedit-card', 'ct-fieldedit-card', 'po-banner', 'po-health'].forEach(id => {
+    ['po-fieldedit-card', 'ct-fieldedit-card', 'po-field-card', 'po-banner', 'po-health'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = 'none';
     });
@@ -7630,7 +7641,16 @@
           ctCard.style.display = 'none';
         }
 
-        // --- Main Bracket (CWS rounds, MLB, MiLB) ---
+        // --- College (level 3): 64-team NCAA tournament stages ---
+        if (String(level) === '3' && data.ncaa) {
+          const ncaaCard = document.getElementById('po-bracket-card');
+          const ncaaDiv = document.getElementById('po-bracket');
+          ncaaDiv.innerHTML = renderNcaaBracket(data.ncaa);
+          ncaaCard.style.display = '';
+          return;
+        }
+
+        // --- Main Bracket (MLB, MiLB) ---
         const card = document.getElementById('po-bracket-card');
         const div = document.getElementById('po-bracket');
         if (!data.rounds || Object.keys(data.rounds).length === 0) {
@@ -7692,7 +7712,7 @@
   function _bracketTitleForLevel(level) {
     const lvl = String(level);
     if (lvl === '9') return 'MLB Playoffs';
-    if (lvl === '3') return 'College World Series';
+    if (lvl === '3') return 'NCAA Tournament';
     const names = { '5': 'Single-A', '6': 'High-A', '7': 'Double-A', '8': 'Triple-A' };
     return (names[lvl] || `Level ${lvl}`) + ' Playoffs';
   }
@@ -7740,8 +7760,16 @@
 
   function generatePlayoffBracketPng() {
     _withSkeleton(() => {
-      const wantKey = String(lastBracketLevel) === '3' ? 'CWS' : 'main';
-      const bracket = (lastSkeleton.brackets || []).find(b => b.key === wantKey);
+      // College: many NCAA-stage brackets (16 regionals + super + MCWS + final).
+      if (String(lastBracketLevel) === '3') {
+        const ncaa = (lastSkeleton.brackets || []).filter(b =>
+          b.key.startsWith('REG') || ['SUPER', 'MCWS_A', 'MCWS_B', 'FINAL'].includes(b.key));
+        if (!ncaa.length) { alert('No bracket to export yet — generate the bracket first.'); return; }
+        ncaa.map(_renderSkeletonBracket)
+          .forEach((b, i) => setTimeout(() => _downloadCanvasPng(b.canvas, b.filename), i * 400));
+        return;
+      }
+      const bracket = (lastSkeleton.brackets || []).find(b => b.key === 'main');
       if (!bracket) { alert('No bracket to export yet — generate the bracket first.'); return; }
       const out = _renderSkeletonBracket(bracket);
       _downloadCanvasPng(out.canvas, out.filename);
@@ -8030,6 +8058,121 @@
           });
         });
       });
+  }
+
+  // ===== NCAA 64-team college tournament rendering =====
+  const NCAA_DE_ORDER = ['G1', 'WF', 'LB', 'L2', 'RF', 'RF2'];
+  const NCAA_DE_LABELS = {
+    G1: 'Round 1', WF: "Winners' Final", LB: 'Elimination',
+    L2: "Losers' Final", RF: 'Final', RF2: 'If Necessary',
+  };
+
+  function _poSeriesBadge(s) {
+    if (s.status === 'complete') return '<span class="badge badge-success">Complete</span>';
+    const gp = (s.wins_a || 0) + (s.wins_b || 0);
+    return `<span class="badge badge-warning">Game ${gp + 1} of ${s.series_length}</span>`;
+  }
+
+  function _poMatchupRow(s) {
+    const score = s.series_length > 1
+      ? `<td>${s.wins_a} - ${s.wins_b} (Bo${s.series_length})</td>` : '<td>—</td>';
+    const a = s.team_a || {}, b = s.team_b || {};
+    return `<tr>
+      <td>${a.abbrev || 'TBD'} (#${a.seed || '-'}) vs ${b.abbrev || 'TBD'} (#${b.seed || '-'})</td>
+      ${score}
+      <td>${_poSeriesBadge(s)}</td>
+      <td>${s.winner ? s.winner.abbrev : '-'}</td>
+    </tr>`;
+  }
+
+  function _poSeriesTable(list) {
+    let h = '<table class="data-table"><thead><tr><th>Matchup</th><th>Score</th><th>Status</th><th>Winner</th></tr></thead><tbody>';
+    list.forEach(s => { h += _poMatchupRow(s); });
+    return h + '</tbody></table>';
+  }
+
+  function _deGroupTables(rounds) {
+    let h = '';
+    NCAA_DE_ORDER.forEach(suf => {
+      const key = Object.keys(rounds || {}).find(k => k.endsWith('_' + suf));
+      if (!key) return;
+      h += `<h6 style="margin:8px 0 4px 12px">${NCAA_DE_LABELS[suf]}</h6>`;
+      h += '<div style="margin-left:12px">' + _poSeriesTable(rounds[key]) + '</div>';
+    });
+    return h;
+  }
+
+  function renderNcaaBracket(ncaa) {
+    let html = '';
+    if (ncaa.champion) {
+      html += `<p style="font-weight:700;font-size:15px;color:var(--text-primary);margin:0 0 12px">🏆 National Champion: ${ncaa.champion.abbrev}</p>`;
+    }
+
+    // Regionals (16, collapsible)
+    html += '<h5 style="margin-top:8px">Regionals</h5>';
+    (ncaa.regionals || []).forEach(r => {
+      const started = Object.keys(r.rounds || {}).length > 0;
+      const status = (r.complete && r.champion)
+        ? ` — 🏆 ${r.champion.abbrev}`
+        : (started ? ' — in progress' : ' — not started');
+      const teamsList = (r.teams || [])
+        .map(t => `#${t.regional_seed} ${t.team_abbrev}${t.eliminated ? ' <span class="muted">(out)</span>' : ''}`)
+        .join(' · ');
+      html += `<details style="margin-bottom:6px"><summary style="cursor:pointer;font-weight:600">Regional ${r.regional_no}${r.national_seed ? ` · Nat #${r.national_seed}` : ''} — ${r.host || 'TBD'}${status}</summary>`;
+      html += `<p class="muted" style="margin:4px 0 4px 12px">${teamsList}</p>`;
+      html += _deGroupTables(r.rounds || {});
+      html += '</details>';
+    });
+
+    // Super Regionals
+    if ((ncaa.super_regionals || []).length) {
+      html += '<h5 style="margin-top:16px">Super Regionals (Best of 3)</h5>';
+      html += _poSeriesTable(ncaa.super_regionals);
+    }
+
+    // MCWS (two double-elim brackets in Omaha)
+    const mA = ncaa.mcws && ncaa.mcws.A, mB = ncaa.mcws && ncaa.mcws.B;
+    const hasMcws = (mA && Object.keys(mA.rounds || {}).length)
+      || (mB && Object.keys(mB.rounds || {}).length);
+    if (hasMcws) {
+      html += '<h5 style="margin-top:16px">College World Series — Omaha</h5>';
+      [['A', mA], ['B', mB]].forEach(([side, m]) => {
+        if (!m) return;
+        const champ = (m.complete && m.champion) ? ` — 🏆 ${m.champion.abbrev}` : '';
+        html += `<h6 style="margin:8px 0 4px">Bracket ${side}${champ}</h6>`;
+        html += _deGroupTables(m.rounds || {});
+      });
+    }
+
+    // Finals
+    if (ncaa.final) {
+      html += '<h5 style="margin-top:16px">MCWS Finals (Best of 3)</h5>';
+      html += _poSeriesTable([ncaa.final]);
+    }
+
+    return html;
+  }
+
+  function renderNcaaField(field) {
+    const card = document.getElementById('po-field-card');
+    const div = document.getElementById('po-field');
+    card.style.display = '';
+    const byReg = {};
+    (field || []).forEach(t => { (byReg[t.regional_no] = byReg[t.regional_no] || []).push(t); });
+    let html = '<p class="muted" style="margin:0 0 8px">64-team NCAA field — conference auto-bids + at-large. National seeds 1–16 (bold) anchor the 16 regionals.</p>';
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
+    Object.keys(byReg).map(Number).sort((a, b) => a - b).forEach(n => {
+      const teams = byReg[n].slice().sort((a, b) => a.regional_seed - b.regional_seed);
+      const host = teams[0] || {};
+      html += `<table class="data-table"><thead><tr><th colspan="3">Regional ${n}${host.national_seed ? ` · Nat #${host.national_seed}` : ''}</th></tr></thead><tbody>`;
+      teams.forEach(t => {
+        const bold = t.regional_seed === 1 ? ' style="font-weight:600"' : '';
+        html += `<tr${bold}><td>#${t.regional_seed}</td><td>${t.team_abbrev}</td><td>${t.wins}-${t.losses}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    });
+    html += '</div>';
+    div.innerHTML = html;
   }
 
   function renderPlayoffField(field) {
