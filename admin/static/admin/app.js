@@ -8158,11 +8158,14 @@
     const div = document.getElementById('po-field');
     card.style.display = '';
     const byReg = {};
-    (field || []).forEach(t => { (byReg[t.regional_no] = byReg[t.regional_no] || []).push(t); });
+    (field || []).forEach(t => {
+      if (t == null || t.regional_no == null) return;
+      (byReg[t.regional_no] = byReg[t.regional_no] || []).push(t);
+    });
     let html = '<p class="muted" style="margin:0 0 8px">64-team NCAA field — conference auto-bids + at-large. National seeds 1–16 (bold) anchor the 16 regionals.</p>';
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
     Object.keys(byReg).map(Number).sort((a, b) => a - b).forEach(n => {
-      const teams = byReg[n].slice().sort((a, b) => a.regional_seed - b.regional_seed);
+      const teams = (byReg[n] || []).slice().sort((a, b) => a.regional_seed - b.regional_seed);
       const host = teams[0] || {};
       html += `<table class="data-table"><thead><tr><th colspan="3">Regional ${n}${host.national_seed ? ` · Nat #${host.national_seed}` : ''}</th></tr></thead><tbody>`;
       teams.forEach(t => {
