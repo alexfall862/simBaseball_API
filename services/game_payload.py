@@ -2945,10 +2945,22 @@ def _apply_global_stamina_recovery(
     league_level: int | None = None,
 ) -> int:
     """
-    Apply stamina recovery for ALL fatigued players in the league year.
+    Apply one rest subweek of stamina recovery to fatigued players.
 
-    This must be called ONCE per subweek AFTER all levels have drained.
-    Running it per-level would cause double-recovery.
+    Scope:
+      * league_level is None  -> every player_fatigue_state row in the league
+        year (all-levels sim: build_week_payloads is called once per week
+        with league_level=None and this runs once per subweek after every
+        level has drained).
+      * league_level is given -> only players currently on an active roster
+        at that level (contracts -> contractDetails -> contractTeamShare
+        isHolder -> teams.team_level), the same scope /games/stamina-rest
+        uses.  A single-level sim therefore no longer recovers players at
+        the other levels, which were not drained.
+    The level also selects the level_game_config recovery rates.
+
+    Must be called ONCE per subweek AFTER the drain step; calling it again
+    for the same scope would double-recover.
     """
     from sqlalchemy import text as sa_text
 
@@ -2958,9 +2970,22 @@ def _apply_global_stamina_recovery(
         league_level, rec_cfg["base_recovery"], rec_cfg["base_recovery_pitcher"],
     )
 
-    recovery_sql = sa_text("""
+    scope_join = ""
+    scope_params: Dict[str, Any] = {}
+    if league_level is not None:
+        scope_join = """
+        JOIN (SELECT DISTINCT c.playerID AS player_id
+              FROM contracts c
+              JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+              JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+              JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+              WHERE c.isActive = 1 AND t.team_level = :level) sc
+          ON sc.player_id = pfs.player_id"""
+        scope_params["level"] = int(league_level)
+
+    recovery_sql = sa_text(f"""
         UPDATE player_fatigue_state pfs
-        JOIN simbbPlayers p ON p.id = pfs.player_id
+        JOIN simbbPlayers p ON p.id = pfs.player_id{scope_join}
         SET pfs.stamina = LEAST(100, pfs.stamina + ROUND(
             CASE WHEN p.ptype = 'Pitcher' THEN :base_recovery_pitcher
                  ELSE :base_recovery
@@ -2989,9 +3014,11 @@ def _apply_global_stamina_recovery(
             "mult_undependable": rec_cfg["Undependable"],
             "mult_tires_easily": rec_cfg["Tires Easily"],
             "league_year_id": league_year_id,
+            **scope_params,
         })
         recovery_count = rest_result.rowcount
-        logger.info("global_recovery: %d players recovered stamina", recovery_count)
+        logger.info("global_recovery: %d players recovered stamina (scope=%s)",
+                    recovery_count, "all levels" if league_level is None else f"level {league_level}")
     except Exception:
         logger.exception("global_recovery: rest recovery failed")
 
@@ -3103,6 +3130,226 @@ def _detect_resim_games(conn, game_ids: List[int]) -> List[int]:
     return [int(r[0]) for r in rows]
 
 
+def _reverse_season_stats(
+    conn,
+    game_ids: List[int],
+    table_suffix: str = "",
+) -> Dict[str, int]:
+    """
+    Decrement the season accumulation tables (player_batting_stats,
+    player_pitching_stats, player_fielding_stats) by the per-game lines of
+    ``game_ids``.  ``table_suffix`` selects the target tables: "" for the
+    regular-season tables, "_playoff" for the postseason clones (see
+    stat_accumulator.ensure_playoff_stat_tables).  Per-game line tables are
+    shared by every game type, so the source SELECTs never change.
+
+    Runs on the caller's connection/savepoint; returns reversal counts.
+    """
+    from sqlalchemy import text as sa_text
+
+    counts: Dict[str, int] = {}
+    if not game_ids:
+        return counts
+
+    ph = ", ".join(f":g{i}" for i in range(len(game_ids)))
+    gp = {f"g{i}": gid for i, gid in enumerate(game_ids)}
+
+    # -----------------------------------------------------------
+    # 1) Reverse season BATTING stats from old game_batting_lines
+    # -----------------------------------------------------------
+    old_bat = conn.execute(sa_text(f"""
+        SELECT player_id, league_year_id, team_id,
+               COUNT(*) AS game_count,
+               SUM(at_bats) AS at_bats, SUM(runs) AS runs,
+               SUM(hits) AS hits, SUM(doubles_hit) AS doubles_hit,
+               SUM(triples) AS triples, SUM(home_runs) AS home_runs,
+               SUM(inside_the_park_hr) AS inside_the_park_hr,
+               SUM(rbi) AS rbi, SUM(walks) AS walks,
+               SUM(strikeouts) AS strikeouts,
+               SUM(stolen_bases) AS stolen_bases,
+               SUM(caught_stealing) AS caught_stealing,
+               SUM(plate_appearances) AS plate_appearances,
+               SUM(hbp) AS hbp,
+               SUM(sacrifice_flies) AS sacrifice_flies,
+               SUM(gidp) AS gidp,
+               SUM(ground_balls) AS ground_balls,
+               SUM(fly_balls) AS fly_balls,
+               SUM(popups) AS popups,
+               SUM(contact_barrel) AS contact_barrel,
+               SUM(contact_solid) AS contact_solid,
+               SUM(contact_flare) AS contact_flare,
+               SUM(contact_burner) AS contact_burner,
+               SUM(contact_under) AS contact_under,
+               SUM(contact_topped) AS contact_topped,
+               SUM(contact_weak) AS contact_weak
+        FROM game_batting_lines
+        WHERE game_id IN ({ph})
+        GROUP BY player_id, league_year_id, team_id
+    """), gp).mappings().all()
+
+    if old_bat:
+        reverse_bat = sa_text(f"""
+            UPDATE player_batting_stats{table_suffix} SET
+                games          = GREATEST(0, games - :game_count),
+                at_bats        = GREATEST(0, at_bats - :at_bats),
+                runs           = GREATEST(0, runs - :runs),
+                hits           = GREATEST(0, hits - :hits),
+                doubles_hit    = GREATEST(0, doubles_hit - :doubles_hit),
+                triples        = GREATEST(0, triples - :triples),
+                home_runs      = GREATEST(0, home_runs - :home_runs),
+                inside_the_park_hr = GREATEST(0, inside_the_park_hr - :inside_the_park_hr),
+                rbi            = GREATEST(0, rbi - :rbi),
+                walks          = GREATEST(0, walks - :walks),
+                strikeouts     = GREATEST(0, strikeouts - :strikeouts),
+                stolen_bases   = GREATEST(0, stolen_bases - :stolen_bases),
+                caught_stealing = GREATEST(0, caught_stealing - :caught_stealing),
+                plate_appearances = GREATEST(0, plate_appearances - :plate_appearances),
+                hbp            = GREATEST(0, hbp - :hbp),
+                sacrifice_flies = GREATEST(0, sacrifice_flies - :sacrifice_flies),
+                gidp           = GREATEST(0, gidp - :gidp),
+                ground_balls   = GREATEST(0, ground_balls - :ground_balls),
+                fly_balls      = GREATEST(0, fly_balls - :fly_balls),
+                popups         = GREATEST(0, popups - :popups),
+                contact_barrel = GREATEST(0, contact_barrel - :contact_barrel),
+                contact_solid  = GREATEST(0, contact_solid - :contact_solid),
+                contact_flare  = GREATEST(0, contact_flare - :contact_flare),
+                contact_burner = GREATEST(0, contact_burner - :contact_burner),
+                contact_under  = GREATEST(0, contact_under - :contact_under),
+                contact_topped = GREATEST(0, contact_topped - :contact_topped),
+                contact_weak   = GREATEST(0, contact_weak - :contact_weak)
+            WHERE player_id = :player_id
+              AND league_year_id = :league_year_id
+              AND team_id = :team_id
+        """)
+        for row in old_bat:
+            conn.execute(reverse_bat, dict(row))
+        counts["batting_reversed"] = len(old_bat)
+
+    # -----------------------------------------------------------
+    # 2) Reverse season PITCHING stats from old game_pitching_lines
+    # -----------------------------------------------------------
+    old_pitch = conn.execute(sa_text(f"""
+        SELECT player_id, league_year_id, team_id,
+               COUNT(*) AS game_count,
+               SUM(games_started) AS games_started,
+               SUM(win) AS win, SUM(loss) AS loss,
+               SUM(save_recorded) AS save_recorded,
+               SUM(hold) AS hold, SUM(blown_save) AS blown_save,
+               SUM(quality_start) AS quality_start,
+               SUM(innings_pitched_outs) AS innings_pitched_outs,
+               SUM(hits_allowed) AS hits_allowed,
+               SUM(runs_allowed) AS runs_allowed,
+               SUM(earned_runs) AS earned_runs,
+               SUM(walks) AS walks, SUM(strikeouts) AS strikeouts,
+               SUM(home_runs_allowed) AS home_runs_allowed,
+               SUM(inside_the_park_hr_allowed) AS inside_the_park_hr_allowed,
+               SUM(pitches_thrown) AS pitches_thrown,
+               SUM(balls) AS balls,
+               SUM(strikes) AS strikes,
+               SUM(hbp) AS hbp,
+               SUM(wildpitches) AS wildpitches,
+               SUM(batters_faced) AS batters_faced,
+               SUM(sacrifice_flies_allowed) AS sacrifice_flies_allowed,
+               SUM(gidp_induced) AS gidp_induced,
+               SUM(ground_balls_allowed) AS ground_balls_allowed,
+               SUM(fly_balls_allowed) AS fly_balls_allowed,
+               SUM(popups_allowed) AS popups_allowed,
+               SUM(inherited_runners) AS inherited_runners,
+               SUM(inherited_runners_scored) AS inherited_runners_scored,
+               SUM(contact_barrel) AS contact_barrel,
+               SUM(contact_solid) AS contact_solid,
+               SUM(contact_flare) AS contact_flare,
+               SUM(contact_burner) AS contact_burner,
+               SUM(contact_under) AS contact_under,
+               SUM(contact_topped) AS contact_topped,
+               SUM(contact_weak) AS contact_weak
+        FROM game_pitching_lines
+        WHERE game_id IN ({ph})
+        GROUP BY player_id, league_year_id, team_id
+    """), gp).mappings().all()
+
+    if old_pitch:
+        reverse_pitch = sa_text(f"""
+            UPDATE player_pitching_stats{table_suffix} SET
+                games              = GREATEST(0, games - :game_count),
+                games_started      = GREATEST(0, games_started - :games_started),
+                wins               = GREATEST(0, wins - :win),
+                losses             = GREATEST(0, losses - :loss),
+                saves              = GREATEST(0, saves - :save_recorded),
+                holds              = GREATEST(0, holds - :hold),
+                blown_saves        = GREATEST(0, blown_saves - :blown_save),
+                quality_starts     = GREATEST(0, quality_starts - :quality_start),
+                innings_pitched_outs = GREATEST(0, innings_pitched_outs - :innings_pitched_outs),
+                hits_allowed       = GREATEST(0, hits_allowed - :hits_allowed),
+                runs_allowed       = GREATEST(0, runs_allowed - :runs_allowed),
+                earned_runs        = GREATEST(0, earned_runs - :earned_runs),
+                walks              = GREATEST(0, walks - :walks),
+                strikeouts         = GREATEST(0, strikeouts - :strikeouts),
+                home_runs_allowed  = GREATEST(0, home_runs_allowed - :home_runs_allowed),
+                inside_the_park_hr_allowed = GREATEST(0, inside_the_park_hr_allowed - :inside_the_park_hr_allowed),
+                pitches_thrown     = GREATEST(0, pitches_thrown - :pitches_thrown),
+                balls              = GREATEST(0, balls - :balls),
+                strikes            = GREATEST(0, strikes - :strikes),
+                hbp                = GREATEST(0, hbp - :hbp),
+                wildpitches        = GREATEST(0, wildpitches - :wildpitches),
+                batters_faced      = GREATEST(0, batters_faced - :batters_faced),
+                sacrifice_flies_allowed = GREATEST(0, sacrifice_flies_allowed - :sacrifice_flies_allowed),
+                gidp_induced       = GREATEST(0, gidp_induced - :gidp_induced),
+                ground_balls_allowed = GREATEST(0, ground_balls_allowed - :ground_balls_allowed),
+                fly_balls_allowed  = GREATEST(0, fly_balls_allowed - :fly_balls_allowed),
+                popups_allowed     = GREATEST(0, popups_allowed - :popups_allowed),
+                inherited_runners  = GREATEST(0, inherited_runners - :inherited_runners),
+                inherited_runners_scored = GREATEST(0, inherited_runners_scored - :inherited_runners_scored),
+                contact_barrel     = GREATEST(0, contact_barrel - :contact_barrel),
+                contact_solid      = GREATEST(0, contact_solid - :contact_solid),
+                contact_flare      = GREATEST(0, contact_flare - :contact_flare),
+                contact_burner     = GREATEST(0, contact_burner - :contact_burner),
+                contact_under      = GREATEST(0, contact_under - :contact_under),
+                contact_topped     = GREATEST(0, contact_topped - :contact_topped),
+                contact_weak       = GREATEST(0, contact_weak - :contact_weak)
+            WHERE player_id = :player_id
+              AND league_year_id = :league_year_id
+              AND team_id = :team_id
+        """)
+        for row in old_pitch:
+            conn.execute(reverse_pitch, dict(row))
+        counts["pitching_reversed"] = len(old_pitch)
+
+    # -----------------------------------------------------------
+    # 3) Reverse season FIELDING stats from old game_fielding_lines
+    # -----------------------------------------------------------
+    old_field = conn.execute(sa_text(f"""
+        SELECT player_id, league_year_id, team_id, position_code,
+               COUNT(*) AS game_count,
+               SUM(innings) AS innings, SUM(putouts) AS putouts,
+               SUM(assists) AS assists, SUM(errors) AS errors,
+               SUM(double_plays) AS double_plays
+        FROM game_fielding_lines
+        WHERE game_id IN ({ph})
+        GROUP BY player_id, league_year_id, team_id, position_code
+    """), gp).mappings().all()
+
+    if old_field:
+        reverse_field = sa_text(f"""
+            UPDATE player_fielding_stats{table_suffix} SET
+                games   = GREATEST(0, games - :game_count),
+                innings = GREATEST(0, innings - :innings),
+                putouts = GREATEST(0, putouts - :putouts),
+                assists = GREATEST(0, assists - :assists),
+                errors       = GREATEST(0, errors - :errors),
+                double_plays = GREATEST(0, double_plays - :double_plays)
+            WHERE player_id = :player_id
+              AND league_year_id = :league_year_id
+              AND team_id = :team_id
+              AND position_code = :position_code
+        """)
+        for row in old_field:
+            conn.execute(reverse_field, dict(row))
+        counts["fielding_reversed"] = len(old_field)
+
+    return counts
+
+
 def _rollback_prior_results(
     conn,
     resim_game_ids: List[int],
@@ -3117,6 +3364,8 @@ def _rollback_prior_results(
       1. Reverse season batting stats using old game_batting_lines
       2. Reverse season pitching stats using old game_pitching_lines
       3. Reverse season fielding stats using old game_fielding_lines
+         (1-3 target player_*_stats for regular games and
+          player_*_stats_playoff for gamelist.game_type = 'playoff')
       4. Reverse stamina drain using stamina_cost from per-game lines
       5. Reverse position usage (decrement starts_this_week)
       6. Reverse playoff series win counts
@@ -3138,197 +3387,26 @@ def _rollback_prior_results(
     try:
         with conn.begin_nested():
             # -----------------------------------------------------------
-            # 1) Reverse season BATTING stats from old game_batting_lines
+            # 1-3) Reverse season BATTING / PITCHING / FIELDING stats from
+            #      the old per-game lines.  Playoff games accumulated into
+            #      the *_playoff tables, so route by gamelist.game_type.
             # -----------------------------------------------------------
-            old_bat = conn.execute(sa_text(f"""
-                SELECT player_id, league_year_id, team_id,
-                       COUNT(*) AS game_count,
-                       SUM(at_bats) AS at_bats, SUM(runs) AS runs,
-                       SUM(hits) AS hits, SUM(doubles_hit) AS doubles_hit,
-                       SUM(triples) AS triples, SUM(home_runs) AS home_runs,
-                       SUM(inside_the_park_hr) AS inside_the_park_hr,
-                       SUM(rbi) AS rbi, SUM(walks) AS walks,
-                       SUM(strikeouts) AS strikeouts,
-                       SUM(stolen_bases) AS stolen_bases,
-                       SUM(caught_stealing) AS caught_stealing,
-                       SUM(plate_appearances) AS plate_appearances,
-                       SUM(hbp) AS hbp,
-                       SUM(sacrifice_flies) AS sacrifice_flies,
-                       SUM(gidp) AS gidp,
-                       SUM(ground_balls) AS ground_balls,
-                       SUM(fly_balls) AS fly_balls,
-                       SUM(popups) AS popups,
-                       SUM(contact_barrel) AS contact_barrel,
-                       SUM(contact_solid) AS contact_solid,
-                       SUM(contact_flare) AS contact_flare,
-                       SUM(contact_burner) AS contact_burner,
-                       SUM(contact_under) AS contact_under,
-                       SUM(contact_topped) AS contact_topped,
-                       SUM(contact_weak) AS contact_weak
-                FROM game_batting_lines
-                WHERE game_id IN ({ph})
-                GROUP BY player_id, league_year_id, team_id
-            """), gp).mappings().all()
+            type_rows = conn.execute(sa_text(
+                f"SELECT id, game_type FROM gamelist WHERE id IN ({ph})"
+            ), gp).all()
+            type_by_id = {int(r[0]): str(r[1] or "regular") for r in type_rows}
+            # allstar/wbc games never accumulate (stat_accumulator NO_ACCUM_TYPES),
+            # so there is nothing to reverse for them; unknown ids count as regular.
+            playoff_ids = [g for g in resim_game_ids if type_by_id.get(int(g)) == "playoff"]
+            regular_ids = [g for g in resim_game_ids
+                           if type_by_id.get(int(g), "regular") not in ("playoff", "allstar", "wbc")]
 
-            if old_bat:
-                reverse_bat = sa_text("""
-                    UPDATE player_batting_stats SET
-                        games          = GREATEST(0, games - :game_count),
-                        at_bats        = GREATEST(0, at_bats - :at_bats),
-                        runs           = GREATEST(0, runs - :runs),
-                        hits           = GREATEST(0, hits - :hits),
-                        doubles_hit    = GREATEST(0, doubles_hit - :doubles_hit),
-                        triples        = GREATEST(0, triples - :triples),
-                        home_runs      = GREATEST(0, home_runs - :home_runs),
-                        inside_the_park_hr = GREATEST(0, inside_the_park_hr - :inside_the_park_hr),
-                        rbi            = GREATEST(0, rbi - :rbi),
-                        walks          = GREATEST(0, walks - :walks),
-                        strikeouts     = GREATEST(0, strikeouts - :strikeouts),
-                        stolen_bases   = GREATEST(0, stolen_bases - :stolen_bases),
-                        caught_stealing = GREATEST(0, caught_stealing - :caught_stealing),
-                        plate_appearances = GREATEST(0, plate_appearances - :plate_appearances),
-                        hbp            = GREATEST(0, hbp - :hbp),
-                        sacrifice_flies = GREATEST(0, sacrifice_flies - :sacrifice_flies),
-                        gidp           = GREATEST(0, gidp - :gidp),
-                        ground_balls   = GREATEST(0, ground_balls - :ground_balls),
-                        fly_balls      = GREATEST(0, fly_balls - :fly_balls),
-                        popups         = GREATEST(0, popups - :popups),
-                        contact_barrel = GREATEST(0, contact_barrel - :contact_barrel),
-                        contact_solid  = GREATEST(0, contact_solid - :contact_solid),
-                        contact_flare  = GREATEST(0, contact_flare - :contact_flare),
-                        contact_burner = GREATEST(0, contact_burner - :contact_burner),
-                        contact_under  = GREATEST(0, contact_under - :contact_under),
-                        contact_topped = GREATEST(0, contact_topped - :contact_topped),
-                        contact_weak   = GREATEST(0, contact_weak - :contact_weak)
-                    WHERE player_id = :player_id
-                      AND league_year_id = :league_year_id
-                      AND team_id = :team_id
-                """)
-                for row in old_bat:
-                    conn.execute(reverse_bat, dict(row))
-                counts["batting_reversed"] = len(old_bat)
-
-            # -----------------------------------------------------------
-            # 2) Reverse season PITCHING stats from old game_pitching_lines
-            # -----------------------------------------------------------
-            old_pitch = conn.execute(sa_text(f"""
-                SELECT player_id, league_year_id, team_id,
-                       COUNT(*) AS game_count,
-                       SUM(games_started) AS games_started,
-                       SUM(win) AS win, SUM(loss) AS loss,
-                       SUM(save_recorded) AS save_recorded,
-                       SUM(hold) AS hold, SUM(blown_save) AS blown_save,
-                       SUM(quality_start) AS quality_start,
-                       SUM(innings_pitched_outs) AS innings_pitched_outs,
-                       SUM(hits_allowed) AS hits_allowed,
-                       SUM(runs_allowed) AS runs_allowed,
-                       SUM(earned_runs) AS earned_runs,
-                       SUM(walks) AS walks, SUM(strikeouts) AS strikeouts,
-                       SUM(home_runs_allowed) AS home_runs_allowed,
-                       SUM(inside_the_park_hr_allowed) AS inside_the_park_hr_allowed,
-                       SUM(pitches_thrown) AS pitches_thrown,
-                       SUM(balls) AS balls,
-                       SUM(strikes) AS strikes,
-                       SUM(hbp) AS hbp,
-                       SUM(wildpitches) AS wildpitches,
-                       SUM(batters_faced) AS batters_faced,
-                       SUM(sacrifice_flies_allowed) AS sacrifice_flies_allowed,
-                       SUM(gidp_induced) AS gidp_induced,
-                       SUM(ground_balls_allowed) AS ground_balls_allowed,
-                       SUM(fly_balls_allowed) AS fly_balls_allowed,
-                       SUM(popups_allowed) AS popups_allowed,
-                       SUM(inherited_runners) AS inherited_runners,
-                       SUM(inherited_runners_scored) AS inherited_runners_scored,
-                       SUM(contact_barrel) AS contact_barrel,
-                       SUM(contact_solid) AS contact_solid,
-                       SUM(contact_flare) AS contact_flare,
-                       SUM(contact_burner) AS contact_burner,
-                       SUM(contact_under) AS contact_under,
-                       SUM(contact_topped) AS contact_topped,
-                       SUM(contact_weak) AS contact_weak
-                FROM game_pitching_lines
-                WHERE game_id IN ({ph})
-                GROUP BY player_id, league_year_id, team_id
-            """), gp).mappings().all()
-
-            if old_pitch:
-                reverse_pitch = sa_text("""
-                    UPDATE player_pitching_stats SET
-                        games              = GREATEST(0, games - :game_count),
-                        games_started      = GREATEST(0, games_started - :games_started),
-                        wins               = GREATEST(0, wins - :win),
-                        losses             = GREATEST(0, losses - :loss),
-                        saves              = GREATEST(0, saves - :save_recorded),
-                        holds              = GREATEST(0, holds - :hold),
-                        blown_saves        = GREATEST(0, blown_saves - :blown_save),
-                        quality_starts     = GREATEST(0, quality_starts - :quality_start),
-                        innings_pitched_outs = GREATEST(0, innings_pitched_outs - :innings_pitched_outs),
-                        hits_allowed       = GREATEST(0, hits_allowed - :hits_allowed),
-                        runs_allowed       = GREATEST(0, runs_allowed - :runs_allowed),
-                        earned_runs        = GREATEST(0, earned_runs - :earned_runs),
-                        walks              = GREATEST(0, walks - :walks),
-                        strikeouts         = GREATEST(0, strikeouts - :strikeouts),
-                        home_runs_allowed  = GREATEST(0, home_runs_allowed - :home_runs_allowed),
-                        inside_the_park_hr_allowed = GREATEST(0, inside_the_park_hr_allowed - :inside_the_park_hr_allowed),
-                        pitches_thrown     = GREATEST(0, pitches_thrown - :pitches_thrown),
-                        balls              = GREATEST(0, balls - :balls),
-                        strikes            = GREATEST(0, strikes - :strikes),
-                        hbp                = GREATEST(0, hbp - :hbp),
-                        wildpitches        = GREATEST(0, wildpitches - :wildpitches),
-                        batters_faced      = GREATEST(0, batters_faced - :batters_faced),
-                        sacrifice_flies_allowed = GREATEST(0, sacrifice_flies_allowed - :sacrifice_flies_allowed),
-                        gidp_induced       = GREATEST(0, gidp_induced - :gidp_induced),
-                        ground_balls_allowed = GREATEST(0, ground_balls_allowed - :ground_balls_allowed),
-                        fly_balls_allowed  = GREATEST(0, fly_balls_allowed - :fly_balls_allowed),
-                        popups_allowed     = GREATEST(0, popups_allowed - :popups_allowed),
-                        inherited_runners  = GREATEST(0, inherited_runners - :inherited_runners),
-                        inherited_runners_scored = GREATEST(0, inherited_runners_scored - :inherited_runners_scored),
-                        contact_barrel     = GREATEST(0, contact_barrel - :contact_barrel),
-                        contact_solid      = GREATEST(0, contact_solid - :contact_solid),
-                        contact_flare      = GREATEST(0, contact_flare - :contact_flare),
-                        contact_burner     = GREATEST(0, contact_burner - :contact_burner),
-                        contact_under      = GREATEST(0, contact_under - :contact_under),
-                        contact_topped     = GREATEST(0, contact_topped - :contact_topped),
-                        contact_weak       = GREATEST(0, contact_weak - :contact_weak)
-                    WHERE player_id = :player_id
-                      AND league_year_id = :league_year_id
-                      AND team_id = :team_id
-                """)
-                for row in old_pitch:
-                    conn.execute(reverse_pitch, dict(row))
-                counts["pitching_reversed"] = len(old_pitch)
-
-            # -----------------------------------------------------------
-            # 3) Reverse season FIELDING stats from old game_fielding_lines
-            # -----------------------------------------------------------
-            old_field = conn.execute(sa_text(f"""
-                SELECT player_id, league_year_id, team_id, position_code,
-                       COUNT(*) AS game_count,
-                       SUM(innings) AS innings, SUM(putouts) AS putouts,
-                       SUM(assists) AS assists, SUM(errors) AS errors,
-                       SUM(double_plays) AS double_plays
-                FROM game_fielding_lines
-                WHERE game_id IN ({ph})
-                GROUP BY player_id, league_year_id, team_id, position_code
-            """), gp).mappings().all()
-
-            if old_field:
-                reverse_field = sa_text("""
-                    UPDATE player_fielding_stats SET
-                        games   = GREATEST(0, games - :game_count),
-                        innings = GREATEST(0, innings - :innings),
-                        putouts = GREATEST(0, putouts - :putouts),
-                        assists = GREATEST(0, assists - :assists),
-                        errors       = GREATEST(0, errors - :errors),
-                        double_plays = GREATEST(0, double_plays - :double_plays)
-                    WHERE player_id = :player_id
-                      AND league_year_id = :league_year_id
-                      AND team_id = :team_id
-                      AND position_code = :position_code
-                """)
-                for row in old_field:
-                    conn.execute(reverse_field, dict(row))
-                counts["fielding_reversed"] = len(old_field)
+            counts.update(_reverse_season_stats(conn, regular_ids, ""))
+            if playoff_ids:
+                from services.stat_accumulator import ensure_playoff_stat_tables
+                ensure_playoff_stat_tables(conn)
+                for key, val in _reverse_season_stats(conn, playoff_ids, "_playoff").items():
+                    counts[f"{key}_playoff"] = val
 
             # -----------------------------------------------------------
             # 4) Reverse STAMINA drain using stored stamina_cost

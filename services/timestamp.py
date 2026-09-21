@@ -11,7 +11,7 @@ This state is broadcast to all connected WebSocket clients whenever it changes.
 
 import logging
 import time as _time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
 from sqlalchemy import MetaData, Table, select, update
@@ -149,8 +149,12 @@ def _get_total_season_weeks(season: int) -> int:
         engine = get_engine()
         with engine.connect() as conn:
             from sqlalchemy import text
+            # gamelist.season is seasons.id, NOT the calendar year — resolve
+            # through seasons.year (querying by the year silently matched
+            # nothing and fell back to the default).
             row = conn.execute(
-                text("SELECT MAX(season_week) FROM gamelist WHERE season = :s"),
+                text("SELECT MAX(g.season_week) FROM gamelist g "
+                     "JOIN seasons s ON s.id = g.season WHERE s.year = :s"),
                 {"s": season},
             ).first()
             if row and row[0]:
@@ -160,6 +164,49 @@ def _get_total_season_weeks(season: int) -> int:
     except Exception:
         logger.debug("Could not query max season_week, using default")
     return _DEFAULT_SEASON_WEEKS
+
+
+_postseason_cache: Dict[int, Tuple[Optional[bool], Optional[bool], float]] = {}
+_POSTSEASON_TTL = 30.0
+
+
+def _mlb_postseason_state(season: int) -> Tuple[Optional[bool], Optional[bool]]:
+    """(bracket_exists, world_series_complete) for the MLB (level 9) postseason
+    of the league year with this calendar year. Cached for 30s; (None, None) if
+    the lookup fails."""
+    now = _time.monotonic()
+    if season in _postseason_cache:
+        exists, done, at = _postseason_cache[season]
+        if (now - at) < _POSTSEASON_TTL:
+            return exists, done
+    exists: Optional[bool] = None
+    done: Optional[bool] = None
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            row = conn.execute(text("""
+                SELECT COUNT(*) AS n,
+                       SUM(CASE WHEN ps.round = 'WS' AND ps.status = 'complete'
+                                     AND ps.winner_team_id IS NOT NULL THEN 1 ELSE 0 END) AS ws_done
+                FROM playoff_series ps
+                JOIN league_years ly ON ly.id = ps.league_year_id
+                WHERE ly.league_year = :yr AND ps.league_level = 9
+            """), {"yr": season}).first()
+            exists = bool(row and int(row[0] or 0) > 0)
+            done = bool(row and int(row[1] or 0) > 0)
+            _postseason_cache[season] = (exists, done, now)
+    except Exception:
+        logger.debug("Could not query MLB postseason state", exc_info=True)
+    return exists, done
+
+
+def _mlb_bracket_exists(season: int) -> Optional[bool]:
+    return _mlb_postseason_state(season)[0]
+
+
+def _mlb_postseason_complete(season: int) -> bool:
+    return bool(_mlb_postseason_state(season)[1])
 
 
 def get_current_phase(ts: Dict[str, Any]) -> str:
@@ -225,9 +272,16 @@ def get_available_actions(ts: Dict[str, Any], phase: str) -> List[str]:
 
         actions.append("set_week")
 
-        total_weeks = _get_total_season_weeks(ts.get("Season", 2026))
-        if ts.get("Week", 0) >= total_weeks and all_ran:
+        # End Season is offered once the MLB postseason has crowned a champion
+        # (the backend refuses it before that unless forced). The week-based
+        # rule is kept only for a league year that has no MLB bracket at all.
+        if _mlb_postseason_complete(ts.get("Season", 2026)):
             actions.append("end_season")
+        else:
+            total_weeks = _get_total_season_weeks(ts.get("Season", 2026))
+            if (ts.get("Week", 0) >= total_weeks and all_ran
+                    and _mlb_bracket_exists(ts.get("Season", 2026)) is False):
+                actions.append("end_season")
 
     elif phase == "OFFSEASON":
         actions.append("start_free_agency")
@@ -375,23 +429,51 @@ def set_phase_flags(
 # --- Lifecycle transitions ---
 
 
-def end_regular_season(league_year_id: int) -> Dict[str, Any]:
+def _ensure_league_years_column(conn, column: str, ddl: str) -> None:
+    """Lazy, idempotent ALTER for a claim column on league_years (no migration
+    runner in this project; mirrors migrations/add_league_years_season_ended_at.sql)."""
+    from sqlalchemy import text as _t
+    exists = conn.execute(_t(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = 'league_years' "
+        "AND column_name = :col"
+    ), {"col": column}).scalar()
+    if not exists:
+        conn.execute(_t(f"ALTER TABLE league_years ADD COLUMN `{column}` {ddl}"))
+        logger.info("league_years: added column %s", column)
+
+
+# Weeks of injury recovery credited over the offseason (end_regular_season).
+# The offseason never advances weeks, so without this a 20-week injury at
+# season end would still be 20 weeks at next year's week 1.
+OFFSEASON_INJURY_WEEKS = 16
+
+
+def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, Any]:
     """
     Transition from regular season to offseason.
 
     Steps:
+      0. Resolve outstanding waivers
       1. Run end-of-season contract processing (service time, expirations, FA eligibility)
       2. Progress all players (age +1, ability changes)
+      2b. Offseason injury tick (OFFSEASON_INJURY_WEEKS of recovery)
       3. Set timestamp flags to OFFSEASON
 
+    Guards: refuses unless the MLB World Series is complete (``force=True``
+    overrides — e.g. a league year with no MLB bracket), and refuses a second
+    call for the same league year (see the season_ended_at claim below).
+
     Args:
-        league_year_id: The league year to process.
+        league_year_id: The league year to process (must be the current one).
+        force: Skip the postseason-complete check.
 
     Returns:
         Summary dict with results from each step.
 
     Raises:
-        ValueError: If not currently in REGULAR_SEASON phase.
+        ValueError: If not currently in REGULAR_SEASON phase, if the postseason
+        is unfinished (and not forced), or if the season was already ended.
     """
     ts = get_current_timestamp()
     if ts is None:
@@ -403,6 +485,58 @@ def end_regular_season(league_year_id: int) -> Dict[str, Any]:
 
     engine = get_engine()
     summary: Dict[str, Any] = {"phase_transition": "REGULAR_SEASON -> OFFSEASON"}
+
+    # Postseason guard — ending the season ages every player and expires
+    # contracts while series may still be live. Checked BEFORE the claim so a
+    # refusal doesn't consume the one-shot.
+    _postseason_cache.clear()
+    bracket_exists, ws_done = _mlb_postseason_state(int(ts.get("Season", 2026)))
+    if not ws_done and not force:
+        if bracket_exists:
+            raise ValueError(
+                "The MLB postseason is not finished (no completed World Series "
+                "for this league year). Finish the playoffs, or pass force=true."
+            )
+        raise ValueError(
+            "No MLB playoff bracket exists for this league year. Generate and "
+            "play the postseason first, or pass force=true to end the season "
+            "without one."
+        )
+    summary["postseason_complete"] = bool(ws_done)
+    summary["forced"] = bool(force)
+
+    # Idempotency claim: end-of-season is one-way (service time, contract
+    # expiry, and ageing/progression are NOT reversible), so the league year
+    # claims `league_years.season_ended_at` atomically. A second call — a
+    # double click, a retry after a partial failure — is refused instead of
+    # ageing every player again. Clear the column by hand to deliberately
+    # re-run. The league_year_id must be the year the timestamp is on.
+    from sqlalchemy import text as _claim_text
+    with engine.begin() as conn:
+        _ensure_league_years_column(conn, "season_ended_at", "DATETIME NULL DEFAULT NULL")
+        cur = conn.execute(
+            _claim_text("SELECT id FROM league_years WHERE league_year = :yr"),
+            {"yr": ts.get("Season")},
+        ).first()
+        if cur and int(cur[0]) != int(league_year_id):
+            raise ValueError(
+                f"league_year_id {league_year_id} is not the current season "
+                f"(timestamp is on {ts.get('Season')} = league_year_id {int(cur[0])})"
+            )
+        claimed = conn.execute(_claim_text(
+            "UPDATE league_years SET season_ended_at = NOW() "
+            "WHERE id = :lyid AND season_ended_at IS NULL"
+        ), {"lyid": league_year_id}).rowcount
+        if not claimed:
+            ended_at = conn.execute(
+                _claim_text("SELECT season_ended_at FROM league_years WHERE id = :lyid"),
+                {"lyid": league_year_id},
+            ).scalar()
+            raise ValueError(
+                f"Season for league_year_id {league_year_id} was already ended at "
+                f"{ended_at}; refusing to run end-of-season processing twice"
+            )
+    summary["season_ended_claimed"] = True
 
     # 0. Resolve any outstanding waivers before contract processing
     try:
@@ -443,6 +577,20 @@ def end_regular_season(league_year_id: int) -> Dict[str, Any]:
     except Exception as e:
         logger.exception("end_regular_season: player progression failed")
         summary["progression_error"] = str(e)
+
+    # 2b. Offseason injury tick: credit OFFSEASON_INJURY_WEEKS of recovery to
+    #     every active injury (heals those that reach 0, career malus applies
+    #     as usual); longer injuries carry into next season with the
+    #     remainder. Replaces the old archive-time "heal everyone" reset.
+    try:
+        healed = _tick_injuries(engine, None, weeks=OFFSEASON_INJURY_WEEKS)
+        summary["offseason_injury_tick"] = {
+            "weeks": OFFSEASON_INJURY_WEEKS, "players_healed": healed,
+        }
+        logger.info(f"Offseason injury tick ({OFFSEASON_INJURY_WEEKS} weeks): {healed} healed")
+    except Exception as e:
+        logger.exception("end_regular_season: offseason injury tick failed")
+        summary["offseason_injury_tick_error"] = str(e)
 
     # 3. Flip to offseason
     update_timestamp(
@@ -672,21 +820,56 @@ def start_new_season(league_year_id: int) -> Dict[str, Any]:
         )
 
     engine = get_engine()
-    league_year = ts.get("Season", 2026)
+    old_season = int(ts.get("Season", 2026))
     summary: Dict[str, Any] = {"phase_transition": "OFFSEASON -> REGULAR_SEASON"}
 
-    # 1. Year-start financial books
+    # 0. Preconditions — all checked BEFORE any write so a bad call leaves
+    #    nothing half-done. `league_year_id` is the NEW year's league_years row,
+    #    which POST /admin/initialize-next-league-year creates together with
+    #    its game_weeks (1..weeks_in_season).
+    from sqlalchemy import text as _text
+    with engine.connect() as conn:
+        ly_row = conn.execute(
+            _text("SELECT id, league_year FROM league_years WHERE id = :lyid"),
+            {"lyid": league_year_id},
+        ).first()
+        if not ly_row:
+            raise ValueError(
+                f"league_year_id {league_year_id} does not exist. Run "
+                "POST /admin/initialize-next-league-year (creates the league_years "
+                "row + game_weeks for the new year) before starting the season."
+            )
+        new_season = int(ly_row[1])
+        if new_season <= old_season:
+            raise ValueError(
+                f"league_year_id {league_year_id} is season {new_season}, which is not "
+                f"after the current season {old_season}. Pass the NEW year's id."
+            )
+        gw_row_new = conn.execute(
+            _text("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = 1"),
+            {"lyid": league_year_id},
+        ).first()
+        if not gw_row_new:
+            raise ValueError(
+                f"game_weeks has no week 1 for league_year_id {league_year_id}. Run "
+                "POST /admin/initialize-next-league-year first."
+            )
+        new_week1_gw_id = int(gw_row_new[0])
+
+    # 1. Year-start financial books for the NEW year (media payouts from the
+    #    new year's media_total, signing bonuses for contracts signed this year).
+    #    Previously this ran for the outgoing year, whose claim columns were
+    #    already set, so the new year's books were silently skipped.
     try:
         from financials.books import run_year_start_books
-        books_result = run_year_start_books(engine, league_year)
+        books_result = run_year_start_books(engine, new_season)
         summary["year_start_books"] = books_result
-        logger.info(f"Year-start books: {books_result}")
+        logger.info(f"Year-start books for {new_season}: {books_result}")
     except Exception as e:
         logger.exception("start_new_season: year-start books failed")
         summary["year_start_books_error"] = str(e)
 
     # 2. Reset to regular season
-    new_season = league_year + 1
     update_timestamp(
         {
             "season": new_season,
@@ -707,22 +890,15 @@ def start_new_season(league_year_id: int) -> Dict[str, Any]:
         },
         broadcast=True,
     )
-    # Sync league_state to new league year + week 1
-    try:
-        from sqlalchemy import text as _text
-        with engine.begin() as conn:
-            gw_row_new = conn.execute(
-                _text("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = 1"),
-                {"lyid": league_year_id},
-            ).first()
-            if gw_row_new:
-                conn.execute(
-                    _text("UPDATE league_state SET current_league_year_id = :lyid, current_game_week_id = :gwid WHERE id = 1"),
-                    {"lyid": league_year_id, "gwid": int(gw_row_new[0])},
-                )
-                logger.info(f"Synced league_state to league_year_id={league_year_id}, week 1")
-    except Exception as e:
-        logger.warning(f"Failed to sync league_state for new season: {e}")
+    # Sync league_state to new league year + week 1 (row verified above, so
+    # this can no longer silently leave the frontend on the old year).
+    with engine.begin() as conn:
+        conn.execute(
+            _text("UPDATE league_state SET current_league_year_id = :lyid, current_game_week_id = :gwid WHERE id = 1"),
+            {"lyid": league_year_id, "gwid": new_week1_gw_id},
+        )
+        logger.info(f"Synced league_state to league_year_id={league_year_id}, week 1")
+    summary["league_state_synced"] = True
 
     summary["new_season"] = new_season
     summary["timestamp_updated"] = True
@@ -845,6 +1021,38 @@ def set_run_games(running: bool, broadcast: bool = True) -> bool:
     return update_timestamp({"run_games": running}, broadcast=broadcast)
 
 
+def _ensure_postseason_game_week(conn, league_year_id: int, week_index: int,
+                                 weeks_in_season: int) -> Optional[int]:
+    """Return the game_weeks id for (league_year, week). Regular-season rows
+    must already exist (initialize-next-league-year creates them); postseason
+    rows (week_index > weeks_in_season) are inserted on demand, labelled
+    "Postseason Wk N". Returns None only for a missing regular-season row."""
+    from sqlalchemy import text as _t
+    row = conn.execute(
+        _t("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = :w"),
+        {"lyid": league_year_id, "w": week_index},
+    ).first()
+    if row:
+        return int(row[0])
+    if week_index <= weeks_in_season:
+        return None
+    conn.execute(
+        _t("INSERT IGNORE INTO game_weeks (league_year_id, week_index, label) "
+           "VALUES (:lyid, :w, :label)"),
+        {"lyid": league_year_id, "w": week_index,
+         "label": f"Postseason Wk {week_index - weeks_in_season}"},
+    )
+    row = conn.execute(
+        _t("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = :w"),
+        {"lyid": league_year_id, "w": week_index},
+    ).first()
+    if row:
+        logger.info("game_weeks: created postseason row week %d for league_year_id %d",
+                    week_index, league_year_id)
+        return int(row[0])
+    return None
+
+
 def advance_week(broadcast: bool = True) -> bool:
     """
     Advance to the next week and reset all game completion flags.
@@ -888,22 +1096,29 @@ def advance_week(broadcast: bool = True) -> bool:
             conn.execute(stmt)
 
             # Sync league_state.current_game_week_id so bootstrap/frontend
-            # reads the same week as the admin panel
+            # reads the same week as the admin panel. game_weeks only has
+            # rows for 1..weeks_in_season, so postseason weeks (53+) are
+            # created here on demand — that gives the injury tick its claim
+            # row and keeps the frontend's week pointer moving. Weekly books
+            # are gated separately below (salary is pro-rated over
+            # weeks_in_season, so postseason weeks must NOT pay salary).
+            weeks_in_season = None
             try:
                 from sqlalchemy import text as _text
                 ly_row_sync = conn.execute(
-                    _text("SELECT id FROM league_years WHERE league_year = :yr"),
+                    _text("SELECT id, weeks_in_season FROM league_years WHERE league_year = :yr"),
                     {"yr": league_year},
                 ).first()
                 if ly_row_sync:
-                    gw_row_sync = conn.execute(
-                        _text("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = :w"),
-                        {"lyid": int(ly_row_sync[0]), "w": new_week},
-                    ).first()
-                    if gw_row_sync:
+                    lyid_sync = int(ly_row_sync[0])
+                    weeks_in_season = int(ly_row_sync[1] or _DEFAULT_SEASON_WEEKS)
+                    # Completed week (for the tick claim) and the new week.
+                    _ensure_postseason_game_week(conn, lyid_sync, current_week, weeks_in_season)
+                    gw_id_new = _ensure_postseason_game_week(conn, lyid_sync, new_week, weeks_in_season)
+                    if gw_id_new:
                         conn.execute(
                             _text("UPDATE league_state SET current_game_week_id = :gwid WHERE id = 1"),
-                            {"gwid": int(gw_row_sync[0])},
+                            {"gwid": gw_id_new},
                         )
             except Exception as e:
                 logger.warning(f"Failed to sync league_state game week: {e}")
@@ -944,13 +1159,18 @@ def advance_week(broadcast: bool = True) -> bool:
             except Exception as e:
                 logger.exception(f"Injury tick failed for week {current_week}, continuing")
 
-            # Run financial books for the completed week
-            try:
-                from financials.books import run_week_books
-                books_result = run_week_books(engine, league_year, current_week)
-                logger.info(f"Week books for week {current_week}: {books_result}")
-            except Exception as e:
-                logger.exception(f"Week books failed for week {current_week}, continuing")
+            # Run financial books for the completed week — regular season
+            # only. Salary is pro-rated over weeks_in_season; postseason
+            # weeks would pay an extra installment.
+            if weeks_in_season is not None and current_week > weeks_in_season:
+                logger.info(f"Week books skipped for postseason week {current_week}")
+            else:
+                try:
+                    from financials.books import run_week_books
+                    books_result = run_week_books(engine, league_year, current_week)
+                    logger.info(f"Week books for week {current_week}: {books_result}")
+                except Exception as e:
+                    logger.exception(f"Week books failed for week {current_week}, continuing")
 
             # Process expired waivers (before FA auction so cleared players
             # who enter auction get their first phase tick this cycle)
@@ -1034,9 +1254,10 @@ def reset_week_games(broadcast: bool = True) -> bool:
 _CAREER_MALUS_FRACTION = 0.2
 
 
-def _tick_injuries(engine, game_week_id: int | None = None) -> int:
+def _tick_injuries(engine, game_week_id: int | None = None, weeks: int = 1) -> int:
     """
-    Decrement weeks_remaining on **all** active injury events by 1.
+    Decrement weeks_remaining on **all** active injury events by ``weeks``
+    (1 per advanced week; OFFSEASON_INJURY_WEEKS at season end).
 
     When ``game_week_id`` is supplied the tick is claimed atomically against
     ``game_weeks.injuries_ticked_at`` so the same week can never be decremented
@@ -1074,9 +1295,9 @@ def _tick_injuries(engine, game_week_id: int | None = None) -> int:
         conn.execute(sa_text("""
             UPDATE player_injury_events pie
             JOIN player_injury_state pis ON pis.player_id = pie.player_id
-            SET pie.weeks_remaining = GREATEST(pie.weeks_remaining - 1, 0)
+            SET pie.weeks_remaining = GREATEST(pie.weeks_remaining - :weeks, 0)
             WHERE pis.status = 'injured' AND pie.weeks_remaining > 0
-        """))
+        """), {"weeks": max(1, int(weeks))})
 
         # 1b) Create career injuries for career-eligible events that just
         #     hit weeks_remaining = 0 (they were decremented from 1 → 0

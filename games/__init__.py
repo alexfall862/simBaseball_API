@@ -1102,6 +1102,143 @@ def rollback_to_week():
         return jsonify(error="unexpected_error", message=str(e)), 500
 
 
+@games_bp.post("/games/stamina-rest")
+def stamina_rest():
+    """
+    Apply a block of rest-only stamina recovery to every player on rosters at
+    one league level (e.g. the short break before the postseason).
+
+    Uses the SAME per-subweek formula the sim applies to a resting player
+    (level_game_config base rate x durability multiplier, capped at 100), so
+    `subweeks=4` is exactly "one week of games with nobody playing".
+
+    Request body:
+    {
+        "league_year_id": 1,
+        "league_level": 9,        // required — scopes to that level's active rosters
+        "subweeks": 4,            // rest subweeks to apply (1-16, default 4)
+        "full_reset": false,      // true = set everyone at this level to 100 instead
+        "dry_run": false          // true = report the before/after without writing
+    }
+
+    Returns before/after aggregates for the scoped players.
+    """
+    from sqlalchemy import text as sa_text
+    from services.game_payload import _load_stamina_recovery_config
+
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        league_year_id = int(body["league_year_id"])
+        league_level = int(body["league_level"])
+        subweeks = int(body.get("subweeks", 4))
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="missing_field",
+                       message="league_year_id and league_level are required"), 400
+    full_reset = bool(body.get("full_reset", False))
+    dry_run = bool(body.get("dry_run", False))
+    if not (1 <= subweeks <= 16):
+        return jsonify(error="invalid_type", message="subweeks must be 1-16"), 400
+
+    # Players on an active roster at this level. Same contract chain the
+    # awards/allstar code uses; a player is on exactly one team via isHolder.
+    scope_sql = """
+        SELECT DISTINCT c.playerID AS player_id
+        FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+        WHERE c.isActive = 1 AND t.team_level = :level
+    """
+    summary_sql = sa_text(f"""
+        SELECT COUNT(*) AS tracked,
+               ROUND(AVG(pfs.stamina), 1) AS avg_stamina,
+               MIN(pfs.stamina) AS min_stamina,
+               SUM(pfs.stamina < 70) AS under_70,
+               SUM(pfs.stamina < 40) AS under_40,
+               SUM(pfs.stamina >= 100) AS at_100
+        FROM player_fatigue_state pfs
+        JOIN ({scope_sql}) sc ON sc.player_id = pfs.player_id
+        WHERE pfs.league_year_id = :lyid
+    """)
+    params = {"lyid": league_year_id, "level": league_level}
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            cfg = _load_stamina_recovery_config(conn, league_level)
+            before = dict(conn.execute(summary_sql, params).mappings().first() or {})
+
+            if full_reset:
+                write_sql = sa_text(f"""
+                    UPDATE player_fatigue_state pfs
+                    JOIN ({scope_sql}) sc ON sc.player_id = pfs.player_id
+                    SET pfs.stamina = 100, pfs.last_updated_at = NOW()
+                    WHERE pfs.league_year_id = :lyid AND pfs.stamina < 100
+                """)
+                write_params = dict(params)
+            else:
+                # N rest subweeks == N x ROUND(base x durability mult), capped at 100
+                # (identical to _apply_global_stamina_recovery, applied N times).
+                write_sql = sa_text(f"""
+                    UPDATE player_fatigue_state pfs
+                    JOIN ({scope_sql}) sc ON sc.player_id = pfs.player_id
+                    JOIN simbbPlayers p ON p.id = pfs.player_id
+                    SET pfs.stamina = LEAST(100, pfs.stamina + :n * ROUND(
+                            CASE WHEN p.ptype = 'Pitcher' THEN :base_pitcher ELSE :base END *
+                            CASE p.durability
+                                WHEN 'Iron Man'     THEN :m_iron
+                                WHEN 'Dependable'   THEN :m_dep
+                                WHEN 'Normal'       THEN :m_norm
+                                WHEN 'Undependable' THEN :m_undep
+                                WHEN 'Tires Easily' THEN :m_tires
+                                ELSE 1.0
+                            END)),
+                        pfs.last_updated_at = NOW()
+                    WHERE pfs.league_year_id = :lyid AND pfs.stamina < 100
+                """)
+                write_params = {
+                    **params, "n": subweeks,
+                    "base": cfg["base_recovery"],
+                    "base_pitcher": cfg["base_recovery_pitcher"],
+                    "m_iron": cfg["Iron Man"], "m_dep": cfg["Dependable"],
+                    "m_norm": cfg["Normal"], "m_undep": cfg["Undependable"],
+                    "m_tires": cfg["Tires Easily"],
+                }
+
+            if dry_run:
+                # Preview by running the write inside a savepoint we roll back.
+                sp = conn.begin_nested()
+                updated = conn.execute(write_sql, write_params).rowcount
+                after = dict(conn.execute(summary_sql, params).mappings().first() or {})
+                sp.rollback()
+            else:
+                updated = conn.execute(write_sql, write_params).rowcount
+                after = dict(conn.execute(summary_sql, params).mappings().first() or {})
+
+        def _clean(d):
+            return {k: (float(v) if v is not None else None) for k, v in d.items()}
+
+        current_app.logger.info(
+            "stamina_rest: level=%d lyid=%d mode=%s subweeks=%d dry_run=%s updated=%d",
+            league_level, league_year_id, "full_reset" if full_reset else "rest",
+            subweeks, dry_run, updated,
+        )
+        return jsonify(
+            league_year_id=league_year_id,
+            league_level=league_level,
+            mode="full_reset" if full_reset else "rest",
+            subweeks=None if full_reset else subweeks,
+            recovery_config=None if full_reset else cfg,
+            dry_run=dry_run,
+            rows_updated=updated,
+            before=_clean(before),
+            after=_clean(after),
+        ), 200
+
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
 @games_bp.post("/games/wipe-season")
 def wipe_season():
     """
@@ -1504,9 +1641,13 @@ def end_season_endpoint():
     Transition from regular season to offseason.
     Runs end-of-season contract processing and player progression.
 
+    One-shot per league year (claims league_years.season_ended_at) and refuses
+    unless the MLB World Series is complete, unless "force": true.
+
     Request body:
     {
-        "league_year_id": 1
+        "league_year_id": 1,
+        "force": false
     }
 
     Example:
@@ -1523,7 +1664,7 @@ def end_season_endpoint():
             ), 400
 
         from services.timestamp import end_regular_season
-        result = end_regular_season(int(league_year_id))
+        result = end_regular_season(int(league_year_id), force=bool(data.get("force", False)))
         return jsonify(result), 200
 
     except ValueError as e:

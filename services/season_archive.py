@@ -325,7 +325,10 @@ def _clean_background_tasks(engine, conn, dry_run: bool,
 
 def _reset_injury_state(engine, conn, ly_id: int,
                         dry_run: bool) -> Dict[str, int]:
-    """Reset player_injury_state to healthy for season end.
+    """DEPRECATED — no longer called by archive_season (kept for reference).
+    Superseded by the offseason injury tick in services.timestamp.end_regular_season.
+
+    Reset player_injury_state to healthy for season end.
 
     player_injury_state has no league_year_id — it's a current-state
     snapshot keyed by player_id.  At season end, all injuries expire.
@@ -522,14 +525,15 @@ def archive_season(
         logger.warning("archive: background_tasks failed: %s", e)
         warnings.append(f"background_tasks: {e}")
 
-    # 16. player_injury_state (reset to healthy for season end)
-    try:
-        with engine.begin() as conn:
-            tables["player_injury_state"] = _reset_injury_state(
-                engine, conn, league_year_id, dry_run)
-    except Exception as e:
-        logger.warning("archive: player_injury_state failed: %s", e)
-        warnings.append(f"player_injury_state: {e}")
+    # 16. player_injury_state — intentionally NOT reset. Injuries carry across
+    #     seasons by weeks_remaining; end_regular_season credits an offseason
+    #     tick (OFFSEASON_INJURY_WEEKS) instead of healing everyone. The old
+    #     reset was also not league_year-scoped, so archiving a past year
+    #     healed the current season's injured list.
+    tables["player_injury_state"] = {
+        "counted": 0, "updated": 0,
+        "note": "not reset; offseason injury tick runs in end-season",
+    }
 
     return {
         "league_year_id": league_year_id,

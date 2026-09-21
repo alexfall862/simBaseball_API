@@ -66,6 +66,8 @@ VALUES
     ('comeback',        'Comeback Player',       'major',     'any',     1, 0, 0, 50,  'Comeback Player of the Year in each league.'),
     ('silver_slugger',  'Silver Slugger',        'batting',   'hitter',  1, 1, 0, 60,  'Best offensive player at each position in each league.'),
     ('gold_glove',      'Gold Glove',            'fielding',  'any',     1, 1, 0, 70,  'Best defender at each position in each league.'),
+    ('pennant',         'League Pennant',        'championship', 'any',  1, 0, 1, 80,  'Member of the AL or NL champion (Championship Series winner).'),
+    ('world_series',    'World Series Champion', 'championship', 'any',  0, 0, 1, 85,  'Member of the World Series champion roster (ring).'),
     ('all_star',        'All-Star Selection',    'selection', 'any',     1, 0, 1, 90,  'Selected to the league All-Star roster.')
 ON DUPLICATE KEY UPDATE
     `name`=VALUES(`name`), `category`=VALUES(`category`), `ptype_scope`=VALUES(`ptype_scope`),

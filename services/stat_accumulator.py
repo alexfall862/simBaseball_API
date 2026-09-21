@@ -7,6 +7,10 @@ UPSERTs them into the season accumulation tables:
   - player_fielding_stats
   - player_position_usage_week  (defensive starts tracking)
 
+Playoff games (game_type 'playoff') accumulate into the *_playoff clones of
+the three season tables instead (see ensure_playoff_stat_tables); allstar/wbc
+games never accumulate.  Per-game line tables are shared by every game type.
+
 Called from game_payload.build_week_payloads() after each subweek's
 results come back from the engine.
 """
@@ -286,6 +290,68 @@ _FIELD_SEASON_ONDUP = """AS new_row ON DUPLICATE KEY UPDATE
         double_plays = player_fielding_stats.double_plays + new_row.double_plays"""
 _FIELD_SEASON_KEYS = ["player_id", "league_year_id", "team_id", "position_code", "innings", "putouts", "assists", "errors", "double_plays"]
 
+
+# ---------------------------------------------------------------------------
+# Postseason accumulation tables (player_*_stats_playoff)
+# ---------------------------------------------------------------------------
+# Playoff games (gamelist.game_type = 'playoff') accumulate into clone tables
+# so regular-season leaderboards are never polluted by postseason games.
+# The clones share the same keys (player_id, league_year_id, team_id
+# [+position_code]) and columns; only the table name differs.
+
+_PLAYOFF_SUFFIX = "_playoff"
+_SEASON_TABLES = ("player_batting_stats", "player_pitching_stats", "player_fielding_stats")
+_playoff_tables_ready = False
+
+
+def _to_playoff_sql(sql: str) -> str:
+    """Rewrite a season-table SQL template so it targets the _playoff clone."""
+    for tbl in _SEASON_TABLES:
+        sql = sql.replace(tbl, tbl + _PLAYOFF_SUFFIX)
+    return sql
+
+
+_BAT_SEASON_INSERT_PO = _to_playoff_sql(_BAT_SEASON_INSERT)
+_BAT_SEASON_ONDUP_PO = _to_playoff_sql(_BAT_SEASON_ONDUP)
+_PITCH_SEASON_INSERT_PO = _to_playoff_sql(_PITCH_SEASON_INSERT)
+_PITCH_SEASON_ONDUP_PO = _to_playoff_sql(_PITCH_SEASON_ONDUP)
+_FIELD_SEASON_INSERT_PO = _to_playoff_sql(_FIELD_SEASON_INSERT)
+_FIELD_SEASON_ONDUP_PO = _to_playoff_sql(_FIELD_SEASON_ONDUP)
+
+
+def ensure_playoff_stat_tables(conn) -> None:
+    """Create the three *_playoff season tables if any is missing.
+
+    Guarded by a module flag, so the information_schema probe runs once per
+    process.  The DDL runs on a SEPARATE pooled connection
+    (``conn.engine.begin()``), never on the caller's ``conn``: MySQL DDL
+    implicitly commits, and every caller is mid-transaction inside the sim.
+    Same pattern and rationale as services.awards.ensure_awards_schema.
+    Mirrors migrations/add_playoff_stat_tables.sql -- keep the two in sync.
+    Call it only when there are playoff rows to write.
+    """
+    global _playoff_tables_ready
+    if _playoff_tables_ready:
+        return
+
+    wanted = [t + _PLAYOFF_SUFFIX for t in _SEASON_TABLES]
+    ph = ", ".join(f":t{i}" for i in range(len(wanted)))
+    existing = {
+        str(r[0]).lower() for r in conn.execute(text(f"""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = DATABASE() AND table_name IN ({ph})
+        """), {f"t{i}": t for i, t in enumerate(wanted)}).all()
+    }
+    missing = [t for t in wanted if t not in existing]
+    if missing:
+        with conn.engine.begin() as ddl_conn:
+            for tbl in missing:
+                base = tbl[: -len(_PLAYOFF_SUFFIX)]
+                ddl_conn.execute(text(f"CREATE TABLE IF NOT EXISTS `{tbl}` LIKE `{base}`"))
+        logger.info("stat_accumulator: created playoff stat tables %s", missing)
+
+    _playoff_tables_ready = True
+
 _USAGE_INSERT = "INSERT INTO player_position_usage_week (league_year_id, season_week, team_id, player_id, position_code, vs_hand, starts_this_week)"
 _USAGE_VALS = "(:league_year_id, :season_week, :team_id, :player_id, :position_code, :vs_hand, 1)"
 _USAGE_ONDUP = "ON DUPLICATE KEY UPDATE starts_this_week = starts_this_week + 1"
@@ -315,6 +381,7 @@ def accumulate_game_stats(
 
     When game_type is 'allstar' or 'wbc', season accumulation UPSERTs are
     skipped but per-game lines are still written for box score reconstruction.
+    When game_type is 'playoff', season UPSERTs go to the *_playoff tables.
 
     Args:
         conn: Active SQLAlchemy connection (caller manages commit).
@@ -326,6 +393,7 @@ def accumulate_game_stats(
         Dict with counts: {"batters": N, "pitchers": N, "fielders": N}
     """
     skip_season = game_type in ("allstar", "wbc")
+    is_playoff = game_type == "playoff"
 
     nested = game_result.get("result") or {}
     stats = game_result.get("stats") or nested.get("stats")
@@ -345,9 +413,11 @@ def accumulate_game_stats(
     p_count = 0
     f_count = 0
     if not skip_season:
-        b_count = _upsert_batting(conn, batters, league_year_id)
-        p_count = _upsert_pitching(conn, pitchers, league_year_id)
-        f_count = _upsert_fielding(conn, fielders, league_year_id)
+        if is_playoff:
+            ensure_playoff_stat_tables(conn)
+        b_count = _upsert_batting(conn, batters, league_year_id, playoff=is_playoff)
+        p_count = _upsert_pitching(conn, pitchers, league_year_id, playoff=is_playoff)
+        f_count = _upsert_fielding(conn, fielders, league_year_id, playoff=is_playoff)
 
     # Per-game lines for box score reconstruction
     if game_id is not None:
@@ -545,13 +615,19 @@ _FIELDING_UPSERT = text("""
 """)
 
 
+_BATTING_UPSERT_PO = text(_to_playoff_sql(_BATTING_UPSERT.text))
+_PITCHING_UPSERT_PO = text(_to_playoff_sql(_PITCHING_UPSERT.text))
+_FIELDING_UPSERT_PO = text(_to_playoff_sql(_FIELDING_UPSERT.text))
+
+
 def _upsert_batting(
-    conn, batters: Dict[str, Any], league_year_id: int
+    conn, batters: Dict[str, Any], league_year_id: int, playoff: bool = False
 ) -> int:
+    stmt = _BATTING_UPSERT_PO if playoff else _BATTING_UPSERT
     count = 0
     for player_id_str, b in batters.items():
         try:
-            conn.execute(_BATTING_UPSERT, {
+            conn.execute(stmt, {
                 "player_id":          int(player_id_str),
                 "league_year_id":     league_year_id,
                 "team_id":            int(b["team_id"]),
@@ -581,12 +657,13 @@ def _upsert_batting(
 
 
 def _upsert_pitching(
-    conn, pitchers: Dict[str, Any], league_year_id: int
+    conn, pitchers: Dict[str, Any], league_year_id: int, playoff: bool = False
 ) -> int:
+    stmt = _PITCHING_UPSERT_PO if playoff else _PITCHING_UPSERT
     count = 0
     for player_id_str, p in pitchers.items():
         try:
-            conn.execute(_PITCHING_UPSERT, {
+            conn.execute(stmt, {
                 "player_id":                   int(player_id_str),
                 "league_year_id":              league_year_id,
                 "team_id":                     int(p["team_id"]),
@@ -636,8 +713,9 @@ _FIELDING_POS_NORMALIZE = {
 
 
 def _upsert_fielding(
-    conn, fielders: Dict[str, Any], league_year_id: int
+    conn, fielders: Dict[str, Any], league_year_id: int, playoff: bool = False
 ) -> int:
+    stmt = _FIELDING_UPSERT_PO if playoff else _FIELDING_UPSERT
     count = 0
     for player_id_str, f in fielders.items():
         try:
@@ -652,7 +730,7 @@ def _upsert_fielding(
                 raw_pos = str(f.get("position_code", ""))
                 position_code = _FIELDING_POS_NORMALIZE.get(raw_pos.lower(), raw_pos)
 
-            conn.execute(_FIELDING_UPSERT, {
+            conn.execute(stmt, {
                 "player_id":      player_id,
                 "league_year_id": league_year_id,
                 "team_id":        int(f["team_id"]),
@@ -1227,7 +1305,8 @@ def accumulate_subweek_stats_bulk(
 
     When game_type_by_id is provided, games with type 'allstar' or 'wbc'
     will only get per-game lines (box scores) but NOT season accumulation
-    UPSERTs.
+    UPSERTs, and games with type 'playoff' accumulate into the *_playoff
+    season tables instead of the regular-season ones.
 
     Args:
         is_resim: If True, use ON DUPLICATE KEY UPDATE for per-game lines
@@ -1241,6 +1320,10 @@ def accumulate_subweek_stats_bulk(
     batting_params = []
     pitching_params = []
     fielding_params = []
+    # Postseason accumulation params (game_type == 'playoff')
+    batting_params_po = []
+    pitching_params_po = []
+    fielding_params_po = []
     # Per-game lines (always written for box score reconstruction)
     game_batting_params = []
     game_pitching_params = []
@@ -1258,6 +1341,7 @@ def accumulate_subweek_stats_bulk(
 
         game_id = game_result.get("game_id") or nested.get("game_id")
         skip_season = game_type_by_id.get(int(game_id), "regular") in NO_ACCUM_TYPES if game_id is not None else False
+        is_playoff = game_type_by_id.get(int(game_id)) == "playoff" if game_id is not None else False
 
         batters = stats.get("batters") or {}
         pitchers = stats.get("pitchers") or {}
@@ -1298,7 +1382,7 @@ def accumulate_subweek_stats_bulk(
                     **_extract_new_fields(b, _NEW_BAT_FIELDS),
                 }
                 if not skip_season:
-                    batting_params.append(params)
+                    (batting_params_po if is_playoff else batting_params).append(params)
 
                 if game_id is not None:
                     pos = b.get("position") or pos_map.get(pid)
@@ -1345,7 +1429,7 @@ def accumulate_subweek_stats_bulk(
                     **_extract_new_fields(p, _NEW_PIT_FIELDS),
                 }
                 if not skip_season:
-                    pitching_params.append(params)
+                    (pitching_params_po if is_playoff else pitching_params).append(params)
 
                 if game_id is not None:
                     game_pitching_params.append({
@@ -1382,7 +1466,7 @@ def accumulate_subweek_stats_bulk(
                     "double_plays":   int(f.get("double_plays_turned", 0)),
                 }
                 if not skip_season:
-                    fielding_params.append(field_row)
+                    (fielding_params_po if is_playoff else fielding_params).append(field_row)
                 # Always write per-game fielding line (for re-sim rollback)
                 game_fielding_params.append({**field_row, "game_id": game_id})
             except Exception:
@@ -1418,7 +1502,12 @@ def accumulate_subweek_stats_bulk(
 
     # Execute all bulk writes with FK checks disabled (data is pre-validated
     # from cache/engine results, so referential integrity is guaranteed).
-    totals = {"batters": 0, "pitchers": 0, "fielders": 0}
+    totals = {"batters": 0, "pitchers": 0, "fielders": 0,
+              "playoff_batters": 0, "playoff_pitchers": 0, "playoff_fielders": 0}
+
+    # Bootstrap the *_playoff tables (separate connection) only when needed.
+    if batting_params_po or pitching_params_po or fielding_params_po:
+        ensure_playoff_stat_tables(conn)
 
     with _fk_checks_disabled(conn):
         # --- Season accumulation UPSERTs (multi-row: 1 SQL per chunk) ---
@@ -1445,6 +1534,31 @@ def accumulate_subweek_stats_bulk(
                     _FIELD_SEASON_ONDUP, _FIELD_SEASON_KEYS, fielding_params)
             except Exception:
                 logger.exception("stat_accumulator bulk: fielding upsert failed (%d rows)", len(fielding_params))
+
+        # --- Postseason accumulation UPSERTs (player_*_stats_playoff) ---
+        if batting_params_po:
+            try:
+                totals["playoff_batters"] = _multi_row_chunked_execute(
+                    conn, _BAT_SEASON_INSERT_PO, _BAT_SEASON_VALS,
+                    _BAT_SEASON_ONDUP_PO, _BAT_SEASON_KEYS, batting_params_po)
+            except Exception:
+                logger.exception("stat_accumulator bulk: playoff batting upsert failed (%d rows)", len(batting_params_po))
+
+        if pitching_params_po:
+            try:
+                totals["playoff_pitchers"] = _multi_row_chunked_execute(
+                    conn, _PITCH_SEASON_INSERT_PO, _PITCH_SEASON_VALS,
+                    _PITCH_SEASON_ONDUP_PO, _PITCH_SEASON_KEYS, pitching_params_po)
+            except Exception:
+                logger.exception("stat_accumulator bulk: playoff pitching upsert failed (%d rows)", len(pitching_params_po))
+
+        if fielding_params_po:
+            try:
+                totals["playoff_fielders"] = _multi_row_chunked_execute(
+                    conn, _FIELD_SEASON_INSERT_PO, _FIELD_SEASON_VALS,
+                    _FIELD_SEASON_ONDUP_PO, _FIELD_SEASON_KEYS, fielding_params_po)
+            except Exception:
+                logger.exception("stat_accumulator bulk: playoff fielding upsert failed (%d rows)", len(fielding_params_po))
 
         # --- Per-game lines: multi-row INSERT (1 SQL per chunk) ---
         gbat_ondup = _GBAT_ONDUP_RESIM if is_resim else _GBAT_ONDUP_FRESH
@@ -1511,8 +1625,10 @@ def accumulate_subweek_stats_bulk(
 
     logger.info(
         "stat_accumulator bulk: %d batters, %d pitchers, %d fielders, "
+        "%d/%d/%d playoff, "
         "%d game batting lines, %d game pitching lines, %d substitutions%s",
         totals["batters"], totals["pitchers"], totals["fielders"],
+        totals["playoff_batters"], totals["playoff_pitchers"], totals["playoff_fielders"],
         len(game_batting_params), len(game_pitching_params),
         len(substitution_params),
         " (resim mode)" if is_resim else "",

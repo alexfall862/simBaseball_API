@@ -24,6 +24,7 @@ All endpoints are under `/api/v1`.
 - **Per-position awards.** Silver Slugger and Gold Glove have one winner **per fielding position per league** — e.g. AL Silver Slugger at SS. Those rows carry a `position_code` (`"C"`, `"1B"`, `"SS"`, `"DH"`, …). All other awards have `position_code = null`.
 - **Winners vs. finalists.** `rank = 1` and `is_winner = true` is the winner. Finalists/runners-up (if entered) have `rank` 2, 3, … and `is_winner = false`. For headline displays, filter to `is_winner`.
 - **All-Star selections are awards too.** A player selected to an All-Star roster gets an `all_star` award (one per season per league). Unlike single-winner trophies, `all_star` has **many recipients per league** (`allows_multiple`). This is written automatically when an All-Star roster is created — no manual entry needed.
+- **Pennants and World Series rings are team awards.** When a Championship Series clinches, every player on the winning roster gets a `pennant` award (`sub_league` = `"AL"` or `"NL"`). When the World Series clinches, every player on the champion's roster gets a `world_series` award (league-wide, `sub_league` is `null`). Both are `category: "championship"` and `allows_multiple`. They are written automatically by the playoff engine; `metadata` on the row carries `series_id`, `opponent_team_id` and `series_result` (e.g. `"4-2"`). Rosters are snapshotted at the moment the series ends.
 
 ---
 
@@ -228,6 +229,8 @@ Seeded set:
 | `comeback` | Comeback Player | major | ✅ | – | – | any |
 | `silver_slugger` | Silver Slugger | batting | ✅ | ✅ | – | hitter |
 | `gold_glove` | Gold Glove | fielding | ✅ | ✅ | – | any |
+| `pennant` | League Pennant | championship | ✅ | – | ✅ | any |
+| `world_series` | World Series Champion | championship | – | – | ✅ | any |
 | `all_star` | All-Star Selection | selection | ✅ | – | ✅ | any |
 
 The set is **data-driven** — new trophies can be added server-side without a frontend change. Render labels from `name`, group with `category`, and use the flags to decide which form fields (sub-league / position) to show in admin entry.
@@ -241,6 +244,10 @@ The set is **data-driven** — new trophies can be added server-side without a f
 **Awards timeline** (player profile): group `awards` by `league_year_id` (already sorted newest-first). Within a season, render each award with `award_name`, and append the qualifier when present: `sub_league` and/or `position_code` → e.g. *"AL Silver Slugger (3B)"*, *"NL Cy Young"*.
 
 **Distinguish trophies from selections:** filter `award_code === "all_star"` into a separate "Selections" count; treat the rest as trophies. Or branch on `category === "selection"`.
+
+**Championships:** `category === "championship"` rows (`pennant`, `world_series`) are team honours rather than individual trophies. Typical rendering is a ring/pennant badge line on the profile (`2× World Series Champion · 3× AL Pennant`) and a "Championships" section on the team page. Team pages can list a season's champions from `GET /awards/season/<id>` by grouping `world_series` / `pennant` recipients by `team_id`.
+
+**Manual entry for team awards:** `POST /awards/team` with `{team_id, league_year_id, award_code, sub_league?}` gives the whole current roster the award in one call (`player_ids` overrides the roster). `POST /awards/sync-postseason` with `{league_year_id}` re-derives pennants and rings from the completed playoff series if the automatic write was missed.
 
 **Finalists:** if you display vote results, `is_winner === false` rows are finalists — sort by `rank` ascending under each award/league.
 

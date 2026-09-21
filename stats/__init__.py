@@ -15,16 +15,47 @@ stats_bp = Blueprint("stats", __name__)
 
 
 # ---------------------------------------------------------------------------
+# Regular-season vs postseason accumulation tables
+# ---------------------------------------------------------------------------
+# Playoff games accumulate into *_playoff clones of the three season tables
+# (services/stat_accumulator.py).  Leaderboards read the regular tables by
+# default; ?stat_type=playoff swaps in the clones.
+
+_STAT_TABLES = {
+    "regular": ("player_batting_stats", "player_pitching_stats", "player_fielding_stats"),
+    "playoff": ("player_batting_stats_playoff", "player_pitching_stats_playoff",
+                "player_fielding_stats_playoff"),
+}
+
+
+def _stat_tables():
+    """Resolve ?stat_type= (regular|playoff, default regular).
+
+    Returns ((batting_tbl, pitching_tbl, fielding_tbl), stat_type, error)
+    where error is a ready-to-return (response, 400) tuple or None.
+    """
+    stat_type = (request.args.get("stat_type") or "regular").strip().lower()
+    tables = _STAT_TABLES.get(stat_type)
+    if tables is None:
+        return None, stat_type, (jsonify(
+            error="invalid_type",
+            message="stat_type must be 'regular' or 'playoff'"), 400)
+    return tables, stat_type, None
+
+
+# ---------------------------------------------------------------------------
 # Batting leaderboard
 # ---------------------------------------------------------------------------
 
 @stats_bp.get("/stats/batting")
 def batting_leaderboard():
     """
-    Batting leaderboard from player_batting_stats.
+    Batting leaderboard from player_batting_stats (or
+    player_batting_stats_playoff when ?stat_type=playoff).
 
     Query params:
       league_year_id (required), league_level, team_id, position,
+      stat_type (regular|playoff, default regular),
       sort (any stat key, default avg), order (asc|desc),
       min_pa (default 0), page, page_size (default 50)
     """
@@ -34,6 +65,11 @@ def batting_leaderboard():
     if not league_year_id:
         return jsonify(error="missing_field",
                        message="league_year_id is required"), 400
+
+    tables, stat_type, st_err = _stat_tables()
+    if st_err:
+        return st_err
+    bat_tbl, _pit_tbl, fld_tbl = tables
 
     league_level = request.args.get("league_level", type=int)
     team_id = request.args.get("team_id", type=int)
@@ -135,7 +171,7 @@ def batting_leaderboard():
 
     join_pos = ""
     if position:
-        join_pos = ("JOIN player_fielding_stats fs_pos "
+        join_pos = (f"JOIN {fld_tbl} fs_pos "
                     "ON fs_pos.player_id = bs.player_id "
                     "AND fs_pos.league_year_id = bs.league_year_id "
                     "AND fs_pos.team_id = bs.team_id "
@@ -148,7 +184,7 @@ def batting_leaderboard():
     try:
         with engine.connect() as conn:
             total = conn.execute(sa_text(f"""
-                SELECT COUNT(*) FROM player_batting_stats bs
+                SELECT COUNT(*) FROM {bat_tbl} bs
                 JOIN teams tm ON tm.id = bs.team_id
                 {join_pos}
                 WHERE {where_sql}
@@ -178,7 +214,7 @@ def batting_leaderboard():
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
                        tm.team_level AS team_level
-                FROM player_batting_stats bs
+                FROM {bat_tbl} bs
                 JOIN simbbPlayers p ON p.id = bs.player_id
                 JOIN teams tm ON tm.id = bs.team_id
                 {join_pos}
@@ -215,7 +251,7 @@ def batting_leaderboard():
                        SUM(bs.walks) AS bb, SUM(bs.hbp) AS hbp,
                        SUM(bs.at_bats) AS ab, SUM(bs.runs) AS r,
                        SUM(bs.at_bats + bs.walks + bs.hbp) AS pa
-                FROM player_batting_stats bs
+                FROM {bat_tbl} bs
                 JOIN teams tm ON tm.id = bs.team_id
                 WHERE bs.league_year_id = :lyid {lg_level_filter}
             """), lg_params).mappings().first()
@@ -248,7 +284,7 @@ def batting_leaderboard():
                 fld_qry = conn.execute(sa_text(f"""
                     SELECT player_id, position_code, games, innings,
                            errors, putouts, assists, double_plays
-                    FROM player_fielding_stats
+                    FROM {fld_tbl}
                     WHERE player_id IN ({fld_ph}) AND league_year_id = :lyid3
                     ORDER BY innings DESC
                 """), fld_pp).mappings().all()
@@ -412,7 +448,8 @@ def batting_leaderboard():
                 ldr["rank"] = offset + i + 1
 
         pages = (total + page_size - 1) // page_size if total else 0
-        return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
+        return jsonify(leaders=leaders, total=total, page=page, pages=pages,
+                       stat_type=stat_type), 200
 
     except SQLAlchemyError as e:
         logger.exception("Stats endpoint error: %s", e)
@@ -426,10 +463,12 @@ def batting_leaderboard():
 @stats_bp.get("/stats/pitching")
 def pitching_leaderboard():
     """
-    Pitching leaderboard from player_pitching_stats.
+    Pitching leaderboard from player_pitching_stats (or
+    player_pitching_stats_playoff when ?stat_type=playoff).
 
     Query params:
       league_year_id (required), league_level, team_id,
+      stat_type (regular|playoff, default regular),
       role (starter|reliever — filters by GS),
       sort (any stat key, default era), order (asc|desc),
       min_ip (default 0, in innings), page, page_size
@@ -440,6 +479,11 @@ def pitching_leaderboard():
     if not league_year_id:
         return jsonify(error="missing_field",
                        message="league_year_id is required"), 400
+
+    tables, stat_type, st_err = _stat_tables()
+    if st_err:
+        return st_err
+    _bat_tbl, pit_tbl, _fld_tbl = tables
 
     league_level = request.args.get("league_level", type=int)
     team_id = request.args.get("team_id", type=int)
@@ -548,7 +592,7 @@ def pitching_leaderboard():
     try:
         with engine.connect() as conn:
             total = conn.execute(sa_text(f"""
-                SELECT COUNT(*) FROM player_pitching_stats ps
+                SELECT COUNT(*) FROM {pit_tbl} ps
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE {where_sql}
             """), params).scalar()
@@ -580,7 +624,7 @@ def pitching_leaderboard():
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
                        tm.team_level AS team_level
-                FROM player_pitching_stats ps
+                FROM {pit_tbl} ps
                 JOIN simbbPlayers p ON p.id = ps.player_id
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE {where_sql}
@@ -599,7 +643,7 @@ def pitching_leaderboard():
                        SUM(ps.home_runs_allowed) AS hra, SUM(ps.walks) AS bb,
                        SUM(ps.strikeouts) AS so, SUM(ps.hbp) AS hbp,
                        SUM(ps.fly_balls_allowed) AS fb_a
-                FROM player_pitching_stats ps
+                FROM {pit_tbl} ps
                 JOIN teams tm ON tm.id = ps.team_id
                 WHERE ps.league_year_id = :lyid {fip_level_filter}
             """), fip_params).mappings().first()
@@ -771,7 +815,8 @@ def pitching_leaderboard():
                 ldr["rank"] = offset + i + 1
 
         pages = (total + page_size - 1) // page_size if total else 0
-        return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
+        return jsonify(leaders=leaders, total=total, page=page, pages=pages,
+                       stat_type=stat_type), 200
 
     except SQLAlchemyError as e:
         logger.exception("Stats endpoint error: %s", e)
@@ -785,10 +830,12 @@ def pitching_leaderboard():
 @stats_bp.get("/stats/fielding")
 def fielding_leaderboard():
     """
-    Fielding leaderboard from player_fielding_stats.
+    Fielding leaderboard from player_fielding_stats (or
+    player_fielding_stats_playoff when ?stat_type=playoff).
 
     Query params:
       league_year_id (required), league_level, position_code, team_id,
+      stat_type (regular|playoff, default regular),
       sort (any stat key, default fpct), order (asc|desc),
       min_inn (default 0), page, page_size
     """
@@ -798,6 +845,11 @@ def fielding_leaderboard():
     if not league_year_id:
         return jsonify(error="missing_field",
                        message="league_year_id is required"), 400
+
+    tables, stat_type, st_err = _stat_tables()
+    if st_err:
+        return st_err
+    _bat_tbl, _pit_tbl, fld_tbl = tables
 
     from services.listed_position import POSITION_DISPLAY
 
@@ -861,7 +913,7 @@ def fielding_leaderboard():
     try:
         with engine.connect() as conn:
             total = conn.execute(sa_text(f"""
-                SELECT COUNT(*) FROM player_fielding_stats fs
+                SELECT COUNT(*) FROM {fld_tbl} fs
                 JOIN teams tm ON tm.id = fs.team_id
                 WHERE {where_sql}
             """), params).scalar()
@@ -882,7 +934,7 @@ def fielding_leaderboard():
                        p.firstName, p.lastName,
                        tm.team_abbrev AS team_abbrev,
                        tm.team_level AS team_level
-                FROM player_fielding_stats fs
+                FROM {fld_tbl} fs
                 JOIN simbbPlayers p ON p.id = fs.player_id
                 JOIN teams tm ON tm.id = fs.team_id
                 WHERE {where_sql}
@@ -958,7 +1010,8 @@ def fielding_leaderboard():
                 ldr["rank"] = offset + i + 1
 
         pages = (total + page_size - 1) // page_size if total else 0
-        return jsonify(leaders=leaders, total=total, page=page, pages=pages), 200
+        return jsonify(leaders=leaders, total=total, page=page, pages=pages,
+                       stat_type=stat_type), 200
 
     except SQLAlchemyError as e:
         logger.exception("Stats endpoint error: %s", e)
@@ -1205,6 +1258,11 @@ def player_stats(player_id: int):
     """
     Single player's season stats across all seasons.
     Optionally include per-game log via ?include=gamelog.
+
+    Also returns ``postseason`` = {batting, pitching, fielding} read from the
+    player_*_stats_playoff tables in the same row shape as the top-level
+    keys (empty lists when the player has no playoff games or the tables do
+    not exist yet).
     """
     from sqlalchemy import text as sa_text
     from services.listed_position import POSITION_DISPLAY
@@ -1285,6 +1343,52 @@ def player_stats(player_id: int):
                 WHERE {fld_where}
                 ORDER BY fs.league_year_id
             """), fld_params).mappings().all()
+
+            # Postseason accumulation (player_*_stats_playoff). Best-effort:
+            # the clone tables are created lazily on the first playoff game.
+            po_batting, po_pitching, po_fielding = [], [], []
+            try:
+                po_batting = conn.execute(sa_text(f"""
+                    SELECT bs.league_year_id, bs.team_id, bs.games, bs.at_bats,
+                           bs.runs, bs.hits, bs.doubles_hit, bs.triples,
+                           bs.home_runs, bs.inside_the_park_hr,
+                           bs.rbi, bs.walks, bs.strikeouts,
+                           bs.stolen_bases, bs.caught_stealing,
+                           bs.plate_appearances, bs.hbp,
+                           tm.team_abbrev AS team_abbrev
+                    FROM player_batting_stats_playoff bs
+                    JOIN teams tm ON tm.id = bs.team_id
+                    WHERE {bat_where}
+                    ORDER BY bs.league_year_id
+                """), bat_params).mappings().all()
+                po_pitching = conn.execute(sa_text(f"""
+                    SELECT ps.league_year_id, ps.team_id, ps.games, ps.games_started,
+                           ps.wins, ps.losses, ps.saves,
+                           ps.holds, ps.blown_saves, ps.quality_starts,
+                           ps.innings_pitched_outs, ps.hits_allowed,
+                           ps.runs_allowed, ps.earned_runs,
+                           ps.walks, ps.strikeouts, ps.home_runs_allowed,
+                           ps.inside_the_park_hr_allowed,
+                           ps.pitches_thrown, ps.balls, ps.strikes,
+                           ps.hbp, ps.wildpitches,
+                           tm.team_abbrev AS team_abbrev
+                    FROM player_pitching_stats_playoff ps
+                    JOIN teams tm ON tm.id = ps.team_id
+                    WHERE {pit_where}
+                    ORDER BY ps.league_year_id
+                """), pit_params).mappings().all()
+                po_fielding = conn.execute(sa_text(f"""
+                    SELECT fs.league_year_id, fs.team_id, fs.position_code,
+                           fs.games, fs.innings, fs.putouts, fs.assists, fs.errors,
+                           tm.team_abbrev AS team_abbrev
+                    FROM player_fielding_stats_playoff fs
+                    JOIN teams tm ON tm.id = fs.team_id
+                    WHERE {fld_where}
+                    ORDER BY fs.league_year_id
+                """), fld_params).mappings().all()
+            except SQLAlchemyError:
+                logger.warning("player_stats: playoff stat tables unavailable for %d",
+                               player_id, exc_info=True)
 
             # Current injury status
             current_injury = conn.execute(sa_text("""
@@ -1433,6 +1537,17 @@ def player_stats(player_id: int):
                 "p_ip": f"{(pitches / ip_f if ip_f else 0):.1f}",
             }
 
+        def _fld_season(r):
+            return {
+                "league_year_id": int(r["league_year_id"]),
+                "team_id": int(r["team_id"]),
+                "team_abbrev": r["team_abbrev"],
+                "pos": POSITION_DISPLAY.get(r["position_code"], r["position_code"]),
+                "g": int(r["games"]), "inn": int(r["innings"]),
+                "po": int(r["putouts"]), "a": int(r["assists"]),
+                "e": int(r["errors"]),
+            }
+
         result = {
             "player_id": player_id,
             "name": f"{player['firstName']} {player['lastName']}",
@@ -1453,15 +1568,13 @@ def player_stats(player_id: int):
             } for r in injury_history],
             "batting": [_bat_season(r) for r in batting],
             "pitching": [_pit_season(r) for r in pitching],
-            "fielding": [{
-                "league_year_id": int(r["league_year_id"]),
-                "team_id": int(r["team_id"]),
-                "team_abbrev": r["team_abbrev"],
-                "pos": POSITION_DISPLAY.get(r["position_code"], r["position_code"]),
-                "g": int(r["games"]), "inn": int(r["innings"]),
-                "po": int(r["putouts"]), "a": int(r["assists"]),
-                "e": int(r["errors"]),
-            } for r in fielding],
+            "fielding": [_fld_season(r) for r in fielding],
+            # Postseason accumulation, same row shapes as batting/pitching/fielding
+            "postseason": {
+                "batting": [_bat_season(r) for r in po_batting],
+                "pitching": [_pit_season(r) for r in po_pitching],
+                "fielding": [_fld_season(r) for r in po_fielding],
+            },
             # Career awards. `awards` is the full list (filtered to the requested
             # season when ?league_year_id= is supplied); `award_summary` and
             # `total_awards` always reflect the whole career for headline display.

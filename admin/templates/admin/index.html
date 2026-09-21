@@ -730,6 +730,39 @@
           </div>
         </div>
 
+        <!-- Offseason Checklist (ordered rollover steps; see docs/OFFSEASON_RUNBOOK.md) -->
+        <div class="card" id="offseason-checklist-card">
+          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px">
+            <div>
+              <h3 style="margin: 0">Offseason Checklist</h3>
+              <p class="text-muted" style="margin: 4px 0 0">Ordered season-rollover steps for the selected league year. Work top to bottom; steps 7-10 have no completion signal and must be confirmed by hand. Full procedure: docs/OFFSEASON_RUNBOOK.md.</p>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+              <span id="oc-phase-badge" class="badge badge-info">--</span>
+              <select id="oc-lyid" title="League year that is ending"></select>
+              <button class="btn btn-secondary btn-sm" id="btn-refresh-offseason">Refresh</button>
+            </div>
+          </div>
+          <div id="oc-summary" class="text-muted" style="margin-bottom: 10px"></div>
+          <div style="overflow-x: auto">
+            <table class="data-table" id="oc-table">
+              <thead>
+                <tr>
+                  <th style="width: 32px">#</th>
+                  <th style="width: 90px">Status</th>
+                  <th>Step</th>
+                  <th>Detail</th>
+                  <th style="width: 160px">Action</th>
+                </tr>
+              </thead>
+              <tbody id="oc-body">
+                <tr><td colspan="5" class="text-muted">Click Refresh to load the checklist.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <pre id="oc-result" class="result-box" style="margin-top: 12px; display: none"></pre>
+        </div>
+
         <!-- Listed Positions -->
         <div class="card">
           <h3>Listed Positions</h3>
@@ -3706,6 +3739,7 @@
             <button id="btn-po-advance" class="btn btn-secondary">Advance Round</button>
             <button id="btn-po-procadv" class="btn btn-primary">Process &amp; Advance</button>
             <button id="btn-po-health" class="btn btn-secondary">Health Check</button>
+            <button id="btn-po-rest" class="btn btn-secondary" title="Apply a week (4 subweeks) of rest-only stamina recovery to every roster at this level">Rest Week (Stamina)</button>
             <button id="btn-po-refresh" class="btn btn-secondary">Refresh</button>
             <button id="btn-po-wipe" class="btn btn-danger">Wipe Playoffs</button>
           </div>
@@ -3746,6 +3780,32 @@
         <div class="card" id="po-field-card" style="display:none">
           <h4>Playoff Field</h4>
           <div id="po-field"></div>
+        </div>
+        <div class="card" id="ncaa-editor-card" style="display:none">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h4 style="margin:0">Manual CWS Field (64 Teams)</h4>
+            <button class="btn btn-secondary" id="btn-ncaa-cancel">Close</button>
+          </div>
+          <p class="muted" style="margin:6px 0">Assign conference champions and a ranking metric, click <strong>Suggest Field</strong> to auto-build the 64‑team bracket, then fine‑tune any slot. The 16 regionals below are exactly what gets generated.</p>
+          <div class="filter-row" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+            <div>
+              <label>Rank / suggest by</label>
+              <select id="ncaa-ranking">
+                <option value="elo">ELO</option>
+                <option value="power">Power Ranking</option>
+                <option value="record">Record (win %)</option>
+              </select>
+            </div>
+            <button class="btn btn-secondary" id="btn-ncaa-suggest">Suggest Field</button>
+            <button class="btn btn-primary" id="btn-ncaa-generate">Generate Bracket from This Field</button>
+            <span id="ncaa-editor-status" class="status-msg"></span>
+          </div>
+          <details id="ncaa-champs-wrap" style="margin-top:10px">
+            <summary style="cursor:pointer;font-weight:600">Conference Champions (auto-bids)</summary>
+            <p class="muted" style="margin:4px 0 8px">Each conference's champion gets an automatic bid. Change them, then click <strong>Suggest Field</strong> to rebuild.</p>
+            <div id="ncaa-champs"></div>
+          </details>
+          <div id="ncaa-field"></div>
         </div>
         <div class="card" id="ct-bracket-card" style="display:none">
           <div style="display:flex;justify-content:space-between;align-items:center">

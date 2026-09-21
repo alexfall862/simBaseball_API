@@ -137,6 +137,14 @@
     const btnArchive = document.getElementById('btn-season-archive');
     if (btnArchive) btnArchive.addEventListener('click', archiveSeason);
 
+    // Offseason Checklist
+    const btnOc = document.getElementById('btn-refresh-offseason');
+    if (btnOc) btnOc.addEventListener('click', loadOffseasonChecklist);
+    const ocSel = document.getElementById('oc-lyid');
+    if (ocSel) ocSel.addEventListener('change', loadOffseasonChecklist);
+    const tsNewYear = document.getElementById('ts-new-year');
+    if (tsNewYear) tsNewYear.addEventListener('input', () => { tsNewYear.dataset.userEdited = '1'; });
+
     // Weight Calibration
     const _calListeners = {
       'btn-cal-run': runCalibration,
@@ -469,6 +477,7 @@
         break;
       case 'timestamp':
         loadTimestamp();
+        loadOffseasonChecklist();
         break;
       case 'organizations':
         loadOrganizations();
@@ -1368,6 +1377,205 @@
         loadTimestamp();
       })
       .catch(err => { resultBox.textContent = 'Error: ' + err.message; });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Offseason Checklist (Timestamp section)
+  // Read-only status from GET /admin/offseason/checklist; Run buttons POST to
+  // the step's own endpoint and then refresh. See docs/OFFSEASON_RUNBOOK.md.
+  // ---------------------------------------------------------------------------
+  let _ocData = null;
+  let _ocAdminPw = '';
+
+  function _ocEsc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function loadOffseasonChecklist() {
+    const sel = document.getElementById('oc-lyid');
+    const body = document.getElementById('oc-body');
+    if (!sel || !body) return;
+    const lyid = sel.value;
+    const qs = lyid ? `?league_year_id=${encodeURIComponent(lyid)}` : '';
+    body.innerHTML = '<tr><td colspan="5" class="text-muted">Loading...</td></tr>';
+
+    fetch(`${ADMIN_BASE}/offseason/checklist${qs}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) throw new Error(data.message || data.error || 'checklist failed');
+        _ocData = data;
+        renderOffseasonChecklist(data);
+      })
+      .catch(err => {
+        body.innerHTML = `<tr><td colspan="5" class="text-danger">Error: ${_ocEsc(err.message)}</td></tr>`;
+      });
+  }
+
+  function _ocStatus(step) {
+    if (step.not_built) return { cls: 'badge-danger', label: 'not built' };
+    if (step.done === true) return { cls: 'badge-complete', label: 'done' };
+    if (step.manual) return { cls: 'badge-warning', label: 'manual' };
+    if (step.done === false) return { cls: 'badge-pending', label: 'pending' };
+    return { cls: 'badge-secondary', label: 'unknown' };
+  }
+
+  function renderOffseasonChecklist(data) {
+    const sel = document.getElementById('oc-lyid');
+    const body = document.getElementById('oc-body');
+    const badge = document.getElementById('oc-phase-badge');
+    const summary = document.getElementById('oc-summary');
+
+    // League-year select: populate once from the response, keep the server's pick.
+    if (sel && Array.isArray(data.league_years)) {
+      const current = String(data.league_year_id);
+      const have = Array.from(sel.options).map(o => o.value);
+      const want = data.league_years.map(ly => String(ly.id));
+      if (have.join(',') !== want.join(',')) {
+        sel.innerHTML = '';
+        data.league_years.forEach(ly => {
+          const o = document.createElement('option');
+          o.value = ly.id;
+          o.textContent = `${ly.league_year} (id ${ly.id})`;
+          sel.appendChild(o);
+        });
+      }
+      sel.value = current;
+    }
+
+    if (badge) {
+      const phase = data.phase || 'UNKNOWN';
+      badge.textContent = PHASE_LABEL[phase] || phase;
+      badge.className = 'badge ' + (PHASE_BADGE_CLASS[phase] || 'badge-secondary');
+    }
+
+    if (summary) {
+      const ts = data.timestamp || {};
+      const doneCount = (data.steps || []).filter(s => s.done === true).length;
+      const nextTxt = data.next_league_year_id
+        ? `next league_year_id = ${data.next_league_year_id} (${data.next_league_year})`
+        : `league year ${data.next_league_year} not created yet`;
+      summary.textContent =
+        `Ending ${data.league_year} (league_year_id ${data.league_year_id}); ${nextTxt}. ` +
+        `Timestamp: Season ${ts.Season ?? '--'}, Week ${ts.Week ?? '--'}, ` +
+        `offseason=${ts.IsOffSeason}, fa_locked=${ts.IsFreeAgencyLocked}, fa_round=${ts.FreeAgencyRound}, ` +
+        `draft=${ts.IsDraftTime}, recruiting_locked=${ts.IsRecruitingLocked}. ` +
+        `${doneCount}/${(data.steps || []).length} steps detected done.`;
+    }
+
+    // Default the Start New Season input to the detected next id (unless the
+    // user has typed in it), and prefill the archive id if it is empty.
+    const newYearInput = document.getElementById('ts-new-year');
+    if (newYearInput && data.next_league_year_id && !newYearInput.dataset.userEdited) {
+      newYearInput.value = data.next_league_year_id;
+    }
+    const archiveInput = document.getElementById('archive-league-year-id');
+    if (archiveInput && !archiveInput.value && data.league_year_id) {
+      archiveInput.value = data.league_year_id;
+    }
+
+    if (!body) return;
+    body.innerHTML = (data.steps || []).map(step => {
+      const st = _ocStatus(step);
+      let actionHtml = '<span class="text-muted">--</span>';
+      if (step.action) {
+        if (step.action.blocked) {
+          actionHtml = `<span class="text-muted" title="${_ocEsc(step.action.blocked)}">blocked: ${_ocEsc(step.action.blocked)}</span>`;
+        } else {
+          const cls = step.action.confirm ? 'btn-danger' : 'btn-primary';
+          actionHtml = `<button class="btn ${cls} btn-sm oc-run" data-key="${_ocEsc(step.key)}">${_ocEsc(step.action.label || 'Run')}</button>`;
+        }
+      } else if (step.key === 'end_season') {
+        actionHtml = '<span class="text-muted">End Regular Season card</span>';
+      } else if (step.key === 'archive_season') {
+        actionHtml = '<span class="text-muted">Season Archive card</span>';
+      } else if (step.key === 'schedule') {
+        actionHtml = '<span class="text-muted">Schedule Generator section</span>';
+      } else if (step.key === 'start_new_season') {
+        actionHtml = '<span class="text-muted">Start New Season card</span>';
+      } else if (step.key === 'world_series') {
+        actionHtml = '<span class="text-muted">Playoffs section</span>';
+      } else if (step.manual) {
+        actionHtml = '<span class="text-muted">confirm by hand</span>';
+      }
+      return `<tr>
+        <td>${step.order}</td>
+        <td><span class="badge ${st.cls}">${st.label}</span></td>
+        <td><strong>${_ocEsc(step.title)}</strong></td>
+        <td style="white-space: normal">${_ocEsc(step.detail)}</td>
+        <td>${actionHtml}</td>
+      </tr>`;
+    }).join('');
+
+    body.querySelectorAll('.oc-run').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const step = (_ocData?.steps || []).find(s => s.key === btn.dataset.key);
+        if (step) runOffseasonStep(step, btn);
+      });
+    });
+  }
+
+  function _ocAdminPassword() {
+    // Password-gated app.py endpoints check X-Admin-Password against
+    // ADMIN_PASSWORD; reuse the login box value when it is still there.
+    const typed = elements.adminPassword ? elements.adminPassword.value : '';
+    if (typed) return typed;
+    if (_ocAdminPw) return _ocAdminPw;
+    const p = prompt('Admin password (sent as X-Admin-Password for this endpoint):');
+    if (p) _ocAdminPw = p;
+    return p || '';
+  }
+
+  function runOffseasonStep(step, btn) {
+    const a = step.action;
+    if (!a || a.blocked) return;
+    const resultBox = document.getElementById('oc-result');
+
+    let msg = `Run step ${step.order} (${step.title})?\n\n${a.method} ${a.url}\n${JSON.stringify(a.body)}`;
+    if (a.confirm) {
+      msg += '\n\nThis creates the next league year (league_years row + game_weeks) and CANNOT be re-run. Continue?';
+    }
+    if (!confirm(msg)) return;
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (a.header) {
+      const pw = _ocAdminPassword();
+      if (!pw) { alert('Admin password is required for this endpoint.'); return; }
+      headers[a.header] = pw;
+    }
+
+    if (btn) { btn.disabled = true; btn.textContent = 'Running...'; }
+    if (resultBox) {
+      resultBox.style.display = 'block';
+      resultBox.textContent = `Step ${step.order}: ${a.method} ${a.url} ...`;
+    }
+
+    fetch(a.url, {
+      method: a.method || 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(a.body || {}),
+    })
+      .then(async r => {
+        const text = await r.text();
+        let parsed;
+        try { parsed = JSON.parse(text); } catch (_) { parsed = text; }
+        return { status: r.status, body: parsed };
+      })
+      .then(({ status, body }) => {
+        if (resultBox) {
+          resultBox.textContent = `Step ${step.order} -> HTTP ${status}\n` +
+            (typeof body === 'string' ? body : JSON.stringify(body, null, 2));
+        }
+        if (status === 401 && a.header) _ocAdminPw = '';
+        loadOffseasonChecklist();
+        if (typeof loadTimestamp === 'function') loadTimestamp();
+      })
+      .catch(err => {
+        if (resultBox) resultBox.textContent = `Step ${step.order} error: ${err.message}`;
+        if (btn) { btn.disabled = false; btn.textContent = a.label || 'Run'; }
+      });
   }
 
   // Listed Positions — manual fill
@@ -7252,6 +7460,35 @@
       }).catch(e => div.innerHTML = `<span style="color:#e57373">${e.message}</span>`);
   });
 
+  document.getElementById('btn-po-rest')?.addEventListener('click', () => {
+    const lyid = parseInt(document.getElementById('po-lyid').value);
+    const level = parseInt(document.getElementById('po-level').value);
+    const levelLabel = document.getElementById('po-level').selectedOptions[0]?.textContent || level;
+    const status = document.getElementById('po-status');
+    const raw = prompt(`Rest subweeks to apply to every ${levelLabel} roster player (4 = one full week of rest)?`, '4');
+    if (raw === null) return;
+    const subweeks = parseInt(raw);
+    if (!Number.isFinite(subweeks) || subweeks < 1 || subweeks > 16) { status.textContent = 'Subweeks must be 1-16.'; return; }
+    const fmt = d => d ? `avg ${d.avg_stamina} · min ${d.min_stamina} · <70: ${d.under_70} · at 100: ${d.at_100} (of ${d.tracked} tracked)` : 'n/a';
+    const post = dryRun => fetch(`${API_BASE}/games/stamina-rest`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: lyid, league_level: level, subweeks, dry_run: dryRun }),
+    }).then(r => r.json());
+    status.textContent = 'Previewing stamina rest...';
+    post(true).then(prev => {
+      if (prev.error) { status.textContent = `Error: ${prev.message || prev.error}`; return; }
+      if (!confirm(`Apply ${subweeks} rest subweek(s) to ${levelLabel}?\n\nBefore: ${fmt(prev.before).replace(/<70/g, 'under 70')}\nAfter:  ${fmt(prev.after).replace(/<70/g, 'under 70')}`)) {
+        status.textContent = 'Stamina rest cancelled (preview only).'; return;
+      }
+      status.textContent = 'Applying stamina rest...';
+      return post(false).then(data => {
+        if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+        status.innerHTML = `Stamina rest applied to ${data.rows_updated} players. Before: ${fmt(data.before)} → After: ${fmt(data.after)}`;
+      });
+    }).catch(e => status.textContent = e.message);
+  });
+
   function loadPlayoffStatus(lyid, level) {
     const banner = document.getElementById('po-banner');
     if (!banner) return;
@@ -7351,6 +7588,8 @@
     const lyid = document.getElementById('po-lyid').value;
     const level = document.getElementById('po-level').value;
     const status = document.getElementById('po-status');
+    // College: open the manual 64-team editor (ELO-aware, champion inputs).
+    if (String(level) === '3') { status.textContent = ''; openNcaaEditor(); return; }
     status.textContent = 'Loading field...';
     fetch(`${API_BASE}/playoffs/field/${lyid}/${level}`, { credentials: 'include' })
       .then(r => r.json()).then(data => {
@@ -7504,8 +7743,10 @@
     const level = document.getElementById('po-level')?.value;
     const ct = document.getElementById('ct-controls');
     if (ct) ct.style.display = level === '3' ? 'flex' : 'none';
+    const prevBtn = document.getElementById('btn-po-preview');
+    if (prevBtn) prevBtn.textContent = level === '3' ? 'Set CWS Field Manually' : 'Preview / Edit Field';
     // Hide any open editors / stale status when the level changes.
-    ['po-fieldedit-card', 'ct-fieldedit-card', 'po-field-card', 'po-banner', 'po-health'].forEach(id => {
+    ['po-fieldedit-card', 'ct-fieldedit-card', 'po-field-card', 'ncaa-editor-card', 'po-banner', 'po-health'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = 'none';
     });
@@ -8177,6 +8418,166 @@
     html += '</div>';
     div.innerHTML = html;
   }
+
+  // ===== Manual CWS field editor (64 teams, ELO-aware) =====
+  let ncaaEditState = null; // {conferences, teamById, optionsHtml, ranking}
+
+  function _ncaaTeamOptions(conferences) {
+    let html = '';
+    Object.keys(conferences).sort().forEach(conf => {
+      html += `<optgroup label="${conf}">`;
+      conferences[conf].forEach(t => {
+        html += `<option value="${t.team_id}">${t.team_abbrev} (${t.wins}-${t.losses}, ELO ${t.elo})</option>`;
+      });
+      html += '</optgroup>';
+    });
+    return html;
+  }
+
+  function _ncaaTeamIndex(conferences) {
+    const idx = {};
+    Object.entries(conferences).forEach(([conf, teams]) =>
+      teams.forEach(t => { idx[t.team_id] = { ...t, conference: conf }; }));
+    return idx;
+  }
+
+  function openNcaaEditor() {
+    document.getElementById('ncaa-editor-card').style.display = '';
+    document.getElementById('ncaa-champs').innerHTML = '';
+    document.getElementById('ncaa-field').innerHTML = '<p class="muted">Loading suggestion…</p>';
+    ncaaSuggest();
+  }
+
+  function ncaaCollectChampions() {
+    const champs = {};
+    document.querySelectorAll('#ncaa-champs select').forEach(s => {
+      if (s.value) champs[s.getAttribute('data-conf')] = parseInt(s.value);
+    });
+    return champs;
+  }
+
+  function ncaaSuggest() {
+    const lyid = document.getElementById('po-lyid').value;
+    const ranking = document.getElementById('ncaa-ranking').value;
+    const status = document.getElementById('ncaa-editor-status');
+    status.textContent = 'Building suggestion…';
+    fetch(`${API_BASE}/playoffs/ncaa/suggest`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), ranking, champions: ncaaCollectChampions() }),
+    }).then(r => r.json()).then(d => {
+      if (d.error) { status.textContent = `Error: ${d.message || d.error}`; return; }
+      status.textContent = '';
+      ncaaEditState = {
+        conferences: d.conferences,
+        teamById: _ncaaTeamIndex(d.conferences),
+        optionsHtml: _ncaaTeamOptions(d.conferences),
+        ranking: d.ranking,
+      };
+      renderNcaaChamps(d.field);
+      renderNcaaEditorField(d.field);
+    }).catch(e => status.textContent = e.message);
+  }
+
+  function renderNcaaChamps(field) {
+    const champByConf = {};
+    field.forEach(t => { if (t.qualifier === 'auto_bid') champByConf[t.conference] = t.team_id; });
+    const confs = Object.keys(ncaaEditState.conferences).filter(c => c !== 'Independent').sort();
+    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px">';
+    confs.forEach(conf => {
+      const cur = champByConf[conf];
+      const opts = ncaaEditState.conferences[conf].map(t =>
+        `<option value="${t.team_id}"${t.team_id === cur ? ' selected' : ''}>${t.team_abbrev} (${t.wins}-${t.losses}, ELO ${t.elo})</option>`).join('');
+      html += `<div><label style="font-size:12px">${conf}</label><select data-conf="${conf}" style="width:100%">${opts}</select></div>`;
+    });
+    html += '</div>';
+    document.getElementById('ncaa-champs').innerHTML = html;
+  }
+
+  function renderNcaaEditorField(field) {
+    const byReg = {};
+    field.forEach(t => { (byReg[t.regional_no] = byReg[t.regional_no] || []).push(t); });
+    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-top:10px">';
+    Object.keys(byReg).map(Number).sort((a, b) => a - b).forEach(n => {
+      const teams = byReg[n].slice().sort((a, b) => a.regional_seed - b.regional_seed);
+      const nat = teams[0] && teams[0].national_seed ? ` · Nat #${teams[0].national_seed}` : '';
+      html += `<table class="data-table"><thead><tr><th colspan="3">Regional ${n}${nat}</th></tr></thead><tbody>`;
+      teams.forEach(t => {
+        html += `<tr><td style="width:26px">#${t.regional_seed}</td>
+          <td><select class="ncaa-slot" data-reg="${n}" data-rseed="${t.regional_seed}">${ncaaEditState.optionsHtml}</select></td>
+          <td class="ncaa-meta" style="white-space:nowrap;font-size:11px;color:var(--text-secondary)"></td></tr>`;
+      });
+      html += '</tbody></table>';
+    });
+    html += '</div>';
+    const div = document.getElementById('ncaa-field');
+    div.innerHTML = html;
+    field.forEach(t => {
+      const sel = div.querySelector(`.ncaa-slot[data-reg="${t.regional_no}"][data-rseed="${t.regional_seed}"]`);
+      if (sel) sel.value = t.team_id;
+    });
+    ncaaRefreshMeta();
+    ncaaValidateHighlight();
+  }
+
+  function ncaaRefreshMeta() {
+    if (!ncaaEditState) return;
+    document.querySelectorAll('#ncaa-field .ncaa-slot').forEach(sel => {
+      const meta = sel.closest('tr').querySelector('.ncaa-meta');
+      const t = ncaaEditState.teamById[parseInt(sel.value)];
+      meta.textContent = t ? `${t.wins}-${t.losses} · ELO ${t.elo}` : '';
+    });
+  }
+
+  function ncaaValidateHighlight() {
+    const counts = {};
+    document.querySelectorAll('#ncaa-field .ncaa-slot').forEach(s => { counts[s.value] = (counts[s.value] || 0) + 1; });
+    let dups = 0;
+    document.querySelectorAll('#ncaa-field .ncaa-slot').forEach(s => {
+      const dup = counts[s.value] > 1;
+      s.style.outline = dup ? '2px solid #e57373' : '';
+      if (dup) dups++;
+    });
+    return dups;
+  }
+
+  function ncaaGenerate() {
+    const lyid = document.getElementById('po-lyid').value;
+    const status = document.getElementById('ncaa-editor-status');
+    const slots = document.querySelectorAll('#ncaa-field .ncaa-slot');
+    if (slots.length !== 64) { status.textContent = 'Field is not fully built — click Suggest Field first.'; return; }
+    if (ncaaValidateHighlight() > 0) { status.textContent = 'A team is used more than once — fix the red-outlined slots.'; return; }
+    const field = Array.from(slots).map(s => ({
+      team_id: parseInt(s.value),
+      regional_no: parseInt(s.getAttribute('data-reg')),
+      regional_seed: parseInt(s.getAttribute('data-rseed')),
+    }));
+    if (!confirm('Generate the CWS bracket from this 64-team field? Wipe any existing College bracket first if one exists.')) return;
+    status.textContent = 'Generating…';
+    fetch(`${API_BASE}/playoffs/generate`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ league_year_id: parseInt(lyid), league_level: 3, field }),
+    }).then(r => r.json()).then(d => {
+      if (d.error) { status.textContent = `Error: ${d.message || d.error}`; return; }
+      status.textContent = `Created ${(d.series_created || []).length} regional games.`;
+      document.getElementById('ncaa-editor-card').style.display = 'none';
+      loadPlayoffBracket(lyid, '3');
+      loadPendingGames(lyid, '3');
+    }).catch(e => status.textContent = e.message);
+  }
+
+  document.getElementById('ncaa-field')?.addEventListener('change', e => {
+    if (e.target.classList && e.target.classList.contains('ncaa-slot')) {
+      ncaaRefreshMeta();
+      ncaaValidateHighlight();
+    }
+  });
+  document.getElementById('btn-ncaa-suggest')?.addEventListener('click', ncaaSuggest);
+  document.getElementById('btn-ncaa-generate')?.addEventListener('click', ncaaGenerate);
+  document.getElementById('btn-ncaa-cancel')?.addEventListener('click', () => {
+    document.getElementById('ncaa-editor-card').style.display = 'none';
+  });
 
   function renderPlayoffField(field) {
     const card = document.getElementById('po-field-card');

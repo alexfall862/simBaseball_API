@@ -544,7 +544,8 @@ def update_series_after_game(conn, game_id: int) -> Optional[Dict[str, Any]]:
 
     # Candidate series for this team pair, in schedule order.
     cands = conn.execute(sa_text("""
-        SELECT id, team_a_id, team_b_id, series_length, start_week, status
+        SELECT id, team_a_id, team_b_id, series_length, start_week, status,
+               round, conference
         FROM playoff_series
         WHERE league_year_id = :lyid AND league_level = :level
           AND ((team_a_id = :home AND team_b_id = :away)
@@ -633,6 +634,25 @@ def update_series_after_game(conn, game_id: int) -> Optional[Dict[str, Any]]:
         "next_game": None,
     }
 
+    # Durable team awards: a completed CS hands out the pennant, a completed WS
+    # the ring (MLB only; the awards module ignores other levels/rounds).
+    # Best-effort — the sim must never fail because of trophy bookkeeping.
+    if status == "complete" and winner_id is not None:
+        try:
+            from services.awards import record_postseason_series_award
+            loser_id = team_b_id if winner_id == team_a_id else team_a_id
+            ww, wl = (wins_a, wins_b) if winner_id == team_a_id else (wins_b, wins_a)
+            award = record_postseason_series_award(
+                conn, lyid, level, owning["round"], owning["conference"], winner_id,
+                series_id=series_id, loser_team_id=loser_id,
+                wins_winner=ww, wins_loser=wl,
+            )
+            if award:
+                result["award"] = {k: award[k] for k in ("award_code", "sub_league", "count")}
+        except Exception:
+            log.warning("playoffs: postseason award hook failed for series %d",
+                        series_id, exc_info=True)
+
     # Auto-generate the next game if the series is still active
     if status == "active":
         next_game = generate_next_series_game(conn, series_id)
@@ -683,6 +703,17 @@ def _advance_mlb_round(
     conn, engine, league_year_id: int, complete_rounds: Dict
 ) -> Dict[str, Any]:
     """Advance MLB playoffs to the next round."""
+
+    # Serialize concurrent advance calls for this bracket: lock its series
+    # rows for the rest of the transaction. The DS/CS inserts are protected
+    # by uk_series, but the WS row has conference = NULL (NULLs are distinct
+    # in a MySQL unique index), so a double-click could insert two World
+    # Series without this lock + the explicit existence check below.
+    conn.execute(sa_text("""
+        SELECT id FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = 9
+        FOR UPDATE
+    """), {"lyid": league_year_id}).all()
 
     # Determine which round just completed and needs advancement.
     # Walk rounds in order; find the latest complete round whose NEXT round
@@ -878,6 +909,18 @@ def _advance_mlb_round(
 
         al = al_champ[0]
         nl = nl_champ[0]
+
+        existing_ws = conn.execute(sa_text("""
+            SELECT id FROM playoff_series
+            WHERE league_year_id = :lyid AND league_level = 9 AND round = 'WS'
+            LIMIT 1
+        """), {"lyid": league_year_id}).first()
+        if existing_ws:
+            return {
+                "status": "exists",
+                "message": "World Series already created",
+                "series_id": int(existing_ws[0]),
+            }
 
         # Higher seed (better regular season record) gets home field
         al_seed = min(int(al["seed_a"]), int(al["seed_b"]))
@@ -1698,28 +1741,78 @@ def _get_college_team_records(
     return by_conf
 
 
-def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
+def _college_ranking_metrics(conn, league_year_id: int, ranking: str) -> Dict[int, Dict]:
+    """
+    ``{team_id: {"elo": float, "composite": float}}`` for level-3 teams.
+
+    ELO is always attached (cheap, used for display); the power-ranking
+    composite is only computed when ``ranking == 'power'`` (it also folds in
+    roster OVR, which is heavier).  Failures degrade gracefully to record-only.
+    """
+    out: Dict[int, Dict] = {}
+    try:
+        from services.rankings import compute_elo_ratings
+        for t in compute_elo_ratings(conn, league_year_id, 3)["teams"]:
+            out.setdefault(int(t["team_id"]), {})["elo"] = float(t["elo"])
+    except Exception:
+        log.warning("determine_cws_field: ELO unavailable, using records", exc_info=True)
+    if ranking == "power":
+        try:
+            from services.rankings import compute_power_rankings
+            for t in compute_power_rankings(conn, league_year_id, 3)["teams"]:
+                out.setdefault(int(t["team_id"]), {})["composite"] = float(t["composite_score"])
+        except Exception:
+            log.warning("determine_cws_field: power rankings unavailable", exc_info=True)
+    return out
+
+
+def _ncaa_rank_key(ranking: str):
+    """Sort key (higher = better seed) for the chosen ranking metric."""
+    if ranking == "elo":
+        return lambda t: (t.get("elo", 1500.0), t["win_pct"], t["wins"])
+    if ranking == "power":
+        return lambda t: (t.get("composite", 0.0), t.get("elo", 1500.0), t["win_pct"])
+    return lambda t: (t["win_pct"], t["conf_win_pct"], t["wins"])
+
+
+def determine_cws_field(
+    conn, league_year_id: int, *,
+    champions: Optional[Dict[str, int]] = None,
+    ranking: str = "record",
+) -> List[Dict]:
     """
     Build the 64-team NCAA tournament field for the college (level 3) postseason.
 
     Selection (mirrors real NCAA):
-      * Auto-bids  — one per conference: the conference-tournament champion
-        (``get_conf_tournament_winners``), or the best conference record if that
-        conference's tournament hasn't finished.
-      * At-large   — fill to 64 with the best remaining teams by overall win%.
+      * Auto-bids  — one per conference.  Precedence: an explicit ``champions``
+        override ``{conference: team_id}`` (manual entry), else the
+        conference-tournament champion (``get_conf_tournament_winners``), else
+        the best team in the conference by the chosen ranking metric.
+      * At-large   — fill to 64 with the best remaining teams by the metric.
+
+    ``ranking`` picks the seeding/selection metric: ``'elo'`` (power/ELO),
+    ``'power'`` (composite power ranking), or ``'record'`` (overall win%).
+    Every team carries ``elo`` (and ``composite`` when ranking='power') for
+    display.
 
     Seeding:
-      * Overall selection ``seed`` 1..64 by win% (tiebreak conf win%, wins).
+      * Overall selection ``seed`` 1..64 by the metric.
       * Top 16 get ``national_seed`` 1..16 and anchor the 16 regionals at
         ``regional_seed`` 1.
       * The remaining 48 are snake-drafted into ``regional_seed`` 2/3/4 so the
         strongest regionals draw the weakest pods (balance).
-
-    Returns a flat list of 64 dicts, each with:
-        team_id, team_abbrev, seed, national_seed|None, regional_no (1-16),
-        regional_seed (1-4), qualifier, plus the record fields.
     """
+    champions = champions or {}
     by_conf = _get_college_team_records(conn, league_year_id)
+
+    metrics = _college_ranking_metrics(conn, league_year_id, ranking)
+    for teams in by_conf.values():
+        for t in teams:
+            m = metrics.get(t["team_id"], {})
+            t["elo"] = m.get("elo", 1500.0)
+            t["composite"] = m.get("composite", 0.0)
+
+    rank_key = _ncaa_rank_key(ranking)
     ct_winners = get_conf_tournament_winners(conn, league_year_id)
 
     auto_bids: List[Dict] = []
@@ -1728,21 +1821,19 @@ def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
         if conf == "Independent" or not teams:
             continue
         champ = None
-        if conf in ct_winners:
-            wid = ct_winners[conf]
-            champ = next((t for t in teams if t["team_id"] == wid), None)
+        if conf in champions:
+            champ = next((t for t in teams if t["team_id"] == int(champions[conf])), None)
+        if champ is None and conf in ct_winners:
+            champ = next((t for t in teams if t["team_id"] == ct_winners[conf]), None)
         if champ is None:
-            champ = sorted(
-                teams, key=lambda x: (x["conf_win_pct"], x["win_pct"]),
-                reverse=True,
-            )[0]
+            champ = sorted(teams, key=rank_key, reverse=True)[0]
         auto_bids.append({**champ, "qualifier": "auto_bid"})
         used.add(champ["team_id"])
 
     all_teams = [t for teams in by_conf.values() for t in teams]
     at_large_pool = sorted(
         (t for t in all_teams if t["team_id"] not in used),
-        key=lambda x: (x["win_pct"], x["conf_win_pct"]), reverse=True,
+        key=rank_key, reverse=True,
     )
     needed = NCAA_FIELD_SIZE - len(auto_bids)
     at_large = [{**t, "qualifier": "at_large"} for t in at_large_pool[:max(0, needed)]]
@@ -1755,9 +1846,9 @@ def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
             f"regular season first."
         )
 
-    # Overall selection seed (best record first).  If there are more auto-bids
-    # than 64 (never with 29 conferences) the weakest champs drop off here.
-    field.sort(key=lambda x: (x["win_pct"], x["conf_win_pct"], x["wins"]), reverse=True)
+    # Overall selection seed (best first by the metric).  If there are more
+    # auto-bids than 64 (never with 29 conferences) the weakest champs drop off.
+    field.sort(key=rank_key, reverse=True)
     field = field[:NCAA_FIELD_SIZE]
 
     for i, t in enumerate(field):
@@ -1784,6 +1875,27 @@ def determine_cws_field(conn, league_year_id: int) -> List[Dict]:
             t["regional_seed"] = rseed
 
     return field
+
+
+def build_ncaa_pool(conn, league_year_id: int, ranking: str = "elo") -> Dict[str, List[Dict]]:
+    """
+    ``{conference: [team, ...]}`` for the manual field editor — every level-3
+    team with a record, sorted best-first by the chosen ranking metric, each
+    carrying team_id, team_abbrev, conference, wins, losses, win_pct, conf_win_pct,
+    elo, and composite.  Feeds the conference-champion dropdowns and the swap pool.
+    """
+    by_conf = _get_college_team_records(conn, league_year_id)
+    metrics = _college_ranking_metrics(conn, league_year_id, ranking)
+    for teams in by_conf.values():
+        for t in teams:
+            m = metrics.get(t["team_id"], {})
+            t["elo"] = round(m.get("elo", 1500.0), 1)
+            t["composite"] = round(m.get("composite", 0.0), 1)
+    rank_key = _ncaa_rank_key(ranking)
+    return {
+        conf: sorted(teams, key=rank_key, reverse=True)
+        for conf, teams in by_conf.items()
+    }
 
 
 def create_cws_bracket(

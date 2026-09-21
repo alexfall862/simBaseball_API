@@ -8,6 +8,8 @@ Endpoints (all under /api/v1):
     GET    /awards/player/<player_id>     — one player's career awards
     GET    /awards/season/<league_year_id>— a season's full award slate
     POST   /awards                        — record/update one award (admin)
+    POST   /awards/team                   — give a whole roster one award (pennant/ring)
+    POST   /awards/sync-postseason        — backfill pennant/world_series from playoff_series
     DELETE /awards/<award_id>             — revoke one award (admin)
 """
 
@@ -18,6 +20,8 @@ from db import get_engine
 from services.awards import (
     list_award_types,
     record_award,
+    record_team_award,
+    sync_postseason_awards,
     revoke_award,
     get_player_awards,
     get_season_awards,
@@ -103,6 +107,82 @@ def post_award():
                 created_by=data.get("created_by"),
             )
         return jsonify(result), 201
+    except ValueError as e:
+        return jsonify(error="validation_error", message=str(e)), 400
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@awards_bp.post("/awards/team")
+def post_team_award():
+    """
+    Give every player on a team's current active roster the same award.
+    Only multi-recipient, non-positional types qualify (pennant, world_series,
+    all_star).
+
+    Body: {
+      team_id, league_year_id, award_code,
+      sub_league?     ("AL"/"NL" — required for pennant, must be empty for world_series),
+      league_level?   (default 9),
+      player_ids?     (override the roster snapshot with an explicit list),
+      metadata?, created_by?
+    }
+    """
+    data = request.get_json(force=True) or {}
+    try:
+        team_id = int(data["team_id"])
+        league_year_id = int(data["league_year_id"])
+        award_code = str(data["award_code"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="validation_error",
+                       message="team_id, league_year_id, award_code are required"), 400
+
+    player_ids = data.get("player_ids")
+    if player_ids is not None and not isinstance(player_ids, list):
+        return jsonify(error="validation_error", message="player_ids must be a list"), 400
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = record_team_award(
+                conn,
+                league_year_id=league_year_id,
+                team_id=team_id,
+                award_code=award_code,
+                sub_league=data.get("sub_league", ""),
+                league_level=int(data.get("league_level", 9)),
+                player_ids=[int(p) for p in player_ids] if player_ids is not None else None,
+                metadata=data.get("metadata"),
+                created_by=data.get("created_by") or "admin",
+            )
+        return jsonify(result), 201
+    except ValueError as e:
+        return jsonify(error="validation_error", message=str(e)), 400
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@awards_bp.post("/awards/sync-postseason")
+def post_sync_postseason():
+    """
+    Backfill pennant (CS winners) and world_series (WS winner) awards from the
+    completed series in playoff_series. Idempotent. The in-sim hook records
+    these automatically when a series clinches; use this if that was missed.
+
+    Body: {league_year_id, league_level? (default 9)}
+    """
+    data = request.get_json(force=True) or {}
+    try:
+        league_year_id = int(data["league_year_id"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="validation_error", message="league_year_id is required"), 400
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = sync_postseason_awards(
+                conn, league_year_id, int(data.get("league_level", 9)))
+        return jsonify(result), 200
     except ValueError as e:
         return jsonify(error="validation_error", message=str(e)), 400
     except SQLAlchemyError as e:

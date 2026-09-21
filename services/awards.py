@@ -14,6 +14,8 @@ Public API:
     record_award(conn, ...)                     — create/replace one award row
     revoke_award(conn, award_id)                — delete one award row
     record_all_star_selections(conn, ...)       — bulk-insert all_star awards
+    record_team_award(conn, ...)                — give every player on a team an award
+    sync_postseason_awards(conn, league_year_id)— pennant / world_series from playoff_series
     get_player_awards(conn, player_id)          — one player's career awards
     get_awards_for_players_bulk(conn, ids)      — embed awards in list endpoints
     get_season_awards(conn, league_year_id)     — a season's full award slate
@@ -154,6 +156,14 @@ _AWARD_TYPES_SEED: List[Dict[str, Any]] = [
      "ptype_scope": "any", "has_league_split": 1, "is_per_position": 1,
      "allows_multiple": 0, "sort_order": 70,
      "description": "Best defender at each position in each league."},
+    {"code": "pennant", "name": "League Pennant", "category": "championship",
+     "ptype_scope": "any", "has_league_split": 1, "is_per_position": 0,
+     "allows_multiple": 1, "sort_order": 80,
+     "description": "Member of the AL or NL champion (Championship Series winner)."},
+    {"code": "world_series", "name": "World Series Champion", "category": "championship",
+     "ptype_scope": "any", "has_league_split": 0, "is_per_position": 0,
+     "allows_multiple": 1, "sort_order": 85,
+     "description": "Member of the World Series champion roster (ring)."},
     {"code": "all_star", "name": "All-Star Selection", "category": "selection",
      "ptype_scope": "any", "has_league_split": 1, "is_per_position": 0,
      "allows_multiple": 1, "sort_order": 90,
@@ -378,6 +388,187 @@ def record_all_star_selections(
     log.info("awards: recorded %d all_star selections for season %d",
              count, league_year_id)
     return count
+
+
+# Playoff round -> team award. CS winners are league champions (pennant, split
+# by conference); the WS winner gets the ring (league-wide, no split).
+POSTSEASON_AWARD_BY_ROUND = {"CS": "pennant", "WS": "world_series"}
+
+
+def get_team_roster_player_ids(conn, team_id: int) -> List[int]:
+    """Player ids on a team's CURRENT active roster (contract-holder chain).
+
+    Same join as `_snapshot_team_id`, in the team -> players direction. This is
+    a snapshot of "now", so team awards should be recorded at crowning time.
+    """
+    rows = conn.execute(sa_text("""
+        SELECT DISTINCT c.playerID
+        FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+        WHERE t.id = :tid AND c.isActive = 1
+    """), {"tid": int(team_id)}).scalars().all()
+    return [int(pid) for pid in rows]
+
+
+def record_team_award(
+    conn,
+    league_year_id: int,
+    team_id: int,
+    award_code: str,
+    *,
+    sub_league: str = "",
+    league_level: int = DEFAULT_AWARD_LEVEL,
+    player_ids: Optional[List[int]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    created_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Give every player on `team_id` the same award (pennant, world_series, ...).
+
+    The award type must allow multiple recipients (otherwise the single-winner
+    purge in `record_award` would leave only one teammate standing). Recipients
+    default to the team's current active roster; pass `player_ids` to override
+    (e.g. a postseason-eligible list). Idempotent via uq_award_slot — re-running
+    refreshes team_id/metadata and never duplicates.
+
+    Returns {"award_code", "team_id", "sub_league", "count", "player_ids"}.
+    """
+    if int(league_level) not in AWARD_LEAGUE_LEVELS:
+        raise ValueError(
+            f"awards are only issued at levels {sorted(AWARD_LEAGUE_LEVELS)} "
+            f"(got {league_level})"
+        )
+    ensure_awards_schema(conn)
+
+    atype = _get_award_type(conn, award_code)
+    if not atype:
+        raise ValueError(f"unknown award_code '{award_code}'")
+    if not int(atype["allows_multiple"]):
+        raise ValueError(
+            f"award '{award_code}' is single-winner; team awards need allows_multiple=1"
+        )
+    if int(atype["is_per_position"]):
+        raise ValueError(f"award '{award_code}' is per-position; not a team award")
+
+    sub_league = (sub_league or "").upper().strip()
+    if sub_league not in VALID_SUB_LEAGUES:
+        raise ValueError(f"sub_league must be one of {sorted(VALID_SUB_LEAGUES)}")
+    if int(atype["has_league_split"]) and not sub_league:
+        raise ValueError(f"award '{award_code}' is split by league; sub_league is required")
+    if not int(atype["has_league_split"]) and sub_league:
+        raise ValueError(f"award '{award_code}' is league-wide; sub_league must be empty")
+
+    if player_ids is None:
+        player_ids = get_team_roster_player_ids(conn, team_id)
+    player_ids = sorted({int(p) for p in player_ids})
+    if not player_ids:
+        raise ValueError(f"team {team_id} has no active roster players to award")
+
+    meta_json = json.dumps(metadata) if metadata is not None else None
+    for pid in player_ids:
+        conn.execute(sa_text("""
+            INSERT INTO player_awards
+                (player_id, league_year_id, league_level, award_code,
+                 sub_league, position_code, team_id, `rank`, is_winner,
+                 metadata_json, created_by)
+            VALUES
+                (:pid, :ly, :lvl, :code, :sub, '', :team, 1, 1, :meta, :by)
+            ON DUPLICATE KEY UPDATE
+                team_id = VALUES(team_id),
+                metadata_json = COALESCE(VALUES(metadata_json), metadata_json)
+        """), {
+            "pid": pid, "ly": int(league_year_id), "lvl": int(league_level),
+            "code": award_code, "sub": sub_league, "team": int(team_id),
+            "meta": meta_json, "by": created_by,
+        })
+
+    log.info("awards: recorded %s for %d players on team %d (season %d, %s)",
+             award_code, len(player_ids), team_id, league_year_id,
+             sub_league or "league-wide")
+    return {
+        "award_code": award_code,
+        "team_id": int(team_id),
+        "sub_league": sub_league,
+        "count": len(player_ids),
+        "player_ids": player_ids,
+    }
+
+
+def record_postseason_series_award(
+    conn,
+    league_year_id: int,
+    league_level: int,
+    round_code: str,
+    conference: Optional[str],
+    winner_team_id: int,
+    *,
+    series_id: Optional[int] = None,
+    loser_team_id: Optional[int] = None,
+    wins_winner: Optional[int] = None,
+    wins_loser: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Turn a completed MLB playoff series into a team award: CS -> pennant
+    (sub_league = the series' conference), WS -> world_series. Returns None for
+    rounds/levels that carry no award. Idempotent.
+    """
+    code = POSTSEASON_AWARD_BY_ROUND.get((round_code or "").upper())
+    if code is None or int(league_level) not in AWARD_LEAGUE_LEVELS:
+        return None
+    sub = (conference or "").upper().strip() if code == "pennant" else ""
+    meta = {
+        "round": round_code,
+        "series_id": series_id,
+        "opponent_team_id": loser_team_id,
+        "series_result": (
+            f"{wins_winner}-{wins_loser}"
+            if wins_winner is not None and wins_loser is not None else None
+        ),
+    }
+    return record_team_award(
+        conn, league_year_id, winner_team_id, code,
+        sub_league=sub, league_level=league_level,
+        metadata=meta, created_by="playoffs",
+    )
+
+
+def sync_postseason_awards(
+    conn, league_year_id: int, league_level: int = DEFAULT_AWARD_LEVEL,
+) -> Dict[str, Any]:
+    """
+    Backfill pennant / world_series awards from every COMPLETE CS/WS series in
+    `playoff_series` for a season. Rosters are snapshotted as of now, so run
+    this before offseason roster churn if the in-sim hook was missed.
+    """
+    rows = conn.execute(sa_text("""
+        SELECT id, round, conference, team_a_id, team_b_id, wins_a, wins_b, winner_team_id
+        FROM playoff_series
+        WHERE league_year_id = :ly AND league_level = :lvl
+          AND status = 'complete' AND winner_team_id IS NOT NULL
+          AND round IN ('CS', 'WS')
+        ORDER BY FIELD(round, 'CS', 'WS'), id
+    """), {"ly": int(league_year_id), "lvl": int(league_level)}).mappings().all()
+
+    recorded = []
+    for r in rows:
+        wid = int(r["winner_team_id"])
+        a, b = int(r["team_a_id"]), int(r["team_b_id"])
+        loser = b if wid == a else a
+        ww, wl = (r["wins_a"], r["wins_b"]) if wid == a else (r["wins_b"], r["wins_a"])
+        res = record_postseason_series_award(
+            conn, league_year_id, league_level, r["round"], r["conference"], wid,
+            series_id=int(r["id"]), loser_team_id=loser,
+            wins_winner=int(ww or 0), wins_loser=int(wl or 0),
+        )
+        if res:
+            recorded.append({**res, "round": r["round"], "series_id": int(r["id"])})
+    return {
+        "league_year_id": int(league_year_id),
+        "series_found": len(rows),
+        "recorded": recorded,
+    }
 
 
 # =====================================================================

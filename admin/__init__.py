@@ -4094,3 +4094,395 @@ def tutorial_reorder():
     except Exception as e:
         logging.exception("tutorial_reorder failed")
         return jsonify(ok=False, error=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Offseason Checklist (read-only status of the season rollover steps)
+# ---------------------------------------------------------------------------
+
+_OC_MLB_ROUNDS = ("WC", "DS", "CS", "WS")
+
+
+def _oc_col_exists(conn, table: str, column: str) -> bool:
+    from sqlalchemy import text as sa_text
+    return bool(conn.execute(sa_text(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = :t AND column_name = :c"
+    ), {"t": table, "c": column}).scalar())
+
+
+def _oc_step(key, order, title, fn, *, manual=False, action=None, not_built=False):
+    """Run one detector; a failure becomes done=None with the error in detail
+    instead of failing the whole checklist."""
+    step = {
+        "key": key, "order": order, "title": title,
+        "done": None, "detail": "", "action": action, "manual": manual,
+        "not_built": not_built,
+    }
+    try:
+        done, detail, extra = fn()
+        step["done"] = done
+        step["detail"] = detail
+        if extra:
+            step.update(extra)
+    except Exception as e:  # noqa: BLE001 - surfaced to the admin, not hidden
+        logging.warning("offseason_checklist: step %s failed: %s", key, e)
+        step["done"] = None
+        step["detail"] = f"Could not evaluate: {e}"
+    return step
+
+
+def _build_offseason_checklist(conn, league_year_id: int) -> dict:
+    from sqlalchemy import text as sa_text
+
+    ly = conn.execute(sa_text(
+        "SELECT id, league_year, weeks_in_season FROM league_years WHERE id = :id"
+    ), {"id": league_year_id}).mappings().first()
+    if not ly:
+        raise ValueError(f"league_year_id {league_year_id} not found")
+    L = int(ly["id"])
+    Y = int(ly["league_year"])
+    next_year = Y + 1
+
+    # ---- shared context (each guarded) ----
+    ts = None
+    phase = None
+    try:
+        from services.timestamp import get_current_timestamp, get_current_phase
+        ts = get_current_timestamp()
+        if ts:
+            phase = get_current_phase(ts)
+    except Exception as e:  # noqa: BLE001
+        logging.warning("offseason_checklist: timestamp unavailable: %s", e)
+
+    ts_flags = None
+    if ts:
+        ts_flags = {
+            "Season": ts.get("Season"),
+            "SeasonID": ts.get("SeasonID"),
+            "Week": ts.get("Week"),
+            "IsOffSeason": ts.get("IsOffSeason"),
+            "IsFreeAgencyLocked": ts.get("IsFreeAgencyLocked"),
+            "IsDraftTime": ts.get("IsDraftTime"),
+            "IsRecruitingLocked": ts.get("IsRecruitingLocked"),
+            "FreeAgencyRound": ts.get("FreeAgencyRound"),
+            "RunGames": ts.get("RunGames"),
+        }
+
+    next_ly = None
+    try:
+        next_ly = conn.execute(sa_text(
+            "SELECT id, league_year, weeks_in_season FROM league_years WHERE league_year = :y"
+        ), {"y": next_year}).mappings().first()
+    except Exception as e:  # noqa: BLE001
+        logging.warning("offseason_checklist: next league_years lookup failed: %s", e)
+    next_ly_id = int(next_ly["id"]) if next_ly else None
+
+    league_state = None
+    try:
+        league_state = conn.execute(sa_text(
+            "SELECT current_league_year_id, current_game_week_id FROM league_state WHERE id = 1"
+        )).mappings().first()
+    except Exception as e:  # noqa: BLE001
+        logging.warning("offseason_checklist: league_state unavailable: %s", e)
+
+    ws_complete_holder = {"done": False}
+
+    # ---- 1. World Series ----
+    def s_world_series():
+        rows = conn.execute(sa_text(
+            "SELECT round, status, COUNT(*) AS n FROM playoff_series "
+            "WHERE league_year_id = :L AND league_level = 9 GROUP BY round, status"
+        ), {"L": L}).mappings().all()
+        if not rows:
+            return False, ("No MLB (level 9) bracket rows exist for this league year yet. "
+                           "Create the bracket in Playoffs and sim it."), {"bracket_exists": False}
+        per_round = {}
+        for r in rows:
+            d = per_round.setdefault(r["round"], {"total": 0, "complete": 0})
+            d["total"] += int(r["n"])
+            if r["status"] == "complete":
+                d["complete"] += int(r["n"])
+        parts = []
+        for rnd in _OC_MLB_ROUNDS:
+            d = per_round.get(rnd)
+            parts.append(f"{rnd} {d['complete']}/{d['total']}" if d else f"{rnd} -/-")
+        ws = per_round.get("WS", {"total": 0, "complete": 0})
+        done = ws["complete"] > 0
+        ws_complete_holder["done"] = done
+        detail = ("World Series complete. " if done else "World Series not complete. ")
+        detail += "Series complete per round: " + ", ".join(parts)
+        return done, detail, {"bracket_exists": True, "rounds": per_round}
+
+    # ---- 2. Postseason awards ----
+    def s_awards():
+        rows = conn.execute(sa_text(
+            "SELECT award_code, COUNT(*) AS n FROM player_awards "
+            "WHERE league_year_id = :L AND award_code IN ('world_series', 'pennant') "
+            "GROUP BY award_code"
+        ), {"L": L}).mappings().all()
+        counts = {r["award_code"]: int(r["n"]) for r in rows}
+        ws_n = counts.get("world_series", 0)
+        pen_n = counts.get("pennant", 0)
+        done = ws_n > 0
+        detail = f"world_series awards: {ws_n}, pennant awards: {pen_n}. "
+        if done:
+            detail += "Recorded."
+        elif not ws_complete_holder["done"]:
+            detail += "Written automatically when the WS clinches; waiting on step 1."
+        else:
+            detail += "WS is complete but no world_series awards exist - run the backfill (idempotent)."
+        return done, detail, {"counts": counts}
+
+    # ---- 3/4. Books claim columns ----
+    def _claim(col, label):
+        def fn():
+            if not _oc_col_exists(conn, "league_years", col):
+                return False, (f"league_years.{col} column does not exist yet "
+                               "(apply migrations/add_league_years_books_run_at.sql); treated as not run."), {"column_exists": False}
+            val = conn.execute(sa_text(
+                f"SELECT `{col}` FROM league_years WHERE id = :L"
+            ), {"L": L}).scalar()
+            if val:
+                return True, f"{label} ran at {val}.", {"ran_at": str(val)}
+            return False, f"{label} has not been run for {Y} (league_years.{col} is NULL).", {"ran_at": None}
+        return fn
+
+    # ---- 5. End season ----
+    def s_end_season():
+        if not _oc_col_exists(conn, "league_years", "season_ended_at"):
+            hint = ""
+            if ts_flags and ts_flags.get("IsOffSeason") and ts_flags.get("Season") == Y:
+                hint = (" Timestamp is already in the offseason for this year, so it may have been "
+                        "ended before the claim column existed.")
+            return False, ("league_years.season_ended_at does not exist yet (end-season adds it lazily); "
+                           "treated as not ended." + hint), {"column_exists": False}
+        val = conn.execute(sa_text(
+            "SELECT season_ended_at FROM league_years WHERE id = :L"
+        ), {"L": L}).scalar()
+        if val:
+            return True, (f"Season ended at {val}. The End Regular Season card refuses a second run; "
+                          "see the runbook if it must be re-run."), {"ended_at": str(val)}
+        return False, ("Season not ended. Use the End Regular Season card above "
+                       "(POST /api/v1/games/end-season). One-shot: refuses a second call; refuses while "
+                       "the WS is incomplete unless force=true; applies the 16-week offseason injury tick."), {"ended_at": None}
+
+    # ---- 6. Archive ----
+    def s_archive():
+        gbl = int(conn.execute(sa_text(
+            "SELECT COUNT(*) FROM game_batting_lines WHERE league_year_id = :L"), {"L": L}).scalar() or 0)
+        pfs = int(conn.execute(sa_text(
+            "SELECT COUNT(*) FROM player_fatigue_state WHERE league_year_id = :L"), {"L": L}).scalar() or 0)
+        done = gbl == 0 and pfs == 0
+        if done:
+            detail = ("No per-game batting lines or fatigue rows remain for this year "
+                      "(archive has run, or nothing was ever simulated).")
+        else:
+            detail = (f"{gbl:,} game_batting_lines and {pfs:,} player_fatigue_state rows still present. "
+                      "Use the Season Archive card (Dry Run unchecked) only after step 5.")
+        return done, detail, {"game_batting_lines": gbl, "player_fatigue_state": pfs}
+
+    # ---- 7-9. Phase-driven (manual confirm) ----
+    def _flags_str():
+        if not ts_flags:
+            return "timestamp unavailable"
+        return (f"phase={phase}, is_offseason={ts_flags['IsOffSeason']}, "
+                f"is_free_agency_locked={ts_flags['IsFreeAgencyLocked']}, "
+                f"free_agency_round={ts_flags['FreeAgencyRound']}, "
+                f"is_draft_time={ts_flags['IsDraftTime']}, "
+                f"is_recruiting_locked={ts_flags['IsRecruitingLocked']}")
+
+    def s_free_agency():
+        if not ts_flags:
+            return None, "Timestamp unavailable; cannot show FA phase flags.", None
+        if phase == "FREE_AGENCY":
+            return None, (f"Free agency is OPEN now (round {ts_flags['FreeAgencyRound']}). "
+                          f"In progress - confirm complete manually. {_flags_str()}"), None
+        return None, (f"No completion signal exists for FA; window is locked. Confirm manually "
+                      f"that FA was run for {Y}. {_flags_str()}"), None
+
+    def s_draft():
+        if not ts_flags:
+            return None, "Timestamp unavailable; cannot show draft phase flags.", None
+        if phase == "DRAFT":
+            return None, (f"Draft is OPEN now (is_draft_time=true). In progress - confirm complete "
+                          f"manually. {_flags_str()}"), None
+        return None, (f"No completion signal exists for the draft. Confirm manually that the draft "
+                      f"was run for {Y}. {_flags_str()}"), None
+
+    def s_recruiting():
+        if not ts_flags:
+            return None, "Timestamp unavailable; cannot show recruiting phase flags.", None
+        if phase == "RECRUITING":
+            return None, (f"Recruiting is OPEN now (is_recruiting_locked=false). In progress - "
+                          f"confirm complete manually. {_flags_str()}"), None
+        return None, (f"No completion signal exists for recruiting. Confirm manually that "
+                      f"recruiting was run for {Y}. {_flags_str()}"), None
+
+    # ---- 10. Retirements / amateur class ----
+    def s_retirements():
+        return None, ("NOT BUILT: there is no retirement logic and no amateur-class generation in "
+                      "the API. Handle manually (or skip) before starting the new season."), None
+
+    # ---- 11. Next league year ----
+    def s_next_year():
+        if not next_ly:
+            return False, (f"league_years row for {next_year} does not exist. Run "
+                           "initialize-next-league-year (creates the row + its game_weeks; "
+                           "cannot be re-run)."), {"next_league_year_id": None}
+        gw = int(conn.execute(sa_text(
+            "SELECT COUNT(*) FROM game_weeks WHERE league_year_id = :id"), {"id": next_ly_id}).scalar() or 0)
+        need = int(next_ly["weeks_in_season"] or 0)
+        done = gw >= need and need > 0
+        detail = f"league_years id={next_ly_id} for {next_year} exists; game_weeks {gw}/{need}."
+        if not done:
+            detail += (" game_weeks are short - the initialize endpoint refuses to re-run once the "
+                       "row exists; insert the missing weeks by hand.")
+        return done, detail, {"next_league_year_id": next_ly_id, "game_weeks": gw, "weeks_in_season": need}
+
+    # ---- 12. Schedule ----
+    def s_schedule():
+        season_id = conn.execute(sa_text(
+            "SELECT id FROM seasons WHERE year = :y"), {"y": next_year}).scalar()
+        if season_id is None:
+            return False, (f"No seasons row with year={next_year}; the schedule generator cannot "
+                           "target it until one exists."), {"season_id": None, "games": 0}
+        rows = conn.execute(sa_text(
+            "SELECT league_level, COUNT(*) AS n FROM gamelist WHERE season = :s "
+            "GROUP BY league_level ORDER BY league_level"
+        ), {"s": int(season_id)}).mappings().all()
+        total = sum(int(r["n"]) for r in rows)
+        by_level = {str(r["league_level"]): int(r["n"]) for r in rows}
+        if total == 0:
+            return False, (f"No gamelist rows for season id {season_id} ({next_year}). Generate "
+                           "schedules in Schedule Generator (POST /admin/schedule/generate, "
+                           f"league_year={next_year}) for every level."), {"season_id": int(season_id), "games": 0}
+        lv = ", ".join(f"L{k}: {v:,}" for k, v in by_level.items())
+        return True, (f"{total:,} games scheduled for {next_year} (season id {season_id}). "
+                      f"Per level - {lv}."), {"season_id": int(season_id), "games": total, "by_level": by_level}
+
+    # ---- 13. Start new season ----
+    def s_start_new():
+        if not ts_flags:
+            return None, "Timestamp unavailable.", None
+        ts_ok = ts_flags.get("Season") == next_year
+        ls_id = None
+        if league_state and league_state.get("current_league_year_id") is not None:
+            ls_id = int(league_state["current_league_year_id"])
+        ls_ok = next_ly_id is not None and ls_id == next_ly_id
+        extra = {"league_state_league_year_id": ls_id}
+        if ts_ok and ls_ok:
+            return True, f"Timestamp is on {next_year} and league_state.current_league_year_id={ls_id}.", extra
+        if ts_ok and not ls_ok:
+            return False, (f"Timestamp is on {next_year} but league_state.current_league_year_id={ls_id} "
+                           f"(expected {next_ly_id})."), extra
+        target = next_ly_id if next_ly_id else "<create it in step 11>"
+        return False, (f"Timestamp is still on {ts_flags.get('Season')} (phase {phase}); "
+                       f"league_state.current_league_year_id={ls_id}. Use the Start New Season card "
+                       f"with league_year_id={target}."), extra
+
+    pw = {"header": "X-Admin-Password"}
+    steps = [
+        _oc_step("world_series", 1, "World Series complete", s_world_series),
+        _oc_step("postseason_awards", 2, "Postseason awards recorded", s_awards,
+                 action={"method": "POST", "url": "/api/v1/awards/sync-postseason",
+                         "body": {"league_year_id": L}, "label": "Backfill awards"}),
+        _oc_step("playoff_revenue", 3, "Playoff revenue books",
+                 _claim("playoff_revenue_run_at", "Playoff revenue"),
+                 action={"method": "POST", "url": "/admin/run-playoff-revenue",
+                         "body": {"league_year": Y}, "label": "Run playoff revenue", **pw}),
+        _oc_step("year_end_interest", 4, "Year-end interest",
+                 _claim("interest_run_at", "Year-end interest"),
+                 action={"method": "POST", "url": "/admin/run-year-end-interest",
+                         "body": {"league_year": Y}, "label": "Run interest", **pw}),
+        _oc_step("end_season", 5, "End Season", s_end_season),
+        _oc_step("archive_season", 6, "Archive Season", s_archive),
+        _oc_step("free_agency", 7, "Free Agency", s_free_agency, manual=True),
+        _oc_step("draft", 8, "Draft", s_draft, manual=True),
+        _oc_step("recruiting", 9, "Recruiting", s_recruiting, manual=True),
+        _oc_step("retirements", 10, "Retirements and new amateur class", s_retirements,
+                 manual=True, not_built=True),
+        _oc_step("next_league_year", 11, f"Initialize league year {next_year}", s_next_year,
+                 action=None if next_ly else {
+                     "method": "POST", "url": "/admin/initialize-next-league-year",
+                     "body": {"league_year": Y}, "label": f"Create {next_year}",
+                     "confirm": True, **pw}),
+        _oc_step("schedule", 12, f"Generate {next_year} schedule", s_schedule),
+        _oc_step("start_new_season", 13, "Start New Season", s_start_new),
+    ]
+
+    # Enforce order in the card: hide/annotate Run buttons whose prerequisites
+    # are not met, and drop the button once a step is done.
+    by_key = {s["key"]: s for s in steps}
+    if not by_key["world_series"]["done"]:
+        for k in ("postseason_awards", "playoff_revenue"):
+            if by_key[k]["action"]:
+                by_key[k]["action"] = dict(by_key[k]["action"], blocked="World Series is not complete")
+    for s in steps:
+        if s["done"] is True and s["action"]:
+            s["action"] = None
+
+    league_years = [
+        {"id": int(r["id"]), "league_year": int(r["league_year"])}
+        for r in conn.execute(sa_text(
+            "SELECT id, league_year FROM league_years ORDER BY league_year")).mappings().all()
+    ]
+
+    return {
+        "league_year_id": L,
+        "league_year": Y,
+        "next_league_year": next_year,
+        "next_league_year_id": next_ly_id,
+        "phase": phase,
+        "timestamp": ts_flags,
+        "league_state": dict(league_state) if league_state else None,
+        "league_years": league_years,
+        "steps": steps,
+    }
+
+
+@admin_bp.get("/offseason/checklist")
+def admin_offseason_checklist():
+    """
+    Read-only status of the ordered season-rollover steps.
+
+    GET /admin/offseason/checklist?league_year_id=L
+    Defaults to league_state.current_league_year_id, then the timestamp's
+    Season, then the highest league_years.id.
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+    league_year_id = request.args.get("league_year_id", type=int)
+    try:
+        from db import get_engine
+        from sqlalchemy import text as sa_text
+        engine = get_engine()
+        with engine.connect() as conn:
+            if not league_year_id:
+                try:
+                    league_year_id = conn.execute(sa_text(
+                        "SELECT current_league_year_id FROM league_state WHERE id = 1")).scalar()
+                except Exception:  # noqa: BLE001
+                    league_year_id = None
+            if not league_year_id:
+                try:
+                    from services.timestamp import get_current_timestamp
+                    ts = get_current_timestamp() or {}
+                    if ts.get("Season"):
+                        league_year_id = conn.execute(sa_text(
+                            "SELECT id FROM league_years WHERE league_year = :y"),
+                            {"y": ts["Season"]}).scalar()
+                except Exception:  # noqa: BLE001
+                    league_year_id = None
+            if not league_year_id:
+                league_year_id = conn.execute(sa_text("SELECT MAX(id) FROM league_years")).scalar()
+            if not league_year_id:
+                return jsonify(ok=False, error="no_league_years", message="league_years is empty"), 404
+            result = _build_offseason_checklist(conn, int(league_year_id))
+        return jsonify(ok=True, **result)
+    except ValueError as e:
+        return jsonify(ok=False, error="not_found", message=str(e)), 404
+    except Exception as e:
+        logging.exception("offseason_checklist_failed")
+        return jsonify(ok=False, error="checklist_error", message=str(e)), 500

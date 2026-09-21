@@ -10,6 +10,7 @@ from services.playoffs import (
     determine_milb_playoff_field,
     create_milb_bracket,
     determine_cws_field,
+    build_ncaa_pool,
     create_cws_bracket,
     determine_conf_tournament_fields,
     create_conf_tournaments,
@@ -129,6 +130,52 @@ def _validate_flat_field(conn, field, size, level):
         raise ValueError(f"Field must contain exactly {size} teams")
     _check_seeds(field, size)
     _verify_teams(conn, [t["team_id"] for t in field], level)
+
+
+def _validate_ncaa_field(conn, field):
+    """
+    Validate a hand-set 64-team NCAA field and normalize it for
+    ``create_cws_bracket``.  ``field`` is a list of dicts with at least
+    ``team_id``, ``regional_no`` (1-16) and ``regional_seed`` (1-4).  Derives the
+    overall ``seed`` (1-64) and ``national_seed`` (1-16 for each regional's #1).
+    """
+    if not isinstance(field, list) or len(field) != 64:
+        raise ValueError("The NCAA field must contain exactly 64 teams")
+    tids = [int(t["team_id"]) for t in field]
+    if len(set(tids)) != 64:
+        raise ValueError("A team appears more than once in the field")
+    _verify_teams(conn, tids, 3)
+
+    by_reg = {}
+    for t in field:
+        rno, rseed = int(t["regional_no"]), int(t["regional_seed"])
+        if not (1 <= rno <= 16):
+            raise ValueError(f"regional_no {rno} is out of range (1-16)")
+        if not (1 <= rseed <= 4):
+            raise ValueError(f"regional_seed {rseed} is out of range (1-4)")
+        by_reg.setdefault(rno, []).append(rseed)
+    if len(by_reg) != 16:
+        raise ValueError(f"Expected 16 regionals, found {len(by_reg)}")
+    for rno, seeds in by_reg.items():
+        if sorted(seeds) != [1, 2, 3, 4]:
+            raise ValueError(
+                f"Regional {rno} must have exactly one team at each seed 1-4 "
+                f"(got seeds {sorted(seeds)})"
+            )
+
+    norm = [{
+        "team_id": int(t["team_id"]),
+        "regional_no": int(t["regional_no"]),
+        "regional_seed": int(t["regional_seed"]),
+        "qualifier": t.get("qualifier", "manual"),
+    } for t in field]
+    # Overall seed: #1 seeds (regionals 1-16) become overall seeds 1-16, then
+    # the #2s, then #3s, then #4s.
+    norm.sort(key=lambda x: (x["regional_seed"], x["regional_no"]))
+    for i, t in enumerate(norm):
+        t["seed"] = i + 1
+        t["national_seed"] = t["regional_no"] if t["regional_seed"] == 1 else None
+    return norm
 
 
 def _validate_conf_fields(conn, fields):
@@ -257,9 +304,12 @@ def generate_playoffs():
                 result = create_mlb_bracket(conn, league_year_id, field, start_week)
                 result["field"] = field
             elif league_level == 3:
-                # The 64-team NCAA field is computed server-side (conference
-                # auto-bids + at-large, national seeds 1-16). Not hand-editable.
-                field = determine_cws_field(conn, league_year_id)
+                # 64-team NCAA field: either a hand-set field from the manual
+                # editor, or computed server-side (auto-bids + at-large).
+                if override is not None:
+                    field = _validate_ncaa_field(conn, override)
+                else:
+                    field = determine_cws_field(conn, league_year_id)
                 result = create_cws_bracket(conn, league_year_id, field, start_week)
                 result["field"] = field
             elif 5 <= league_level <= 8:
@@ -333,6 +383,41 @@ def preview_field(league_year_id: int, league_level: int):
                                pool=_team_pool(conn, league_year_id, league_level)), 200
             return jsonify(error="invalid_level",
                            message=f"Level {league_level} has no playoff format"), 400
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.post("/playoffs/ncaa/suggest")
+def ncaa_suggest_field():
+    """
+    Build a suggested 64-team NCAA field for the manual editor.
+
+    Body: {league_year_id, ranking?: 'elo'|'power'|'record', champions?: {conf: team_id}}
+
+    Returns:
+      field        — 64 seeded teams (regional_no/regional_seed/national_seed + metrics)
+      conferences  — {conference: [teams sorted by the metric]} for champion
+                     dropdowns and the swap pool
+      ranking      — the metric used
+    """
+    data = request.get_json(force=True)
+    league_year_id = int(data["league_year_id"])
+    ranking = (data.get("ranking") or "elo").lower()
+    if ranking not in ("elo", "power", "record"):
+        return jsonify(error="bad_ranking",
+                       message="ranking must be elo, power, or record"), 400
+    raw_champs = data.get("champions") or {}
+    champions = {k: int(v) for k, v in raw_champs.items() if v}
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            field = determine_cws_field(
+                conn, league_year_id, champions=champions, ranking=ranking)
+            pool = build_ncaa_pool(conn, league_year_id, ranking)
+        return jsonify(field=field, conferences=pool, ranking=ranking), 200
+    except ValueError as e:
+        return jsonify(error="validation_error", message=str(e)), 400
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500
 
