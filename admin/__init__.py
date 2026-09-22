@@ -2114,6 +2114,82 @@ def _run_sql_internal(sql: str, mode: str, limit: int, dry_run: bool):
 # ---------------------------------------------------------------------------
 
 
+@admin_bp.get("/players/search")
+def admin_players_search():
+    """
+    Name search over players on active rosters, for admin pickers (awards).
+
+    Query: q (>= 2 chars), league_level (default 9), league_year_id (optional —
+    adds the player's most-used fielding position that season), limit (<= 50).
+    Returns [{player_id, name, ptype, age, team_id, team_abbrev, primary_pos}].
+    """
+    guard = _require_admin()
+    if guard:
+        return guard
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify(ok=True, players=[])
+    try:
+        level = int(request.args.get("league_level", 9))
+        limit = max(1, min(int(request.args.get("limit", 20)), 50))
+        lyid = request.args.get("league_year_id")
+        lyid = int(lyid) if lyid else None
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="bad_request"), 400
+
+    pos_join = ""
+    params = {"level": level, "limit": limit,
+              "q": f"%{q}%", "qfull": f"%{q.replace(' ', '%')}%"}
+    if lyid:
+        pos_join = """
+            LEFT JOIN (
+                SELECT fs.player_id, fs.position_code
+                FROM player_fielding_stats fs
+                JOIN (SELECT player_id, MAX(games) AS mg FROM player_fielding_stats
+                      WHERE league_year_id = :lyid AND position_code <> 'bench'
+                      GROUP BY player_id) mx
+                  ON mx.player_id = fs.player_id AND mx.mg = fs.games
+                WHERE fs.league_year_id = :lyid AND fs.position_code <> 'bench'
+                GROUP BY fs.player_id, fs.position_code
+            ) pp ON pp.player_id = p.id
+        """
+        params["lyid"] = lyid
+    sql = f"""
+        SELECT p.id AS player_id, p.firstName, p.lastName, p.ptype, p.age,
+               t.id AS team_id, t.team_abbrev
+               {", MIN(pp.position_code) AS primary_pos" if lyid else ", NULL AS primary_pos"}
+        FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        JOIN teams t ON t.orgID = cts.orgID AND t.team_level = c.current_level
+        JOIN simbbPlayers p ON p.id = c.playerID
+        {pos_join}
+        WHERE c.isActive = 1 AND t.team_level = :level
+          AND (p.lastName LIKE :q OR p.firstName LIKE :q
+               OR CONCAT(p.firstName, ' ', p.lastName) LIKE :qfull)
+        GROUP BY p.id, p.firstName, p.lastName, p.ptype, p.age, t.id, t.team_abbrev
+        ORDER BY p.lastName, p.firstName
+        LIMIT :limit
+    """
+    try:
+        from db import get_engine
+        from sqlalchemy import text as _t
+        with get_engine().connect() as conn:
+            rows = conn.execute(_t(sql), params).mappings().all()
+        return jsonify(ok=True, players=[{
+            "player_id": int(r["player_id"]),
+            "name": f"{r['firstName']} {r['lastName']}".strip(),
+            "ptype": r["ptype"],
+            "age": r["age"],
+            "team_id": int(r["team_id"]) if r["team_id"] is not None else None,
+            "team_abbrev": r["team_abbrev"],
+            "primary_pos": r["primary_pos"],
+        } for r in rows])
+    except Exception as e:
+        logging.exception("players_search_failed")
+        return jsonify(ok=False, error="search_error", message=str(e)), 500
+
+
 @admin_bp.get("/analytics/league-years")
 def admin_analytics_league_years():
     guard = _require_admin()

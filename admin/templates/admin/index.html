@@ -206,6 +206,9 @@
       <a href="#" class="nav-item" data-section="playoffs">
         <span class="nav-icon">&#127942;</span> Playoffs
       </a>
+      <a href="#" class="nav-item" data-section="awards">
+        <span class="nav-icon">&#127941;</span> Awards
+      </a>
       <a href="#" class="nav-item" data-section="allstar">
         <span class="nav-icon">&#11088;</span> All-Star Game
       </a>
@@ -3824,6 +3827,71 @@
             <button class="btn btn-secondary" id="btn-po-png">Download PNG</button>
           </div>
           <div id="po-bracket"></div>
+        </div>
+      </section>
+
+      <section id="section-awards" class="section">
+        <div class="card">
+          <h3>Assign Award</h3>
+          <p class="muted" style="margin:0 0 8px">MLB individual awards (MVP, Cy Young, Silver Slugger, Gold Glove, …). Pennants, World Series rings and All-Star selections are written automatically by the sim; use the board below to review or revoke them.</p>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div>
+              <label>Season</label>
+              <select id="aw-lyid"></select>
+            </div>
+            <div>
+              <label>Award</label>
+              <select id="aw-code"></select>
+            </div>
+            <div id="aw-sub-wrap">
+              <label>League</label>
+              <select id="aw-sub">
+                <option value="AL">AL</option>
+                <option value="NL">NL</option>
+              </select>
+            </div>
+            <div id="aw-pos-wrap" style="display:none">
+              <label>Position</label>
+              <select id="aw-pos">
+                <option value="C">C</option><option value="1B">1B</option><option value="2B">2B</option>
+                <option value="3B">3B</option><option value="SS">SS</option><option value="LF">LF</option>
+                <option value="CF">CF</option><option value="RF">RF</option><option value="OF">OF</option>
+                <option value="DH">DH</option><option value="P">P</option><option value="UT">UT</option>
+              </select>
+            </div>
+            <div>
+              <label>Rank</label>
+              <select id="aw-rank">
+                <option value="1">1 — Winner</option>
+                <option value="2">2 — Finalist</option>
+                <option value="3">3 — Finalist</option>
+                <option value="4">4</option><option value="5">5</option>
+              </select>
+            </div>
+          </div>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-top:10px">
+            <div style="flex:1;min-width:260px;position:relative">
+              <label>Player (type a name)</label>
+              <input type="text" id="aw-q" placeholder="Search MLB rosters…" autocomplete="off" style="width:100%">
+              <div id="aw-results" class="data-table" style="display:none;position:absolute;z-index:20;left:0;right:0;max-height:260px;overflow:auto;border:1px solid rgba(255,255,255,0.15);border-radius:6px"></div>
+            </div>
+            <div style="min-width:220px">
+              <label>Selected</label>
+              <div id="aw-selected" class="muted" style="padding:8px 0">none</div>
+            </div>
+            <button id="btn-aw-assign" class="btn btn-primary">Assign Award</button>
+          </div>
+          <div id="aw-status" class="status-msg"></div>
+        </div>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+            <h4 style="margin:0">Season Award Board</h4>
+            <div style="display:flex;gap:8px">
+              <button id="btn-aw-sync-postseason" class="btn btn-secondary" title="Re-derive pennant / World Series awards from the completed playoff series">Sync Postseason Awards</button>
+              <button id="btn-aw-refresh" class="btn btn-secondary">Refresh</button>
+            </div>
+          </div>
+          <div id="aw-board" style="margin-top:10px"></div>
         </div>
       </section>
 

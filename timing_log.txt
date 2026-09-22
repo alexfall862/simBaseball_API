@@ -113573,3 +113573,12 @@
 2026-09-03 20:35:48 | week=52 sw=d level=9   | phase2_position_usage        |    0.32s | 
 2026-09-03 20:35:49 | week=52 sw=d level=9   | phase2_stamina_injuries      |    1.07s | 
 2026-09-03 20:35:50 | week=52 sw=d level=    | global_stamina_recovery      |    0.14s | 
+2026-09-21 20:11:38 | week=53 sw=  level=    | load_week_cache              |    7.81s | 8 teams
+2026-09-21 20:11:40 | week=53 sw=a level=9   | load_subweek_state           |    2.11s | 216 players
+2026-09-21 20:11:40 | week=53 sw=a level=9   | build_payloads               |    0.00s | 4 games
+2026-09-21 20:11:46 | week=53 sw=a level=9   | engine_call                  |    5.30s | 4 games
+2026-09-21 20:11:48 | week=53 sw=a level=9   | phase1_store_results         |    1.78s | 4 results
+2026-09-21 20:11:52 | week=53 sw=a level=9   | phase2_stat_accum            |    1.29s | 4 results
+2026-09-21 20:11:52 | week=53 sw=a level=9   | phase2_position_usage        |    0.25s | 
+2026-09-21 20:11:53 | week=53 sw=a level=9   | phase2_stamina_injuries      |    0.97s | 
+2026-09-21 20:11:53 | week=53 sw=a level=    | global_stamina_recovery      |    0.11s | 

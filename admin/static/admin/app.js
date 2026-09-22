@@ -562,6 +562,9 @@
       case 'playoffs':
         loadSpecialEventLeagueYears('po-lyid');
         break;
+      case 'awards':
+        initAwardsSection();
+        break;
       case 'allstar':
         loadSpecialEventLeagueYears('as-lyid');
         break;
@@ -7319,6 +7322,229 @@
           sel.appendChild(o);
         });
       });
+  }
+
+  // --- Awards (admin entry of individual MLB trophies) ---
+  const awState = { types: [], selected: null, inited: false, debounce: null };
+
+  function initAwardsSection() {
+    const sel = document.getElementById('aw-lyid');
+    if (!sel) return;
+    const needYears = sel.options.length === 0;
+    if (needYears) {
+      fetch(`${ADMIN_BASE}/analytics/league-years`, { credentials: 'include' })
+        .then(r => r.json()).then(data => {
+          if (!data.ok) return;
+          sel.innerHTML = '';
+          (data.league_years || []).forEach(ly => {
+            const o = document.createElement('option');
+            o.value = ly.id; o.textContent = ly.league_year; sel.appendChild(o);
+          });
+          loadAwardBoard();
+        });
+    } else {
+      loadAwardBoard();
+    }
+    if (!awState.inited) {
+      awState.inited = true;
+      fetch(`${API_BASE}/awards/types`, { credentials: 'include' })
+        .then(r => r.json()).then(data => {
+          awState.types = data.award_types || [];
+          const code = document.getElementById('aw-code');
+          code.innerHTML = '';
+          // Individual trophies only — roster-wide awards are automatic.
+          awState.types.filter(t => !t.allows_multiple).forEach(t => {
+            const o = document.createElement('option');
+            o.value = t.code; o.textContent = t.name; code.appendChild(o);
+          });
+          awToggleFields();
+        });
+      document.getElementById('aw-code').addEventListener('change', awToggleFields);
+      document.getElementById('aw-lyid').addEventListener('change', () => { awSetSelected(null); loadAwardBoard(); });
+      document.getElementById('btn-aw-refresh').addEventListener('click', loadAwardBoard);
+      document.getElementById('btn-aw-assign').addEventListener('click', awAssign);
+      document.getElementById('btn-aw-sync-postseason').addEventListener('click', awSyncPostseason);
+      const q = document.getElementById('aw-q');
+      q.addEventListener('input', () => {
+        clearTimeout(awState.debounce);
+        awState.debounce = setTimeout(awSearch, 250);
+      });
+      q.addEventListener('focus', () => { if (q.value.trim().length >= 2) awSearch(); });
+      document.addEventListener('click', (e) => {
+        const res = document.getElementById('aw-results');
+        if (res && !res.contains(e.target) && e.target !== q) res.style.display = 'none';
+      });
+    }
+  }
+
+  // Engine fielding codes (player_fielding_stats.position_code) -> award position codes.
+  const AW_POS_MAP = { p: 'P', c: 'C', fb: '1B', sb: '2B', tb: '3B', ss: 'SS', lf: 'LF', cf: 'CF', rf: 'RF', dh: 'DH' };
+  const awPos = code => code ? (AW_POS_MAP[String(code).toLowerCase()] || String(code).toUpperCase()) : null;
+
+  function awType() {
+    const code = document.getElementById('aw-code').value;
+    return awState.types.find(t => t.code === code) || null;
+  }
+
+  function awToggleFields() {
+    const t = awType();
+    document.getElementById('aw-sub-wrap').style.display = (t && t.has_league_split) ? '' : 'none';
+    document.getElementById('aw-pos-wrap').style.display = (t && t.is_per_position) ? '' : 'none';
+    const q = document.getElementById('aw-q');
+    q.placeholder = t && t.ptype_scope === 'pitcher' ? 'Search MLB pitchers…'
+      : t && t.ptype_scope === 'hitter' ? 'Search MLB hitters…' : 'Search MLB rosters…';
+  }
+
+  function awSearch() {
+    const q = document.getElementById('aw-q').value.trim();
+    const res = document.getElementById('aw-results');
+    if (q.length < 2) { res.style.display = 'none'; return; }
+    const lyid = document.getElementById('aw-lyid').value;
+    fetch(`${ADMIN_BASE}/players/search?q=${encodeURIComponent(q)}&league_level=9&league_year_id=${lyid}&limit=25`, { credentials: 'include' })
+      .then(r => r.json()).then(data => {
+        const players = data.players || [];
+        const t = awType();
+        const scoped = players.filter(p => {
+          if (!t) return true;
+          if (t.ptype_scope === 'pitcher') return p.ptype === 'Pitcher';
+          if (t.ptype_scope === 'hitter') return p.ptype !== 'Pitcher';
+          return true;
+        });
+        if (!scoped.length) {
+          res.innerHTML = '<div class="muted" style="padding:8px">No matching players on MLB rosters.</div>';
+          res.style.display = ''; return;
+        }
+        res.innerHTML = scoped.map(p => `
+          <div class="aw-hit" data-pid="${p.player_id}" style="padding:6px 10px;cursor:pointer;display:flex;justify-content:space-between;gap:8px">
+            <span>${p.name}</span>
+            <span class="muted">${p.team_abbrev || '—'} · ${p.ptype === 'Pitcher' ? 'P' : (awPos(p.primary_pos) || 'POS')}${p.age ? ' · ' + p.age : ''}</span>
+          </div>`).join('');
+        res.style.display = '';
+        res.querySelectorAll('.aw-hit').forEach(el => {
+          el.addEventListener('mouseenter', () => el.style.background = 'rgba(255,255,255,0.06)');
+          el.addEventListener('mouseleave', () => el.style.background = '');
+          el.addEventListener('click', () => {
+            const p = scoped.find(x => x.player_id === parseInt(el.dataset.pid));
+            awSetSelected(p);
+            res.style.display = 'none';
+            // Pre-select the position for per-position awards.
+            const mapped = p ? (p.ptype === 'Pitcher' ? 'P' : awPos(p.primary_pos)) : null;
+            if (mapped) {
+              const pos = document.getElementById('aw-pos');
+              if ([...pos.options].some(o => o.value === mapped)) pos.value = mapped;
+            }
+          });
+        });
+      }).catch(e => { res.innerHTML = `<div class="text-danger" style="padding:8px">${e.message}</div>`; res.style.display = ''; });
+  }
+
+  function awSetSelected(p) {
+    awState.selected = p;
+    const el = document.getElementById('aw-selected');
+    if (!p) { el.textContent = 'none'; el.className = 'muted'; return; }
+    el.className = '';
+    el.innerHTML = `<strong>${p.name}</strong> <span class="muted">(${p.team_abbrev || '—'}, ${p.ptype || ''}, id ${p.player_id})</span>`;
+    document.getElementById('aw-q').value = p.name;
+  }
+
+  function awAssign() {
+    const status = document.getElementById('aw-status');
+    const t = awType();
+    const p = awState.selected;
+    if (!t) { status.textContent = 'Pick an award type.'; return; }
+    if (!p) { status.textContent = 'Pick a player from the search results first.'; return; }
+    const body = {
+      player_id: p.player_id,
+      league_year_id: parseInt(document.getElementById('aw-lyid').value),
+      award_code: t.code,
+      sub_league: t.has_league_split ? document.getElementById('aw-sub').value : '',
+      position_code: t.is_per_position ? document.getElementById('aw-pos').value : '',
+      rank: parseInt(document.getElementById('aw-rank').value),
+      created_by: 'admin_panel',
+    };
+    const label = `${body.sub_league ? body.sub_league + ' ' : ''}${t.name}${body.position_code ? ' (' + body.position_code + ')' : ''}${body.rank > 1 ? ' — rank ' + body.rank : ''}`;
+    if (body.rank === 1 && !confirm(`Assign ${label} to ${p.name}?\nAny existing winner in this slot will be replaced.`)) return;
+    status.textContent = 'Saving…';
+    fetch(`${API_BASE}/awards`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }).then(r => r.json().then(j => ({ ok: r.ok, j })))
+      .then(({ ok, j }) => {
+        if (!ok || j.error) { status.textContent = `Error: ${j.message || j.error}`; return; }
+        status.textContent = `Saved: ${label} → ${p.name} (award #${j.award_id}).`;
+        awSetSelected(null);
+        document.getElementById('aw-q').value = '';
+        loadAwardBoard();
+      }).catch(e => status.textContent = e.message);
+  }
+
+  function awSyncPostseason() {
+    const status = document.getElementById('aw-status');
+    const lyid = parseInt(document.getElementById('aw-lyid').value);
+    status.textContent = 'Syncing postseason awards…';
+    fetch(`${API_BASE}/awards/sync-postseason`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ league_year_id: lyid }),
+    }).then(r => r.json()).then(j => {
+      if (j.error) { status.textContent = `Error: ${j.message || j.error}`; return; }
+      const parts = (j.recorded || []).map(r => `${r.round}: ${r.award_code}${r.sub_league ? ' ' + r.sub_league : ''} × ${r.count}`);
+      status.textContent = `${j.series_found} completed CS/WS series found. ${parts.length ? parts.join('; ') : 'Nothing to record yet.'}`;
+      loadAwardBoard();
+    }).catch(e => status.textContent = e.message);
+  }
+
+  function loadAwardBoard() {
+    const lyid = document.getElementById('aw-lyid')?.value;
+    const board = document.getElementById('aw-board');
+    if (!lyid || !board) return;
+    board.innerHTML = '<span class="muted">Loading…</span>';
+    fetch(`${API_BASE}/awards/season/${lyid}?league_level=9`, { credentials: 'include' })
+      .then(r => r.json()).then(data => {
+        const awards = data.awards || [];
+        if (!awards.length) { board.innerHTML = '<span class="muted">No awards recorded for this season yet.</span>'; return; }
+        let html = '';
+        awards.forEach(a => {
+          const team = a.category === 'championship' || a.category === 'selection';
+          const recips = a.recipients.slice().sort((x, y) =>
+            (x.sub_league || '').localeCompare(y.sub_league || '') ||
+            (x.position_code || '').localeCompare(y.position_code || '') ||
+            x.rank - y.rank || x.name.localeCompare(y.name));
+          html += `<h5 style="margin:14px 0 6px">${a.award_name} <span class="muted">· ${recips.length} recipient${recips.length === 1 ? '' : 's'}</span></h5>`;
+          if (team) {
+            // Roster-wide awards: summarize by team instead of listing 26 rows each.
+            const byTeam = {};
+            recips.forEach(r => {
+              const k = `${r.sub_league || ''}|${r.team_abbrev || r.team_id || '?'}`;
+              byTeam[k] = byTeam[k] || { sub: r.sub_league, team: r.team_abbrev || r.team_id, n: 0 };
+              byTeam[k].n++;
+            });
+            html += '<table class="data-table"><thead><tr><th>League</th><th>Team</th><th>Players</th></tr></thead><tbody>';
+            Object.values(byTeam).forEach(t => { html += `<tr><td>${t.sub || '—'}</td><td>${t.team}</td><td>${t.n}</td></tr>`; });
+            html += '</tbody></table>';
+            return;
+          }
+          html += '<table class="data-table"><thead><tr><th>League</th><th>Pos</th><th>Rank</th><th>Player</th><th>Team</th><th></th></tr></thead><tbody>';
+          recips.forEach(r => {
+            html += `<tr>
+              <td>${r.sub_league || '—'}</td><td>${r.position_code || '—'}</td>
+              <td>${r.is_winner ? '<span class="badge badge-complete">Winner</span>' : r.rank}</td>
+              <td>${r.name}</td><td>${r.team_abbrev || '—'}</td>
+              <td><button class="btn btn-danger btn-sm aw-revoke" data-id="${r.award_id}" data-label="${a.award_name} — ${r.name}">Revoke</button></td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+        });
+        board.innerHTML = html;
+        board.querySelectorAll('.aw-revoke').forEach(btn => btn.addEventListener('click', () => {
+          if (!confirm(`Revoke ${btn.dataset.label}?`)) return;
+          fetch(`${API_BASE}/awards/${btn.dataset.id}`, { method: 'DELETE', credentials: 'include' })
+            .then(r => r.json()).then(j => {
+              const status = document.getElementById('aw-status');
+              status.textContent = j.error ? `Error: ${j.message || j.error}` : `Revoked ${btn.dataset.label}.`;
+              loadAwardBoard();
+            });
+        }));
+      }).catch(e => board.innerHTML = `<span class="text-danger">${e.message}</span>`);
   }
 
   // --- Playoffs ---
