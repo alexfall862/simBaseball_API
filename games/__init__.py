@@ -256,8 +256,14 @@ def simulate_subweek():
         "league_year_id": 2026,
         "season_week": 53,
         "subweek": "a",
-        "league_level": 9  // optional
+        "league_level": 9,      // optional
+        "game_ids": [999000041] // optional: sim only these unplayed games
     }
+
+    With game_ids, only those games run (makeup for games left behind in a
+    subweek).  They must be unplayed and scheduled in this week/subweek.  The
+    subweek's completion flag is left untouched and the once-per-subweek
+    global stamina recovery is skipped.
     """
     body = request.get_json(force=True, silent=True) or {}
 
@@ -265,6 +271,7 @@ def simulate_subweek():
     season_week = body.get("season_week")
     subweek = body.get("subweek")
     league_level = body.get("league_level")
+    game_ids = body.get("game_ids")
 
     if not league_year_id or not season_week or not subweek:
         return jsonify(
@@ -283,6 +290,10 @@ def simulate_subweek():
         season_week = int(season_week)
         if league_level is not None:
             league_level = int(league_level)
+        if game_ids is not None:
+            if not isinstance(game_ids, list) or not game_ids:
+                raise ValueError("game_ids must be a non-empty list")
+            game_ids = [int(g) for g in game_ids]
     except (TypeError, ValueError) as e:
         return jsonify(error="invalid_type", message=str(e)), 400
 
@@ -298,10 +309,13 @@ def simulate_subweek():
                 season_week=season_week,
                 league_level=league_level,
                 subweek_filter=subweek,
+                game_ids=game_ids,
             )
 
-        # Mark just this subweek as completed
-        set_subweek_completed(subweek, broadcast=False)
+        # Mark just this subweek as completed (not for a makeup run of
+        # selected games — the rest of the subweek may still be unplayed)
+        if game_ids is None:
+            set_subweek_completed(subweek, broadcast=False)
         set_run_games(False, broadcast=True)
 
         games_in_subweek = len(result.get("subweeks", {}).get(subweek, []))

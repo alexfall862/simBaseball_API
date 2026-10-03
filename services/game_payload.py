@@ -3832,9 +3832,15 @@ def build_week_payloads(
     league_level: int | None = None,
     simulate: bool = True,
     subweek_filter: str | None = None,
+    game_ids: List[int] | None = None,
 ) -> Dict[str, Any]:
     """
     Build game payloads for all games in a given season_week.
+
+    If game_ids is set (requires subweek_filter), only those games are
+    processed — a makeup run for games left behind in a subweek.  The
+    subweek-wide global stamina recovery is skipped in that mode: recovery
+    is a once-per-subweek tick that belongs to the full subweek run.
 
     Processes games sequentially by subweek (a -> b -> c -> d) to support
     state updates between subweeks.  Within each subweek, different league
@@ -3921,6 +3927,15 @@ def build_week_payloads(
     if league_level is not None:
         conditions.append(gamelist.c.league_level == league_level)
 
+    if game_ids is not None:
+        if not subweek_filter:
+            raise ValueError("game_ids requires a subweek")
+        game_ids = sorted({int(g) for g in game_ids})
+        if not game_ids:
+            raise ValueError("game_ids is empty")
+        conditions.append(gamelist.c.id.in_(game_ids))
+        conditions.append(gamelist.c.season_subweek == subweek_filter)
+
     stmt = (
         select(gamelist)
         .where(and_(*conditions))
@@ -3928,6 +3943,26 @@ def build_week_payloads(
     )
 
     all_games = conn.execute(stmt).mappings().all()
+
+    if game_ids is not None:
+        found = {int(g["id"]) for g in all_games}
+        missing = [g for g in game_ids if g not in found]
+        if missing:
+            raise ValueError(
+                f"Game(s) {missing} not found in week {season_week} subweek "
+                f"'{subweek_filter}'" + (f" at level {league_level}" if league_level else "")
+            )
+        from sqlalchemy import text as _gid_text, bindparam as _gid_bind
+        played = conn.execute(
+            _gid_text("SELECT game_id FROM game_results WHERE game_id IN :ids")
+            .bindparams(_gid_bind("ids", expanding=True)),
+            {"ids": game_ids},
+        ).fetchall()
+        if played:
+            raise ValueError(
+                f"Game(s) {sorted(int(r[0]) for r in played)} already have results; "
+                f"single-game sim only runs unplayed games"
+            )
 
     if not all_games:
         raise ValueError(
@@ -4145,18 +4180,26 @@ def build_week_payloads(
                     # Continue to next level — don't abort remaining levels
                     # or subsequent subweeks for a single level's write failure.
 
-            # GLOBAL: Stamina recovery runs ONCE after all levels drain
+            # GLOBAL: Stamina recovery runs ONCE after all levels drain.
+            # Skipped for a game_ids makeup run: the subweek's recovery tick
+            # belongs to the full subweek run, not to each makeup game.
             try:
-                with timed_stage("global_stamina_recovery",
-                                 week=season_week, subweek=subweek):
-                    recovery_count = _apply_global_stamina_recovery(
-                        conn, league_year_id, league_level=league_level,
+                if game_ids is not None:
+                    logger.info(
+                        "Global stamina recovery skipped for subweek '%s' "
+                        "(single-game run: %s)", subweek, game_ids,
                     )
-                conn.commit()
-                logger.info(
-                    "Global stamina recovery for subweek '%s': %d players",
-                    subweek, recovery_count,
-                )
+                else:
+                    with timed_stage("global_stamina_recovery",
+                                     week=season_week, subweek=subweek):
+                        recovery_count = _apply_global_stamina_recovery(
+                            conn, league_year_id, league_level=league_level,
+                        )
+                    conn.commit()
+                    logger.info(
+                        "Global stamina recovery for subweek '%s': %d players",
+                        subweek, recovery_count,
+                    )
             except Exception as rec_err:
                 logger.exception(
                     "Global stamina recovery failed for subweek '%s': %s",

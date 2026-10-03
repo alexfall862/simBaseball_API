@@ -8045,6 +8045,8 @@
 
   function loadPlayoffBracket(lyid, level) {
     loadPlayoffStatus(lyid, level);
+    loadMatchupEditor(lyid, level);
+    loadWsHomeField(lyid, level);
     // Prefetch the full bracket skeleton for PNG export (complete shape incl.
     // TBD rounds). Best-effort — the export buttons re-fetch if it's missing.
     lastSkeleton = null;
@@ -8526,6 +8528,171 @@
         });
       });
   }
+
+  // ===== World Series home-field rule (MLB only, persists across seasons) =====
+  function wsHomeInfoText(data) {
+    const asg = data.allstar_result;
+    const asgTxt = asg
+      ? (asg.winner_label === 'tie'
+          ? `All-Star Game ended in a tie (${asg.home_score}-${asg.away_score}).`
+          : `All-Star Game: ${asg.winner_label} won ${asg.winner_score}-${asg.loser_score}.`)
+      : 'No completed All-Star Game this year.';
+    if (data.ws_home_field !== 'allstar') return `Current rule: better seed. ${asgTxt}`;
+    if (asg && (asg.winner_label === 'AL' || asg.winner_label === 'NL')) {
+      return `Current rule: All-Star winner. ${asgTxt} The ${asg.winner_label} champion will host games 1, 2, 6, 7.`;
+    }
+    return `Current rule: All-Star winner. ${asgTxt} Will fall back to better seed.`;
+  }
+
+  function loadWsHomeField(lyid, level) {
+    const row = document.getElementById('po-ws-controls');
+    if (!row) return;
+    if (String(level) !== '9') { row.style.display = 'none'; return; }
+    fetch(`${API_BASE}/playoffs/settings/9?league_year_id=${lyid}`, { credentials: 'include' })
+      .then(r => r.json()).then(data => {
+        if (data.error) { row.style.display = 'none'; return; }
+        document.getElementById('po-ws-home').value = data.ws_home_field || 'seed';
+        document.getElementById('po-ws-home-info').textContent = wsHomeInfoText(data);
+        row.style.display = 'flex';
+      }).catch(() => { row.style.display = 'none'; });
+  }
+
+  document.getElementById('btn-po-ws-home-save')?.addEventListener('click', () => {
+    const lyid = document.getElementById('po-lyid').value;
+    const rule = document.getElementById('po-ws-home').value;
+    const info = document.getElementById('po-ws-home-info');
+    info.textContent = 'Saving...';
+    fetch(`${API_BASE}/playoffs/settings/9`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ws_home_field: rule }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { info.textContent = `Error: ${data.message || data.error}`; return; }
+      loadWsHomeField(lyid, 9);
+    }).catch(e => info.textContent = e.message);
+  });
+
+  // ===== Manual matchup editor (levels 5-9) =====
+  // Lets an admin rewrite the pairings of any series that has not started,
+  // one round at a time (different leagues re-seed differently, so the auto
+  // pairing is only a default).  Backed by GET /playoffs/matchups and
+  // POST /playoffs/set-matchups.
+  let poMatchupState = null;  // { lyid, level, round, series, pool }
+
+  function loadMatchupEditor(lyid, level) {
+    const card = document.getElementById('po-matchups-card');
+    if (!card) return;
+    poMatchupState = null;
+    fetch(`${API_BASE}/playoffs/matchups/${lyid}/${level}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error || !data.supported) { card.style.display = 'none'; return; }
+        // Edit the latest round that still has an unplayed series.
+        const rounds = (data.rounds || []).filter(r => r.series.some(s => s.editable));
+        if (rounds.length === 0) { card.style.display = 'none'; return; }
+        const rnd = rounds[rounds.length - 1];
+        poMatchupState = { lyid, level, round: rnd.round, series: rnd.series, pool: data.pool || [] };
+        renderMatchupEditor();
+        card.style.display = '';
+      })
+      .catch(() => { card.style.display = 'none'; });
+  }
+
+  function matchupTeamSelect(pool, conf, selectedId, cls) {
+    // Conference-scoped series (MLB) only offer teams from that conference.
+    const opts = pool.filter(p => !conf || p.conference === conf).map(p => {
+      const sel = p.team_id === selectedId ? ' selected' : '';
+      const seed = p.seed ? ` (#${p.seed})` : '';
+      return `<option value="${p.team_id}" data-seed="${p.seed ?? ''}"${sel}>${p.team_abbrev}${seed}</option>`;
+    }).join('');
+    return `<select class="${cls}">${opts}</select>`;
+  }
+
+  function renderMatchupEditor() {
+    const st = poMatchupState;
+    const div = document.getElementById('po-matchups');
+    const status = document.getElementById('po-matchups-status');
+    status.textContent = '';
+    let html = `<div style="margin-bottom:6px"><span class="badge badge-pending">Round ${st.round}</span></div>`;
+    html += '<table class="data-table"><thead><tr><th>Conf</th><th>#</th><th>Team A (home G1)</th><th>Seed</th><th>Team B</th><th>Seed</th><th>Bo</th><th>Status</th></tr></thead><tbody>';
+    st.series.forEach(s => {
+      const conf = s.conference || '';
+      if (!s.editable) {
+        html += `<tr><td>${conf || '—'}</td><td>${s.series_number}</td>
+          <td>${s.team_a.abbrev}</td><td>${s.team_a.seed ?? ''}</td>
+          <td>${s.team_b.abbrev}</td><td>${s.team_b.seed ?? ''}</td>
+          <td>${s.series_length}</td><td><span class="badge badge-complete">${s.status}</span></td></tr>`;
+        return;
+      }
+      html += `<tr class="po-mu-row" data-sid="${s.series_id}" data-conf="${conf}">
+        <td>${conf || '—'}</td><td>${s.series_number}</td>
+        <td>${matchupTeamSelect(st.pool, s.conference, s.team_a.id, 'po-mu-a')}</td>
+        <td><input type="number" min="1" class="po-mu-seed-a" value="${s.team_a.seed ?? ''}" style="width:60px"></td>
+        <td>${matchupTeamSelect(st.pool, s.conference, s.team_b.id, 'po-mu-b')}</td>
+        <td><input type="number" min="1" class="po-mu-seed-b" value="${s.team_b.seed ?? ''}" style="width:60px"></td>
+        <td>${s.series_length}</td><td><span class="badge badge-pending">${s.status}</span></td></tr>`;
+    });
+    html += '</tbody></table>';
+    div.innerHTML = html;
+    // Picking a team pre-fills its persisted seed (still editable).
+    div.querySelectorAll('.po-mu-a, .po-mu-b').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const seedCls = sel.classList.contains('po-mu-a') ? '.po-mu-seed-a' : '.po-mu-seed-b';
+        const seed = sel.selectedOptions[0]?.dataset.seed || '';
+        sel.closest('tr').querySelector(seedCls).value = seed;
+      });
+    });
+  }
+
+  function collectMatchupEdits() {
+    const st = poMatchupState;
+    const edits = [];
+    document.querySelectorAll('#po-matchups .po-mu-row').forEach(row => {
+      const sid = parseInt(row.dataset.sid);
+      const orig = st.series.find(s => s.series_id === sid);
+      const a = parseInt(row.querySelector('.po-mu-a').value);
+      const b = parseInt(row.querySelector('.po-mu-b').value);
+      const sa = row.querySelector('.po-mu-seed-a').value;
+      const sb = row.querySelector('.po-mu-seed-b').value;
+      const seedA = sa === '' ? null : parseInt(sa);
+      const seedB = sb === '' ? null : parseInt(sb);
+      const changed = a !== orig.team_a.id || b !== orig.team_b.id
+        || seedA !== orig.team_a.seed || seedB !== orig.team_b.seed;
+      if (changed) edits.push({ series_id: sid, team_a_id: a, team_b_id: b, seed_a: seedA, seed_b: seedB });
+    });
+    return edits;
+  }
+
+  document.getElementById('btn-po-matchups-reset')?.addEventListener('click', () => {
+    if (poMatchupState) renderMatchupEditor();
+  });
+
+  document.getElementById('btn-po-matchups-save')?.addEventListener('click', () => {
+    const st = poMatchupState;
+    if (!st) return;
+    const status = document.getElementById('po-matchups-status');
+    const edits = collectMatchupEdits();
+    if (edits.length === 0) { status.textContent = 'No changes to save.'; return; }
+    const abbrev = id => (st.pool.find(p => p.team_id === id) || {}).team_abbrev || id;
+    const summary = edits.map(e => `${abbrev(e.team_a_id)} vs ${abbrev(e.team_b_id)}`).join(', ');
+    if (!confirm(`Rewrite ${edits.length} ${st.round} series?\n\n${summary}\n\nUnplayed game 1 rows for these series will be deleted and re-created.`)) return;
+    status.textContent = 'Saving matchups...';
+    fetch(`${API_BASE}/playoffs/set-matchups`, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        league_year_id: parseInt(st.lyid), league_level: parseInt(st.level),
+        round: st.round, matchups: edits,
+      }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { status.textContent = `Error: ${data.message || data.error}`; return; }
+      const parts = (data.updated || []).map(u =>
+        `${u.team_a.abbrev} (#${u.team_a.seed}) vs ${u.team_b.abbrev} (#${u.team_b.seed}) — G1 wk ${u.game_1.week}${u.game_1.subweek}`);
+      status.textContent = parts.length ? `Updated ${st.round}: ${parts.join(' · ')}` : (data.message || 'Saved.');
+      loadPlayoffBracket(st.lyid, st.level);
+      loadPendingGames(st.lyid, st.level);
+    }).catch(e => status.textContent = e.message);
+  });
 
   // ===== NCAA 64-team college tournament rendering =====
   const NCAA_DE_ORDER = ['G1', 'WF', 'LB', 'L2', 'RF', 'RF2'];

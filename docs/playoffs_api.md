@@ -217,6 +217,112 @@ To get all playoff results for a bracket, query `game_results` where `game_type 
 
 ---
 
+## 5. Manual Matchup Editor (levels 5-9)
+
+Playoff formats differ in how later rounds are paired (MLB does not re-seed
+after the Wild Card round; other leagues do).  The auto-advance pairing is only
+a default: an admin can rewrite the pairings of any series that has not
+started, one round at a time.
+
+### GET `/api/v1/playoffs/matchups/{league_year_id}/{league_level}`
+
+Series grouped by round, each with an `editable` flag, plus the team pool.
+
+```json
+{
+  "supported": true,
+  "rounds": [
+    {"round": "DS", "series": [
+      {"series_id": 1253, "conference": "AL", "series_number": 1, "start_week": 54,
+       "series_length": 5, "status": "pending", "editable": true,
+       "team_a": {"id": 19, "abbrev": "MIN", "seed": 1},
+       "team_b": {"id": 11, "abbrev": "TB",  "seed": 6}}
+    ]}
+  ],
+  "pool": [{"team_id": 19, "team_abbrev": "MIN", "conference": "AL", "seed": 1, "in_field": true}]
+}
+```
+
+`editable` is true only when the series is `pending`, 0-0, and no game between
+its teams has a result from its `start_week` onward.  `supported` is false for
+level 3 (the NCAA double-elimination format is driven by group state, not
+series rows).
+
+### POST `/api/v1/playoffs/set-matchups`
+
+```json
+{
+  "league_year_id": 1, "league_level": 9, "round": "DS",
+  "matchups": [
+    {"series_id": 1253, "team_a_id": 19, "team_b_id": 18},
+    {"series_id": 1254, "team_a_id": 2,  "team_b_id": 11}
+  ],
+  "dry_run": false
+}
+```
+
+- `team_a` hosts game 1 and follows the series' home pattern.
+- `seed_a` / `seed_b` are optional: omitted seeds come from the persisted
+  playoff field (`playoff_seeds`), else the series' current seed when that team
+  is unchanged.  Seeds matter downstream (home field in the next round).
+- Every listed series must be editable (see above) and belong to `round`.
+  Both teams must exist at the level and, for conference-scoped series, in the
+  series' conference.  After all edits, no team may appear twice in the round.
+- Effect per changed series: unplayed game rows for the OLD pair are deleted,
+  the series row is rewritten (0-0, pending) and game 1 is re-created on the
+  first free subweek from `start_week`.  Later games are generated as usual.
+- Swaps are atomic: send every affected series in one call (e.g. swapping the
+  opponents of two DS series), or the uniqueness check rejects the first half.
+- `dry_run: true` validates and returns the plan without writing.
+
+Response (200):
+
+```json
+{"round": "DS", "dry_run": false, "updated": [
+  {"series_id": 1253, "conference": "AL", "series_number": 1,
+   "team_a": {"id": 19, "abbrev": "MIN", "seed": 1},
+   "team_b": {"id": 18, "abbrev": "KC",  "seed": 4},
+   "was": "MIN vs TB", "games_deleted": 1,
+   "game_1": {"home_team_id": 19, "away_team_id": 18, "week": 54, "subweek": "a"}}
+]}
+```
+
+Errors: `validation_error` (400) with a message naming the offending series or
+team; `database_error` (500).
+
+## 6. Playoff Settings (World Series home field)
+
+Per-level rules that persist across seasons.
+
+### GET `/api/v1/playoffs/settings/{league_level}?league_year_id={id}`
+
+```json
+{"league_level": 9, "ws_home_field": "allstar",
+ "ws_home_field_options": ["seed", "allstar"],
+ "allstar_result": {"event_id": 7, "winner_label": "NL", "home_label": "AL",
+                    "away_label": "NL", "home_score": 1, "away_score": 3,
+                    "winner_score": 3, "loser_score": 1, "completed_at": "..."}}
+```
+
+`allstar_result` is only included for level 9 when `league_year_id` is given,
+and is `null` when that year has no completed All-Star Game.
+
+### POST `/api/v1/playoffs/settings/{league_level}`
+
+Body: `{"ws_home_field": "seed" | "allstar"}`
+
+- `seed` (default): the pennant winner with the better seed number hosts; the
+  AL hosts on a tie.
+- `allstar`: the champion of the league that won the year's completed
+  All-Star Game hosts.  Falls back to `seed` when there is no completed game
+  or it ended in a tie.
+
+The rule is read when the World Series is created (advancing out of the CS).
+The host is `team_a` and gets games 1, 2, 6 and 7.  An already-created World
+Series is not changed; use the matchup editor (section 5) to swap team A and
+team B while it is unplayed.  The advance response's `series_created` entry
+for the WS reports `home_field`, `home_field_rule` and `home_field_reason`.
+
 ## Data Model Summary
 
 ### `playoff_series` (one row per matchup)

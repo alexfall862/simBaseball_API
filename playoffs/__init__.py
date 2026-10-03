@@ -24,6 +24,12 @@ from services.playoffs import (
     get_pending_playoff_games,
     process_completed_playoff_games,
     wipe_playoffs,
+    get_round_matchups,
+    set_round_matchups,
+    get_playoff_settings,
+    set_playoff_settings,
+    get_allstar_winner,
+    WS_HOME_FIELD_RULES,
 )
 
 playoffs_bp = Blueprint("playoffs", __name__)
@@ -814,6 +820,112 @@ def reschedule_game():
 
         return jsonify(ok=True, game_id=game_id,
                        season_week=week, season_subweek=subweek), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Playoff settings (per level, persist across seasons)
+# ---------------------------------------------------------------------------
+
+@playoffs_bp.get("/playoffs/settings/<int:league_level>")
+def get_settings(league_level: int):
+    """
+    Playoff rules for a level.  For MLB, ``league_year_id`` (query) adds the
+    All-Star Game result the 'allstar' World Series rule would use.
+    """
+    lyid = request.args.get("league_year_id", type=int)
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            out = {"league_level": league_level,
+                   "ws_home_field_options": list(WS_HOME_FIELD_RULES),
+                   **get_playoff_settings(conn, league_level)}
+            if league_level == 9 and lyid:
+                out["allstar_result"] = get_allstar_winner(conn, lyid)
+        return jsonify(out), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.post("/playoffs/settings/<int:league_level>")
+def update_settings(league_level: int):
+    """
+    Body: {"ws_home_field": "seed" | "allstar"}
+
+    Applied when the World Series is created (on advance from the CS); an
+    already-created World Series is not changed.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    rule = data.get("ws_home_field")
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            out = set_playoff_settings(conn, league_level, str(rule))
+        return jsonify(league_level=league_level, **out), 200
+    except ValueError as e:
+        return jsonify(error="validation_error", message=str(e)), 400
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Manual matchup editor (per-round override of unplayed series)
+# ---------------------------------------------------------------------------
+
+@playoffs_bp.get("/playoffs/matchups/<int:league_year_id>/<int:league_level>")
+def get_matchups(league_year_id: int, league_level: int):
+    """
+    Series grouped by round with an ``editable`` flag (pending, no game
+    played), plus the team pool for the admin matchup editor.  Levels 5-9.
+    """
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            return jsonify(get_round_matchups(conn, league_year_id, league_level)), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+@playoffs_bp.post("/playoffs/set-matchups")
+def set_matchups():
+    """
+    Rewrite the pairings of unplayed series in one round (levels 5-9).
+
+    Body: {league_year_id, league_level, round,
+           matchups: [{series_id, team_a_id, team_b_id, seed_a?, seed_b?}, ...],
+           dry_run?: false}
+
+    team_a hosts game 1.  Omitted seeds come from the persisted playoff field
+    (or the series' current seed when the team is unchanged).  Each edited
+    series has its unplayed game rows deleted and game 1 re-created on the
+    first free slot from its start_week.  Refuses any series that has started.
+    dry_run validates and returns the plan without writing.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        league_year_id = int(data["league_year_id"])
+        league_level = int(data["league_level"])
+        round_name = str(data["round"]).strip()
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="invalid_request",
+                       message="league_year_id, league_level and round are required"), 400
+    matchups = data.get("matchups")
+    if not isinstance(matchups, list) or not matchups:
+        return jsonify(error="invalid_request",
+                       message="matchups must be a non-empty list"), 400
+    dry_run = bool(data.get("dry_run", False))
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = set_round_matchups(
+                conn, engine, league_year_id, league_level, round_name, matchups,
+                dry_run=dry_run,
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation_error", message=str(e)), 400
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500
 

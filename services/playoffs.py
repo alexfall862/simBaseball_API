@@ -7,6 +7,7 @@ Playoff bracket generation, series tracking, and round advancement for:
   - College World Series (level 3): Conference tourney winners + at-large, double-elimination
 """
 
+import json
 import logging
 import math
 from typing import Any, Dict, List, Optional, Tuple
@@ -922,16 +923,39 @@ def _advance_mlb_round(
                 "series_id": int(existing_ws[0]),
             }
 
-        # Higher seed (better regular season record) gets home field
-        al_seed = min(int(al["seed_a"]), int(al["seed_b"]))
-        nl_seed = min(int(nl["seed_a"]), int(nl["seed_b"]))
+        # Each pennant winner keeps the seed it carried into its CS.
+        def _winner_seed(s):
+            wid = int(s["winner_team_id"])
+            return int(s["seed_a"]) if wid == int(s["team_a_id"]) else int(s["seed_b"])
 
-        if al_seed <= nl_seed:
-            team_a_id = int(al["winner_team_id"])
-            team_b_id = int(nl["winner_team_id"])
+        al_seed = _winner_seed(al)
+        nl_seed = _winner_seed(nl)
+        al_id = int(al["winner_team_id"])
+        nl_id = int(nl["winner_team_id"])
+
+        # Home field (team_a hosts games 1, 2, 6, 7) per the level's rule:
+        # 'seed' = better seed (AL on a tie); 'allstar' = league that won
+        # this year's All-Star Game, falling back to 'seed' if unavailable.
+        rule = get_playoff_settings(conn, 9)["ws_home_field"]
+        home_league = None
+        home_reason = None
+        if rule == "allstar":
+            asg = get_allstar_winner(conn, league_year_id)
+            if asg and asg["winner_label"] in ("AL", "NL"):
+                home_league = asg["winner_label"]
+                home_reason = (f"All-Star Game winner ({asg['winner_label']} "
+                               f"{asg['winner_score']}-{asg['loser_score']})")
+            else:
+                home_reason = ("All-Star rule set but no decisive completed "
+                               "All-Star Game found; fell back to better seed")
+        if home_league is None:
+            home_league = "AL" if al_seed <= nl_seed else "NL"
+            home_reason = home_reason or "better seed"
+
+        if home_league == "AL":
+            team_a_id, seed_a, team_b_id, seed_b = al_id, al_seed, nl_id, nl_seed
         else:
-            team_a_id = int(nl["winner_team_id"])
-            team_b_id = int(al["winner_team_id"])
+            team_a_id, seed_a, team_b_id, seed_b = nl_id, nl_seed, al_id, al_seed
 
         conn.execute(sa_text("""
             INSERT INTO playoff_series
@@ -945,7 +969,7 @@ def _advance_mlb_round(
         """), {
             "lyid": league_year_id,
             "team_a": team_a_id, "team_b": team_b_id,
-            "seed_a": al_seed, "seed_b": nl_seed,
+            "seed_a": seed_a, "seed_b": seed_b,
             "week": next_week,
         })
 
@@ -955,7 +979,13 @@ def _advance_mlb_round(
             series_length=7, start_week=next_week,
         )
 
-        created.append({"round": "WS", "matchup": "AL champ vs NL champ"})
+        log.info("playoffs: World Series created, %s has home field (%s, rule=%s)",
+                 home_league, home_reason, rule)
+        created.append({
+            "round": "WS", "matchup": "AL champ vs NL champ",
+            "home_field": home_league, "home_field_rule": rule,
+            "home_field_reason": home_reason,
+        })
 
     return {"round_advanced": next_round, "series_created": created, "week": next_week}
 
@@ -3296,6 +3326,69 @@ def _get_league_year(conn, league_year_id: int) -> int:
 _SUBWEEKS = ["a", "b", "c", "d"]
 
 
+def _last_simulated_slot(
+    conn, league_year_id: int, league_level: int,
+) -> Optional[Tuple[int, int]]:
+    """
+    Latest (week, subweek_index) that is already in the past for this level,
+    or None.  The later of:
+
+    * the highest slot at this level holding a game result (covers the
+      in-sim hook, which schedules the next series game before the
+      subweek's "ran" flag is set), and
+    * the timestamp's current week with its highest subweek flagged as ran
+      (covers a subweek that had no games at this level).  Only applied when
+      the timestamp's season is this league year.
+
+    Slots at or before this point must never receive a new game: the sim
+    will not go back to them.
+    """
+    best: Optional[Tuple[int, int]] = None
+
+    season_id = conn.execute(sa_text("""
+        SELECT s.id FROM seasons s
+        JOIN league_years ly ON ly.league_year = s.year
+        WHERE ly.id = :lyid LIMIT 1
+    """), {"lyid": league_year_id}).scalar()
+    if season_id is not None:
+        # Two index-backed steps (game_results(season, league_level,
+        # season_week)): latest played week, then latest subweek within it.
+        wk = conn.execute(sa_text("""
+            SELECT MAX(season_week) FROM game_results
+            WHERE season = :sid AND league_level = :level
+        """), {"sid": season_id, "level": league_level}).scalar()
+        if wk is not None:
+            sw = conn.execute(sa_text("""
+                SELECT MAX(FIELD(gl.season_subweek, 'a', 'b', 'c', 'd'))
+                FROM game_results gr
+                JOIN gamelist gl ON gl.id = gr.game_id
+                WHERE gr.season = :sid AND gr.league_level = :level
+                  AND gr.season_week = :wk
+            """), {"sid": season_id, "level": league_level, "wk": int(wk)}).scalar()
+            if sw:
+                best = (int(wk), int(sw) - 1)
+
+    if _table_exists(conn, "timestamp_state"):
+        ts = conn.execute(sa_text("""
+            SELECT ts.week, ts.games_a_ran, ts.games_b_ran,
+                   ts.games_c_ran, ts.games_d_ran
+            FROM timestamp_state ts
+            JOIN league_years ly ON ly.league_year = ts.season
+            WHERE ly.id = :lyid
+            LIMIT 1
+        """), {"lyid": league_year_id}).mappings().first()
+        if ts and ts["week"] is not None:
+            flags = [ts["games_a_ran"], ts["games_b_ran"],
+                     ts["games_c_ran"], ts["games_d_ran"]]
+            ran = [i for i, f in enumerate(flags) if f]
+            if ran:
+                cand = (int(ts["week"]), max(ran))
+                if best is None or cand > best:
+                    best = cand
+
+    return best
+
+
 def _next_available_subweek(
     conn, league_year_id: int, league_level: int,
     team_a_id: int, team_b_id: int, start_week: int,
@@ -3303,7 +3396,9 @@ def _next_available_subweek(
     """
     Find the next available (week, subweek) slot for a playoff game between
     these two teams, starting from start_week.  Checks gamelist for existing
-    entries to avoid collisions.
+    entries to avoid collisions, and never returns a slot at or before the
+    last simulated slot for this level (see ``_last_simulated_slot``) — a
+    hole behind the sim clock is in the past, not free.
     """
     # Get all occupied subweeks where EITHER team already has a playoff game
     occupied = conn.execute(sa_text("""
@@ -3321,10 +3416,14 @@ def _next_available_subweek(
 
     used = {(int(r[0]), str(r[1])) for r in occupied}
 
-    # Find first free slot
-    week = start_week
+    floor = _last_simulated_slot(conn, league_year_id, league_level)
+
+    # Find first free slot strictly after the sim clock
+    week = max(start_week, floor[0]) if floor else start_week
     for _ in range(20):  # safety: don't loop forever
-        for sw in _SUBWEEKS:
+        for idx, sw in enumerate(_SUBWEEKS):
+            if floor and (week, idx) <= floor:
+                continue
             if (week, sw) not in used:
                 return week, sw
         week += 1
@@ -3364,3 +3463,410 @@ def _insert_single_playoff_game(
     )
 
 
+
+
+# =====================================================================
+# Manual matchup editor — override the pairings of an unplayed round
+# =====================================================================
+#
+# Different leagues seed their brackets differently (MLB does not re-seed
+# after the Wild Card round; some formats do).  Rather than hard-code every
+# variant, an admin can rewrite the team pairings of any series that has not
+# been played yet.  Games carry no FK to a series — they are matched by team
+# pair + week window — so rewriting a series means: rewrite the row, drop its
+# unplayed game rows, and re-create game 1.  Later rounds read winners and
+# seeds from the series rows, so the rest of the bracket follows.
+
+_MATCHUP_EDIT_LEVELS = frozenset(range(5, 10))   # MLB + MiLB series formats
+
+
+def _season_id_subquery() -> str:
+    return ("(SELECT s.id FROM seasons s JOIN league_years ly "
+            "ON ly.league_year = s.year WHERE ly.id = :lyid LIMIT 1)")
+
+
+def _pair_results_since(
+    conn, league_year_id: int, league_level: int,
+    team_x: int, team_y: int, start_week: int,
+) -> int:
+    """Count played playoff games between a pair from start_week onward."""
+    return int(conn.execute(sa_text(f"""
+        SELECT COUNT(*)
+        FROM gamelist gl
+        JOIN game_results gr ON gr.game_id = gl.id
+        WHERE gl.game_type = 'playoff' AND gl.league_level = :level
+          AND gl.season_week >= :sw
+          AND ((gl.home_team = :x AND gl.away_team = :y)
+            OR (gl.home_team = :y AND gl.away_team = :x))
+          AND gl.season = {_season_id_subquery()}
+    """), {"level": league_level, "sw": start_week,
+           "x": team_x, "y": team_y, "lyid": league_year_id}).scalar() or 0)
+
+
+def _delete_unplayed_pair_games(
+    conn, league_year_id: int, league_level: int,
+    team_x: int, team_y: int, start_week: int,
+) -> int:
+    """Delete unplayed playoff games between a pair from start_week onward."""
+    res = conn.execute(sa_text(f"""
+        DELETE gl FROM gamelist gl
+        LEFT JOIN game_results gr ON gr.game_id = gl.id
+        WHERE gl.game_type = 'playoff' AND gl.league_level = :level
+          AND gl.season_week >= :sw
+          AND gr.game_id IS NULL
+          AND ((gl.home_team = :x AND gl.away_team = :y)
+            OR (gl.home_team = :y AND gl.away_team = :x))
+          AND gl.season = {_season_id_subquery()}
+    """), {"level": league_level, "sw": start_week,
+           "x": team_x, "y": team_y, "lyid": league_year_id})
+    return int(res.rowcount or 0)
+
+
+def _persisted_seed_by_team(conn, league_year_id: int, league_level: int) -> Dict[int, int]:
+    """``{team_id: seed}`` from playoff_seeds, regardless of conference key."""
+    if not _table_exists(conn, "playoff_seeds"):
+        return {}
+    rows = conn.execute(sa_text("""
+        SELECT team_id, seed FROM playoff_seeds
+        WHERE league_year_id = :lyid AND league_level = :level
+    """), {"lyid": league_year_id, "level": league_level}).all()
+    return {int(r[0]): int(r[1]) for r in rows}
+
+
+def get_round_matchups(conn, league_year_id: int, league_level: int) -> Dict[str, Any]:
+    """
+    Series grouped by round, each flagged ``editable`` (unplayed), plus the
+    pool of teams at this level (with persisted playoff seed when known) for
+    the admin matchup editor.
+    """
+    if league_level not in _MATCHUP_EDIT_LEVELS:
+        return {"league_year_id": league_year_id, "league_level": league_level,
+                "supported": False, "rounds": [], "pool": []}
+
+    rows = conn.execute(sa_text("""
+        SELECT ps.id, ps.round, ps.conference, ps.series_number, ps.start_week,
+               ps.team_a_id, ps.team_b_id, ps.seed_a, ps.seed_b,
+               ps.wins_a, ps.wins_b, ps.series_length, ps.status,
+               ta.team_abbrev AS abbrev_a, tb.team_abbrev AS abbrev_b
+        FROM playoff_series ps
+        JOIN teams ta ON ta.id = ps.team_a_id
+        JOIN teams tb ON tb.id = ps.team_b_id
+        WHERE ps.league_year_id = :lyid AND ps.league_level = :level
+        ORDER BY ps.start_week, FIELD(ps.round, 'WC','DS','CS','WS','QF','SF','F'),
+                 ps.conference, ps.series_number
+    """), {"lyid": league_year_id, "level": league_level}).mappings().all()
+
+    rounds: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+    for r in rows:
+        a, b, sw = int(r["team_a_id"]), int(r["team_b_id"]), int(r["start_week"])
+        editable = (
+            r["status"] == "pending"
+            and int(r["wins_a"]) == 0 and int(r["wins_b"]) == 0
+            and _pair_results_since(conn, league_year_id, league_level, a, b, sw) == 0
+        )
+        if r["round"] not in rounds:
+            rounds[r["round"]] = []
+            order.append(r["round"])
+        rounds[r["round"]].append({
+            "series_id": int(r["id"]),
+            "conference": r["conference"],
+            "series_number": int(r["series_number"]),
+            "start_week": sw,
+            "series_length": int(r["series_length"]),
+            "status": r["status"],
+            "editable": editable,
+            "team_a": {"id": a, "abbrev": r["abbrev_a"],
+                       "seed": int(r["seed_a"]) if r["seed_a"] is not None else None},
+            "team_b": {"id": b, "abbrev": r["abbrev_b"],
+                       "seed": int(r["seed_b"]) if r["seed_b"] is not None else None},
+        })
+
+    seed_by_team = _persisted_seed_by_team(conn, league_year_id, league_level)
+    pool_rows = conn.execute(sa_text("""
+        SELECT id, team_abbrev, conference FROM teams
+        WHERE team_level = :level ORDER BY conference, team_abbrev
+    """), {"level": league_level}).mappings().all()
+    pool = [{
+        "team_id": int(p["id"]), "team_abbrev": p["team_abbrev"],
+        "conference": p["conference"],
+        "seed": seed_by_team.get(int(p["id"])),
+        "in_field": int(p["id"]) in seed_by_team,
+    } for p in pool_rows]
+    pool.sort(key=lambda p: (p["conference"] or "", p["seed"] is None,
+                             p["seed"] or 0, p["team_abbrev"]))
+
+    return {
+        "league_year_id": league_year_id, "league_level": league_level,
+        "supported": True,
+        "rounds": [{"round": rn, "series": rounds[rn]} for rn in order],
+        "pool": pool,
+    }
+
+
+def set_round_matchups(
+    conn, engine, league_year_id: int, league_level: int,
+    round_name: str, matchups: List[Dict[str, Any]], dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Rewrite the team pairings of unplayed series in one round.
+
+    ``matchups`` is a list of ``{series_id, team_a_id, team_b_id, seed_a?,
+    seed_b?}``.  team_a gets home field for game 1 (and the series' home
+    pattern).  Omitted seeds fall back to the persisted playoff field, then to
+    the series' current seed when the team is unchanged.
+
+    Guards (all raise ValueError): level must be 5-9; every series must belong
+    to ``round_name``, be ``pending`` with no played game in its window; both
+    teams must exist at this level (and in the series' conference for MLB);
+    after applying every edit, no team may appear twice in the round.
+
+    Writes: unplayed game rows for each edited series' OLD pair are deleted,
+    the series row is rewritten (0-0, pending), and game 1 is re-created on
+    the first free slot from the series' start_week.  ``dry_run`` validates
+    and reports the plan without writing.
+    """
+    if league_level not in _MATCHUP_EDIT_LEVELS:
+        raise ValueError(f"Matchup editing is only supported for levels 5-9 (got {league_level})")
+    if not matchups:
+        raise ValueError("No matchups supplied")
+
+    # Serialize against concurrent advance/edit calls on this bracket.
+    conn.execute(sa_text("""
+        SELECT id FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = :level
+        FOR UPDATE
+    """), {"lyid": league_year_id, "level": league_level}).all()
+
+    round_rows = conn.execute(sa_text("""
+        SELECT id, conference, series_number, start_week, team_a_id, team_b_id,
+               seed_a, seed_b, wins_a, wins_b, series_length, status
+        FROM playoff_series
+        WHERE league_year_id = :lyid AND league_level = :level AND round = :rnd
+        ORDER BY conference, series_number
+    """), {"lyid": league_year_id, "level": league_level, "rnd": round_name}).mappings().all()
+    if not round_rows:
+        raise ValueError(f"No {round_name} series exist for this bracket")
+    by_id = {int(r["id"]): r for r in round_rows}
+
+    seed_by_team = _persisted_seed_by_team(conn, league_year_id, league_level)
+
+    # ---- Validate each edit ----
+    edits: List[Dict[str, Any]] = []
+    seen_series: set = set()
+    for m in matchups:
+        try:
+            sid = int(m["series_id"])
+            a = int(m["team_a_id"])
+            b = int(m["team_b_id"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Each matchup needs integer series_id, team_a_id and team_b_id")
+        if sid in seen_series:
+            raise ValueError(f"Series {sid} listed more than once")
+        seen_series.add(sid)
+        s = by_id.get(sid)
+        if s is None:
+            raise ValueError(f"Series {sid} is not a {round_name} series of this bracket")
+        if a == b:
+            raise ValueError(f"Series {sid}: a team cannot play itself")
+
+        old_a, old_b, sw = int(s["team_a_id"]), int(s["team_b_id"]), int(s["start_week"])
+        if s["status"] != "pending" or int(s["wins_a"]) or int(s["wins_b"]):
+            raise ValueError(f"Series {sid} has already started ({s['status']}, "
+                             f"{s['wins_a']}-{s['wins_b']}) and cannot be edited")
+        if _pair_results_since(conn, league_year_id, league_level, old_a, old_b, sw):
+            raise ValueError(f"Series {sid} already has a played game and cannot be edited")
+
+        team_rows = conn.execute(sa_text(
+            "SELECT id, team_level, conference FROM teams WHERE id IN (:a, :b)"
+        ), {"a": a, "b": b}).mappings().all()
+        found = {int(t["id"]): t for t in team_rows}
+        for tid in (a, b):
+            if tid not in found:
+                raise ValueError(f"Team {tid} does not exist")
+            if int(found[tid]["team_level"]) != league_level:
+                raise ValueError(f"Team {tid} is not at level {league_level}")
+            if s["conference"] and found[tid]["conference"] != s["conference"]:
+                raise ValueError(f"Team {tid} is not in the {s['conference']} "
+                                 f"(series {sid} is an {s['conference']} series)")
+
+        def _seed(key: str, tid: int, old_tid: int, old_seed: Any) -> int:
+            val = m.get(key)
+            if val is not None and val != "":
+                try:
+                    val = int(val)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Series {sid}: {key} must be an integer")
+                if val < 1:
+                    raise ValueError(f"Series {sid}: {key} must be >= 1")
+                return val
+            if tid in seed_by_team:
+                return seed_by_team[tid]
+            if tid == old_tid and old_seed is not None:
+                return int(old_seed)
+            raise ValueError(f"Series {sid}: no known seed for team {tid}; supply {key}")
+
+        seed_a = _seed("seed_a", a, old_a, s["seed_a"])
+        seed_b = _seed("seed_b", b, old_b, s["seed_b"])
+
+        if a != old_a or b != old_b:
+            if _pair_results_since(conn, league_year_id, league_level, a, b, sw):
+                raise ValueError(f"Series {sid}: teams {a} and {b} already have a played "
+                                 f"playoff game from week {sw} on")
+
+        old_seed_a = int(s["seed_a"]) if s["seed_a"] is not None else None
+        old_seed_b = int(s["seed_b"]) if s["seed_b"] is not None else None
+        edits.append({
+            "series_id": sid, "conference": s["conference"],
+            "series_number": int(s["series_number"]),
+            "start_week": sw, "series_length": int(s["series_length"]),
+            "old_a": old_a, "old_b": old_b,
+            "team_a_id": a, "team_b_id": b, "seed_a": seed_a, "seed_b": seed_b,
+            "changed": (a, b, seed_a, seed_b) != (old_a, old_b, old_seed_a, old_seed_b),
+        })
+
+    # ---- Round-wide uniqueness after applying every edit ----
+    final_pairs: Dict[int, Tuple[int, int]] = {
+        int(r["id"]): (int(r["team_a_id"]), int(r["team_b_id"])) for r in round_rows
+    }
+    for e in edits:
+        final_pairs[e["series_id"]] = (e["team_a_id"], e["team_b_id"])
+    owner: Dict[int, int] = {}
+    for sid, (a, b) in final_pairs.items():
+        for tid in (a, b):
+            if tid in owner:
+                raise ValueError(f"Team {tid} would appear in two {round_name} series "
+                                 f"({owner[tid]} and {sid})")
+            owner[tid] = sid
+
+    abbrevs = {int(r["id"]): r["team_abbrev"] for r in conn.execute(sa_text(
+        "SELECT id, team_abbrev FROM teams WHERE team_level = :level"
+    ), {"level": league_level}).mappings().all()}
+
+    result: Dict[str, Any] = {
+        "round": round_name, "league_year_id": league_year_id,
+        "league_level": league_level, "dry_run": dry_run, "updated": [],
+    }
+    to_apply = [e for e in edits if e["changed"]]
+    if not to_apply:
+        result["message"] = "No changes"
+        return result
+
+    # ---- Apply: rewrite rows + drop old game rows, then re-create game 1s ----
+    for e in to_apply:
+        deleted = 0
+        if not dry_run:
+            deleted = _delete_unplayed_pair_games(
+                conn, league_year_id, league_level, e["old_a"], e["old_b"], e["start_week"])
+            conn.execute(sa_text("""
+                UPDATE playoff_series
+                SET team_a_id = :a, team_b_id = :b, seed_a = :sa, seed_b = :sb,
+                    wins_a = 0, wins_b = 0, winner_team_id = NULL, status = 'pending'
+                WHERE id = :sid
+            """), {"a": e["team_a_id"], "b": e["team_b_id"],
+                   "sa": e["seed_a"], "sb": e["seed_b"], "sid": e["series_id"]})
+        e["games_deleted"] = deleted
+
+    for e in to_apply:
+        a, b, n = e["team_a_id"], e["team_b_id"], e["series_length"]
+        pattern = HOME_PATTERNS.get(n, [True])
+        home, away = (a, b) if pattern[0] else (b, a)
+        if dry_run:
+            week, sub = e["start_week"], None
+        else:
+            week, sub = _next_available_subweek(
+                conn, league_year_id, league_level, a, b, e["start_week"])
+            _insert_single_playoff_game(
+                conn, league_year_id, league_level, home, away, week, sub)
+        was = f"{abbrevs.get(e['old_a'])} vs {abbrevs.get(e['old_b'])}"
+        result["updated"].append({
+            "series_id": e["series_id"], "conference": e["conference"],
+            "series_number": e["series_number"],
+            "team_a": {"id": a, "abbrev": abbrevs.get(a), "seed": e["seed_a"]},
+            "team_b": {"id": b, "abbrev": abbrevs.get(b), "seed": e["seed_b"]},
+            "was": was,
+            "games_deleted": e["games_deleted"],
+            "game_1": {"home_team_id": home, "away_team_id": away,
+                       "week": week, "subweek": sub},
+        })
+        if not dry_run:
+            log.info("playoffs: %s series %d rewritten: %s -> %s vs %s (game 1 wk %d%s)",
+                     round_name, e["series_id"], was,
+                     abbrevs.get(a), abbrevs.get(b), week, sub)
+
+    return result
+
+
+# =====================================================================
+# Playoff settings (per level, persist across seasons)
+# =====================================================================
+
+WS_HOME_FIELD_RULES = ("seed", "allstar")
+_PLAYOFF_SETTING_DEFAULTS = {"ws_home_field": "seed"}
+
+
+def get_playoff_settings(conn, league_level: int) -> Dict[str, Any]:
+    """Settings for a level; defaults when no row / table is missing."""
+    out = dict(_PLAYOFF_SETTING_DEFAULTS)
+    if not _table_exists(conn, "playoff_settings"):
+        return out
+    row = conn.execute(sa_text(
+        "SELECT ws_home_field FROM playoff_settings WHERE league_level = :level"
+    ), {"level": league_level}).mappings().first()
+    if row and row["ws_home_field"] in WS_HOME_FIELD_RULES:
+        out["ws_home_field"] = row["ws_home_field"]
+    return out
+
+
+def set_playoff_settings(conn, league_level: int, ws_home_field: str) -> Dict[str, Any]:
+    """Upsert a level's settings.  Raises ValueError on a bad value."""
+    if ws_home_field not in WS_HOME_FIELD_RULES:
+        raise ValueError(f"ws_home_field must be one of {list(WS_HOME_FIELD_RULES)}")
+    if not _table_exists(conn, "playoff_settings"):
+        raise ValueError("playoff_settings table missing; apply "
+                         "migrations/add_playoff_settings.sql")
+    conn.execute(sa_text("""
+        INSERT INTO playoff_settings (league_level, ws_home_field)
+        VALUES (:level, :rule)
+        ON DUPLICATE KEY UPDATE ws_home_field = VALUES(ws_home_field)
+    """), {"level": league_level, "rule": ws_home_field})
+    return get_playoff_settings(conn, league_level)
+
+
+def get_allstar_winner(conn, league_year_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Result of the latest completed MLB All-Star Game for a league year, or
+    None.  ``winner_label`` is the side label ("AL"/"NL") or "tie".
+    """
+    # Sort on the narrow columns only: metadata_json carries the full box
+    # score, and sorting it overflows the server's sort buffer.
+    ids = conn.execute(sa_text("""
+        SELECT id, completed_at FROM special_events
+        WHERE league_year_id = :lyid AND event_type = 'allstar'
+          AND status = 'completed'
+        ORDER BY completed_at DESC, id DESC
+    """), {"lyid": league_year_id}).mappings().all()
+    for r in ids:
+        meta_json = conn.execute(sa_text(
+            "SELECT metadata_json FROM special_events WHERE id = :id"
+        ), {"id": r["id"]}).scalar()
+        try:
+            meta = json.loads(meta_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        lvl = meta.get("league_level")
+        if lvl is not None and int(lvl) != 9:
+            continue
+        gr = meta.get("game_result") or {}
+        if not gr.get("winner_label"):
+            continue
+        hs, as_ = int(gr.get("home_score") or 0), int(gr.get("away_score") or 0)
+        return {
+            "event_id": int(r["id"]),
+            "winner_label": gr["winner_label"],
+            "home_label": gr.get("home_label"), "away_label": gr.get("away_label"),
+            "home_score": hs, "away_score": as_,
+            "winner_score": max(hs, as_), "loser_score": min(hs, as_),
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+        }
+    return None

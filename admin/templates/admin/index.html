@@ -3752,6 +3752,17 @@
             <button id="btn-ct-advance" class="btn btn-secondary">Advance Conf Tournaments</button>
             <button id="btn-ct-wipe" class="btn btn-danger">Wipe Conf Tournaments</button>
           </div>
+          <div id="po-ws-controls" class="filter-row" style="display:none;gap:12px;flex-wrap:wrap;align-items:end;margin-top:8px">
+            <div>
+              <label>World Series Home Field</label>
+              <select id="po-ws-home">
+                <option value="seed">Better seed</option>
+                <option value="allstar">All-Star Game winner</option>
+              </select>
+            </div>
+            <button id="btn-po-ws-home-save" class="btn btn-secondary">Save Rule</button>
+            <span id="po-ws-home-info" class="text-muted"></span>
+          </div>
           <div id="po-banner" style="display:none;margin-top:8px;padding:8px 12px;border-radius:6px;font-weight:600"></div>
           <div id="po-health" style="display:none;margin-top:8px"></div>
           <div id="po-status" class="status-msg"></div>
@@ -3820,6 +3831,21 @@
         <div class="card" id="po-pending-card" style="display:none">
           <h4>Pending Games</h4>
           <div id="po-pending"></div>
+        </div>
+        <div class="card" id="po-matchups-card" style="display:none">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+            <h4 style="margin:0">Adjust Matchups</h4>
+            <div class="button-group">
+              <button class="btn btn-secondary" id="btn-po-matchups-reset">Reset</button>
+              <button class="btn btn-warning" id="btn-po-matchups-save">Save Matchups</button>
+            </div>
+          </div>
+          <p class="text-muted" style="margin:6px 0 8px">
+            Rewrite the pairings of series that have not started. Team A hosts game 1.
+            Saving deletes the unplayed game 1 rows of any changed series and re-creates them.
+          </p>
+          <div id="po-matchups"></div>
+          <div id="po-matchups-status" class="status-msg"></div>
         </div>
         <div class="card" id="po-bracket-card" style="display:none">
           <div style="display:flex;justify-content:space-between;align-items:center">
