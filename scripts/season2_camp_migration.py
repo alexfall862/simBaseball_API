@@ -177,7 +177,7 @@ def status_notes(s: Schema):
     except Exception as e:  # noqa: BLE001
         notes["season2_amateur_pipeline.sql"] = str(e)
     try:
-        tables = ["training_camp_focus", "training_camp_results", "player_rating_snapshots", "progression_curve_stats"]
+        tables = ["training_camp_focus", "training_camp_results", "training_camp_runs", "player_rating_snapshots", "progression_curve_stats"]
         mx = s.q("SELECT MAX(age) FROM growth_curves")[0][0]
         notes["season2_progression_camp.sql"] = ("tables: " + ", ".join(f"{t}={'ok' if s.table_exists(t) else 'MISSING'}" for t in tables)
                                                 + f"; growth_curves max age {mx}")

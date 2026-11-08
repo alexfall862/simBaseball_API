@@ -693,18 +693,33 @@ def _choose_player_for_position(
       plans_by_position: Pre-loaded position plans from _load_all_position_plans_for_team
       usage_by_position: Pre-loaded weekly usage from _load_all_weekly_usage_for_team
     """
-    # We never put pitchers in *field* positions here (only SP at 'p')
+    # Get pre-loaded depth chart for this position (if any)
+    plan_rows = plans_by_position.get(position_code, [])
+
+    # Pitchers are kept out of *field* positions unless the team has LOCKED
+    # them to this specific position in the depth chart. A lock is the
+    # manager's explicit override ("I really want this pitcher playing here");
+    # an unlocked plan row or the rating-based fallback never puts a pitcher
+    # in the field. Locks elsewhere don't count — a pitcher locked at RF is
+    # still blocked from 3B.
+    locked_pitchers_here = set()
+    for row in plan_rows:
+        if not row.get("locked"):
+            continue
+        try:
+            locked_pitchers_here.add(int(row["player_id"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+
     remaining_field_ids = [
         pid for pid in remaining_ids
         if (players_by_id[pid].get("ptype") or "").lower() != "pitcher"
+        or pid in locked_pitchers_here
     ]
     if not remaining_field_ids:
         return None
 
     rating_key = _POS_RATING_KEY.get(position_code)
-
-    # Get pre-loaded depth chart for this position (if any)
-    plan_rows = plans_by_position.get(position_code, [])
 
     # First pass: using team_position_plan
     if plan_rows:

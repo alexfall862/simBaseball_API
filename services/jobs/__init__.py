@@ -620,6 +620,16 @@ def start_new_season_job(ctx: JobContext) -> Dict[str, Any]:
     return start_new_season(int(ctx.params["league_year_id"]))
 
 
+@job("training_camp_apply", title="Apply preseason training camp", group="rollover", dangerous=True,
+     description="Replays this offseason's progression dice at the camp grade for every focus skill, "
+                 "records results and locks focus. One-shot per season; run before opening day.",
+     params={"league_year_id": {"type": "int", "label": "Camp league year ID (the season about to start)"}})
+def training_camp_apply_job(ctx: JobContext) -> Dict[str, Any]:
+    from services.training_camp import apply_camp
+    with ctx.engine.begin() as conn:
+        return apply_camp(conn, int(ctx.params["league_year_id"]))
+
+
 @job("phase_action", title="Phase action (start/end FA, draft, recruiting)", group="rollover",
      description="Runs one of the timestamp phase transitions.",
      params={"action": {"type": "str", "label": "Action",
@@ -674,6 +684,10 @@ def offseason_checklist_step(ctx: JobContext) -> Dict[str, Any]:
         from services.awards import sync_postseason_awards
         with ctx.engine.begin() as conn:
             return sync_postseason_awards(conn, ctx.league_year_id())
+    if url == "/admin/training-camp/apply":
+        from services.training_camp import apply_camp
+        with ctx.engine.begin() as conn:
+            return apply_camp(conn, int((a.get("body") or {})["league_year_id"]))
     target = mapping.get(url)
     if not target:
         raise ValueError(f"step action {url} has no job mapping")

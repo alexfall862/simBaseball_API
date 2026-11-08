@@ -1,6 +1,8 @@
 -- Season 2: progression QC, rating snapshots and training camp.
 -- Apply once after season2_amateur_pipeline.sql. Everything here is idempotent
--- (CREATE IF NOT EXISTS / INSERT IGNORE / INSERT ... WHERE NOT EXISTS).
+-- (CREATE IF NOT EXISTS / INSERT IGNORE / INSERT ... WHERE NOT EXISTS /
+-- information_schema-guarded ALTERs), so it is also safe to re-run on a
+-- database that applied an earlier revision of this file.
 
 -- ── Growth curves: extend to age 50 with the age-45 values (age-related
 --    regression is potential-agnostic by design; the tail just continues) ──
@@ -29,7 +31,7 @@ CREATE TABLE IF NOT EXISTS player_rating_snapshots (
   id             BIGINT       NOT NULL AUTO_INCREMENT,
   player_id      INT          NOT NULL,
   league_year_id INT          NOT NULL,
-  stage          ENUM('pre_progression','post_progression') NOT NULL,
+  stage          ENUM('pre_progression','post_progression','post_camp') NOT NULL,
   age            INT          NOT NULL,
   level          TINYINT      NULL,
   org_id         INT          NULL,
@@ -62,7 +64,13 @@ CREATE TABLE IF NOT EXISTS progression_curve_stats (
   UNIQUE KEY uq_pcs (league_year_id, grade, age)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- ── Training camp: one focus skill per player per season, set by the org ──
+-- Earlier revision created the stage ENUM without 'post_camp' (MODIFY is idempotent).
+ALTER TABLE player_rating_snapshots
+  MODIFY COLUMN stage ENUM('pre_progression','post_progression','post_camp') NOT NULL;
+
+-- ── Training camp: one focus skill per player per season, set by the org.
+--    Keyed by the league year about to be played; applied in the preseason
+--    by POST /admin/training-camp/apply (services/training_camp.apply_camp). ──
 CREATE TABLE IF NOT EXISTS training_camp_focus (
   id             INT          NOT NULL AUTO_INCREMENT,
   player_id      INT          NOT NULL,
@@ -82,6 +90,7 @@ CREATE TABLE IF NOT EXISTS training_camp_results (
   player_id       INT          NOT NULL,
   org_id          INT          NOT NULL,
   league_year_id  INT          NOT NULL,
+  prog_league_year_id INT      NULL,
   attr            VARCHAR(32)  NOT NULL,
   intensity       ENUM('regular','intense','max') NOT NULL,
   base_grade      VARCHAR(3)   NULL,
@@ -90,8 +99,42 @@ CREATE TABLE IF NOT EXISTS training_camp_results (
   backfired       TINYINT(1)   NOT NULL DEFAULT 0,
   roll            DECIMAL(6,4) NOT NULL,
   pot_columns     JSON         NOT NULL,
+  effect          JSON         NULL,
   created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_tcr (player_id, league_year_id),
   KEY idx_tcr_org_year (org_id, league_year_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Columns added after the first revision (guarded ADD COLUMN).
+SET @sql := IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'training_camp_results'
+       AND COLUMN_NAME = 'prog_league_year_id') = 0,
+    'ALTER TABLE training_camp_results ADD COLUMN prog_league_year_id INT NULL AFTER league_year_id',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql := IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'training_camp_results'
+       AND COLUMN_NAME = 'effect') = 0,
+    'ALTER TABLE training_camp_results ADD COLUMN effect JSON NULL AFTER pot_columns',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+-- One row per applied camp; its presence locks that season's focus.
+CREATE TABLE IF NOT EXISTS training_camp_runs (
+  league_year_id      INT       NOT NULL,
+  prog_league_year_id INT       NOT NULL,
+  players             INT       NOT NULL,
+  applied             INT       NOT NULL,
+  skipped             INT       NOT NULL,
+  summary             JSON      NULL,
+  applied_at          DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (league_year_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -1,10 +1,20 @@
 # Training Camp — frontend guide
 
 Each organization picks **one focus skill and an intensity per player** for the
-season. At end-season the progression pass treats that skill's potential as if it
-were a few steps better (or worse, on a backfire) on the grade ladder
-`N F D- D D+ C- C C+ B- B B+ A- A A+`. Stored potentials never change; the
-effect is confined to that one offseason's progression roll.
+coming season. Camp runs in the **preseason**, after free agency, trades and the
+draft and before opening day. It takes the focus skill's progression roll from
+the end-season that just happened and re-evaluates it as if the potential had
+been a few steps better (or worse, on a backfire) on the grade ladder
+`N F D- D D+ C- C C+ B- B B+ A- A A+`. Same luck, different grade; the
+difference is added to the rating. Stored potentials never change.
+
+Timeline for a season Y+1:
+
+1. End-season Y: everyone ages and progresses at their natural potential. The
+   offseason market works on these fresh ratings.
+2. Offseason: focus for Y+1 is open. Players move between orgs.
+3. Preseason camp (admin step): every focus is applied and focus for Y+1 locks.
+4. Opening day of Y+1.
 
 | Intensity | Effect this offseason | Risk |
 |---|---|---|
@@ -13,18 +23,22 @@ effect is confined to that one offseason's progression roll.
 | `max` | +4 steps (a C trains like a B+) | 50 % chance of −4 steps instead |
 
 The outcome is rolled once per player and season (deterministic), so the
-result an org sees after end-season is final. Steps and thresholds live in
+result an org sees after camp is final. Steps and thresholds live in
 `league_config` (`camp_*` keys) and are returned by the options endpoint.
 
 Who can set a focus: the org holding the player's active contract — pro orgs
 for players at any level 4–9, college programs for their roster (level 3).
 HS and international amateur pools have no camp. A focus can be changed or
-removed until end-season applies it; afterwards the endpoints return 400.
+removed until camp is applied; afterwards the endpoints return 400.
 
-Which season: `league_year_id` is the season being **played** (the one
-end-season will close). Omit it and the API uses the current timestamp season.
-After end-season the timestamp moves to Y+1, so a focus set in the offseason
-applies to the following camp.
+A focus belongs to the org that set it. If the player changes orgs before
+camp, that focus is skipped and the new org can set its own (the PUT replaces
+the old row). The roster list only shows focus rows the requesting org owns.
+
+Which season: `league_year_id` is the season about to be **played**. Omit it
+and the API uses the current timestamp season, which is Y+1 from the moment
+end-season Y finishes. During the regular season the current season's camp is
+already applied, so the window effectively runs from end-season to preseason.
 
 All routes are under `/api/v1`.
 
@@ -62,7 +76,7 @@ GET /training-camp/focus?org_id=12&league_year_id=5
 
 ```json
 {
-  "org_id": 12, "league_year_id": 5, "with_focus": 3,
+  "org_id": 12, "league_year_id": 5, "camp_applied": false, "camp_applied_at": null, "with_focus": 3,
   "players": [
     { "player_id": 3200, "name": "Mike Johnson", "age": 24, "ptype": "Pitcher", "level": 9,
       "pitches": ["Fastball", "Slider", "Changeup", null, null],
@@ -71,7 +85,8 @@ GET /training-camp/focus?org_id=12&league_year_id=5
 }
 ```
 
-`locked: true` means this season's camp has already been applied for the player.
+`locked: true` (and `camp_applied: true`) means this season's camp has already
+been applied; editing is closed for every player.
 
 ## 3. Set a focus (one or many)
 
@@ -100,7 +115,7 @@ DELETE /training-camp/focus
 → { "success": true, "removed": true, "league_year_id": 5 }
 ```
 
-## 5. Results (after end-season)
+## 5. Results (after camp)
 
 ```
 GET /training-camp/results?org_id=12&league_year_id=5
@@ -113,7 +128,7 @@ GET /training-camp/results?org_id=12&league_year_id=5
 ```
 
 Fog-of-war: this view says what was trained and whether it backfired, never
-the grades involved. Potentials remain scouted information; the only visible
+the grades involved or the true rating change. Potentials remain scouted information; the only visible
 effect is the (fuzzed) rating change on the player card.
 
 ## UI suggestions
@@ -122,6 +137,9 @@ effect is the (fuzzed) rating change on the player card.
   program): one row per player with a skill dropdown (abilities, then the
   player's pitches by name) and an intensity selector showing the risk text
   from the options endpoint.
-- Roster badge for players with a focus; after end-season show the result
-  with a success/backfire marker.
-- Disable editing for `locked` players.
+- Roster badge for players with a focus; after camp show the result with a
+  success/backfire marker.
+- Disable editing when `camp_applied` is true.
+- From age 29 the growth table is nearly the same for every potential: at 29–33
+  only an F-potential skill still gains a little (F has a lower mode there), and
+  from 34 camp changes nothing. A hint on 29+ rows avoids wasted picks.

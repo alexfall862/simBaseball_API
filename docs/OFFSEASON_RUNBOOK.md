@@ -35,7 +35,7 @@ Terminology used below:
 | `not built` | The step has no implementation in the API at all (see [What Is Not Automated](#what-is-not-automated)). |
 | `unknown` | The detector query failed (missing table/column, DB error); the detail column shows the error. |
 
-Steps 2, 3, 4 and 11 have a **Run** button that POSTs to the step's endpoint and then refreshes the card. Steps 5, 6, 12 and 13 already have their own UI (named in the Action column); the card just tells you when to use them.
+Steps 2, 3, 4, 11 and 13 have a **Run** button that POSTs to the step's endpoint and then refreshes the card. Steps 5, 6, 12 and 14 already have their own UI (named in the Action column); the card just tells you when to use them.
 
 **Endpoint (read-only):**
 
@@ -154,7 +154,7 @@ Contract processing expires only contracts whose **completed** season was their 
 | INTAM player at contract end | Re-upped at org 339 until the `intam_age_out` age (23), then leaves the pool as a free agent. |
 | Everyone 40+, 36+ without a pro contract, 33+ unsigned and below `retire_marginal_ovr` | Retired: open contracts finished, active auction withdrawn, row in `player_retirements`. Retirees never enter FA or the draft pool. |
 | Draft pool | `draft_eligible_players` for Y+1 = HS graduates + **every** college player (nobody declares), with `class_year` and a consensus `draft_rank` from the ratings/potentials composite. The archive no longer deletes it. |
-| Progression (2026-11-08) | Bracketed by true-value **rating snapshots** (`player_rating_snapshots`, stages `pre_progression` / `post_progression`); **training camp** focus skills (`training_camp_focus`) are rolled and applied as potential-grade overrides for this pass only (results in `training_camp_results`); every player ages, those inside the growth table (16–50) progress (independent triangular draw per attribute); then `displayovr` and its breakpoints are **refreshed** (also for players without a contract, against their last level), and `progression_curve_stats` is rebuilt for the admin *Progression → Diagnostics* page. Response keys: `snapshot_pre`, `training_camp`, `progression`, `displayovr_refresh`, `snapshot_post`, `curve_stats`. |
+| Progression (2026-11-08) | Bracketed by true-value **rating snapshots** (`player_rating_snapshots`, stages `pre_progression` / `post_progression`); every player ages, those inside the growth table (16–50) progress at their natural potential (independent triangular draw per attribute, each die seeded by league year, player and column so the preseason camp can replay it); then `displayovr` and its breakpoints are **refreshed** (also for players without a contract, against their last level), and `progression_curve_stats` is rebuilt for the admin *Progression → Diagnostics* page. Training camp is **not** part of end-season any more; it is step 13. Response keys: `snapshot_pre`, `progression` (`seeded: true`), `displayovr_refresh`, `snapshot_post`, `curve_stats`. |
 | New classes (after progression) | HS freshmen (US, age `hs_entry_age`) and INTAM entrants (international, `intam_entry_age`) are generated to refill both pools to `hs_pool_target` / `intam_pool_target`. |
 | Year tables | `scouting_budgets` for every org, `ifa_state` + `ifa_bonus_pools` (from Y's standings), `recruiting_state`, `player_listed_position` for Y+1. |
 
@@ -231,17 +231,27 @@ When this step is done the card shows the new `league_years.id`, and the *Start 
 | **Where** | Schedule Generator section (`POST /admin/schedule/generate` with `{"league_year": Y+1, "league_level": <level>, "start_week": 1, "clear_existing": false}`), once per level you run (9, 8, 7, 6, 5, 3). |
 | **Done when** | `gamelist` has rows with `season = (SELECT id FROM seasons WHERE year = Y+1)`. The card shows the per-level game counts. |
 | **Precondition** | A `seasons` row for Y+1 must exist (the table is pre-seeded through 2044). Step 11 is not strictly required by the generator but do it first so the week ids line up. |
-| **Irreversible?** | No — `clear_existing: true` or `POST /admin/schedule/clear` removes a level's schedule for the year. Do this only before step 13. |
+| **Irreversible?** | No — `clear_existing: true` or `POST /admin/schedule/clear` removes a level's schedule for the year. Do this only before step 14. |
 
 Generate every level you intend to simulate; the checklist only requires at least one game to exist, so look at the per-level breakdown.
 
-### 13. Start New Season
+### 13. Preseason training camp
+
+| | |
+|---|---|
+| **Where** | The checklist card's **Apply training camp** button, `POST /admin/training-camp/apply` with `{"league_year_id": <new id>}` and the `X-Admin-Password` header (or the admin session). Also a scheduler job, `training_camp_apply`. |
+| **Done when** | `training_camp_runs` has a row for the new league year. |
+| **Precondition** | Step 5 (it replays that end-season's progression dice; refuses without its `pre_progression` snapshot). Run it after free agency, trades and the draft have settled and **before opening day**: it refuses once games of the new season have been played unless `force: true` is sent. |
+| **What it does** | For every focus skill set for the new season by an org that still holds the player (level ≥ 3): rolls the intensity, re-evaluates that skill's end-season die at the shifted potential grade, and adds the difference to the rating (pitch focus: all four components, then the pitch OVR). Focus rows left by an org that no longer holds the player are skipped and listed. Writes `training_camp_results`, a `post_camp` snapshot of the camp players, refreshes `displayovr`, and records the run. |
+| **Irreversible?** | One-shot: the run row locks focus for that season, and a second call returns the stored summary without changing anything. Undoing it means restoring the focus columns from the `post_progression` snapshot by hand. |
+
+### 14. Start New Season
 
 | | |
 |---|---|
 | **Where** | Timestamp section → *Start New Season* card (`#btn-start-new-season`), `POST /api/v1/games/start-new-season` with `{"league_year_id": <new id from step 11>}`. |
 | **Done when** | `timestamp_state.season = Y+1` and `league_state.current_league_year_id` = the new id. |
-| **Precondition** | Steps 5 and 12; the calendar is already on Y+1 (week 0) and must be in `OFFSEASON` with FA, draft and recruiting all closed (the card is hidden otherwise). The endpoint refuses if `gamelist` has no games for Y+1. |
+| **Precondition** | Steps 5, 12 and 13 (13 is not enforced by the endpoint; the checklist shows it); the calendar is already on Y+1 (week 0) and must be in `OFFSEASON` with FA, draft and recruiting all closed (the card is hidden otherwise). The endpoint refuses if `gamelist` has no games for Y+1. |
 | **Irreversible?** | It runs year-start books (media payouts, signing bonuses — each claims `media_run_at` / `bonuses_run_at` on the new row) and sets week 1, regular season. Going back means hand-editing `timestamp_state` and `league_state`. |
 
 After this, the Offseason Checklist for the **old** year should read all `done` except rows 7-10, and selecting the new year should show a fresh, all-`pending` list.
@@ -302,5 +312,6 @@ Use the SQL console in the admin panel (write mode on) for the `UPDATE`/`DELETE`
 10. Retirements + amateur class NOT BUILT
 11. Initialize Y+1              done by step 5; POST /admin/initialize-next-league-year {league_year: Y} only to do it early
 12. Schedule for Y+1            Schedule Generator, one run per level, league_year = Y+1
-13. Start New Season            Start New Season card -> POST /api/v1/games/start-new-season {league_year_id: new id}
+13. Preseason training camp     Checklist button -> POST /admin/training-camp/apply {league_year_id: new id}  [X-Admin-Password]  ONE-SHOT; before opening day
+14. Start New Season            Start New Season card -> POST /api/v1/games/start-new-season {league_year_id: new id}
 ```

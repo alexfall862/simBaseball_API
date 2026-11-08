@@ -609,10 +609,11 @@ def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, An
         logger.exception("end_regular_season: contract processing failed")
         summary["end_of_season_error"] = str(e)
 
-    # 2. Player progression, bracketed by true-value rating snapshots, with
-    #    the training-camp grade overrides, then a displayovr refresh (the
-    #    stored column is a cohort percentile and goes stale otherwise) and
-    #    the realised-curve statistics for the admin diagnostics.
+    # 2. Player progression, bracketed by true-value rating snapshots, then a
+    #    displayovr refresh (the stored column is a cohort percentile and goes
+    #    stale otherwise) and the realised-curve statistics for the admin
+    #    diagnostics. Dice are seeded by this league year so the preseason
+    #    training camp (services/training_camp.apply_camp) can replay them.
     try:
         from services.progression_snapshots import take_snapshot
         with engine.begin() as conn:
@@ -621,21 +622,10 @@ def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, An
         logger.exception("end_regular_season: pre-progression snapshot failed")
         summary["snapshot_pre_error"] = str(e)
 
-    camp_overrides = None
-    try:
-        from services.training_camp import prepare_camp
-        with engine.begin() as conn:
-            camp = prepare_camp(conn, league_year_id)
-        camp_overrides = camp.pop("overrides", None)
-        summary["training_camp"] = camp
-    except Exception as e:
-        logger.exception("end_regular_season: training camp failed")
-        summary["training_camp_error"] = str(e)
-
     try:
         from player_engine.player_progression import progress_all_players
         with engine.begin() as conn:
-            prog_result = progress_all_players(conn, grade_overrides=camp_overrides)
+            prog_result = progress_all_players(conn, league_year_id=league_year_id)
         summary["progression"] = prog_result
         logger.info(f"Player progression complete: {prog_result}")
     except Exception as e:

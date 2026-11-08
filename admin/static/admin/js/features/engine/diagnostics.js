@@ -72,7 +72,7 @@ export async function mount(el, ctx) {
 
     <div class="card pd-pane" data-pane="camp" style="display:none">
       <h4>Training camp</h4>
-      <p class="text-muted small">One focus skill per player, chosen by the org; the skill's potential grade is shifted for the progression pass. From age 29 the growth table is potential-agnostic, so a focus on a 29+ player changes nothing.</p>
+      <p class="text-muted small">One focus skill per player, chosen by the org holding him at the preseason camp. Camp replays that skill's end-season progression die at the shifted potential grade and applies the difference. From age 29 the growth table is nearly potential-agnostic (at 29–33 only grade F differs, from 34 nothing), so a focus on a 29+ player changes little or nothing.</p>
       <div id="pd-camp"></div>
     </div>
 
@@ -267,7 +267,6 @@ export async function mount(el, ctx) {
         { key: 'delta', title: 'Δ', align: 'right', sortable: true, html: true, render: x => `<strong class="${x.delta > 0 ? 'text-success' : x.delta < 0 ? 'text-danger' : ''}">${esc(fx(x.delta, 1))}</strong>` },
         { key: 'cohort_mean', title: 'cohort Δ', align: 'right', render: x => fx(x.cohort_mean, 1) },
         { key: 'z', title: 'z', align: 'right', sortable: true, render: x => fx(x.z, 2) },
-        { key: 'camp', title: 'Camp', render: x => (x.camp ? `${x.camp.attr} / ${x.camp.intensity}${x.camp.backfired ? ' (backfired)' : ''}` : '') },
       ],
       rows: [],
     });
@@ -287,16 +286,14 @@ export async function mount(el, ctx) {
     const box = q(el, '#pd-camp');
     if (!d) { setHtml(box, raw(emptyState('Load a season to see camp results.'))); return; }
     const s = d.summary || {}, e = d.effects || {};
-    const effectRows = Object.entries(e.by_intensity || {}).map(([k, v]) => ({
-      outcome: k,
-      n: v.focus && v.focus.n, focus: v.focus && v.focus.mean, focus_vs_mode: v.focus_vs_mode && v.focus_vs_mode.mean,
-      other: v.other && v.other.mean, other_vs_mode: v.other_vs_mode && v.other_vs_mode.mean,
-    }));
+    const effectRows = Object.entries(e.by_outcome || {}).map(([k, v]) => ({ outcome: k, ...v }));
     setHtml(box, html`
       <div class="grid-2 mb-2">
         ${raw(kvTable([
-          ['Focus set but not yet applied', fmtNum(s.pending_focus ?? 0)],
-          ['Players with a camp result this season', fmtNum(e.players ?? 0)],
+          ['Preseason camp', s.applied ? `applied ${s.applied_at}` : 'not applied yet'],
+          ['Focus set, waiting for camp', fmtNum(s.pending_focus ?? 0)],
+          ['Players with a camp result', fmtNum(e.players ?? 0)],
+          ['Skipped (org no longer held the player)', fmtNum(s.skipped ?? 0)],
         ]))}
         <div></div>
       </div>
@@ -305,12 +302,17 @@ export async function mount(el, ctx) {
         { title: 'Intensity', key: 'intensity' }, { title: 'Players', key: 'players' }, { title: 'Backfired', key: 'backfired' },
         { title: 'Mean steps', render: r => fx(r.mean_steps, 2) },
       ], s.by_intensity || []))}
-      <h5 class="mb-1 mt-2">Effect: mean yearly delta of the focus skill vs the same players' other attributes</h5>
+      <h5 class="mb-1 mt-2">Effect: rating change applied per focus attribute (same die, camp grade vs natural grade)</h5>
       ${raw(simpleTable([
-        { title: 'Outcome', key: 'outcome' }, { title: 'n focus attrs', key: 'n' },
-        { title: 'Focus Δ', render: r => fx(r.focus) }, { title: 'Focus Δ − table mode', render: r => fx(r.focus_vs_mode) },
-        { title: 'Other Δ', render: r => fx(r.other) }, { title: 'Other Δ − table mode', render: r => fx(r.other_vs_mode) },
+        { title: 'Outcome', key: 'outcome' }, { title: 'Players', key: 'players' }, { title: 'No effect', key: 'no_effect' },
+        { title: 'Focus attrs', key: 'n' },
+        { title: 'Mean Δ', render: r => fx(r.mean) }, { title: 'Min Δ', render: r => fx(r.min) }, { title: 'Max Δ', render: r => fx(r.max) },
       ], effectRows))}
+      <h5 class="mb-1 mt-2">Effect by age</h5>
+      ${raw(simpleTable([
+        { title: 'Age', key: 'band' }, { title: 'Focus attrs', key: 'n' },
+        { title: 'Mean Δ', render: r => fx(r.mean) }, { title: 'Min Δ', render: r => fx(r.min) }, { title: 'Max Δ', render: r => fx(r.max) },
+      ], e.by_age || []))}
       <h5 class="mb-1 mt-2">Skills chosen</h5>
       ${raw(simpleTable([
         { title: 'Skill', render: r => r.label || r.attr }, { title: 'Players', key: 'players' }, { title: 'Backfired', key: 'backfired' },

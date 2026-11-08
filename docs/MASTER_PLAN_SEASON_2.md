@@ -477,7 +477,7 @@ Effect: a C-grade 60 at 33 is ≈ 48 at 40 and ≈ 30 at 46; an A-grade 70 at 33
 | G3 | Shared yearly development factor | **rejected and rolled back** (2026-11-08): attributes are specific and their dice must stay unrelated. `sample_delta` is the plain independent triangular draw; no config key. |
 | G4 | Snapshots pre/post progression with all 39 bases + potentials, raw_ovr, displayovr | **built** (`services/progression_snapshots.take_snapshot`; retention thinning left for the archive step) |
 | G5 | Diagnostics: table-vs-actual, age profile, drift, outliers, player trajectory, camp effects | **built** (`/admin/analytics/progression-*`, admin section *Progression → Diagnostics*) |
-| G6 | Training camp: **one focus skill per player**, chosen by the org; the skill's potential grade is shifted for this progression pass only; intensities regular +1 / intense 75 % +2 · 25 % −2 / max 50 % +4 · 50 % −4 | **built** (`services/training_camp.py`, blueprint `/training-camp/*`, `docs/training_camp_frontend_guide.md`) |
+| G6 | Training camp: **one focus skill per player**, chosen by the org; the skill's potential grade is shifted for this progression pass only; intensities regular +1 / intense 75 % +2 · 25 % −2 / max 50 % +4 · 50 % −4 | **built** (`services/training_camp.py`, blueprint `/training-camp/*`, `docs/training_camp_frontend_guide.md`); **moved to the preseason** 2026-11-08, see 13i |
 
 Finding from the first snapshot pair: the growth table's **mode is not what players get on average**. A triangular(min, mode, max) draw averages (min+mode+max)/3; with the table's wide negative tails (e.g. B at 22: −5 / 7 / 12) the realised mean is 4.7, not 7. The table-vs-actual report therefore compares with the table mean and shows both numbers; if the modes were meant as the typical outcome, the min/max columns need narrowing (sandbox work, not code).
 
@@ -489,6 +489,16 @@ Finding from the first snapshot pair: the growth table's **mode is not what play
 - **Age profile** of the first pair: peak mean raw_ovr at 30 for MLB, 23 for college, 28 overall. **Drift baseline** (post, mean raw_ovr): L1 18.4 · L2 25.7 · L3 31.6 · L4 43.5 · L5 45.6 · L6 46.2 · L7 47.8 · L8 49.5 · L9 54.8 · no contract 36.0. Oldest player 39; no pure-age retirements.
 - **Outliers:** top gainer a 16-year-old (+28.8, the age-16 "build" year), top loser a 37-year-old (−7.0, z −1.4): nothing anomalous.
 - **Caveat found by the camp-effects report:** the camp shifts the *potential grade*, and from 29 on the growth table is potential-agnostic (plateau, then the same decline for every grade). A focus on a player aged 29+ therefore changes nothing; the six org-1 test players were all 30+, and their focus deltas equal their other attributes'. The camp as specified works for amateurs and pros through 28 (four college years ≈ +1 step on one skill every year). If the "long-tenured pro smooths a weakness" goal matters, the camp needs a second lever for the plateau/decline years (e.g. +1 on the mode of the focus skill, or halving its decline). **Open decision.**
+
+### 13i. Camp timing: preseason replay (decided 2026-11-08)
+
+Problem: camp inside end-season runs before the offseason's player movement (a club picks a focus for a player it is about to lose), while moving progression to the preseason would leave the whole offseason market on stale ratings.
+
+Decision: progression stays at end-season, at natural potentials, so FA, the draft, arbitration and retirements see fresh ratings. Every attribute's end-season die is now **seeded** by (league year, player, column) (`player_progression.attr_uniform`; same triangular distribution, still independent per attribute). Camp is a separate preseason step (runbook step 13, `POST /admin/training-camp/apply`, job `training_camp_apply`): for each focus skill it re-evaluates that die at the shifted grade and adds the difference. The result equals what the progression would have produced at the camp grade (same luck, different grade), but the focus is chosen by the club holding the player on opening day, on post-progression ratings.
+
+Size of the late adjustment (mean of one attribute, table means): regular C → C+ about +0.2 at 20–24; max success C → B+ about +0.8; a max backfire costs about the same. Small enough that offseason valuations stay sound.
+
+Mechanics: focus keyed by the season about to be played; open from end-season to the camp run; `training_camp_runs` row locks it; a focus set by an org that no longer holds the player is skipped; results carry `prog_league_year_id` and `effect` (age + per-column delta); a `post_camp` snapshot covers the camp players; displayovr refreshed. `compute_curve_stats` no longer excludes focus columns (the pre/post pair is camp-free). The 29+ caveat (13g) is unchanged in substance. Precisely: at 29–33 every grade shares one row except F (mode −1 instead of 0), so only an F-potential focus gains a little (the rehearsal measured +0.22 and +0.29); from 34 camp changes nothing.
 
 ### 13h. Original decision list (for reference)
 

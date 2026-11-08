@@ -1,6 +1,7 @@
 """
 Training camp blueprint: an org picks one focus skill and an intensity per
-player for the season; the end-season progression applies it.
+player for the season about to be played; the preseason camp step
+(POST /admin/training-camp/apply) applies it before opening day.
 
 GET    /training-camp/options
 GET    /training-camp/focus?org_id=&league_year_id=

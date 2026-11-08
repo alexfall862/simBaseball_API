@@ -13684,9 +13684,8 @@
   }
 
   function renderProgOutliers(d) {
-    const fmt = items => progTable(['Player', 'Age', 'Lvl', 'Org', 'raw pre', 'raw post', 'Δ', 'cohort Δ', 'z', 'Camp'],
-      items.map(x => [`<a href="#" data-pid="${x.player_id}" class="prog-player-link">${x.name}</a>`, x.age, x.level ?? '-', x.org ?? '-', x.raw_pre, x.raw_post, x.delta, x.cohort_mean, x.z,
-        x.camp ? `${x.camp.attr} / ${x.camp.intensity}${x.camp.backfired ? ' (backfired)' : ''}` : '']));
+    const fmt = items => progTable(['Player', 'Age', 'Lvl', 'Org', 'raw pre', 'raw post', 'Δ', 'cohort Δ', 'z'],
+      items.map(x => [`<a href="#" data-pid="${x.player_id}" class="prog-player-link">${x.name}</a>`, x.age, x.level ?? '-', x.org ?? '-', x.raw_pre, x.raw_post, x.delta, x.cohort_mean, x.z]));
     document.getElementById('prog-gainers').innerHTML = fmt(d.gainers || []);
     document.getElementById('prog-losers').innerHTML = fmt(d.losers || []);
     document.querySelectorAll('.prog-player-link').forEach(a => a.addEventListener('click', ev => {
@@ -13698,11 +13697,12 @@
 
   function renderProgCamp(d) {
     const s = d.summary || {}, e = d.effects || {};
-    let html = `<p style="color:#999">Focus set but not yet applied: ${s.pending_focus ?? 0}. Players with a camp result this season: ${e.players ?? 0}.</p>`;
+    let html = `<p style="color:#999">Preseason camp for this season: ${s.applied ? `applied ${s.applied_at}, ${s.skipped ?? 0} skipped` : `not applied yet, ${s.pending_focus ?? 0} focus skill(s) set`}. Players with a camp result: ${e.players ?? 0}.</p>`;
     html += progTable(['Intensity', 'Players', 'Backfired', 'Mean steps'], (s.by_intensity || []).map(r => [r.intensity, r.players, r.backfired, r.mean_steps]));
-    const rows = Object.entries(e.by_intensity || {}).map(([k, v]) => [k, v.focus?.n ?? '', v.focus?.mean ?? '', v.focus_vs_mode?.mean ?? '', v.other?.mean ?? '', v.other_vs_mode?.mean ?? '']);
-    html += '<h5 style="margin-top:12px">Effect: mean yearly delta of the focus skill vs the same players\' other attributes</h5>';
-    html += progTable(['Outcome', 'n focus attrs', 'Focus Δ', 'Focus Δ − table mode', 'Other Δ', 'Other Δ − table mode'], rows);
+    const rows = Object.entries(e.by_outcome || {}).map(([k, v]) => [k, v.players, v.no_effect, v.n, v.mean ?? '-', v.min ?? '-', v.max ?? '-']);
+    html += '<h5 style="margin-top:12px">Effect: rating change applied per focus attribute (same die, camp grade vs natural grade)</h5>';
+    html += progTable(['Outcome', 'Players', 'No effect', 'Focus attrs', 'Mean Δ', 'Min Δ', 'Max Δ'], rows);
+    html += progTable(['Age', 'Focus attrs', 'Mean Δ', 'Min Δ', 'Max Δ'], (e.by_age || []).map(r => [r.band, r.n, r.mean ?? '-', r.min ?? '-', r.max ?? '-']));
     html += '<h5 style="margin-top:12px">Skills chosen</h5>';
     html += progTable(['Skill', 'Players', 'Backfired'], (s.by_attr || []).map(r => [r.label, r.players, r.backfired]));
     document.getElementById('prog-camp').innerHTML = html;

@@ -6,8 +6,9 @@ diagnostics built on them.
 ``take_snapshot`` writes one row per player (age, level, org, raw_ovr,
 displayovr, all base attributes and potentials as JSON) for a
 (league_year_id, stage). ``compute_curve_stats`` turns the pre/post pair into
-realised deltas per (potential grade, age) for the table-vs-actual report,
-excluding attributes that were training-camp focus skills that year.
+realised deltas per (potential grade, age) for the table-vs-actual report.
+Training camp runs in the preseason, outside that pair; its own
+``post_camp`` snapshot covers only the camp players of the season.
 
 raw_ovr is the weighted average of the *base* attributes
 (``ovr_core.compute_raw_ovr``), an absolute number. displayovr is a cohort
@@ -28,7 +29,7 @@ log = logging.getLogger("app")
 BASE_COLS: List[str] = [f"{a}_base" for a in ALL_ABILITIES] + \
     [f"{s}_{sub}_base" for s in PITCH_SLOTS for sub in PITCH_SUB_ABILITIES]
 POT_COLS: List[str] = [c[:-5] + "_pot" for c in BASE_COLS]
-STAGES = ("pre_progression", "post_progression")
+STAGES = ("pre_progression", "post_progression", "post_camp")
 
 
 def _pct(sorted_vals: List[float], p: float) -> float:
@@ -47,9 +48,17 @@ def _f(v) -> Optional[float]:
 # Writing
 # ---------------------------------------------------------------------------
 
-def take_snapshot(conn, league_year_id: int, stage: str) -> Dict[str, Any]:
+def take_snapshot(conn, league_year_id: int, stage: str,
+                  player_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+    """Snapshot every non-retired player, or only ``player_ids``."""
     if stage not in STAGES:
         raise ValueError(f"stage must be one of {STAGES}")
+    if player_ids is not None and not player_ids:
+        return {"stage": stage, "players": 0}
+    id_sql = "" if player_ids is None else \
+        f" AND p.id IN ({','.join(str(int(x)) for x in player_ids)})"
+    del_sql = "" if player_ids is None else \
+        f" AND player_id IN ({','.join(str(int(x)) for x in player_ids)})"
     from services.ovr_core import load_weights, compute_raw_ovr
 
     weights = load_weights(conn)
@@ -73,11 +82,11 @@ def take_snapshot(conn, league_year_id: int, stage: str) -> Dict[str, Any]:
             JOIN (SELECT playerID, MAX(id) AS max_cid FROM contracts WHERE isFinished = 0 GROUP BY playerID) m
                  ON m.max_cid = c.id
         ) h ON h.playerID = p.id
-        WHERE NOT EXISTS (SELECT 1 FROM player_retirements r WHERE r.player_id = p.id)
-    """)).mappings().all()
+        WHERE NOT EXISTS (SELECT 1 FROM player_retirements r WHERE r.player_id = p.id){id_sql}
+    """.replace("{id_sql}", id_sql))).mappings().all()
 
     conn.execute(text(
-        "DELETE FROM player_rating_snapshots WHERE league_year_id = :ly AND stage = :st"
+        "DELETE FROM player_rating_snapshots WHERE league_year_id = :ly AND stage = :st" + del_sql
     ), {"ly": int(league_year_id), "st": stage})
 
     batch: List[Dict[str, Any]] = []
@@ -134,26 +143,12 @@ def _load_stage(conn, league_year_id: int, stage: str) -> Dict[int, Dict[str, An
     return out
 
 
-def _camp_focus_cols(conn, league_year_id: int) -> Dict[int, set]:
-    out: Dict[int, set] = {}
-    try:
-        for pid, cols in conn.execute(text(
-            "SELECT player_id, pot_columns FROM training_camp_results WHERE league_year_id = :ly"
-        ), {"ly": int(league_year_id)}).all():
-            c = json.loads(cols) if isinstance(cols, (str, bytes)) else cols
-            out[int(pid)] = {x[:-4] + "_base" for x in c}
-    except Exception:
-        pass
-    return out
-
-
 def compute_curve_stats(conn, league_year_id: int) -> Dict[str, Any]:
     """Realised per-(grade, age) deltas from the pre/post pair of this year."""
     pre = _load_stage(conn, league_year_id, "pre_progression")
     post = _load_stage(conn, league_year_id, "post_progression")
     if not pre or not post:
         return {"rows": 0, "error": "both snapshots are required"}
-    camp = _camp_focus_cols(conn, league_year_id)
     table = {(g, int(a)): (float(mn), float(md), float(mx)) for g, a, mn, md, mx in conn.execute(text(
         "SELECT grade, age, prog_min, prog_mode, prog_max FROM growth_curves")).all()}
 
@@ -162,11 +157,8 @@ def compute_curve_stats(conn, league_year_id: int) -> Dict[str, Any]:
         a = pre.get(pid)
         if not a:
             continue
-        skip = camp.get(pid, set())
         age = b["age"]
         for col in BASE_COLS:
-            if col in skip:
-                continue
             v0, v1 = a["bases"].get(col), b["bases"].get(col)
             grade = b["pots"].get(col[:-5] + "_pot")
             if v0 is None or v1 is None or not grade:
@@ -309,22 +301,17 @@ def outliers(conn, league_year_id: int, n: int = 25) -> Dict[str, Any]:
     for r in rows:
         cohorts[(int(r["age"]), None if r["level"] is None else int(r["level"]))].append(float(r["delta"]))
     stats = {k: (statistics.fmean(v), statistics.pstdev(v) if len(v) > 1 else 1.0) for k, v in cohorts.items()}
-    camp = {int(pid): (attr, inten, bool(bf)) for pid, attr, inten, bf in conn.execute(text(
-        "SELECT player_id, attr, intensity, backfired FROM training_camp_results WHERE league_year_id = :ly"
-    ), {"ly": int(league_year_id)}).all()} if _table_exists(conn, "training_camp_results") else {}
     items = []
     for r in rows:
         key = (int(r["age"]), None if r["level"] is None else int(r["level"]))
         mean, sd = stats[key]
         d = float(r["delta"])
         z = (d - mean) / sd if sd > 1e-9 else 0.0
-        c = camp.get(int(r["player_id"]))
         items.append({"player_id": int(r["player_id"]), "name": f"{r['firstName']} {r['lastName']}",
                       "ptype": r["ptype"], "age": int(r["age"]), "level": r["level"],
                       "org": r["org_abbrev"], "raw_pre": round(float(r["raw_pre"]), 2),
                       "raw_post": round(float(r["raw_post"]), 2), "delta": round(d, 2),
-                      "cohort_mean": round(mean, 2), "z": round(z, 2),
-                      "camp": None if not c else {"attr": c[0], "intensity": c[1], "backfired": c[2]}})
+                      "cohort_mean": round(mean, 2), "z": round(z, 2)})
     items.sort(key=lambda x: x["delta"])
     return {"league_year_id": int(league_year_id), "cohorts": len(cohorts),
             "losers": items[:n], "gainers": list(reversed(items[-n:]))}
@@ -388,7 +375,9 @@ def player_trajectory(conn, player_id: int) -> Dict[str, Any]:
                               "band": None if not band else {"min": band[0], "mode": band[1], "max": band[2]},
                               "outside_band": bool(band and delta is not None and
                                                    (delta < band[0] - 0.01 or delta > band[2] + 0.01))})
+        camp_snap = y.get("post_camp")
         seasons.append({"league_year_id": ly_id, "league_year": y["league_year"], "camp": y["camp"],
+                        "post_camp": None if not camp_snap else {k: camp_snap[k] for k in ("age", "level", "org", "raw_ovr", "displayovr")},
                         "pre": None if not pre else {k: pre[k] for k in ("age", "level", "org", "raw_ovr", "displayovr")},
                         "post": None if not post else {k: post[k] for k in ("age", "level", "org", "raw_ovr", "displayovr")},
                         "attributes": attrs})
@@ -398,41 +387,55 @@ def player_trajectory(conn, player_id: int) -> Dict[str, Any]:
 
 
 def camp_effects(conn, league_year_id: int) -> Dict[str, Any]:
-    """Focus-skill deltas vs the same players' non-focus deltas and the table mode."""
+    """
+    What the preseason camp of ``league_year_id`` did to ratings: the
+    applied delta per focus column (replayed die at the shifted grade minus
+    the same die at the natural grade), by intensity/outcome and by age band.
+    """
+    empty = {"league_year_id": int(league_year_id), "players": 0, "by_outcome": {}, "by_age": []}
     if not _table_exists(conn, "training_camp_results"):
-        return {"league_year_id": int(league_year_id), "players": 0, "by_intensity": {}}
-    pre = _load_stage(conn, league_year_id, "pre_progression")
-    post = _load_stage(conn, league_year_id, "post_progression")
-    table = {(g, int(a)): float(md) for g, a, md in conn.execute(text(
-        "SELECT grade, age, prog_mode FROM growth_curves")).all()}
-    rows = conn.execute(text("""
-        SELECT player_id, intensity, steps, backfired, pot_columns
-        FROM training_camp_results WHERE league_year_id = :ly
-    """), {"ly": int(league_year_id)}).mappings().all()
-    agg: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+        return empty
+    try:
+        rows = conn.execute(text("""
+            SELECT player_id, intensity, steps, backfired, effect
+            FROM training_camp_results WHERE league_year_id = :ly
+        """), {"ly": int(league_year_id)}).mappings().all()
+    except Exception:
+        return empty
+    by_outcome: Dict[str, List[float]] = defaultdict(list)
+    by_outcome_players: Dict[str, int] = defaultdict(int)
+    by_outcome_zero: Dict[str, int] = defaultdict(int)
+    bands = (("<=22", 0, 22), ("23-25", 23, 25), ("26-28", 26, 28), ("29+", 29, 999))
+    by_age: Dict[str, List[float]] = defaultdict(list)
     players = 0
     for r in rows:
-        pid = int(r["player_id"])
-        a, b = pre.get(pid), post.get(pid)
-        if not a or not b:
+        e = r["effect"]
+        if isinstance(e, (str, bytes)):
+            e = json.loads(e)
+        if not e:
             continue
         players += 1
-        cols = json.loads(r["pot_columns"]) if isinstance(r["pot_columns"], (str, bytes)) else r["pot_columns"]
-        focus_base = {c[:-4] + "_base" for c in cols}
         key = r["intensity"] + (":backfired" if r["backfired"] else ":success")
-        age = b["age"]
-        for col in BASE_COLS:
-            v0, v1 = a["bases"].get(col), b["bases"].get(col)
-            if v0 is None or v1 is None:
-                continue
-            d = float(v1) - float(v0)
-            grade = b["pots"].get(col[:-5] + "_pot")
-            mode = table.get((grade, age)) if grade else None
-            bucket = "focus" if col in focus_base else "other"
-            agg[key][bucket].append(d)
-            if mode is not None:
-                agg[key][bucket + "_vs_mode"].append(d - mode)
+        deltas = [float(v) for v in (e.get("deltas") or {}).values()]
+        by_outcome_players[key] += 1
+        if not any(abs(v) > 1e-9 for v in deltas):
+            by_outcome_zero[key] += 1
+        by_outcome[key].extend(deltas)
+        age = int(e.get("age") or 0)
+        for label, lo, hi in bands:
+            if lo <= age <= hi:
+                by_age[label].extend(deltas)
+                break
+
+    def _agg(v: List[float]) -> Dict[str, Any]:
+        if not v:
+            return {"n": 0, "mean": None, "min": None, "max": None}
+        return {"n": len(v), "mean": round(statistics.fmean(v), 3),
+                "min": round(min(v), 3), "max": round(max(v), 3)}
+
     out = {}
-    for key, b in agg.items():
-        out[key] = {k: {"n": len(v), "mean": round(statistics.fmean(v), 3)} for k, v in b.items() if v}
-    return {"league_year_id": int(league_year_id), "players": players, "by_intensity": out}
+    for key in sorted(by_outcome_players):
+        out[key] = {"players": by_outcome_players[key], "no_effect": by_outcome_zero[key],
+                    **_agg(by_outcome[key])}
+    return {"league_year_id": int(league_year_id), "players": players, "by_outcome": out,
+            "by_age": [{"band": label, **_agg(by_age[label])} for label, _, _ in bands]}

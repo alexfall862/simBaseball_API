@@ -2722,6 +2722,31 @@ def admin_progression_camp():
     return _prog_call(_both)
 
 
+@admin_bp.post("/training-camp/apply")
+def admin_training_camp_apply():
+    """Preseason training camp for a season (default: the current one).
+    Body: {league_year_id?, force?}. One-shot; a repeat returns the stored run."""
+    admin_pw = os.getenv("ADMIN_PASSWORD")
+    if admin_pw and session.get("admin") is not True \
+            and request.headers.get("X-Admin-Password") != admin_pw:
+        return jsonify(error="unauthorized", message="Invalid admin password."), 401
+    body = request.get_json(silent=True) or {}
+    from db import get_engine
+    from services import training_camp as tc
+    try:
+        with get_engine().begin() as conn:
+            lyid = body.get("league_year_id") or tc.current_league_year_id(conn)
+            if not lyid:
+                return jsonify(ok=False, error="league_year_id is required (no current season)"), 400
+            result = tc.apply_camp(conn, int(lyid), force=bool(body.get("force")))
+        return jsonify(ok=True, **result)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    except Exception as e:
+        logging.exception("training camp apply failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
 @admin_bp.get("/analytics/stamina-overview")
 def admin_stamina_overview():
     guard = _require_admin()
@@ -4572,7 +4597,30 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         return True, (f"{total:,} games scheduled for {next_year} (season id {season_id}). "
                       f"Per level - {lv}."), {"season_id": int(season_id), "games": total, "by_level": by_level}
 
-    # ---- 13. Start new season ----
+    # ---- 13. Preseason training camp ----
+    def s_camp():
+        if not next_ly_id:
+            return False, (f"league_years row for {next_year} does not exist yet; camp for {next_year} "
+                           "runs after it is created (step 11)."), None
+        from services.training_camp import camp_run
+        run = camp_run(conn, next_ly_id)
+        if run:
+            return True, (f"Camp for {next_year} applied at {run['applied_at']}: {run['applied']} player(s), "
+                          f"{run['skipped']} skipped (focus set by an org that no longer holds the player)."), {
+                "camp_applied": run["applied"], "camp_skipped": run["skipped"]}
+        try:
+            pending = int(conn.execute(sa_text(
+                "SELECT COUNT(*) FROM training_camp_focus WHERE league_year_id = :id"
+            ), {"id": next_ly_id}).scalar() or 0)
+        except Exception:
+            return None, ("training_camp_focus table missing: apply "
+                          "migrations/season2_progression_camp.sql."), None
+        return False, (f"{pending} focus skill(s) set for {next_year}. Run after free agency, trades and "
+                       "the draft are settled and before opening day: it replays this offseason's "
+                       "progression dice at the camp grade for each focus skill and locks focus for "
+                       f"{next_year}."), {"pending_focus": pending}
+
+    # ---- 14. Start new season ----
     def s_start_new():
         if not ts_flags:
             return None, "Timestamp unavailable.", None
@@ -4622,7 +4670,12 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
                      "body": {"league_year": Y}, "label": f"Create {next_year}",
                      "confirm": True, **pw}),
         _oc_step("schedule", 12, f"Generate {next_year} schedule", s_schedule),
-        _oc_step("start_new_season", 13, "Start New Season", s_start_new),
+        _oc_step("training_camp", 13, f"Training camp for {next_year}", s_camp,
+                 action=None if not next_ly_id else {
+                     "method": "POST", "url": "/admin/training-camp/apply",
+                     "body": {"league_year_id": next_ly_id}, "label": "Apply training camp",
+                     "confirm": True, **pw}),
+        _oc_step("start_new_season", 14, "Start New Season", s_start_new),
     ]
 
     # Enforce order in the card: hide/annotate Run buttons whose prerequisites
@@ -4632,6 +4685,9 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         for k in ("postseason_awards", "playoff_revenue"):
             if by_key[k]["action"]:
                 by_key[k]["action"] = dict(by_key[k]["action"], blocked="World Series is not complete")
+    if by_key["end_season"]["done"] is not True and by_key["training_camp"]["action"]:
+        by_key["training_camp"]["action"] = dict(by_key["training_camp"]["action"],
+                                                 blocked="End Season has not run")
     for s in steps:
         if s["done"] is True and s["action"]:
             s["action"] = None

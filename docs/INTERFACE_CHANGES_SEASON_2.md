@@ -44,7 +44,7 @@ The league year now begins the moment `POST /games/end-season` runs: `timestamp`
 
 | API | Interface change |
 |---|---|
-| `GET /training-camp/options`; `GET /training-camp/focus?org_id&league_year_id`; `PUT` / `DELETE /training-camp/focus`; `GET /training-camp/results?org_id&league_year_id`. One focus skill + intensity (`regular` / `intense` / `max`) per player per season, set by the org holding the contract (pro levels 4–9, college programs). | New "Training Camp" tab on the team / program page: per-player skill dropdown (19 abilities + the player's pitches) and intensity selector with the risk text; `locked` rows read-only; results view after end-season with a backfire marker. No grades are exposed. |
+| `GET /training-camp/options`; `GET /training-camp/focus?org_id&league_year_id`; `PUT` / `DELETE /training-camp/focus`; `GET /training-camp/results?org_id&league_year_id`. One focus skill + intensity (`regular` / `intense` / `max`) per player per season, set by the org holding the contract (pro levels 4–9, college programs). Camp is a **preseason** step: focus for season Y+1 opens when end-season Y finishes and locks when the admin applies camp before opening day; a focus left by an org that no longer holds the player is skipped. The focus list adds `camp_applied` / `camp_applied_at`. | New "Training Camp" tab on the team / program page: per-player skill dropdown (19 abilities + the player's pitches) and intensity selector with the risk text; read-only once `camp_applied`; results view after camp with a backfire marker. No grades or true deltas are exposed. |
 
 ## 4c. Ratings semantics (no endpoint change)
 

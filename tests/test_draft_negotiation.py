@@ -191,3 +191,73 @@ def test_retire_never_signed_at_25_only_without_pro_history():
     assert retirement_reason(25, True, 70, CFG, ever_pro=False) is None
     # default keeps the old behaviour
     assert retirement_reason(25, False, 70, CFG) is None
+
+
+# ── seeded progression dice + preseason camp replay ──────────────────────
+
+from player_engine.constants import ALL_ABILITIES, PITCH_SLOTS, PITCH_SUB_ABILITIES  # noqa: E402
+from player_engine.player_progression import (  # noqa: E402
+    attr_uniform, _progress_row, sample_delta as _sd,
+)
+from services.training_camp import replay_delta  # noqa: E402
+
+
+def _fake_cache():
+    # monotone in grade below 29, potential-agnostic from 29 (like the real table)
+    cache = {}
+    for i, g in enumerate(GRADE_LADDER):
+        for age in range(16, 51):
+            if age < 29:
+                cache[(g, age)] = (-2.0 + 0.1 * i, 1.0 + 0.3 * i, 4.0 + 0.5 * i)
+            else:
+                cache[(g, age)] = (-3.0, -0.5, 1.0)
+    return cache
+
+
+def _fake_player(pid, age, grade="C"):
+    p = {"id": pid, "age": age}
+    for a in ALL_ABILITIES:
+        p[f"{a}_base"], p[f"{a}_pot"] = 40.0, grade
+    for s in PITCH_SLOTS:
+        for sub in PITCH_SUB_ABILITIES:
+            p[f"{s}_{sub}_base"], p[f"{s}_{sub}_pot"] = 40.0, grade
+    return p
+
+
+def test_attr_uniform_is_reproducible_and_independent_per_attribute():
+    assert attr_uniform(4, 123, "power_base") == attr_uniform(4, 123, "power_base")
+    us = {attr_uniform(4, 123, f"{a}_base") for a in ALL_ABILITIES}
+    assert len(us) == len(ALL_ABILITIES)                     # no shared die
+    assert attr_uniform(4, 123, "power_base") != attr_uniform(5, 123, "power_base")
+    vals = [attr_uniform(1, pid, "contact_base") for pid in range(20000)]
+    assert all(0.0 <= v < 1.0 for v in vals)
+    assert abs(sum(vals) / len(vals) - 0.5) < 0.01
+
+
+def test_seeded_progression_keeps_the_triangular_distribution():
+    params = (-5.0, 7.0, 12.0)
+    draws = [_sd(params, 22, u=attr_uniform(9, pid, "eye_base")) for pid in range(20000)]
+    assert all(-5.0 <= d <= 12.0 for d in draws)
+    assert abs(sum(draws) / len(draws) - (-5.0 + 7.0 + 12.0) / 3) < 0.15
+
+
+def test_camp_replay_equals_progression_at_the_camp_grade():
+    cache = _fake_cache()
+    ly, pid, age = 4, 777, 21
+    natural = _progress_row(_fake_player(pid, age, "C"), age + 1, cache, ly)
+    boosted = _progress_row(_fake_player(pid, age, "B+"), age + 1, cache, ly)
+    d = replay_delta(ly, pid, "power_base", age + 1, "C", "B+", cache)
+    assert abs(natural["power_base"] + d - boosted["power_base"]) < 1e-9
+    # every other attribute is untouched by the replay of one column
+    assert natural["contact_base"] == _progress_row(_fake_player(pid, age, "C"), age + 1, cache, ly)["contact_base"]
+
+
+def test_camp_replay_direction_and_29_plus():
+    cache = _fake_cache()
+    ups = [replay_delta(4, pid, "power_base", 22, "C", "C+", cache) for pid in range(500)]
+    downs = [replay_delta(4, pid, "power_base", 22, "C", "D+", cache) for pid in range(500)]
+    assert all(v >= 0 for v in ups) and any(v > 0 for v in ups)
+    assert all(v <= 0 for v in downs) and any(v < 0 for v in downs)
+    assert all(replay_delta(4, pid, "power_base", 31, "C", "B+", cache) == 0 for pid in range(200))
+    assert replay_delta(4, 1, "power_base", 60, "C", "B+", cache) is None   # outside table
+    assert replay_delta(4, 1, "power_base", 22, None, None, cache) is None  # no grade
