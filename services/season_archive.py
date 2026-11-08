@@ -227,6 +227,11 @@ def _clean_ledger_entries(engine, conn, ly_id: int, dry_run: bool,
                 })
                 summarized += 1
 
+        # Commit the summary rows BEFORE deleting: _batch_delete runs on
+        # separate connections and would otherwise block on this
+        # transaction's locks until the lock wait timeout.
+        conn.commit()
+
         # Delete detail rows
         deleted = _batch_delete(
             engine, "org_ledger_entries",
@@ -361,6 +366,7 @@ _PRESERVED_TABLES = [
     "player_batting_stats", "player_pitching_stats", "player_fielding_stats",
     "team_weekly_record", "game_weeks", "gamelist", "game_results (rows kept)",
     "transaction_log", "draft_state", "draft_picks", "draft_signing",
+    "draft_eligible_players (snapshot kept per draft year)",
     "draft_pick_trades", "recruiting_commitments", "recruiting_state",
     "scouting_budgets", "scouting_actions",
     "player_injury_events", "career_injuries",
@@ -454,21 +460,16 @@ def archive_season(
 
     # 8. org_ledger_entries (summarize + delete)
     try:
-        with engine.begin() as conn:
+        with engine.connect() as conn:
             tables["org_ledger_entries"] = _clean_ledger_entries(
                 engine, conn, league_year_id, dry_run, batch_size)
     except Exception as e:
         logger.warning("archive: ledger_entries failed: %s", e)
         warnings.append(f"org_ledger_entries: {e}")
 
-    # 9. draft_eligible_players
-    try:
-        with engine.connect() as conn:
-            tables["draft_eligible_players"] = _clean_draft_eligible(
-                engine, conn, league_year_id, dry_run, batch_size)
-    except Exception as e:
-        logger.warning("archive: draft_eligible failed: %s", e)
-        warnings.append(f"draft_eligible_players: {e}")
+    # 9. draft_eligible_players: KEPT. The pool is the snapshot the draft
+    #    for that league year ran on (class years, consensus ranks); deleting
+    #    it broke the draft when the archive ran before the draft did.
 
     # 10. recruiting tables
     try:

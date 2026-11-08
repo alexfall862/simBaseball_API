@@ -73,9 +73,50 @@ def _require_admin():
         return None
     return jsonify(error="unauthorized"), 401
 
+def _asset_version() -> str:
+    """Cache-busting token: git sha when available, else process start time."""
+    global _ASSET_V
+    if _ASSET_V:
+        return _ASSET_V
+    v = os.getenv("SOURCE_COMMIT") or os.getenv("GIT_SHA") or ""
+    if not v:
+        try:
+            import subprocess
+            v = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                        stderr=subprocess.DEVNULL, timeout=2).decode().strip()
+        except Exception:  # noqa: BLE001
+            v = ""
+    if not v:
+        v = f"{int(time.time()):x}"
+    _ASSET_V = v
+    return v
+
+
+_ASSET_V = ""
+
+
+def _admin_flags() -> dict:
+    """Feature flags exposed to the SPA as window.ADMIN_FLAGS."""
+    raw = os.getenv("ADMIN_FLAGS", "")
+    flags = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        k, _, v = part.partition("=")
+        flags[k.strip()] = (v.strip().lower() not in ("0", "false", "off")) if v else True
+    return flags
+
+
 @admin_bp.get("/")
 def admin_index():
-    return render_template("index.html")
+    return render_template("index.html", asset_v=_asset_version(), admin_flags=_admin_flags())
+
+
+@admin_bp.get("/legacy")
+def admin_legacy_index():
+    """The previous single-file admin UI, kept until every section is ported."""
+    return render_template("legacy.html")
 
 @admin_bp.post("/login")
 def admin_login():
@@ -2607,6 +2648,80 @@ def admin_db_storage():
 # Stamina Reports
 # ---------------------------------------------------------------------------
 
+# ── Progression diagnostics (true values from player_rating_snapshots) ──
+
+def _prog_call(fn, *args, **kwargs):
+    guard = _require_admin()
+    if guard:
+        return guard
+    try:
+        from db import get_engine
+        engine = get_engine()
+        with engine.connect() as conn:
+            data = fn(conn, *args, **kwargs)
+        return jsonify(ok=True, **data) if isinstance(data, dict) else jsonify(ok=True, rows=data)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    except Exception as e:
+        logging.exception("progression analytics failed")
+        return jsonify(ok=False, error=str(e)), 500
+
+
+@admin_bp.get("/analytics/progression-years")
+def admin_progression_years():
+    from services.progression_snapshots import snapshot_years
+    return _prog_call(lambda conn: {"years": snapshot_years(conn)})
+
+
+@admin_bp.get("/analytics/progression-curves")
+def admin_progression_curves():
+    from services.progression_snapshots import table_vs_actual
+    lyid = request.args.get("league_year_id", type=int)
+    if not lyid:
+        return jsonify(ok=False, error="missing_params"), 400
+    return _prog_call(table_vs_actual, lyid, request.args.get("grade") or None)
+
+
+@admin_bp.get("/analytics/progression-age-profile")
+def admin_progression_age_profile():
+    from services.progression_snapshots import age_profile
+    return _prog_call(age_profile, request.args.get("level", type=int))
+
+
+@admin_bp.get("/analytics/progression-drift")
+def admin_progression_drift():
+    from services.progression_snapshots import drift
+    return _prog_call(drift)
+
+
+@admin_bp.get("/analytics/progression-outliers")
+def admin_progression_outliers():
+    from services.progression_snapshots import outliers
+    lyid = request.args.get("league_year_id", type=int)
+    if not lyid:
+        return jsonify(ok=False, error="missing_params"), 400
+    return _prog_call(outliers, lyid, request.args.get("n", default=25, type=int))
+
+
+@admin_bp.get("/analytics/progression-player/<int:player_id>")
+def admin_progression_player(player_id: int):
+    from services.progression_snapshots import player_trajectory
+    return _prog_call(player_trajectory, player_id)
+
+
+@admin_bp.get("/analytics/progression-camp")
+def admin_progression_camp():
+    from services.progression_snapshots import camp_effects
+    from services.training_camp import admin_summary
+    lyid = request.args.get("league_year_id", type=int)
+    if not lyid:
+        return jsonify(ok=False, error="missing_params"), 400
+
+    def _both(conn):
+        return {"summary": admin_summary(conn, lyid), "effects": camp_effects(conn, lyid)}
+    return _prog_call(_both)
+
+
 @admin_bp.get("/analytics/stamina-overview")
 def admin_stamina_overview():
     guard = _require_admin()
@@ -3090,7 +3205,8 @@ def admin_season_archive():
             dry_run=bool(dry_run),
         )
 
-        return jsonify(ok=True, **result)
+        # A step that failed is reported in warnings; do not call that ok.
+        return jsonify(ok=not result.get("warnings"), **result)
 
     except ValueError as e:
         return jsonify(ok=False, error="validation", message=str(e)), 400
@@ -3756,7 +3872,6 @@ def admin_fa_orphan_scan():
                   AND NOT EXISTS (
                       SELECT 1 FROM fa_auction fa
                       WHERE fa.player_id = st.player_id
-                        AND fa.league_year_id = :lyid
                         AND fa.phase IN ('open', 'listening', 'finalize')
                   )
                   AND NOT EXISTS (
@@ -3765,7 +3880,7 @@ def admin_fa_orphan_scan():
                         AND wc.status = 'active'
                   )
                 ORDER BY st.mlb_service_years DESC, p.lastName ASC
-            """), {"fa_threshold": FA_THRESHOLD, "lyid": league_year_id}).mappings().all()
+            """), {"fa_threshold": FA_THRESHOLD}).mappings().all()
 
         return jsonify(
             ok=True,
@@ -4373,9 +4488,11 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
             return None, "Timestamp unavailable; cannot show FA phase flags.", None
         if phase == "FREE_AGENCY":
             return None, (f"Free agency is OPEN now (round {ts_flags['FreeAgencyRound']}). "
+                          f"Each 'Advance FA Round' moves active auctions one phase "
+                          f"(open -> listening -> finalize -> signed). "
                           f"In progress - confirm complete manually. {_flags_str()}"), None
-        return None, (f"No completion signal exists for FA; window is locked. Confirm manually "
-                      f"that FA was run for {Y}. {_flags_str()}"), None
+        return None, (f"No completion signal exists for FA; window is locked. Confirm "
+                      f"manually that FA was run for {Y}. {_flags_str()}"), None
 
     def s_draft():
         if not ts_flags:
@@ -4397,15 +4514,33 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
 
     # ---- 10. Retirements / amateur class ----
     def s_retirements():
-        return None, ("NOT BUILT: there is no retirement logic and no amateur-class generation in "
-                      "the API. Handle manually (or skip) before starting the new season."), None
+        # Automatic since 2026-11-08: graduation, retirements and the new HS/INTAM
+        # classes run inside end-season; walk-ons are placed when the draft completes.
+        try:
+            retired = int(conn.execute(sa_text(
+                "SELECT COUNT(*) FROM player_retirements WHERE league_year_id = :lyid"
+            ), {"lyid": league_year_id}).scalar() or 0)
+        except Exception:
+            return None, ("player_retirements table missing: apply "
+                          "migrations/season2_amateur_pipeline.sql before end-season."), None
+        ended = False
+        if _oc_col_exists(conn, "league_years", "season_ended_at"):
+            ended = bool(conn.execute(sa_text(
+                "SELECT season_ended_at FROM league_years WHERE id = :L"), {"L": L}).scalar())
+        if ended or retired:
+            return True, (f"Done inside End Season: {retired} retirement(s) recorded for this year; "
+                          "HS/college graduation and the new amateur classes ran with it."), {
+                "retired": retired}
+        return False, ("Runs automatically as part of End Season (step 5); nothing to do here. "
+                       "Sizes/thresholds: league_config."), {"retired": retired}
 
     # ---- 11. Next league year ----
     def s_next_year():
         if not next_ly:
-            return False, (f"league_years row for {next_year} does not exist. Run "
-                           "initialize-next-league-year (creates the row + its game_weeks; "
-                           "cannot be re-run)."), {"next_league_year_id": None}
+            return False, (f"league_years row for {next_year} does not exist. End Season (step 5) "
+                           "creates it automatically (row + game_weeks) and moves the calendar to "
+                           f"{next_year}; the Create button below does the same ahead of time."), {
+                "next_league_year_id": None}
         gw = int(conn.execute(sa_text(
             "SELECT COUNT(*) FROM game_weeks WHERE league_year_id = :id"), {"id": next_ly_id}).scalar() or 0)
         need = int(next_ly["weeks_in_season"] or 0)
@@ -4441,14 +4576,18 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
     def s_start_new():
         if not ts_flags:
             return None, "Timestamp unavailable.", None
-        ts_ok = ts_flags.get("Season") == next_year
+        ts_ok = ts_flags.get("Season") == next_year and not ts_flags.get("IsOffSeason")
         ls_id = None
         if league_state and league_state.get("current_league_year_id") is not None:
             ls_id = int(league_state["current_league_year_id"])
         ls_ok = next_ly_id is not None and ls_id == next_ly_id
         extra = {"league_state_league_year_id": ls_id}
         if ts_ok and ls_ok:
-            return True, f"Timestamp is on {next_year} and league_state.current_league_year_id={ls_id}.", extra
+            return True, f"Regular season {next_year} is under way (week {ts_flags.get('Week')}); league_state.current_league_year_id={ls_id}.", extra
+        if ts_flags.get("Season") == next_year and ts_flags.get("IsOffSeason"):
+            return False, (f"Calendar is on {next_year} (offseason, phase {phase}). Finish FA, draft and "
+                           f"recruiting, generate the schedule, then use the Start New Season card with "
+                           f"league_year_id={next_ly_id}."), extra
         if ts_ok and not ls_ok:
             return False, (f"Timestamp is on {next_year} but league_state.current_league_year_id={ls_id} "
                            f"(expected {next_ly_id})."), extra
@@ -4476,8 +4615,7 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         _oc_step("free_agency", 7, "Free Agency", s_free_agency, manual=True),
         _oc_step("draft", 8, "Draft", s_draft, manual=True),
         _oc_step("recruiting", 9, "Recruiting", s_recruiting, manual=True),
-        _oc_step("retirements", 10, "Retirements and new amateur class", s_retirements,
-                 manual=True, not_built=True),
+        _oc_step("retirements", 10, "Retirements and new amateur class", s_retirements),
         _oc_step("next_league_year", 11, f"Initialize league year {next_year}", s_next_year,
                  action=None if next_ly else {
                      "method": "POST", "url": "/admin/initialize-next-league-year",
@@ -4562,3 +4700,11 @@ def admin_offseason_checklist():
     except Exception as e:
         logging.exception("offseason_checklist_failed")
         return jsonify(ok=False, error="checklist_error", message=str(e)), 500
+
+
+# ---------------------------------------------------------------------------
+# Route modules split out of this file (registered on admin_bp at import).
+# ---------------------------------------------------------------------------
+from admin import routes_summary  # noqa: E402,F401
+from admin import routes_jobs  # noqa: E402,F401
+from admin import routes_timeline  # noqa: E402,F401

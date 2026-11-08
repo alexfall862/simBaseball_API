@@ -595,9 +595,10 @@ def _get_standings_priority(
     if not org_ids:
         return []
 
-    # Get season from league_year_id
+    # Get seasons.id (what game_results.season stores) from league_year_id
     season_row = conn.execute(sa_text(
-        "SELECT league_year FROM league_years WHERE id = :lyid"
+        "SELECT s.id FROM league_years ly "
+        "JOIN seasons s ON s.year = ly.league_year WHERE ly.id = :lyid"
     ), {"lyid": league_year_id}).first()
     if not season_row:
         # Fallback: treat everyone as equal, use org_id order

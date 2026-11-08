@@ -27,11 +27,20 @@ def weighted_random_row(conn, query, params=None):
     return random.choices(rows, weights=weights, k=1)[0]
 
 
-def pick_region(conn):
+def pick_region(conn, region_type=None):
     """
     Pick a random region weighted by population/baseball presence.
+    ``region_type`` ('usa' / 'international') restricts the draw to that
+    kind of region (used to generate HS vs. INTAM classes).
     Returns dict with: id, name, region_type, weight, name_pool.
     """
+    if region_type:
+        return weighted_random_row(
+            conn,
+            "SELECT id, name, region_type, weight, name_pool FROM regions "
+            "WHERE region_type = :rt",
+            {"rt": region_type},
+        )
     return weighted_random_row(
         conn,
         "SELECT id, name, region_type, weight, name_pool FROM regions"
@@ -161,6 +170,7 @@ class SeedCache:
         ).mappings().all()
         self._regions = [dict(r) for r in rows]
         self._region_weights = [r["weight"] for r in self._regions]
+        self._regions_by_type = {}
 
     def _load_cities(self, conn):
         rows = conn.execute(
@@ -222,7 +232,17 @@ class SeedCache:
 
     # ── Weighted random picks (in-memory, no DB) ───────────
 
-    def pick_region(self):
+    def pick_region(self, region_type=None):
+        if region_type:
+            key = str(region_type).lower()
+            if key not in self._regions_by_type:
+                regs = [r for r in self._regions
+                        if str(r.get("region_type", "")).lower() == key]
+                self._regions_by_type[key] = (
+                    regs, [r["weight"] for r in regs])
+            regs, weights = self._regions_by_type[key]
+            if regs:
+                return random.choices(regs, weights, k=1)[0]
         return random.choices(self._regions, self._region_weights, k=1)[0]
 
     def pick_city(self, region_id):

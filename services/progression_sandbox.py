@@ -152,23 +152,13 @@ def _generate_synthetic_players(count, start_age, player_type, potential_weights
 
 
 def _progress_ability_inmem(growth_curves, age, grade):
-    """Sample progression delta using in-memory growth curves."""
+    """Sample progression delta using in-memory growth curves (same sampler
+    as the live progression)."""
     params = growth_curves.get((grade, age))
     if not params:
         return 0.0
-    prog_min, prog_mode, prog_max = params
-
-    if prog_min > prog_mode:
-        prog_min = prog_mode
-    if prog_mode > prog_max:
-        prog_max = prog_mode
-
-    delta = random.triangular(prog_min, prog_max, prog_mode)
-
-    if age <= 19 and delta < -1:
-        delta = -1.0
-
-    return delta
+    from player_engine.player_progression import sample_delta
+    return sample_delta(params, age, random)
 
 
 def _run_simulation(players, seasons, start_age, growth_curves, tracked_abilities):
@@ -183,6 +173,8 @@ def _run_simulation(players, seasons, start_age, growth_curves, tracked_abilitie
 
     # per-player tracking: trajectories[ability][player_index] = {grade, values: {age: base}}
     trajectories = defaultdict(dict)
+    table_ages = [a for (_g, a) in growth_curves.keys()]
+    min_age, max_age = (min(table_ages), max(table_ages)) if table_ages else (16, 45)
 
     for pi, player in enumerate(players):
         for ability in tracked_abilities:
@@ -201,7 +193,7 @@ def _run_simulation(players, seasons, start_age, growth_curves, tracked_abilitie
             for ability in tracked_abilities:
                 ab = player["abilities"][ability]
 
-                if 16 <= current_age <= 45:
+                if min_age <= current_age <= max_age:
                     delta = _progress_ability_inmem(
                         growth_curves, current_age, ab["pot"],
                     )

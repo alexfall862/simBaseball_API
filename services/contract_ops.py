@@ -248,17 +248,22 @@ def get_org_contract_overview(
                 prm = {"ly": league_year_id}
                 prm.update({f"p{i}": pid for i, pid in enumerate(pids)})
                 rows = conn.execute(text(
-                    f"SELECT player_id, demand_type, demand_json "
+                    f"SELECT player_id, demand_type, min_aav, min_years, "
+                    f"war_snapshot, buyout_price "
                     f"FROM player_demands "
                     f"WHERE league_year_id = :ly AND player_id IN ({ph})"
-                ), prm).all()
-                import json as _json
+                ), prm).mappings().all()
                 for r in rows:
-                    data = _json.loads(r[2]) if r[2] else {}
-                    if r[1] == "extension":
-                        cached_ext[r[0]] = data
-                    elif r[1] == "buyout":
-                        cached_buyout[r[0]] = data
+                    data = {
+                        "min_aav": str(r["min_aav"]) if r["min_aav"] is not None else None,
+                        "min_years": r["min_years"],
+                        "war": float(r["war_snapshot"]) if r["war_snapshot"] is not None else None,
+                        "buyout_price": str(r["buyout_price"]) if r["buyout_price"] is not None else None,
+                    }
+                    if r["demand_type"] == "extension":
+                        cached_ext[r["player_id"]] = data
+                    elif r["demand_type"] == "buyout":
+                        cached_buyout[r["player_id"]] = data
 
             for entry in results:
                 pid = entry["player_id"]
@@ -292,15 +297,24 @@ def get_org_contract_overview(
 
 # ── Public: end-of-season processing ─────────────────────────────────
 
-def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
+def process_end_of_season(conn, league_year_id: int,
+                          next_league_year_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Run full end-of-season contract processing:
       1. Credit MLB service time
-      2. Advance mid-contract current_year
-      3. Process expiring contracts (extensions, auto-renewal, FA)
+      2. Identify expiring contracts (current_year == years)
+      3. Advance every other started contract's current_year
+      4. Process the expiring contracts (extensions, auto-renewal, FA)
     Returns a summary dict.
+
+    ``league_year_id`` is the season that just finished (service time, stats).
+    ``next_league_year_id`` is the upcoming season that renewals, arbitration
+    market rows, demands and auctions belong to; defaults to the same year
+    for backwards compatibility.
     """
     t = _t(conn)
+    if next_league_year_id is None:
+        next_league_year_id = league_year_id
     c = t["contracts"]
     d = t["details"]
     s = t["shares"]
@@ -328,6 +342,12 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
         "auction_entries": 0,
     }
     fa_player_ids = []  # collect FA-eligible players for auction entry
+    amateur_expiring = []  # HS / INTAM / college contracts -> graduation
+    next_ly_row = conn.execute(
+        select(ly.c.league_year).where(ly.c.id == next_league_year_id)
+    ).first()
+    next_league_year_val = (int(next_ly_row._mapping["league_year"])
+                            if next_ly_row else league_year_val + 1)
 
     # ── Step 1: Credit service time ──────────────────────────────────
     # Find all players at MLB level (9) with active held contracts
@@ -370,19 +390,12 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
             )
             summary["service_time_credited"] += 1
 
-    # ── Step 2: Advance mid-contract players ─────────────────────────
-    result = conn.execute(
-        update(c)
-        .where(and_(
-            c.c.isFinished == 0,
-            c.c.current_year < c.c.years,
-        ))
-        .values(current_year=c.c.current_year + 1)
-    )
-    summary["contracts_advanced"] = result.rowcount
-
-    # ── Step 3: Process expiring contracts ───────────────────────────
-    # All contracts in their final year (current_year == years, not yet finished)
+    # ── Step 2: Identify expiring contracts ──────────────────────────
+    # A contract expires when the season just completed was its final year
+    # (current_year == years). This MUST be selected before Step 3 advances
+    # the others: doing it the other way round advanced a contract into its
+    # final year and expired it in the same pass, cutting every multi-year
+    # deal (pro contracts, HS/college class years) short by a season.
     expiring = conn.execute(
         select(
             c.c.id.label("contract_id"),
@@ -397,6 +410,21 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
         ))
     ).all()
 
+    # ── Step 3: Advance mid-contract players ─────────────────────────
+    # Only contracts that have started (first year <= the season just played).
+    # Pending extensions carry leagueYearSigned = next year and must not be
+    # advanced before they begin.
+    result = conn.execute(
+        update(c)
+        .where(and_(
+            c.c.isFinished == 0,
+            c.c.current_year < c.c.years,
+            c.c.leagueYearSigned <= league_year_val,
+        ))
+        .values(current_year=c.c.current_year + 1)
+    )
+    summary["contracts_advanced"] = result.rowcount
+
     for row in expiring:
         m = row._mapping
         contract_id = m["contract_id"]
@@ -405,6 +433,14 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
         end_year = m["leagueYearSigned"] + m["years"]
 
         summary["contracts_expired"] += 1
+
+        # Amateur contracts (HS 1 / INTAM 2 / college 3) are class years, not
+        # pro deals: graduation handles them (college enrollment, draft pool,
+        # INTAM re-up / age-out) instead of the minor-league auto-renewal
+        # below, which turned every senior into a fifth-year.
+        if level is not None and int(level) <= 3:
+            amateur_expiring.append(dict(m))
+            continue
 
         # Check for extension
         ext = conn.execute(
@@ -421,7 +457,7 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
         if ext:
             # Extension takes over — just finish the old contract
             conn.execute(
-                update(c).where(c.c.id == contract_id).values(isFinished=1)
+                update(c).where(c.c.id == contract_id).values(isFinished=1, isActive=0)
             )
             summary["extensions_activated"] += 1
             continue
@@ -452,12 +488,12 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
             if holder_org:
                 _create_renewal_contract(
                     conn, contract_id, player_id, holder_org,
-                    MINOR_SALARY, level, end_year, league_year_id,
+                    MINOR_SALARY, level, end_year, next_league_year_id,
                 )
                 summary["auto_renewed_minor"] += 1
             else:
                 conn.execute(
-                    update(c).where(c.c.id == contract_id).values(isFinished=1)
+                    update(c).where(c.c.id == contract_id).values(isFinished=1, isActive=0)
                 )
                 summary["became_free_agents"] += 1
 
@@ -466,12 +502,12 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
             if holder_org:
                 _create_renewal_contract(
                     conn, contract_id, player_id, holder_org,
-                    PRE_ARB_SALARY, level, end_year, league_year_id,
+                    PRE_ARB_SALARY, level, end_year, next_league_year_id,
                 )
                 summary["auto_renewed_pre_arb"] += 1
             else:
                 conn.execute(
-                    update(c).where(c.c.id == contract_id).values(isFinished=1)
+                    update(c).where(c.c.id == contract_id).values(isFinished=1, isActive=0)
                 )
                 summary["became_free_agents"] += 1
 
@@ -493,7 +529,7 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
 
                 new_id = _create_renewal_contract(
                     conn, contract_id, player_id, holder_org,
-                    arb_salary, level, end_year, league_year_id,
+                    arb_salary, level, end_year, next_league_year_id,
                     tx_type="arb_renewal",
                 )
 
@@ -506,7 +542,7 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
                         conn, player_id, new_id, war,
                         arb_salary, arb_salary, 1, Decimal("0"),
                         _get_player_age(conn, player_id),
-                        service_years, league_year_id, "arb_renewal",
+                        service_years, next_league_year_id, "arb_renewal",
                     )
                 except Exception as e:
                     log.warning("market history for arb failed: %s", e)
@@ -514,23 +550,48 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
                 summary["arb_renewed"] += 1
             else:
                 conn.execute(
-                    update(c).where(c.c.id == contract_id).values(isFinished=1)
+                    update(c).where(c.c.id == contract_id).values(isFinished=1, isActive=0)
                 )
                 summary["became_free_agents"] += 1
 
         else:
             # FA-eligible — finish contract and enter auction
             conn.execute(
-                update(c).where(c.c.id == contract_id).values(isFinished=1)
+                update(c).where(c.c.id == contract_id).values(isFinished=1, isActive=0)
             )
             fa_player_ids.append(player_id)
             summary["became_free_agents"] += 1
 
+    # ── Step 3b: Graduation (HS / college seniors, INTAM) ────────────
+    try:
+        from services.graduation import process_amateur_expiries
+        summary["graduation"] = process_amateur_expiries(
+            conn, amateur_expiring, league_year_id,
+            next_league_year_id, next_league_year_val,
+        )
+    except Exception as e:
+        log.exception("graduation failed")
+        summary["graduation_error"] = str(e)
+        raise
+
+    # ── Step 3c: Retirements (before auction entry so retirees never
+    #    enter free agency). Ages are pre-progression (the season played).
+    try:
+        from services.graduation import process_retirements
+        ret = process_retirements(conn, league_year_id)
+        retired_ids = set(ret.get("player_ids", []))
+        fa_player_ids = [p for p in fa_player_ids if p not in retired_ids]
+        summary["retirements"] = {k: v for k, v in ret.items() if k != "player_ids"}
+    except Exception as e:
+        log.exception("retirements failed")
+        summary["retirements_error"] = str(e)
+
     # ── Step 4: Enter newly-FA players into auction pool ───────────
+    # Auctions (and the demands behind them) belong to the upcoming season.
     for pid in fa_player_ids:
         try:
             from services.fa_auction import enter_auction
-            enter_auction(conn, pid, league_year_id, current_week=0)
+            enter_auction(conn, pid, next_league_year_id, current_week=0)
             summary["auction_entries"] += 1
         except Exception as e:
             log.warning("Failed to enter player %d into auction: %s", pid, e)
@@ -554,7 +615,6 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
           AND NOT EXISTS (
               SELECT 1 FROM fa_auction fa
               WHERE fa.player_id = st.player_id
-                AND fa.league_year_id = :lyid
                 AND fa.phase IN ('open', 'listening', 'finalize')
           )
           AND NOT EXISTS (
@@ -562,10 +622,13 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
               WHERE wc.player_id = st.player_id
                 AND wc.status = 'active'
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM player_retirements pr
+              WHERE pr.player_id = st.player_id
+          )
           AND st.player_id NOT IN :already_entered
     """), {
         "fa_threshold": FA_THRESHOLD,
-        "lyid": league_year_id,
         "already_entered": tuple(fa_player_ids) if fa_player_ids else (0,),
     }).all()
 
@@ -581,7 +644,7 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
             continue
         try:
             from services.fa_auction import enter_auction
-            enter_auction(conn, pid, league_year_id, current_week=0)
+            enter_auction(conn, pid, next_league_year_id, current_week=0)
             summary["orphan_sweep"] += 1
             summary["auction_entries"] += 1
         except Exception as e:
@@ -589,6 +652,15 @@ def process_end_of_season(conn, league_year_id: int) -> Dict[str, Any]:
 
     if summary["orphan_sweep"]:
         log.info("orphan_sweep: entered %d stranded FAs into auction", summary["orphan_sweep"])
+
+    # ── Step 6: Draft pool snapshot for the upcoming draft ───────────
+    # HS graduates + every college player, ranked by composite.
+    try:
+        from services.graduation import build_draft_pool
+        summary["draft_pool"] = build_draft_pool(conn, next_league_year_id)
+    except Exception as e:
+        log.exception("draft pool snapshot failed")
+        summary["draft_pool_error"] = str(e)
 
     log.info(
         "end_of_season: year=%d credited=%d advanced=%d expired=%d "
@@ -642,7 +714,7 @@ def _create_renewal_contract(
 
     # Finish old contract
     conn.execute(
-        update(c).where(c.c.id == old_contract_id).values(isFinished=1)
+        update(c).where(c.c.id == old_contract_id).values(isFinished=1, isActive=0)
     )
 
     # Create new 1-year contract
@@ -722,13 +794,23 @@ def get_payroll_projection(conn, org_id: int) -> Dict[str, Any]:
     st = t["service_time"]
     ly = t["league_years"]
 
-    # Get current league year
-    current_ly_row = conn.execute(
-        select(ly.c.league_year)
-        .order_by(ly.c.league_year.desc())
-        .limit(1)
+    # Get current league year from the sim clock (timestamp_state.season).
+    # MAX(league_years.league_year) is wrong during the offseason: the next
+    # year's row is created before the season actually rolls over.
+    ts_row = conn.execute(
+        text("SELECT season FROM timestamp_state WHERE id = 1")
     ).first()
-    current_league_year = current_ly_row._mapping["league_year"] if current_ly_row else 2026
+    if ts_row and ts_row[0]:
+        current_league_year = int(ts_row[0])
+    else:
+        current_ly_row = conn.execute(
+            select(ly.c.league_year)
+            .order_by(ly.c.league_year.desc())
+            .limit(1)
+        ).first()
+        if not current_ly_row:
+            raise ValueError("No league_years rows exist")
+        current_league_year = int(current_ly_row._mapping["league_year"])
 
     # Big query: all contract detail rows for this org's active contracts
     league_year_expr = (c.c.leagueYearSigned + d.c.year - 1).label("league_year")

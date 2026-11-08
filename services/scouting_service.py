@@ -270,12 +270,13 @@ def _validate_scouting_permission(conn, org_id, player_id, action_type):
         if not is_college_org(target_org_id):
             raise ValueError("College potential scouting only applies to college players")
 
-    # Draft scouting: MLB orgs, on college/INTAM players
+    # Draft scouting: MLB orgs, on college / INTAM / HS players (HS seniors
+    # are draft-eligible, so MLB orgs must be able to scout them).
     elif action_type in ("draft_attrs_fuzzed", "draft_attrs_precise", "draft_potential_precise"):
         if not (MLB_ORG_MIN <= org_id <= MLB_ORG_MAX):
-            raise ValueError("Only MLB organizations can draft-scout college/INTAM players")
-        if not (is_college_org(target_org_id) or target_org_id == INTAM_ORG_ID):
-            raise ValueError("Draft scouting only applies to college or INTAM players")
+            raise ValueError("Only MLB organizations can draft-scout amateur players")
+        if not (is_college_org(target_org_id) or target_org_id in (INTAM_ORG_ID, USHS_ORG_ID)):
+            raise ValueError("Draft scouting only applies to college, INTAM or HS players")
 
     # Pro roster scouting: any org, on pro-level players
     elif action_type in ("pro_attrs_precise", "pro_potential_precise"):

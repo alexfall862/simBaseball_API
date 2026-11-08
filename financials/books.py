@@ -179,6 +179,17 @@ def run_year_start_books(engine, league_year: int) -> Dict[str, Any]:
                     and_(
                         contracts.c.leagueYearSigned == league_year,
                         contracts.c.bonus > 0,
+                        # Bonuses debited at signing time (FA signings,
+                        # extensions, buyouts) already have a ledger row;
+                        # charging them again here double-paid every
+                        # extension bonus.
+                        ~select(literal(1))
+                        .select_from(ledger)
+                        .where(
+                            ledger.c.contract_id == contracts.c.id,
+                            ledger.c.entry_type.in_(("bonus", "buyout")),
+                        )
+                        .exists(),
                     )
                 )
             ).all()
@@ -926,9 +937,22 @@ def initialize_next_league_year(engine, current_league_year: int) -> Dict[str, A
         if gw_inserts:
             conn.execute(gw_tbl.insert(), gw_inserts)
 
+        # ---- Carry media shares forward ----
+        # Year-start books pay media_total * media_share per org; without rows
+        # for the new year every org's media revenue is silently zero.
+        media_copied = conn.execute(text("""
+            INSERT INTO org_media_shares (league_year_id, org_id, media_share)
+            SELECT :new_id, oms.org_id, oms.media_share
+            FROM org_media_shares oms
+            WHERE oms.league_year_id = :cur_id
+              AND NOT EXISTS (SELECT 1 FROM org_media_shares x
+                              WHERE x.league_year_id = :new_id AND x.org_id = oms.org_id)
+        """), {"new_id": new_ly_id, "cur_id": cur["id"]}).rowcount
+
     return {
         "league_year": next_year,
         "league_year_id": new_ly_id,
+        "media_shares_copied": int(media_copied or 0),
         "previous_year": current_league_year,
         "inflation_rate": float(inflation_factor),
         "inflation_bounds": {

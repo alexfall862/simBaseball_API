@@ -43,7 +43,8 @@ from .db_helpers import (
 )
 
 
-def generate_player(conn, age=15, seed_cache=None, next_id=None):
+def generate_player(conn, age=15, seed_cache=None, next_id=None,
+                    region_type=None):
     """
     Generate a complete new player and INSERT into simbbPlayers.
     Returns the new player's data as a dict.
@@ -53,15 +54,17 @@ def generate_player(conn, age=15, seed_cache=None, next_id=None):
         age: Starting age (default 15)
         seed_cache: Optional SeedCache for batch generation (avoids DB lookups)
         next_id: Explicit ID to assign (avoids relying on AUTO_INCREMENT)
+        region_type: 'usa' or 'international' to force the player's origin
+            (HS classes are US-only, INTAM classes international-only)
     """
     ptype = _pick_position()
 
     # Location
     if seed_cache:
-        region = seed_cache.pick_region()
+        region = seed_cache.pick_region(region_type)
         city_row = seed_cache.pick_city(region["id"])
     else:
-        region = pick_region(conn)
+        region = pick_region(conn, region_type)
         city_row = pick_city(conn, region["id"])
     if not region:
         raise RuntimeError("No regions found in seed data — is the regions table populated?")
@@ -155,7 +158,7 @@ def generate_player(conn, age=15, seed_cache=None, next_id=None):
     return player
 
 
-def generate_players(conn, count, age=15):
+def generate_players(conn, count, age=15, region_type=None):
     """Generate multiple players. Preloads seed data for batch performance."""
     cache = SeedCache(conn)
     # Pre-fetch the next available ID so we don't rely on AUTO_INCREMENT
@@ -163,7 +166,8 @@ def generate_players(conn, count, age=15):
     next_id = max_id + 1
     players = []
     for _ in range(count):
-        p = generate_player(conn, age=age, seed_cache=cache, next_id=next_id)
+        p = generate_player(conn, age=age, seed_cache=cache, next_id=next_id,
+                            region_type=region_type)
         next_id = p["id"] + 1
         players.append(p)
     return players

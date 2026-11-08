@@ -4221,12 +4221,14 @@ def build_week_payloads(
             # the connection in an aborted-transaction state, cascading
             # into downstream operations like refresh_all_teams().
             try:
-                bp_exists = conn.execute(text(
+                from sqlalchemy import text as _probe_text
+                bp_exists = conn.execute(_probe_text(
                     "SELECT 1 FROM information_schema.tables "
                     "WHERE table_schema = DATABASE() "
                     "AND table_name = 'displayovr_breakpoints' LIMIT 1"
                 )).first()
             except Exception:
+                logger.exception("displayovr_breakpoints probe failed")
                 bp_exists = None
 
             if not bp_exists:

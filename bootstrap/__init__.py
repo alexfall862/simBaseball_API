@@ -443,10 +443,38 @@ def _resolve_season_context(conn, tables):
         ).first()
         season_id = _row_to_dict(season_row)["id"] if season_row else None
 
+        # During the offseason the calendar is already on the new year, which
+        # has no results yet. Landing-page standings, schedule and leaders
+        # keep showing the last season that was actually played.
+        display_lyid = ls_d["current_league_year_id"]
+        display_year = ly_d["league_year"]
+        display_season_id = season_id
+        has_results = False
+        if season_id is not None:
+            has_results = bool(conn.execute(
+                text("SELECT 1 FROM game_results WHERE season = :sid LIMIT 1"),
+                {"sid": season_id},
+            ).first())
+        if not has_results:
+            prev = conn.execute(text("""
+                SELECT ly.id, ly.league_year, s.id AS season_id
+                FROM league_years ly
+                JOIN seasons s ON s.year = ly.league_year
+                WHERE ly.league_year < :yr
+                  AND EXISTS (SELECT 1 FROM game_results gr WHERE gr.season = s.id)
+                ORDER BY ly.league_year DESC LIMIT 1
+            """), {"yr": ly_d["league_year"]}).first()
+            if prev:
+                display_lyid, display_year, display_season_id = int(prev[0]), int(prev[1]), int(prev[2])
+
         base = {
             "current_league_year_id": ls_d["current_league_year_id"],
             "league_year": ly_d["league_year"],
             "current_season_id": season_id,
+            # Last season with played games (== current once week 1 is simmed)
+            "display_league_year_id": display_lyid,
+            "display_league_year": display_year,
+            "display_season_id": display_season_id,
         }
         _ctx_cache = base
         _ctx_ts = now
@@ -1994,7 +2022,7 @@ def _get_standings(conn, tables, ctx):
       derived from is_conference flag on gamelist. Conference games_back is
       computed from conference record.
     """
-    season_id = ctx.get("current_season_id")
+    season_id = ctx.get("display_season_id", ctx.get("current_season_id"))
     if season_id is None:
         return []
 
@@ -2124,7 +2152,7 @@ def _get_standings(conn, tables, ctx):
 
 def _get_all_games(conn, tables, ctx, team_ids):
     """Full season schedule for the org's teams."""
-    season_id = ctx.get("current_season_id")
+    season_id = ctx.get("display_season_id", ctx.get("current_season_id"))
     if not team_ids or season_id is None:
         return []
 
@@ -2157,7 +2185,7 @@ def _get_all_games(conn, tables, ctx, team_ids):
 
 def _get_all_games_unfiltered(conn, tables, ctx):
     """Full season schedule for ALL teams (used by /all endpoint)."""
-    season_id = ctx.get("current_season_id")
+    season_id = ctx.get("display_season_id", ctx.get("current_season_id"))
     if season_id is None:
         return []
 
@@ -2374,7 +2402,7 @@ def _get_all_top_batters(conn, tables, ctx, all_team_ids):
     """Top batter per team_id in one query. Returns {team_id: dict}."""
     if not all_team_ids:
         return {}
-    lyid = ctx["current_league_year_id"]
+    lyid = ctx.get("display_league_year_id", ctx["current_league_year_id"])
     ph = ", ".join(f":t{i}" for i in range(len(all_team_ids)))
     params = {"lyid": lyid, "min_ab": MIN_AT_BATS}
     params.update({f"t{i}": tid for i, tid in enumerate(all_team_ids)})
@@ -2409,7 +2437,7 @@ def _get_all_top_pitchers(conn, tables, ctx, all_team_ids):
     """Top pitcher per team_id in one query. Returns {team_id: dict}."""
     if not all_team_ids:
         return {}
-    lyid = ctx["current_league_year_id"]
+    lyid = ctx.get("display_league_year_id", ctx["current_league_year_id"])
     ph = ", ".join(f":t{i}" for i in range(len(all_team_ids)))
     params = {"lyid": lyid, "min_ipo": MIN_IP_OUTS}
     params.update({f"t{i}": tid for i, tid in enumerate(all_team_ids)})
@@ -2443,7 +2471,7 @@ def _get_all_top_fielders(conn, tables, ctx, all_team_ids):
     """Top fielder per team_id in one query. Returns {team_id: dict}."""
     if not all_team_ids:
         return {}
-    lyid = ctx["current_league_year_id"]
+    lyid = ctx.get("display_league_year_id", ctx["current_league_year_id"])
     ph = ", ".join(f":t{i}" for i in range(len(all_team_ids)))
     params = {"lyid": lyid, "min_games": MIN_FIELDING_GAMES}
     params.update({f"t{i}": tid for i, tid in enumerate(all_team_ids)})

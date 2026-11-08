@@ -39,13 +39,14 @@ def svc_progress_single(player_id: int) -> dict:
     return {"player_id": player_id, "status": "ok"}
 
 
-def svc_progress_all(max_age: int = 45) -> dict:
-    """Batch-progress every player under *max_age*. Returns count."""
+def svc_progress_all(max_age=None) -> dict:
+    """Batch-progress every player (optionally only those under *max_age*).
+    Returns the progression summary dict."""
     engine = get_engine()
     with engine.begin() as conn:
-        count = progress_all_players(conn, max_age=max_age)
-    log.info("player_engine: batch progressed %d players (max_age=%d)", count, max_age)
-    return {"progressed": count}
+        result = progress_all_players(conn, max_age=max_age)
+    log.info("player_engine: batch progression %s", result)
+    return result
 
 
 def svc_seed_table_status() -> list[dict]:

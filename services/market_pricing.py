@@ -46,15 +46,37 @@ def _t(conn) -> Dict[str, Table]:
 
 # ── Public API ───────────────────────────────────────────────────────
 
+# Market-sample weights by signing source. Arbitration renewals are formula
+# prices (a fraction of the market rate), not market evidence: including them
+# dragged the rate to the floor. Extensions are real but carry a security
+# discount, hence the lower weight (configurable in fa_config).
+_EXCLUDED_SOURCES = ("arb_renewal",)
+
+
 def get_current_dollar_per_war(conn, league_year_id: int) -> Decimal:
     """
-    Compute $/WAR from fa_market_history using a rolling 3-year weighted window.
+    Compute $/WAR (AAV per WAR) from fa_market_history over a rolling
+    weighted window of league years.
 
-    Returns a Decimal clamped between MIN and MAX_DOLLAR_PER_WAR.
-    If fewer than MIN_HISTORY_FOR_MARKET signings, blends with bootstrap.
+    - rate = sum(aav * w) / sum(war * w) over signings with WAR >= 0.5
+    - arbitration renewals excluded; extensions weighted by
+      ``market_extension_weight``; year weights 1.0 / 0.7 / 0.4
+    - fewer than ``market_min_history`` signings: blended with the default
+    - clamped to [dollar_per_war_min, dollar_per_war_max]
+
+    All constants come from ``fa_config`` with the module defaults as fallback.
     """
+    from services.league_config import get_fa_config, cfg_dec, cfg_int
+
+    cfg = get_fa_config(conn)
+    default_rate = cfg_dec(cfg, "dollar_per_war_default", DEFAULT_DOLLAR_PER_WAR)
+    min_rate = cfg_dec(cfg, "dollar_per_war_min", MIN_DOLLAR_PER_WAR)
+    max_rate = cfg_dec(cfg, "dollar_per_war_max", MAX_DOLLAR_PER_WAR)
+    min_history = cfg_int(cfg, "market_min_history", MIN_HISTORY_FOR_MARKET)
+    lookback = cfg_int(cfg, "market_lookback_years", MARKET_LOOKBACK_YEARS)
+    ext_weight = cfg_dec(cfg, "market_extension_weight", "0.9")
+
     t = _t(conn)
-    mh = t["market"]
     ly = t["league_years"]
 
     # Resolve current league_year value
@@ -62,53 +84,56 @@ def get_current_dollar_per_war(conn, league_year_id: int) -> Decimal:
         select(ly.c.league_year).where(ly.c.id == league_year_id)
     ).first()
     if not row:
-        return DEFAULT_DOLLAR_PER_WAR
+        return default_rate
     current_year = row._mapping["league_year"]
 
-    # Fetch signings in the lookback window with WAR >= 0.5
     signings = conn.execute(sa_text("""
-        SELECT mh.war_at_signing, mh.total_value, ly.league_year
+        SELECT mh.war_at_signing, mh.aav, mh.total_value, mh.years, mh.source,
+               ly.league_year
         FROM fa_market_history mh
         JOIN league_years ly ON ly.id = mh.league_year_id
         WHERE ly.league_year BETWEEN :start_year AND :end_year
           AND mh.war_at_signing >= 0.5
     """), {
-        "start_year": current_year - MARKET_LOOKBACK_YEARS + 1,
+        "start_year": current_year - lookback + 1,
         "end_year":   current_year,
     }).mappings().all()
 
-    if not signings:
-        return DEFAULT_DOLLAR_PER_WAR
-
-    # Weighted $/WAR: sum(value * weight) / sum(war * weight)
     weighted_value = Decimal("0")
     weighted_war   = Decimal("0")
     count = 0
     for s in signings:
+        source = (s["source"] or "").lower()
+        if source in _EXCLUDED_SOURCES:
+            continue
         years_ago = current_year - s["league_year"]
         w = _YEAR_WEIGHTS.get(years_ago, Decimal("0.3"))
-        val = Decimal(str(s["total_value"]))
-        war = Decimal(str(s["war_at_signing"]))
-        weighted_value += val * w
-        weighted_war   += war * w
+        if source == "extension":
+            w = w * ext_weight
+        aav = s["aav"]
+        if aav is None:
+            yrs = int(s["years"] or 1) or 1
+            aav = Decimal(str(s["total_value"])) / yrs
+        weighted_value += Decimal(str(aav)) * w
+        weighted_war   += Decimal(str(s["war_at_signing"])) * w
         count += 1
 
-    if weighted_war <= 0:
-        return DEFAULT_DOLLAR_PER_WAR
+    if count == 0 or weighted_war <= 0:
+        return default_rate
 
     market_rate = (weighted_value / weighted_war).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
 
     # Blend with default if insufficient history
-    if count < MIN_HISTORY_FOR_MARKET:
-        blend = Decimal(str(count)) / Decimal(str(MIN_HISTORY_FOR_MARKET))
+    if count < min_history:
+        blend = Decimal(str(count)) / Decimal(str(min_history))
         market_rate = (
-            market_rate * blend + DEFAULT_DOLLAR_PER_WAR * (Decimal("1") - blend)
+            market_rate * blend + default_rate * (Decimal("1") - blend)
         ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     # Clamp
-    market_rate = max(MIN_DOLLAR_PER_WAR, min(MAX_DOLLAR_PER_WAR, market_rate))
+    market_rate = max(min_rate, min(max_rate, market_rate))
     return market_rate
 
 

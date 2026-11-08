@@ -210,6 +210,7 @@ def generate_wbc_rosters(conn, event_id: int) -> Dict[str, Any]:
                 SELECT p.id AS player_id, p.firstName, p.lastName, p.ptype
                 FROM simbbPlayers p
                 WHERE p.intorusa = 'usa'
+                  AND NOT EXISTS (SELECT 1 FROM player_retirements r WHERE r.player_id = p.id)
                 ORDER BY RAND()
                 LIMIT 200
             """)
@@ -219,6 +220,7 @@ def generate_wbc_rosters(conn, event_id: int) -> Dict[str, Any]:
                 SELECT p.id AS player_id, p.firstName, p.lastName, p.ptype
                 FROM simbbPlayers p
                 WHERE p.intorusa = 'international' AND p.area = :country
+                  AND NOT EXISTS (SELECT 1 FROM player_retirements r WHERE r.player_id = p.id)
                 ORDER BY RAND()
                 LIMIT 200
             """)

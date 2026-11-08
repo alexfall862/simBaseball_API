@@ -72,11 +72,12 @@ def api_progress_player(player_id: int):
 
 @player_ops_bp.post("/player-ops/progress-all")
 def api_progress_all():
-    """Batch-progress all players.  Body: {max_age?: int}"""
+    """Batch-progress all players.  Body: {max_age?: int} (omit to age everyone;
+    players past the growth table's last age only age)."""
     data = request.get_json(silent=True) or {}
-    max_age = data.get("max_age", 45)
+    max_age = data.get("max_age")
 
-    if not isinstance(max_age, int) or max_age < 16 or max_age > 60:
+    if max_age is not None and (not isinstance(max_age, int) or max_age < 16 or max_age > 60):
         return jsonify(error="bad_request", message="max_age must be 16-60"), 400
 
     try:

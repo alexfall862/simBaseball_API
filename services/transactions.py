@@ -96,16 +96,22 @@ def _get_signing_budget(conn, org_id: int, league_year_id: int) -> Decimal:
         ))
     ).scalar_one()
 
-    # Committed bonuses this year (contracts signed this year with bonus > 0)
-    contracts = t["contracts"]
-    committed = conn.execute(
-        select(func.coalesce(func.sum(contracts.c.bonus), 0))
-        .where(and_(
-            contracts.c.signingOrg == org_id,
-            contracts.c.leagueYearSigned == league_year_val,
-            contracts.c.bonus > 0,
-        ))
-    ).scalar_one()
+    # Committed bonuses this year that have NOT yet been debited from the
+    # ledger (signing-time bonuses are debited immediately; renewals, draft
+    # and IFA bonuses are debited by year-start books). Counting a bonus
+    # that is already in ledger_balance would subtract it twice.
+    committed = conn.execute(text("""
+        SELECT COALESCE(SUM(c.bonus), 0)
+        FROM contracts c
+        WHERE c.signingOrg = :org
+          AND c.leagueYearSigned = :yr
+          AND c.bonus > 0
+          AND NOT EXISTS (
+              SELECT 1 FROM org_ledger_entries l
+              WHERE l.contract_id = c.id
+                AND l.entry_type IN ('bonus', 'buyout')
+          )
+    """), {"org": org_id, "yr": league_year_val}).scalar_one()
 
     total_balance = Decimal(str(cash)) + Decimal(str(ledger_balance))
     return total_balance - Decimal(str(committed))
@@ -582,6 +588,42 @@ def release_player(conn, contract_id: int, org_id: int,
     details = t["details"]
     shares = t["shares"]
 
+    # End-of-FA fallback deals (unsigned free agents parked on a roster) can
+    # be released at no cost during the offseason: the contract simply ends,
+    # nothing is owed and the player does not go through waivers.
+    if c.get("fa_fallback"):
+        from services.league_calendar import is_offseason
+        if is_offseason(conn):
+            conn.execute(
+                update(contracts).where(contracts.c.id == contract_id)
+                .values(isFinished=1, isActive=0)
+            )
+            tx_id = _log_transaction(
+                conn,
+                transaction_type="release",
+                league_year_id=league_year_id,
+                primary_org_id=org_id,
+                contract_id=contract_id,
+                player_id=c["playerID"],
+                details={"fa_fallback": True, "years_remaining": 0,
+                         "current_level": c["current_level"], "no_cost": True},
+                executed_by=executed_by,
+                notes="Fallback deal released during the offseason (no cost)",
+            )
+            return {
+                "transaction_id": tx_id,
+                "contract_id": contract_id,
+                "player_id": c["playerID"],
+                "years_remaining_on_books": 0,
+                "fa_fallback_released": True,
+                "waiver": {},
+                "player": {
+                    **_get_player_summary(conn, c["playerID"]),
+                    "current_level": None,
+                    "on_ir": False,
+                },
+            }
+
     # Get all detail IDs for remaining years (current_year onward)
     detail_rows = conn.execute(
         select(details.c.id, details.c.year)
@@ -710,11 +752,12 @@ def buyout_player(conn, contract_id: int, org_id: int,
     except Exception as e:
         logger.warning("Buyout demand check skipped: %s", e)
 
-    # Get current league_year value
-    ly_row = conn.execute(
-        select(ly.c.league_year).where(ly.c.id == league_year_id)
-    ).first()
-    league_year_val = ly_row._mapping["league_year"]
+    # Resolve the year the buyout is booked in (upcoming year if offseason).
+    from services.league_calendar import resolve_signing_year, is_offseason
+    signing_ly_id, league_year_val = resolve_signing_year(conn, league_year_id)
+    league_year_id = signing_ly_id
+    if is_offseason(conn):
+        game_week_id = None
 
     # 1. Finish the original contract
     conn.execute(
@@ -877,13 +920,27 @@ def get_free_agents(conn) -> List[Dict[str, Any]]:
 def sign_free_agent(conn, player_id: int, org_id: int, years: int,
                     salaries: List[Decimal], bonus: Decimal,
                     level_id: int, league_year_id: int,
-                    game_week_id: int, executed_by: str = None) -> Dict[str, Any]:
+                    game_week_id: int, executed_by: str = None,
+                    allow_auction: bool = False) -> Dict[str, Any]:
     """
     Sign a free agent to a new contract.
 
-    Validates: player is actually free, years 1-5, salaries length matches,
-    bonus within signing budget.
+    Validates: player is actually free, not in an active auction (unless
+    ``allow_auction``, used by the auction finalizer itself), years 1-5,
+    salaries length matches, bonus within signing budget.
     """
+    if not allow_auction:
+        active_auction = conn.execute(text("""
+            SELECT id, phase FROM fa_auction
+            WHERE player_id = :pid AND phase IN ('open', 'listening', 'finalize')
+            LIMIT 1
+        """), {"pid": player_id}).first()
+        if active_auction:
+            raise ValueError(
+                f"Player is in an active free-agent auction (auction "
+                f"{active_auction[0]}, phase {active_auction[1]}); submit an "
+                f"offer on the auction instead of signing directly"
+            )
     t = _tables_from_conn(conn)
     contracts = t["contracts"]
     details_tbl = t["details"]
@@ -914,18 +971,23 @@ def sign_free_agent(conn, player_id: int, org_id: int, years: int,
     if held > 0:
         raise ValueError("Player is not a free agent — they have an active holder")
 
-    # Validate bonus budget
+    # Resolve the year this contract belongs to: the requested year in-season,
+    # the UPCOMING year during the offseason. Offseason deals stamped with the
+    # year that just ended never had their year-1 salary paid.
+    from services.league_calendar import resolve_signing_year
+    from services.league_calendar import is_offseason
+    stats_league_year_id = league_year_id   # season whose stats price the deal
+    signing_ly_id, league_year_val = resolve_signing_year(conn, league_year_id)
+    league_year_id = signing_ly_id
+    if is_offseason(conn):
+        game_week_id = None          # offseason: no game week to attach to
+
+    # Validate bonus budget (against the year the bonus is booked in)
     budget = _get_signing_budget(conn, org_id, league_year_id)
     if Decimal(str(bonus)) > budget:
         raise ValueError(
             f"Signing bonus ({bonus}) exceeds available budget ({budget})"
         )
-
-    # Get league_year value
-    ly_row = conn.execute(
-        select(ly.c.league_year).where(ly.c.id == league_year_id)
-    ).first()
-    league_year_val = ly_row._mapping["league_year"]
 
     # Create contract
     result = conn.execute(
@@ -1000,11 +1062,13 @@ def sign_free_agent(conn, player_id: int, org_id: int, years: int,
         executed_by=executed_by,
     )
 
-    # Record to market history for pricing engine
+    # Record to market history for pricing engine. WAR comes from the season
+    # the caller was in (the one just played, during the offseason); the new
+    # year has no stats yet and would record every offseason signing at 0 WAR.
     try:
         from services.market_pricing import record_signing_to_market
         from services.player_demands import get_player_war
-        war = get_player_war(conn, player_id, league_year_id, level_id)
+        war = get_player_war(conn, player_id, stats_league_year_id, level_id)
         total_value = sum(salaries) + bonus
         aav = total_value / years if years else total_value
         players_tbl = t["players"]
@@ -1099,6 +1163,9 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
 
     # Extension starts the year after original contract ends
     end_year = c["leagueYearSigned"] + c["years"]
+    from services.league_calendar import is_offseason
+    if is_offseason(conn):
+        game_week_id = None          # offseason: no game week to attach to
 
     # Create extension contract
     result = conn.execute(

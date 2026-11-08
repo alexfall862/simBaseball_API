@@ -37,6 +37,10 @@ from services.draft import (
     set_team_prefs,
     get_team_prefs,
     execute_auto_rounds,
+    create_draft_trade_proposal,
+    list_draft_trade_proposals,
+    accept_draft_trade_proposal,
+    reject_draft_trade_proposal,
 )
 
 draft_bp = Blueprint("draft", __name__)
@@ -127,9 +131,8 @@ def api_draft_eligible():
     viewing_org_id = request.args.get("viewing_org_id", type=int)
     if not lyid:
         return jsonify(error="missing_fields", fields=["league_year_id"]), 400
-    if not viewing_org_id:
-        return jsonify(error="missing_param",
-                       message="viewing_org_id query param is required"), 400
+    # viewing_org_id is optional: without it the list is served with the
+    # default (public) fog-of-war view instead of a 400.
     try:
         engine = get_engine()
         with engine.begin() as conn:
@@ -158,7 +161,8 @@ def api_org_picks(org_id):
         engine = get_engine()
         with engine.begin() as conn:
             result = get_org_picks(conn, org_id, lyid)
-        return jsonify(picks=result), 200
+        # Bare array: the interface types this as BaseballDraftPick[].
+        return jsonify(result), 200
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
     except SQLAlchemyError:
@@ -189,15 +193,29 @@ def api_make_pick():
 
 @draft_bp.post("/draft/sign/<int:pick_id>")
 def api_sign_pick(pick_id):
+    """
+    Make a signing-bonus offer to a drafted player.
+
+    Body: {league_year_id, bonus?, executed_by?}. ``bonus`` defaults to the
+    slot value. 200 with ``accepted: true`` (contract created) or
+    ``accepted: false`` (``status`` pending with ``offers_remaining``, or
+    ``refused`` after the third rejection: the player returns to school).
+    """
     body = request.get_json(silent=True) or {}
     lyid = _lyid_from(body)
     if not lyid:
         return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+    bonus = body.get("bonus")
+    if bonus is not None:
+        try:
+            bonus = Decimal(str(bonus))
+        except Exception:
+            return jsonify(error="validation", message="bonus must be a number"), 400
     try:
         engine = get_engine()
         with engine.begin() as conn:
             result = sign_pick(conn, pick_id, lyid,
-                               executed_by=body.get("executed_by"))
+                               executed_by=body.get("executed_by"), bonus=bonus)
         return jsonify(result), 200
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
@@ -233,6 +251,92 @@ def api_draft_trade():
                 from_org_id=int(body["from_org_id"]),
                 to_org_id=int(body["to_org_id"]),
                 trade_proposal_id=body.get("trade_proposal_id"),
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.post("/draft/trade/propose")
+def api_draft_trade_propose():
+    """{league_year_id, proposing_org_id, receiving_org_id, picks_offered[], picks_requested[]}
+    -> {success, proposal_id}"""
+    body, err = _require_json("league_year_id", "proposing_org_id", "receiving_org_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = create_draft_trade_proposal(
+                conn,
+                league_year_id=int(body["league_year_id"]),
+                proposing_org_id=int(body["proposing_org_id"]),
+                receiving_org_id=int(body["receiving_org_id"]),
+                picks_offered=body.get("picks_offered") or [],
+                picks_requested=body.get("picks_requested") or [],
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.get("/draft/trade/proposals")
+def api_draft_trade_proposals():
+    """?league_year_id&org_id&status -> bare array of proposals with org abbrevs."""
+    lyid = request.args.get("league_year_id", type=int)
+    if not lyid:
+        return jsonify(error="missing_fields", fields=["league_year_id"]), 400
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = list_draft_trade_proposals(
+                conn, lyid,
+                org_id=request.args.get("org_id", type=int),
+                status=request.args.get("status"),
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.post("/draft/trade/accept")
+def api_draft_trade_accept():
+    """{proposal_id, org_id?} -> executes the pick swap."""
+    body, err = _require_json("proposal_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = accept_draft_trade_proposal(
+                conn, int(body["proposal_id"]),
+                acting_org_id=(int(body["org_id"]) if body.get("org_id") is not None else None),
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation", message=str(e)), 400
+    except SQLAlchemyError:
+        return jsonify(error="db_error", message="Database error"), 500
+
+
+@draft_bp.post("/draft/trade/reject")
+def api_draft_trade_reject():
+    """{proposal_id, org_id?} -> rejected (receiving org) or cancelled (proposer)."""
+    body, err = _require_json("proposal_id")
+    if err:
+        return err
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = reject_draft_trade_proposal(
+                conn, int(body["proposal_id"]),
+                acting_org_id=(int(body["org_id"]) if body.get("org_id") is not None else None),
             )
         return jsonify(result), 200
     except ValueError as e:

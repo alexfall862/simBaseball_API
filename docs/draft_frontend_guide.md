@@ -265,8 +265,11 @@ GET /draft/board?league_year_id=5
 
 - `player_id == null` → empty slot (not yet picked)
 - `current_org_id != original_org_id` → pick was traded
-- `is_auto_pick == true` → auto-drafted (timer expired or auto-round)
-- `sign_status` — `"pending"` | `"signed"` | `"passed"` | `"refused"`
+- `is_auto_pick == true` → auto-drafted (timer expired, auto-round, or CPU-controlled org)
+- `sign_status` — `"pending"` | `"signed"` | `"passed"` | `"refused"` (refused = the org's offers were turned down; the player went back to school)
+- `class_year` — `"hs_senior"` | `"freshman"` | `"sophomore"` | `"junior"` | `"senior"` (college class *after* the season just played)
+- `offers_made` / `bonus_agreed` — negotiation state (see §9). The board never shows the player's ask; only the drafting org sees it in §8.
+- `picked_at` and `pick_deadline_at` are ISO-8601 UTC with a trailing `Z`.
 
 ---
 
@@ -280,8 +283,10 @@ GET /draft/eligible?league_year_id=5&available_only=true&limit=50&offset=0
 - `source` — `"college"` or `"hs"` to filter
 - `search` — name search string
 - `available_only` — `"true"` (default) to hide already-drafted players
-- `viewing_org_id` — applies fog-of-war attribute visibility for that org
+- `viewing_org_id` — applies fog-of-war attribute visibility for that org (optional; without it the public fog view is served)
 - `limit` / `offset` — pagination
+
+**Who is eligible.** HS seniors who just graduated (`source: "hs"`, `class_year: "hs_senior"`) and **every** college player, freshman through redshirt senior (`source: "college"`). Nobody declares. `draft_rank` is the consensus rank (1 = best) over the whole pool, computed once when end-season builds the pool; it is public even though individual ratings are fogged.
 
 **Response:**
 ```json
@@ -429,15 +434,45 @@ Teams with **no preferences set** get pure BPA (backward-compatible with origina
 GET /draft/picks/12?league_year_id=5
 ```
 
-Returns only picks owned by org 12. Same shape as draft board entries. Useful for "My Picks" view.
+Returns a **bare array** of the picks owned by org 12 (board shape plus the org-private negotiation fields):
+
+```json
+[
+  {
+    "pick_id": 15, "round": 1, "pick_in_round": 12, "overall_pick": 12,
+    "original_org_id": 12, "current_org_id": 12,
+    "player_id": 3200, "player_name": "Mike Johnson",
+    "picked_at": "2026-04-08T14:25:30Z", "is_auto_pick": false,
+    "slot_value": 5000000.0,
+    "sign_status": "pending",
+    "ask_bonus": 6175000.0,
+    "class_year": "junior",
+    "offers_made": 1,
+    "offers_remaining": 2,
+    "offers": [ { "offer_no": 1, "amount": 4000000.0, "result": "rejected", "created_at": "..." } ],
+    "bonus_agreed": null,
+    "contract_id": null
+  }
+]
+```
+
+`ask_bonus` is what the player wants; it is only returned here (the public board omits it).
 
 ---
 
-## 9. Signing Phase
+## 9. Signing Phase (bonus negotiation)
 
-After all rounds complete (or admin advances to signing):
+After all rounds complete (or admin advances to signing), every drafted player has a **bonus ask**:
 
-### Sign a Pick
+```
+ask = slot_value × class_mult × talent_mult
+class_mult: senior 1.00 · HS senior 1.10 · junior 1.15 · sophomore 1.35 · freshman 1.60
+talent_mult: 1.30 for consensus #1 … 0.90 for the last-ranked player
+```
+
+The drafting org gets **up to three offers** per pick. Each offer is answered immediately: an offer at or above the ask is always accepted; below it the acceptance chance is `clamp((offer/ask − 0.6) / 0.4, 0, 1) × willingness`, with willingness 1.0 for seniors and HS seniors, 0.6 juniors, 0.35 sophomores, 0.2 freshmen (underclassmen would rather go back to school). The answer is deterministic per pick and offer number, so a retried request gives the same result. A rejected third offer **refuses** the player: `sign_status` becomes `"refused"`, the pick is spent and he keeps his amateur contract.
+
+### Make an Offer
 
 ```
 POST /draft/sign/15
@@ -445,23 +480,37 @@ POST /draft/sign/15
 
 **Request:**
 ```json
-{ "league_year_id": 5 }
+{ "league_year_id": 5, "bonus": 5500000 }
 ```
 
-**Response:**
+`bonus` defaults to the slot value when omitted. The bonus must fit the org's signing budget (400 `validation` otherwise).
+
+**Response — accepted (200):**
 ```json
 {
-  "transaction_id": 42,
-  "contract_id": 1205,
-  "player_id": 3200,
-  "player_name": "Mike Johnson",
-  "org_id": 12,
-  "slot_value": 5000000.0,
-  "years": 3
+  "accepted": true, "status": "signed",
+  "draft_pick_id": 15, "player_id": 3200, "player_name": "Mike Johnson", "org_id": 12,
+  "slot_value": 5000000.0, "ask_bonus": 6175000.0, "class_year": "junior",
+  "offer_no": 2, "offer": 5500000.0, "accept_probability": 0.6,
+  "transaction_id": 42, "contract_id": 1205, "bonus": 5500000.0, "years": 3, "level": 5,
+  "offers_remaining": 0
 }
 ```
 
-Creates a 3-year rookie contract at `slot_value / 3` per year.
+**Response — rejected (still 200):**
+```json
+{
+  "accepted": false, "status": "pending",
+  "offer_no": 1, "offer": 4000000.0, "accept_probability": 0.05,
+  "offers_remaining": 2, "...": "same identity fields as above"
+}
+```
+
+`status` is `"refused"` on the third rejection. A 400 is returned for a pick that is no longer `pending`, has no offers left, or an offer over budget.
+
+**The contract on acceptance:** 3 years at the minor-league salary, bonus = the agreed amount (debited from the org's ledger immediately and counted against the signing budget), HS draftees at level 4, college draftees at level 5. The player's HS/college contract is ended.
+
+**When the admin completes the draft** every still-pending pick is resolved: orgs with no owner/GM sign at the ask; otherwise `refused` if offers were made, `passed` if none were. Unsigned HS graduates without a college commitment are placed at random on a program that still has roster room, or retire when none has; undrafted college seniors stay in the system as free agents only when good enough, otherwise they retire; college underclassmen simply stay on their college contracts.
 
 ### Pass on a Pick
 
@@ -478,19 +527,32 @@ POST /draft/pass/15
 
 ## 10. Pick Trading
 
+### Proposals (org-to-org)
+
 ```
-POST /draft/trade
+POST /draft/trade/propose
+{ "league_year_id": 5, "proposing_org_id": 12, "receiving_org_id": 7,
+  "picks_offered": [45], "picks_requested": [61, 92] }
+→ { "success": true, "proposal_id": 3 }
+
+GET  /draft/trade/proposals?league_year_id=5&org_id=7[&status=proposed]
+→ [ { "proposal_id": 3, "proposing_org_id": 12, "proposing_org_abbrev": "NYY",
+      "receiving_org_id": 7, "receiving_org_abbrev": "BOS",
+      "picks_offered":  [ { "pick_id": 45, "round": 2, "pick_in_round": 12, "overall_pick": 42, "current_org_id": 12, "used": false } ],
+      "picks_requested": [ ... ],
+      "status": "proposed", "created_at": "...Z", "resolved_at": null } ]
+
+POST /draft/trade/accept  { "proposal_id": 3, "org_id": 7 }   → executes the swap
+POST /draft/trade/reject  { "proposal_id": 3, "org_id": 7 }   → status "rejected" (the proposer calling it → "cancelled")
 ```
 
-**Request:**
-```json
-{
-  "league_year_id": 5,
-  "pick_id": 45,
-  "from_org_id": 12,
-  "to_org_id": 7,
-  "trade_proposal_id": null
-}
+Only unused picks owned by the right side can be offered/requested; ownership is re-checked at acceptance, and other open proposals touching the traded picks are cancelled. WebSocket events: `draft_trade_proposed`, `draft_trade_completed` (one per pick moved), `draft_trade_rejected`.
+
+### Direct swap (admin / trusted)
+
+```
+POST /draft/trade
+{ "league_year_id": 5, "pick_id": 45, "from_org_id": 12, "to_org_id": 7, "trade_proposal_id": null }
 ```
 
 Only works on unpicked slots.

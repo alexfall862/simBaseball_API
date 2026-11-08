@@ -60,7 +60,14 @@ def get_player_war(
     """
     Compute WAR for a single player using the same component formula as
     analytics.war_leaderboard.  Returns Decimal("0.00") if insufficient data.
+
+    ``league_year_id`` is the year the contract is *for*; the stats come from
+    the latest year up to it that has any (the season just completed, during
+    the offseason).
     """
+    from services.league_calendar import pricing_stats_league_year_id
+    league_year_id = pricing_stats_league_year_id(conn, league_year_id)
+
     # League averages (same queries as analytics.py but for the level)
     lg = conn.execute(sa_text("""
         SELECT
@@ -185,6 +192,86 @@ def get_player_war(
     return Decimal(str(round(war, 2)))
 
 
+# ── Multi-season blended WAR for demands ─────────────────────────────
+
+def _season_sample_factor(conn, player_id: int, stats_lyid: int,
+                          league_level: int, pa_floor: int, ip_floor: int) -> float:
+    """0..1 regression factor from the season's playing time (PA for hitters,
+    IP for pitchers; a two-way player uses the larger of the two)."""
+    row = conn.execute(sa_text("""
+        SELECT
+          (SELECT COALESCE(SUM(bs.at_bats + bs.walks), 0)
+             FROM player_batting_stats bs JOIN teams tm ON tm.id = bs.team_id
+            WHERE bs.player_id = :pid AND bs.league_year_id = :lyid
+              AND tm.team_level = :level) AS pa,
+          (SELECT COALESCE(SUM(ps.innings_pitched_outs), 0) / 3.0
+             FROM player_pitching_stats ps JOIN teams tm ON tm.id = ps.team_id
+            WHERE ps.player_id = :pid AND ps.league_year_id = :lyid
+              AND tm.team_level = :level) AS ip
+    """), {"pid": player_id, "lyid": stats_lyid, "level": league_level}).first()
+    pa = float(row[0] or 0) if row else 0.0
+    ip = float(row[1] or 0) if row else 0.0
+    f_bat = min(1.0, pa / pa_floor) if pa_floor > 0 else 1.0
+    f_pit = min(1.0, ip / ip_floor) if ip_floor > 0 else 1.0
+    if pa <= 0 and ip <= 0:
+        return 0.0
+    return max(f_bat if pa > 0 else 0.0, f_pit if ip > 0 else 0.0)
+
+
+def get_blended_war(
+    conn, player_id: int, league_year_id: int, league_level: int = 9,
+) -> Decimal:
+    """
+    Demand WAR: weighted blend of the player's last three seasons (weights
+    ``war_blend_w0/w1/w2`` in fa_config, re-normalised over the seasons that
+    exist), each season regressed toward 0 below ``war_regress_pa`` plate
+    appearances / ``war_regress_ip`` innings.
+
+    ``league_year_id`` is the year the contract is for; the most recent
+    season with stats at or before it is season 0.
+    """
+    from services.league_calendar import pricing_stats_league_year_id
+    from services.league_config import get_fa_config, cfg_float, cfg_int
+
+    cfg = get_fa_config(conn)
+    weights = [cfg_float(cfg, "war_blend_w0", 0.5),
+               cfg_float(cfg, "war_blend_w1", 0.3),
+               cfg_float(cfg, "war_blend_w2", 0.2)]
+    pa_floor = cfg_int(cfg, "war_regress_pa", 200)
+    ip_floor = cfg_int(cfg, "war_regress_ip", 50)
+
+    season0 = pricing_stats_league_year_id(conn, league_year_id)
+    yr0 = conn.execute(sa_text(
+        "SELECT league_year FROM league_years WHERE id = :id"), {"id": season0}
+    ).scalar()
+    if yr0 is None:
+        return get_player_war(conn, player_id, league_year_id, league_level)
+
+    # Seasons 0, -1, -2 that exist and have stats
+    seasons = conn.execute(sa_text("""
+        SELECT ly.id, ly.league_year
+        FROM league_years ly
+        WHERE ly.league_year BETWEEN :lo AND :hi
+          AND EXISTS (SELECT 1 FROM player_batting_stats b WHERE b.league_year_id = ly.id)
+        ORDER BY ly.league_year DESC
+    """), {"lo": int(yr0) - 2, "hi": int(yr0)}).all()
+
+    total_w = 0.0
+    acc = 0.0
+    for idx, (lyid, _yr) in enumerate(seasons[:3]):
+        w = weights[idx] if idx < len(weights) else 0.0
+        if w <= 0:
+            continue
+        war = float(get_player_war(conn, player_id, int(lyid), league_level))
+        factor = _season_sample_factor(conn, player_id, int(lyid), league_level,
+                                       pa_floor, ip_floor)
+        acc += w * war * factor
+        total_w += w
+    if total_w <= 0:
+        return Decimal("0.00")
+    return Decimal(str(round(acc / total_w, 2)))
+
+
 # ── Preferred contract years by age ──────────────────────────────────
 
 def _preferred_years(age: int) -> tuple[int, int]:
@@ -237,7 +324,7 @@ def compute_fa_demand(
     age = info["age"]
     service_years = info["service_years"]
 
-    war = get_player_war(conn, player_id, league_year_id, league_level)
+    war = get_blended_war(conn, player_id, league_year_id, league_level)
     dpw = get_current_dollar_per_war(conn, league_year_id)
     mult = age_service_multiplier(age, service_years=99)  # FA-eligible, use age only
 
@@ -277,7 +364,7 @@ def compute_fa_demand(
         conn.execute(
             demands.update()
             .where(demands.c.id == existing._mapping["id"])
-            .values(**values)
+            .values(**values, computed_at=func.now())
         )
     else:
         conn.execute(demands.insert().values(**values))
@@ -363,7 +450,7 @@ def compute_extension_demand(
         conn.execute(
             demands.update()
             .where(demands.c.id == existing._mapping["id"])
-            .values(**values)
+            .values(**values, computed_at=func.now())
         )
     else:
         conn.execute(demands.insert().values(**values))
@@ -487,7 +574,7 @@ def compute_buyout_demand(
         conn.execute(
             demands.update()
             .where(demands.c.id == existing._mapping["id"])
-            .values(**values)
+            .values(**values, computed_at=func.now())
         )
     else:
         conn.execute(demands.insert().values(**values))
@@ -519,13 +606,15 @@ def compute_arb_salary(
 
     arb_year: 1, 2, or 3 (first, second, third year of arbitration)
     """
-    war = get_player_war(conn, player_id, league_year_id, league_level)
+    war = get_blended_war(conn, player_id, league_year_id, league_level)
     dpw = get_current_dollar_per_war(conn, league_year_id)
+    info = _get_player_info(conn, player_id)
+    age_mult = age_service_multiplier(int(info["age"]), service_years=99)
 
     arb_pct = {1: Decimal("0.40"), 2: Decimal("0.60"), 3: Decimal("0.80")}
     pct = arb_pct.get(arb_year, Decimal("0.80"))
 
-    salary = (war * dpw * pct).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    salary = (war * dpw * pct * age_mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     salary = max(salary, ARB_SALARY_FLOOR)
     salary = min(salary, ARB_SALARY_CAP)
 

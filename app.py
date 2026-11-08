@@ -294,6 +294,12 @@ def create_app(config_object=Config):
         app.logger.exception("Failed to register awards blueprint: %s", e)
 
     try:
+        from training_camp import training_camp_bp
+        app.register_blueprint(training_camp_bp, url_prefix="/api/v1")
+    except Exception as e:
+        app.logger.exception("Failed to register training_camp blueprint: %s", e)
+
+    try:
         from recruiting import recruiting_bp
         app.register_blueprint(recruiting_bp, url_prefix="/api/v1")
     except Exception as e:
@@ -597,7 +603,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("seed_contracts: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -717,7 +723,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("admin_run_year_start_books: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -762,7 +768,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("admin_run_week_books: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -807,7 +813,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("admin_run_year_end_interest: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -850,7 +856,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("admin_run_season_books: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -893,7 +899,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("admin_initialize_next_league_year: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -936,7 +942,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("admin_run_playoff_revenue: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -984,7 +990,7 @@ def create_app(config_object=Config):
         admin_pw = os.getenv("ADMIN_PASSWORD")
         if admin_pw:
             header_pw = request.headers.get("X-Admin-Password")
-            if header_pw != admin_pw:
+            if header_pw != admin_pw and session.get("admin") is not True:
                 log.info("admin_simulate_fake_season: invalid admin password")
                 return jsonify(
                     error="unauthorized",
@@ -1020,7 +1026,32 @@ def create_app(config_object=Config):
         return jsonify(status="ok", details=result), 200
 
 
-    log.info("stage: routes_ok") 
+    log.info("stage: routes_ok")
+
+    # Server-side draft pick clock (one leader per DB via GET_LOCK).
+    try:
+        from services.draft_clock import start_draft_clock
+        from db import get_engine as _clock_engine
+        if start_draft_clock(_clock_engine):
+            log.info("stage: draft_clock_started")
+    except Exception as e:
+        log.warning("draft clock not started: %s", e)
+
+    # Admin guard on season-mutating /api/v1 routes (session, X-Admin-Password or X-Admin-Key).
+    try:
+        from services.admin_auth import install_admin_route_guard
+        install_admin_route_guard(app)
+    except Exception as e:
+        log.warning("admin route guard not installed: %s", e)
+
+    # Admin job scheduler (one leader per DB via GET_LOCK; see services/job_scheduler.py).
+    try:
+        from services.job_scheduler import start_job_scheduler
+        from db import get_engine as _sched_engine
+        if start_job_scheduler(_sched_engine):
+            log.info("stage: job_scheduler_started")
+    except Exception as e:
+        log.warning("job scheduler not started: %s", e)
     return app
 
 

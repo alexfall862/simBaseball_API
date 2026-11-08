@@ -726,19 +726,15 @@ def api_payroll_projection(org_id: int):
 
 @transactions_bp.post("/transactions/end-of-season")
 def api_end_of_season():
-    """Run end-of-season contract processing."""
-    body, err = _require_json("league_year_id")
-    if err:
-        return err
-    try:
-        engine = get_engine()
-        with engine.begin() as conn:
-            result = process_end_of_season(conn, int(body["league_year_id"]))
-        return jsonify(result), 200
-    except ValueError as e:
-        return jsonify(error="validation", message=str(e)), 400
-    except SQLAlchemyError:
-        return jsonify(error="db_error", message="Database error"), 500
+    """
+    Removed: this ran process_end_of_season() without the one-shot
+    league_years.season_ended_at guard, so a second call re-advanced and
+    re-renewed every contract. Use POST /api/v1/games/end-season.
+    """
+    return jsonify(
+        error="gone",
+        message="Use POST /api/v1/games/end-season (one-shot, guarded).",
+    ), 410
 
 
 # -----------------------------------------------------------------------

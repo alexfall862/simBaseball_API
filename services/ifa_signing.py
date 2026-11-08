@@ -275,11 +275,17 @@ def _compute_inverse_standings(conn, league_year_id: int) -> List[Dict[str, Any]
     return [dict(r) for r in rows]
 
 
-def allocate_bonus_pools(conn, league_year_id: int) -> List[Dict[str, Any]]:
+def allocate_bonus_pools(conn, league_year_id: int,
+                         standings_league_year_id: Optional[int] = None
+                         ) -> List[Dict[str, Any]]:
     """
     Allocate IFA bonus pools based on inverse standings.
     Worst team gets base * spread, best team gets base / spread,
     linear interpolation between.
+
+    ``standings_league_year_id`` is the season whose results order the orgs
+    (the one just finished, when pools are created for the upcoming year
+    during the offseason); defaults to ``league_year_id`` itself.
 
     Returns list of {org_id, total_pool, standing_rank}.
     """
@@ -287,7 +293,8 @@ def allocate_bonus_pools(conn, league_year_id: int) -> List[Dict[str, Any]]:
     base = _cfg_dec(config, "base_pool_amount", 5_000_000)
     spread = _cfg_float(config, "pool_spread_factor", 1.5)
 
-    standings = _compute_inverse_standings(conn, league_year_id)
+    standings = _compute_inverse_standings(
+        conn, standings_league_year_id or league_year_id)
     n = len(standings)
     if n == 0:
         return []
@@ -1163,10 +1170,10 @@ def _execute_ifa_signing(
     org_id = int(o["org_id"])
     bonus = Decimal(str(o["bonus"]))
 
-    # Get league_year value for contract
-    ly_val = conn.execute(text(
-        "SELECT league_year FROM league_years WHERE id = :lyid"
-    ), {"lyid": league_year_id}).scalar()
+    # Year the contract is booked against (upcoming season if offseason).
+    # league_year_id itself stays the IFA period's year for the pool debit.
+    from services.league_calendar import resolve_signing_year
+    _, ly_val = resolve_signing_year(conn, league_year_id)
 
     # 1. Terminate old INTAM contract
     conn.execute(text("""

@@ -164,6 +164,13 @@
     </div>
 
     <div class="nav-section">
+      <div class="nav-section-title">Progression</div>
+      <a href="#" class="nav-item" data-section="progression-diag">
+        <span class="nav-icon">&#128201;</span> Diagnostics
+      </a>
+    </div>
+
+    <div class="nav-section">
       <div class="nav-section-title">Stamina</div>
       <a href="#" class="nav-item" data-section="stamina-overview">
         <span class="nav-icon">&#9889;</span> League Overview
@@ -1683,7 +1690,7 @@
       <section id="section-tx-eos" class="section">
         <div class="card">
           <h3>Run End of Season</h3>
-          <p class="text-muted">Process all end-of-season contract operations: credit MLB service time, advance mid-contract years, handle expirations (extensions, auto-renewals, free agency).</p>
+          <p class="text-muted">Runs the same one-shot End Season as the Timestamp card (POST /games/end-season): credits MLB service time, expires final-year contracts (extensions, auto-renewals, free agency), advances the rest, ages/progresses players, applies the offseason injury tick and switches to OFFSEASON. Refused until the World Series is complete; cannot be re-run.</p>
 
           <div class="alert alert-info" id="eos-season-info">
             Loading current season info...
@@ -3412,6 +3419,61 @@
             </div>
             <div id="gpa-playerstrat-content"></div>
           </div>
+        </div>
+      </section>
+
+      <section id="section-progression-diag" class="section">
+        <div class="card">
+          <h3>Progression Diagnostics</h3>
+          <p style="color:#999;margin:4px 0 10px">True values from the end-season rating snapshots (before and after progression). <strong>raw_ovr</strong> is the absolute weighted attribute average and is what the trends use; <strong>displayovr</strong> is a cohort percentile and cannot show a trend.</p>
+          <div class="filter-row" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+            <div><label>Season (snapshots)</label><select id="prog-lyid"></select></div>
+            <div>
+              <label>Level</label>
+              <select id="prog-level">
+                <option value="">All</option>
+                <option value="1">1 (HS)</option><option value="2">2 (INTAM)</option><option value="3">3 (College)</option>
+                <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+                <option value="7">7</option><option value="8">8</option><option value="9">9 (MLB)</option>
+              </select>
+            </div>
+            <div><label>Potential grade</label><select id="prog-grade"></select></div>
+            <button id="btn-prog-load" class="btn btn-primary">Load</button>
+          </div>
+          <div id="prog-status" class="status-msg"></div>
+        </div>
+        <div class="card">
+          <h4>Growth table vs realised deltas (selected grade, by age)</h4>
+          <canvas id="prog-curve-chart" height="220"></canvas>
+          <div id="prog-curve-table" style="margin-top:10px"></div>
+        </div>
+        <div class="card">
+          <h4>Age profile: mean raw_ovr by age, one line per season</h4>
+          <canvas id="prog-age-chart" height="220"></canvas>
+          <div id="prog-age-peaks" style="color:#999;margin-top:6px"></div>
+        </div>
+        <div class="card">
+          <h4>League drift: mean raw_ovr per level after progression</h4>
+          <canvas id="prog-drift-chart" height="220"></canvas>
+        </div>
+        <div class="card">
+          <h4>Offseason outliers (raw_ovr change vs the same age and level)</h4>
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+            <div style="flex:1;min-width:360px"><h5>Biggest gainers</h5><div id="prog-gainers"></div></div>
+            <div style="flex:1;min-width:360px"><h5>Biggest losers</h5><div id="prog-losers"></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <h4>Training camp</h4>
+          <div id="prog-camp"></div>
+        </div>
+        <div class="card">
+          <h4>Player trajectory</h4>
+          <div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+            <div><label>Player ID</label><input id="prog-player-id" type="number" style="width:140px"></div>
+            <button id="btn-prog-player" class="btn btn-secondary">Load</button>
+          </div>
+          <div id="prog-player" style="margin-top:10px"></div>
         </div>
       </section>
 

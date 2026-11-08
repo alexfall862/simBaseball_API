@@ -196,7 +196,6 @@ def admin_orphan_sweep():
               AND NOT EXISTS (
                   SELECT 1 FROM fa_auction fa
                   WHERE fa.player_id = st.player_id
-                    AND fa.league_year_id = :lyid
                     AND fa.phase IN ('open', 'listening', 'finalize')
               )
               AND NOT EXISTS (
@@ -204,7 +203,7 @@ def admin_orphan_sweep():
                   WHERE wc.player_id = st.player_id
                     AND wc.status = 'active'
               )
-        """), {"fa_threshold": FA_THRESHOLD, "lyid": league_year_id}).all()
+        """), {"fa_threshold": FA_THRESHOLD}).all()
 
         entered = []
         errors = []
@@ -339,7 +338,8 @@ def free_agent_pool():
 
     engine = get_engine()
     from services.fa_auction import get_free_agent_pool
-    with engine.connect() as conn:
+    # begin(): the pool backfills missing demand rows and must commit them.
+    with engine.begin() as conn:
         result = get_free_agent_pool(
             conn, viewing_org_id, league_year_id,
             page=page, per_page=per_page,
@@ -364,7 +364,8 @@ def player_detail(player_id):
 
     engine = get_engine()
     from services.fa_auction import get_free_agent_detail
-    with engine.connect() as conn:
+    # begin(): the detail view backfills a missing demand row and must commit it.
+    with engine.begin() as conn:
         detail = get_free_agent_detail(conn, player_id, viewing_org_id, league_year_id)
     if not detail:
         return jsonify({"error": "Player not found"}), 404

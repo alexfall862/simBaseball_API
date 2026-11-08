@@ -299,7 +299,7 @@ def compute_star_rankings(conn, league_year_id):
                    p.pendurance_pot, p.pgencontrol_pot,
                    p.pthrowpower_pot, p.psequencing_pot
             FROM simbbPlayers p
-            JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+            JOIN contracts c ON c.playerID = p.id AND c.isActive = 1 AND c.isFinished = 0
             JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
             JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
             WHERE cts.orgID = :ushs
@@ -843,7 +843,7 @@ def resolve_week_20_cleanup(conn, league_year_id, config=None):
         text("""
             SELECT COUNT(*)
             FROM simbbPlayers p
-            JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
+            JOIN contracts c ON c.playerID = p.id AND c.isActive = 1 AND c.isFinished = 0
             JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
             JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
             WHERE cts.orgID = :ushs

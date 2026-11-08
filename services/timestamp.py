@@ -342,11 +342,13 @@ def get_enhanced_timestamp() -> Optional[Dict[str, Any]]:
                 text("SELECT id FROM league_years WHERE league_year = :yr"),
                 {"yr": season_yr},
             ).first()
-            ly_id = row[0] if row else 1
-            _ly_id_cache[season_yr] = (ly_id, now)
+            ly_id = row[0] if row else None
+            if ly_id is not None:
+                _ly_id_cache[season_yr] = (ly_id, now)
             ts["LeagueYearID"] = ly_id
     except Exception:
-        ts["LeagueYearID"] = 1
+        logger.exception("Could not resolve LeagueYearID for season %s", season_yr)
+        ts["LeagueYearID"] = None
 
     return ts
 
@@ -451,14 +453,17 @@ OFFSEASON_INJURY_WEEKS = 16
 
 def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, Any]:
     """
-    Transition from regular season to offseason.
+    Transition from regular season to the offseason of the NEXT league year.
 
     Steps:
+      -1. Create the next league_years row + game_weeks if missing
       0. Resolve outstanding waivers
       1. Run end-of-season contract processing (service time, expirations, FA eligibility)
       2. Progress all players (age +1, ability changes)
       2b. Offseason injury tick (OFFSEASON_INJURY_WEEKS of recovery)
-      3. Set timestamp flags to OFFSEASON
+      3. Move the calendar to the new league year: season = Y+1, week 0,
+         OFFSEASON flags, league_state on the new year. Free agency, the
+         draft and recruiting then run under the season they are for.
 
     Guards: refuses unless the MLB World Series is complete (``force=True``
     overrides — e.g. a league year with no MLB bracket), and refuses a second
@@ -504,6 +509,41 @@ def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, An
         )
     summary["postseason_complete"] = bool(ws_done)
     summary["forced"] = bool(force)
+
+    # -1. The new league year starts the moment the season ends, so its
+    #     league_years row (+ game_weeks) must exist. Create it here if the
+    #     admin has not already; done BEFORE the claim so a failure (e.g.
+    #     financial_config missing) does not consume the one-shot.
+    old_season = int(ts.get("Season"))
+    new_season = old_season + 1
+    from sqlalchemy import text as _ly_text
+    with engine.connect() as conn:
+        next_row = conn.execute(
+            _ly_text("SELECT id FROM league_years WHERE league_year = :yr"),
+            {"yr": new_season},
+        ).first()
+    if next_row:
+        next_league_year_id = int(next_row[0])
+        summary["next_league_year"] = {"league_year_id": next_league_year_id,
+                                       "created": False}
+    else:
+        from financials.books import initialize_next_league_year
+        init_result = initialize_next_league_year(engine, old_season)
+        next_league_year_id = int(init_result["league_year_id"])
+        summary["next_league_year"] = {"league_year_id": next_league_year_id,
+                                       "created": True, **init_result}
+        logger.info(f"Created league year {new_season}: {init_result}")
+    with engine.connect() as conn:
+        gw1 = conn.execute(
+            _ly_text("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = 1"),
+            {"lyid": next_league_year_id},
+        ).first()
+    if not gw1:
+        raise ValueError(
+            f"game_weeks has no week 1 for league year {new_season} "
+            f"(id {next_league_year_id}); insert the weeks before ending the season."
+        )
+    new_week1_gw_id = int(gw1[0])
 
     # Idempotency claim: end-of-season is one-way (service time, contract
     # expiry, and ageing/progression are NOT reversible), so the league year
@@ -560,23 +600,93 @@ def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, An
     try:
         from services.contract_ops import process_end_of_season
         with engine.begin() as conn:
-            eos_result = process_end_of_season(conn, league_year_id)
+            eos_result = process_end_of_season(
+                conn, league_year_id, next_league_year_id=next_league_year_id,
+            )
         summary["end_of_season"] = eos_result
         logger.info(f"End-of-season contracts processed: {eos_result}")
     except Exception as e:
         logger.exception("end_regular_season: contract processing failed")
         summary["end_of_season_error"] = str(e)
 
-    # 2. Player progression
+    # 2. Player progression, bracketed by true-value rating snapshots, with
+    #    the training-camp grade overrides, then a displayovr refresh (the
+    #    stored column is a cohort percentile and goes stale otherwise) and
+    #    the realised-curve statistics for the admin diagnostics.
+    try:
+        from services.progression_snapshots import take_snapshot
+        with engine.begin() as conn:
+            summary["snapshot_pre"] = take_snapshot(conn, league_year_id, "pre_progression")
+    except Exception as e:
+        logger.exception("end_regular_season: pre-progression snapshot failed")
+        summary["snapshot_pre_error"] = str(e)
+
+    camp_overrides = None
+    try:
+        from services.training_camp import prepare_camp
+        with engine.begin() as conn:
+            camp = prepare_camp(conn, league_year_id)
+        camp_overrides = camp.pop("overrides", None)
+        summary["training_camp"] = camp
+    except Exception as e:
+        logger.exception("end_regular_season: training camp failed")
+        summary["training_camp_error"] = str(e)
+
     try:
         from player_engine.player_progression import progress_all_players
         with engine.begin() as conn:
-            prog_result = progress_all_players(conn)
+            prog_result = progress_all_players(conn, grade_overrides=camp_overrides)
         summary["progression"] = prog_result
         logger.info(f"Player progression complete: {prog_result}")
     except Exception as e:
         logger.exception("end_regular_season: player progression failed")
         summary["progression_error"] = str(e)
+
+    try:
+        from services.ovr_core import recompute_stored_displayovr
+        with engine.begin() as conn:
+            summary["displayovr_refresh"] = recompute_stored_displayovr(conn)
+    except Exception as e:
+        logger.exception("end_regular_season: displayovr refresh failed")
+        summary["displayovr_refresh_error"] = str(e)
+
+    try:
+        from services.progression_snapshots import take_snapshot, compute_curve_stats
+        with engine.begin() as conn:
+            summary["snapshot_post"] = take_snapshot(conn, league_year_id, "post_progression")
+            summary["curve_stats"] = compute_curve_stats(conn, league_year_id)
+    except Exception as e:
+        logger.exception("end_regular_season: post-progression snapshot failed")
+        summary["snapshot_post_error"] = str(e)
+
+    # 2a. New amateur classes (after the age bump so freshmen enter at the
+    #     configured age): refill the HS and INTAM pools to their targets.
+    try:
+        from services.graduation import generate_amateur_classes
+        with engine.begin() as conn:
+            summary["amateur_classes"] = generate_amateur_classes(
+                conn, next_league_year_id, new_season)
+    except Exception as e:
+        logger.exception("end_regular_season: amateur class generation failed")
+        summary["amateur_classes_error"] = str(e)
+
+    # 2a'. Per-year rows the offseason subsystems expect (scouting budgets,
+    #      IFA state + pools from this season's standings, recruiting state)
+    #      and listed positions for the new year.
+    try:
+        from services.graduation import bootstrap_year_tables
+        with engine.begin() as conn:
+            summary["year_tables"] = bootstrap_year_tables(
+                conn, next_league_year_id, league_year_id)
+    except Exception as e:
+        logger.exception("end_regular_season: year table bootstrap failed")
+        summary["year_tables_error"] = str(e)
+    try:
+        from services.listed_position import refresh_all_teams
+        with engine.begin() as conn:
+            summary["listed_positions"] = refresh_all_teams(conn, next_league_year_id)
+    except Exception as e:
+        logger.warning("end_regular_season: listed position refresh failed: %s", e)
 
     # 2b. Offseason injury tick: credit OFFSEASON_INJURY_WEEKS of recovery to
     #     every active injury (heals those that reach 0, career malus applies
@@ -592,9 +702,12 @@ def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, An
         logger.exception("end_regular_season: offseason injury tick failed")
         summary["offseason_injury_tick_error"] = str(e)
 
-    # 3. Flip to offseason
+    # 3. Move the calendar to the new league year's offseason (week 0).
     update_timestamp(
         {
+            "season": new_season,
+            "season_id": next_league_year_id,
+            "week": 0,
             "is_offseason": True,
             "is_free_agency_locked": True,
             "is_draft_time": False,
@@ -608,9 +721,29 @@ def end_regular_season(league_year_id: int, force: bool = False) -> Dict[str, An
         },
         broadcast=True,
     )
+    with engine.begin() as conn:
+        conn.execute(
+            _ly_text("UPDATE league_state SET current_league_year_id = :lyid, "
+                     "current_game_week_id = :gwid WHERE id = 1"),
+            {"lyid": next_league_year_id, "gwid": new_week1_gw_id},
+        )
+    try:
+        from bootstrap import invalidate_season_context
+        invalidate_season_context()
+    except Exception:
+        pass
+    _ly_id_cache.clear()
     summary["timestamp_updated"] = True
+    summary["new_season"] = new_season
+    summary["new_league_year_id"] = next_league_year_id
+    summary["phase_transition"] = (
+        f"REGULAR_SEASON {old_season} -> OFFSEASON {new_season}"
+    )
 
-    logger.info(f"Regular season ended for league_year {league_year_id}")
+    logger.info(
+        f"Regular season {old_season} ended (league_year_id {league_year_id}); "
+        f"calendar moved to {new_season} offseason (league_year_id {next_league_year_id})"
+    )
     return summary
 
 
@@ -633,6 +766,19 @@ def start_free_agency() -> bool:
     phase = get_current_phase(ts)
     if phase not in ("OFFSEASON", "FREE_AGENCY"):
         raise ValueError(f"Cannot start free agency: currently in {phase}")
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        from sqlalchemy import text as _text
+
+        # The offseason has no game weeks; FA rounds are the auction clock
+        # (see advance_fa_round). Reset every active auction's phase start so
+        # auctions carried over from the regular season (week 40, 52, ...)
+        # are not stuck behind a week number that never comes.
+        conn.execute(_text(
+            "UPDATE fa_auction SET phase_started_week = 0 "
+            "WHERE phase IN ('open', 'listening', 'finalize')"
+        ))
 
     return update_timestamp(
         {"is_free_agency_locked": False, "free_agency_round": 1},
@@ -661,20 +807,52 @@ def advance_fa_round() -> Dict[str, Any]:
     old_round = ts.get("FreeAgencyRound", 0)
     new_round = old_round + 1
 
-    update_timestamp({"free_agency_round": new_round}, broadcast=True)
+    update_timestamp({"free_agency_round": new_round}, broadcast=False)
 
-    logger.info(f"Free agency advanced from round {old_round} to {new_round}")
-    return {"old_round": old_round, "new_round": new_round}
+    # Offseason auction clock: there are no game weeks between end-season
+    # and start-new-season, so each FA round moves every active auction one
+    # phase (open -> listening -> finalize -> signed). In-season auctions
+    # keep being driven by advance_week().
+    auction_phases = None
+    try:
+        from services.fa_auction import advance_auction_phases
+        from services.league_calendar import resolve_league_year_id
+        engine = get_engine()
+        with engine.begin() as conn:
+            lyid = resolve_league_year_id(conn, int(ts.get("Season")))
+            if lyid is not None:
+                auction_phases = advance_auction_phases(conn, new_round, lyid)
+    except Exception:
+        logger.exception("FA round %d: auction phase advance failed", new_round)
+
+    try:
+        from services.websocket_manager import ws_manager
+        ws_manager.broadcast_timestamp()
+    except Exception:
+        pass
+
+    logger.info(
+        f"Free agency advanced from round {old_round} to {new_round}; "
+        f"auction phases: {auction_phases}"
+    )
+    return {
+        "old_round": old_round,
+        "new_round": new_round,
+        "auction_phases": auction_phases,
+    }
 
 
-def end_free_agency() -> bool:
+def end_free_agency() -> Dict[str, Any]:
     """
     Close the free agency window.
 
-    Sets is_free_agency_locked=True.
+    Resolves every auction still active: auctions with offers are run to a
+    winner; auctions that never drew an offer expire and the player gets a
+    1-year fallback deal (see ``fa_auction.close_free_agency_auctions``).
+    Then sets is_free_agency_locked=True.
 
     Returns:
-        True if succeeded.
+        Summary dict of the auction resolution (truthy).
 
     Raises:
         ValueError: If not in FREE_AGENCY phase.
@@ -687,10 +865,35 @@ def end_free_agency() -> bool:
     if phase != "FREE_AGENCY":
         raise ValueError(f"Cannot end free agency: currently in {phase}")
 
-    return update_timestamp(
-        {"is_free_agency_locked": True},
-        broadcast=True,
-    )
+    summary: Dict[str, Any] = {}
+    try:
+        from services.fa_auction import close_free_agency_auctions
+        engine = get_engine()
+        league_year_id = _resolve_current_league_year_id(engine, ts)
+        current_round = int(ts.get("FreeAgencyRound") or ts.get("free_agency_round") or 0)
+        with engine.begin() as conn:
+            summary = close_free_agency_auctions(
+                conn, league_year_id, current_week=current_round)
+    except Exception as e:
+        logger.exception("end_free_agency: auction close failed")
+        summary = {"error": str(e)}
+
+    update_timestamp({"is_free_agency_locked": True}, broadcast=True)
+    summary["closed"] = True
+    return summary
+
+
+def _resolve_current_league_year_id(engine, ts: Dict[str, Any]) -> int:
+    """league_years.id for the season the calendar is on."""
+    from sqlalchemy import text as _t
+    with engine.connect() as conn:
+        row = conn.execute(
+            _t("SELECT id FROM league_years WHERE league_year = :yr"),
+            {"yr": int(ts.get("Season"))},
+        ).first()
+    if not row:
+        raise ValueError(f"No league_years row for season {ts.get('Season')}")
+    return int(row[0])
 
 
 def start_draft() -> bool:
@@ -710,6 +913,8 @@ def start_draft() -> bool:
         raise ValueError("No timestamp state found")
 
     phase = get_current_phase(ts)
+    if phase == "DRAFT":
+        return True  # already open (draft admin start sets the flag too)
     if phase != "OFFSEASON":
         raise ValueError(f"Cannot start draft: currently in {phase}")
 
@@ -733,6 +938,8 @@ def end_draft() -> bool:
         raise ValueError("No timestamp state found")
 
     phase = get_current_phase(ts)
+    if phase == "OFFSEASON" and not ts.get("IsDraftTime"):
+        return True  # already closed (draft admin complete clears the flag)
     if phase != "DRAFT":
         raise ValueError(f"Cannot end draft: currently in {phase}")
 
@@ -793,14 +1000,18 @@ def end_recruiting() -> bool:
 
 def start_new_season(league_year_id: int) -> Dict[str, Any]:
     """
-    Transition from offseason to a new regular season.
+    Transition from offseason to the regular season.
 
-    Steps:
-      1. Run year-start financial books
-      2. Reset timestamp to week 1, regular season
+    End-season already moved the calendar to the new league year (week 0,
+    offseason), so this step only:
+      1. Runs the year-start financial books for it
+      2. Sets week 1, regular season
 
     Args:
-        league_year_id: The new league year id.
+        league_year_id: The league year id of the season to start (the one
+            the calendar is on; the previous behaviour of passing the NEXT
+            year's id while the calendar was still on the old year is also
+            accepted).
 
     Returns:
         Summary dict.
@@ -840,10 +1051,25 @@ def start_new_season(league_year_id: int) -> Dict[str, Any]:
                 "row + game_weeks for the new year) before starting the season."
             )
         new_season = int(ly_row[1])
-        if new_season <= old_season:
+        if new_season < old_season:
             raise ValueError(
-                f"league_year_id {league_year_id} is season {new_season}, which is not "
-                f"after the current season {old_season}. Pass the NEW year's id."
+                f"league_year_id {league_year_id} is season {new_season}, which is "
+                f"before the season the calendar is on ({old_season})."
+            )
+        if new_season > old_season + 1:
+            raise ValueError(
+                f"league_year_id {league_year_id} is season {new_season}; the calendar "
+                f"is on {old_season}. Seasons cannot be skipped."
+            )
+        schedule_games = conn.execute(
+            _text("SELECT COUNT(*) FROM gamelist g JOIN seasons s ON s.id = g.season "
+                  "WHERE s.year = :yr"),
+            {"yr": new_season},
+        ).scalar() or 0
+        if not schedule_games:
+            raise ValueError(
+                f"No schedule exists for {new_season} (gamelist is empty for that "
+                f"season). Generate it in the Schedule Generator first."
             )
         gw_row_new = conn.execute(
             _text("SELECT id FROM game_weeks WHERE league_year_id = :lyid AND week_index = 1"),
@@ -899,6 +1125,17 @@ def start_new_season(league_year_id: int) -> Dict[str, Any]:
         )
         logger.info(f"Synced league_state to league_year_id={league_year_id}, week 1")
     summary["league_state_synced"] = True
+
+    # Listed positions are keyed by league year; refresh them now so week-1
+    # stats and rosters are not blank until the first advance_week.
+    try:
+        from services.listed_position import refresh_all_teams
+        with engine.begin() as conn:
+            refresh_all_teams(conn, league_year_id)
+        summary["listed_positions_refreshed"] = True
+    except Exception as e:
+        logger.exception("start_new_season: listed position refresh failed")
+        summary["listed_positions_error"] = str(e)
 
     summary["new_season"] = new_season
     summary["timestamp_updated"] = True

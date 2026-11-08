@@ -13,6 +13,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import text as sa_text
 
+from services.league_calendar import season_id_sql
+
 
 # --- Allowlisted columns per source (NEVER add stamina_cost / league_year_id) ---
 
@@ -56,7 +58,8 @@ def build_where(filters: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     clauses = ["1=1"]
     params: Dict[str, Any] = {}
     if filters.get("season"):
-        clauses.append("gr.season = :season")
+        # Callers pass league_year_id; game_results.season stores seasons.id.
+        clauses.append("gr.season = " + season_id_sql("season"))
         params["season"] = filters["season"]
     if filters.get("season_week"):
         clauses.append("gr.season_week = :sw")

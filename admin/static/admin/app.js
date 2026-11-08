@@ -250,6 +250,11 @@
 
     // Player Engine — Sandbox
     document.getElementById('btn-sandbox-run').addEventListener('click', runSandbox);
+
+    // Progression diagnostics
+    document.getElementById('btn-prog-load').addEventListener('click', loadProgYear);
+    document.getElementById('btn-prog-player').addEventListener('click', loadProgPlayer);
+    document.getElementById('prog-grade').addEventListener('change', renderProgCurve);
     document.getElementById('sandbox-ability-select').addEventListener('change', () => {
       populateSandboxGradeFilter();
       renderSandboxChart();
@@ -431,6 +436,7 @@
       'pe-generate': 'Player Generation',
       'pe-progress': 'Player Progression',
       'pe-sandbox': 'Progression Sandbox',
+      'progression-diag': 'Progression Diagnostics',
       'tx-eos': 'End of Season',
       'tx-amateur': 'Amateur Seeding',
       'schedule-gen': 'Schedule Generator',
@@ -544,6 +550,9 @@
         break;
       case 'weight-calibration':
         loadCalibrationInit();
+        break;
+      case 'progression-diag':
+        loadProgDiag();
         break;
       case 'stamina-overview':
       case 'stamina-team':
@@ -4200,7 +4209,7 @@
       alert('Could not determine league year. Please wait for season info to load.');
       return;
     }
-    if (!confirm('This will process ALL end-of-season contract operations (service time, renewals, expirations). Continue?')) {
+    if (!confirm('This runs the one-shot End Season: contract processing (service time, renewals, expirations, FA entry), player aging/progression, the offseason injury tick, and the switch to OFFSEASON. It cannot be re-run. Continue?')) {
       return;
     }
 
@@ -4208,7 +4217,7 @@
     btn.disabled = true;
     btn.textContent = 'Processing...';
 
-    fetch(`${API_BASE}/transactions/end-of-season`, {
+    fetch(`${API_BASE}/games/end-season`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ league_year_id: txLeagueYearId }),
@@ -4227,6 +4236,9 @@
         const card = document.getElementById('eos-result-card');
         card.style.display = 'block';
 
+        // /games/end-season nests the contract summary under end_of_season
+        const eos = data.end_of_season || data;
+
         const labels = {
           league_year: 'League Year',
           service_time_credited: 'Service Time Credited',
@@ -4241,7 +4253,7 @@
         resultDiv.innerHTML = Object.entries(labels).map(([key, label]) => `
           <div class="kv-row">
             <div class="kv-key">${label}</div>
-            <div class="kv-val">${data[key] !== undefined ? data[key] : '--'}</div>
+            <div class="kv-val">${eos[key] !== undefined ? eos[key] : '--'}</div>
           </div>
         `).join('');
       })
@@ -10108,8 +10120,14 @@
     }).then(r => r.json()).then(data => {
       const status = document.getElementById('dft-status');
       if (data.error) { status.textContent = data.message || data.error; status.className = 'status-msg error'; return; }
-      status.textContent = `Signed ${data.player_name} \u2014 ${data.years}yr / ${dftFmt(data.slot_value)}`;
-      status.className = 'status-msg success';
+      if (data.accepted === false) {
+        status.textContent = `${data.player_name} rejected offer #${data.offer_no} (${dftFmt(data.offer)}; ask ${dftFmt(data.ask_bonus)}) \u2014 ` +
+          (data.status === 'refused' ? 'REFUSED, returns to school' : `${data.offers_remaining} offer(s) left`);
+        status.className = 'status-msg error';
+      } else {
+        status.textContent = `Signed ${data.player_name} \u2014 ${data.years}yr, bonus ${dftFmt(data.bonus)} (ask ${dftFmt(data.ask_bonus)})`;
+        status.className = 'status-msg success';
+      }
       loadDftSigningTable(lyid);
     }).catch(e => { document.getElementById('dft-status').textContent = e.message; });
   };
@@ -13546,6 +13564,175 @@
     tutEditCategory,
     tutDeleteCategory,
   });
+
+  // ── Progression diagnostics ─────────────────────────────────────────
+  let progCurveChart = null, progAgeChart = null, progDriftChart = null, progCurveData = null;
+  const PROG_COLORS = ['#3498db', '#e67e22', '#2ecc71', '#9b59b6', '#e74c3c', '#1abc9c', '#f1c40f', '#95a5a6', '#e84393'];
+
+  function progFetch(path) {
+    return fetch(`${ADMIN_BASE}/analytics/${path}`, { credentials: 'include' }).then(r => r.json());
+  }
+
+  function progTable(headers, rows) {
+    if (!rows.length) return '<p style="color:#999">No data.</p>';
+    return `<table class="data-table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead>` +
+      `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c ?? ''}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  }
+
+  function loadProgDiag() {
+    const sel = document.getElementById('prog-lyid');
+    const status = document.getElementById('prog-status');
+    status.textContent = 'Loading...';
+    progFetch('progression-years').then(d => {
+      if (!d.ok) { status.textContent = d.error || 'Error'; return; }
+      const years = {};
+      (d.years || []).forEach(y => {
+        years[y.league_year_id] = years[y.league_year_id] || { ly: y.league_year, stages: [] };
+        years[y.league_year_id].stages.push(`${y.stage.replace('_progression', '')} ${y.players}`);
+      });
+      const prev = sel.value;
+      sel.innerHTML = '';
+      Object.keys(years).sort((a, b) => years[b].ly - years[a].ly).forEach(id => {
+        const o = document.createElement('option');
+        o.value = id; o.textContent = `${years[id].ly} (${years[id].stages.join(', ')})`;
+        sel.appendChild(o);
+      });
+      if (prev && years[prev]) sel.value = prev;
+      if (!sel.options.length) { status.textContent = 'No snapshots yet; end-season writes them.'; return; }
+      status.textContent = '';
+      loadProgYear();
+    }).catch(e => { status.textContent = String(e); });
+  }
+
+  function loadProgYear() {
+    const lyid = document.getElementById('prog-lyid').value;
+    const level = document.getElementById('prog-level').value;
+    if (!lyid) return;
+    progFetch(`progression-curves?league_year_id=${lyid}`).then(d => {
+      if (!d.ok) return;
+      progCurveData = d;
+      const gsel = document.getElementById('prog-grade');
+      const prev = gsel.value;
+      gsel.innerHTML = '';
+      (d.grades || []).forEach(g => { const o = document.createElement('option'); o.value = g; o.textContent = g; gsel.appendChild(o); });
+      if (prev && d.grades.includes(prev)) gsel.value = prev; else if (d.grades.includes('B')) gsel.value = 'B';
+      renderProgCurve();
+    });
+    progFetch(`progression-age-profile${level ? `?level=${level}` : ''}`).then(d => { if (d.ok) renderProgAge(d); });
+    progFetch('progression-drift').then(d => { if (d.ok) renderProgDrift(d, level); });
+    progFetch(`progression-outliers?league_year_id=${lyid}&n=15`).then(d => { if (d.ok) renderProgOutliers(d); });
+    progFetch(`progression-camp?league_year_id=${lyid}`).then(d => { if (d.ok) renderProgCamp(d); });
+  }
+
+  function renderProgCurve() {
+    if (!progCurveData) return;
+    const grade = document.getElementById('prog-grade').value;
+    const cells = (progCurveData.cells || []).filter(c => c.grade === grade).sort((a, b) => a.age - b.age);
+    const labels = cells.map(c => c.age);
+    if (progCurveChart) progCurveChart.destroy();
+    const ctx = document.getElementById('prog-curve-chart').getContext('2d');
+    progCurveChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets: [
+        { label: 'Table mode', data: cells.map(c => c.table_mode), borderColor: '#f1c40f', borderDash: [6, 3], borderWidth: 1, pointRadius: 0 },
+        { label: 'Table mean (expected)', data: cells.map(c => c.table_mean), borderColor: '#f39c12', borderWidth: 2, pointRadius: 0 },
+        { label: 'Table min', data: cells.map(c => c.table_min), borderColor: '#7f8c8d', borderDash: [4, 4], borderWidth: 1, pointRadius: 0 },
+        { label: 'Table max', data: cells.map(c => c.table_max), borderColor: '#7f8c8d', borderDash: [4, 4], borderWidth: 1, pointRadius: 0 },
+        { label: 'Realised mean', data: cells.map(c => c.mean_delta), borderColor: '#3498db', borderWidth: 2, pointRadius: 2 },
+        { label: 'Realised p10', data: cells.map(c => c.p10), borderColor: 'rgba(52,152,219,0.4)', borderWidth: 1, pointRadius: 0 },
+        { label: 'Realised p90', data: cells.map(c => c.p90), borderColor: 'rgba(52,152,219,0.4)', borderWidth: 1, pointRadius: 0, fill: '-1', backgroundColor: 'rgba(52,152,219,0.12)' },
+      ] },
+      options: { responsive: true, scales: { x: { title: { display: true, text: 'Age after progression' } }, y: { title: { display: true, text: 'Yearly delta' } } } },
+    });
+    document.getElementById('prog-curve-table').innerHTML = progTable(
+      ['Age', 'n', 'Table mode', 'Table mean', 'Realised mean', 'Off by', 'p10', 'p50', 'p90'],
+      cells.map(c => [c.age, c.n, c.table_mode, c.table_mean, c.mean_delta, c.flag ? `<span style="color:#e74c3c">${c.off_by}</span>` : c.off_by, c.p10, c.p50, c.p90]));
+  }
+
+  function renderProgAge(d) {
+    const years = Object.keys(d.series || {}).sort();
+    const ages = [...new Set(years.flatMap(y => d.series[y].map(p => p.age)))].sort((a, b) => a - b);
+    if (progAgeChart) progAgeChart.destroy();
+    const ctx = document.getElementById('prog-age-chart').getContext('2d');
+    progAgeChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: ages, datasets: years.map((y, i) => {
+        const byAge = Object.fromEntries(d.series[y].map(p => [p.age, p.mean_raw]));
+        return { label: `${y}`, data: ages.map(a => byAge[a] ?? null), borderColor: PROG_COLORS[i % PROG_COLORS.length], borderWidth: 2, pointRadius: 2, spanGaps: true };
+      }) },
+      options: { responsive: true, scales: { x: { title: { display: true, text: 'Age' } }, y: { title: { display: true, text: 'Mean raw_ovr' } } } },
+    });
+    const peaks = Object.entries(d.peak_age || {}).map(([y, a]) => `${y}: peak age ${a}`).join(' · ');
+    document.getElementById('prog-age-peaks').textContent = peaks || '';
+  }
+
+  function renderProgDrift(d, level) {
+    const rows = (d.rows || []).filter(r => r.stage === 'post_progression' && (!level || String(r.level) === String(level)));
+    const years = [...new Set(rows.map(r => r.league_year))].sort();
+    const levels = [...new Set(rows.map(r => r.level))].sort((a, b) => (a ?? 0) - (b ?? 0));
+    if (progDriftChart) progDriftChart.destroy();
+    const ctx = document.getElementById('prog-drift-chart').getContext('2d');
+    progDriftChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: years, datasets: levels.map((lvl, i) => ({
+        label: lvl === null ? 'No contract' : `Level ${lvl}`,
+        data: years.map(y => (rows.find(r => r.level === lvl && r.league_year === y) || {}).mean ?? null),
+        borderColor: PROG_COLORS[i % PROG_COLORS.length], borderWidth: 2, pointRadius: 3, spanGaps: true,
+      })) },
+      options: { responsive: true, scales: { y: { title: { display: true, text: 'Mean raw_ovr (post)' } } } },
+    });
+  }
+
+  function renderProgOutliers(d) {
+    const fmt = items => progTable(['Player', 'Age', 'Lvl', 'Org', 'raw pre', 'raw post', 'Δ', 'cohort Δ', 'z', 'Camp'],
+      items.map(x => [`<a href="#" data-pid="${x.player_id}" class="prog-player-link">${x.name}</a>`, x.age, x.level ?? '-', x.org ?? '-', x.raw_pre, x.raw_post, x.delta, x.cohort_mean, x.z,
+        x.camp ? `${x.camp.attr} / ${x.camp.intensity}${x.camp.backfired ? ' (backfired)' : ''}` : '']));
+    document.getElementById('prog-gainers').innerHTML = fmt(d.gainers || []);
+    document.getElementById('prog-losers').innerHTML = fmt(d.losers || []);
+    document.querySelectorAll('.prog-player-link').forEach(a => a.addEventListener('click', ev => {
+      ev.preventDefault();
+      document.getElementById('prog-player-id').value = a.dataset.pid;
+      loadProgPlayer();
+    }));
+  }
+
+  function renderProgCamp(d) {
+    const s = d.summary || {}, e = d.effects || {};
+    let html = `<p style="color:#999">Focus set but not yet applied: ${s.pending_focus ?? 0}. Players with a camp result this season: ${e.players ?? 0}.</p>`;
+    html += progTable(['Intensity', 'Players', 'Backfired', 'Mean steps'], (s.by_intensity || []).map(r => [r.intensity, r.players, r.backfired, r.mean_steps]));
+    const rows = Object.entries(e.by_intensity || {}).map(([k, v]) => [k, v.focus?.n ?? '', v.focus?.mean ?? '', v.focus_vs_mode?.mean ?? '', v.other?.mean ?? '', v.other_vs_mode?.mean ?? '']);
+    html += '<h5 style="margin-top:12px">Effect: mean yearly delta of the focus skill vs the same players\' other attributes</h5>';
+    html += progTable(['Outcome', 'n focus attrs', 'Focus Δ', 'Focus Δ − table mode', 'Other Δ', 'Other Δ − table mode'], rows);
+    html += '<h5 style="margin-top:12px">Skills chosen</h5>';
+    html += progTable(['Skill', 'Players', 'Backfired'], (s.by_attr || []).map(r => [r.label, r.players, r.backfired]));
+    document.getElementById('prog-camp').innerHTML = html;
+  }
+
+  function loadProgPlayer() {
+    const pid = document.getElementById('prog-player-id').value;
+    const box = document.getElementById('prog-player');
+    if (!pid) { box.innerHTML = ''; return; }
+    box.innerHTML = 'Loading...';
+    progFetch(`progression-player/${pid}`).then(d => {
+      if (!d.ok) { box.innerHTML = `<p style="color:#e74c3c">${d.error || 'Error'}</p>`; return; }
+      const p = d.player;
+      let html = `<p><strong>${p.name}</strong> · ${p.ptype} · age ${p.age} · displayovr ${p.displayovr ?? '-'}</p>`;
+      if (!(d.seasons || []).length) { box.innerHTML = html + '<p style="color:#999">No snapshots for this player.</p>'; return; }
+      html += progTable(['Season', 'Age', 'Level', 'Org', 'raw pre', 'raw post', 'Δ', 'Camp'],
+        d.seasons.map(s => [s.league_year, s.post?.age ?? s.pre?.age, s.post?.level ?? s.pre?.level ?? '-', s.post?.org ?? s.pre?.org ?? '-',
+          s.pre?.raw_ovr ?? '-', s.post?.raw_ovr ?? '-', (s.pre && s.post && s.pre.raw_ovr != null && s.post.raw_ovr != null) ? (s.post.raw_ovr - s.pre.raw_ovr).toFixed(2) : '-',
+          s.camp ? `${s.camp.attr} / ${s.camp.intensity} ${s.camp.base_grade}→${s.camp.effective_grade}${s.camp.backfired ? ' (backfired)' : ''}` : '']));
+      const last = [...d.seasons].reverse().find(s => s.attributes && s.attributes.length);
+      if (last) {
+        html += `<h5 style="margin-top:12px">Attributes, ${last.league_year} offseason (band = growth table for the grade at that age)</h5>`;
+        html += progTable(['Attribute', 'Grade', 'Pre', 'Post', 'Δ', 'Band min / mode / max'],
+          last.attributes.map(a => [a.attr, a.grade ?? '-', a.pre ?? '-', a.post ?? '-',
+            a.outside_band ? `<span style="color:#e74c3c">${a.delta}</span>` : a.delta,
+            a.band ? `${a.band.min} / ${a.band.mode} / ${a.band.max}` : '-']));
+      }
+      box.innerHTML = html;
+    });
+  }
 
   // Initialize on DOM ready
   if (document.readyState === 'loading') {

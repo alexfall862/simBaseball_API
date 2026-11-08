@@ -99,7 +99,11 @@ class WebSocketManager:
             timestamp_data = get_current_timestamp()
 
             if timestamp_data:
-                return self.broadcast(timestamp_data)
+                # Typed like every other message so clients can route it
+                # (draft events carry type="draft_*").
+                payload = dict(timestamp_data)
+                payload["type"] = "timestamp"
+                return self.broadcast(payload)
             else:
                 logger.warning("No timestamp data to broadcast")
                 return 0

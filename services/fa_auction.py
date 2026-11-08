@@ -70,18 +70,19 @@ def _offer_attractiveness(
     aavs = [float(o["aav"]) for o in offers]
     etvs = [_effective_tv(o) for o in offers]
 
-    aav_min, aav_max = min(aavs), max(aavs)
-    etv_min, etv_max = min(etvs), max(etvs)
-
-    aav_range = aav_max - aav_min if aav_max != aav_min else 1.0
-    etv_range = etv_max - etv_min if etv_max != etv_min else 1.0
+    # Ratio-to-best normalisation: an offer scores by how close it is to the
+    # best AAV and the best effective total on the table. (Min-max scaling
+    # gave the worst offer 0 on both axes, so two near-identical offers could
+    # be scored 1.0 and 0.0.) Ties break on the earliest offer id.
+    aav_max = max(aavs) or 1.0
+    etv_max = max(etvs) or 1.0
 
     for o, etv in zip(offers, etvs):
-        norm_aav = (float(o["aav"]) - aav_min) / aav_range
-        norm_etv = (etv - etv_min) / etv_range
+        norm_aav = float(o["aav"]) / aav_max
+        norm_etv = etv / etv_max
         o["_score"] = aav_w * norm_aav + tv_w * norm_etv
 
-    offers.sort(key=lambda o: o["_score"], reverse=True)
+    offers.sort(key=lambda o: (-o["_score"], int(o.get("id") or 0)))
     return offers
 
 
@@ -263,11 +264,28 @@ def submit_offer(
     total_value = sum(salaries) + bonus
     aav = total_value / years if years else total_value
 
-    # Check minimum demand
+    # Check the player's demand: total, per-year AAV and contract length.
     if total_value < a["min_total_value"]:
         raise ValueError(
             f"Total value ({total_value}) below player minimum ({a['min_total_value']})"
         )
+    if a["min_aav"] is not None and aav < Decimal(str(a["min_aav"])):
+        raise ValueError(
+            f"AAV ({aav:.2f}) below player minimum AAV ({a['min_aav']})"
+        )
+    if a["min_years"] is not None and years < int(a["min_years"]):
+        raise ValueError(
+            f"Contract length ({years}) below player minimum ({a['min_years']} years)"
+        )
+    if a["max_years"] is not None and years > int(a["max_years"]):
+        raise ValueError(
+            f"Contract length ({years}) exceeds player maximum ({a['max_years']} years)"
+        )
+    if not 4 <= int(level_id) <= 9:
+        raise ValueError("level_id must be a pro level (4-9)")
+    from services.org_constants import MLB_ORG_MIN, MLB_ORG_MAX
+    if not MLB_ORG_MIN <= int(org_id) <= MLB_ORG_MAX:
+        raise ValueError("Only MLB organizations can bid on free agents")
 
     # Validate cash balance for bonus
     from services.transactions import _get_signing_budget
@@ -456,122 +474,142 @@ def advance_auction_phases(
         select(auc).where(auc.c.phase.in_(["open", "listening", "finalize"]))
     ).all()
 
+    summary["errors"] = []
+
     for row in active_auctions:
         a = row._mapping
         auction_id = int(a["id"])
-        phase = a["phase"]
-        started = int(a["phase_started_week"])
-        auction_ly = int(a["league_year_id"])
-
-        # If the auction belongs to a previous league year (e.g., season
-        # was reset), the week numbers are stale.  Force-advance it.
-        stale_auction = (auction_ly != league_year_id)
-
-        # Phase must have lasted at least 1 week (unless stale)
-        if not stale_auction and current_week <= started:
-            if phase == "open":
-                summary["still_open"] += 1
-            continue
-
-        if phase == "open":
-            # Need at least 1 offer to transition
-            offer_count = conn.execute(
-                select(func.count()).where(and_(
-                    offers.c.auction_id == auction_id,
-                    offers.c.status == "active",
-                ))
-            ).scalar_one()
-
-            if offer_count == 0:
-                summary["still_open"] += 1
-                continue
-
-            conn.execute(
-                update(auc)
-                .where(auc.c.id == auction_id)
-                .values(phase="listening", phase_started_week=current_week)
-            )
-            summary["open_to_listening"] += 1
-            log.info("auction %d: open -> listening (week %d)", auction_id, current_week)
-
-        elif phase == "listening":
-            # Eliminate non-top-3 offers using age-weighted scoring
-            active_offers = conn.execute(
-                select(offers.c.id, offers.c.total_value, offers.c.aav, offers.c.bonus)
-                .where(and_(
-                    offers.c.auction_id == auction_id,
-                    offers.c.status == "active",
-                ))
-            ).all()
-
-            if len(active_offers) > 3:
-                offer_dicts = [
-                    {"id": int(r._mapping["id"]),
-                     "aav": r._mapping["aav"],
-                     "total_value": r._mapping["total_value"],
-                     "bonus": r._mapping["bonus"]}
-                    for r in active_offers
-                ]
-                scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
-                keep_ids = {o["id"] for o in scored[:3]}
-                for o in scored[3:]:
-                    conn.execute(
-                        update(offers)
-                        .where(offers.c.id == o["id"])
-                        .values(status="outbid")
-                    )
-
-            conn.execute(
-                update(auc)
-                .where(auc.c.id == auction_id)
-                .values(phase="finalize", phase_started_week=current_week)
-            )
-            summary["listening_to_finalize"] += 1
-            log.info("auction %d: listening -> finalize (week %d)", auction_id, current_week)
-
-        elif phase == "finalize":
-            # Winner = highest age-weighted attractiveness score
-            final_offers = conn.execute(
-                select(offers)
-                .where(and_(
-                    offers.c.auction_id == auction_id,
-                    offers.c.status == "active",
-                ))
-            ).all()
-
-            if not final_offers:
-                log.warning("auction %d: finalize with no active offers", auction_id)
-                conn.execute(
-                    update(auc)
-                    .where(auc.c.id == auction_id)
-                    .values(phase="withdrawn")
+        try:
+            # SAVEPOINT per auction: a failure (player direct-signed meanwhile,
+            # bonus over budget, ...) rolls back only this auction's changes
+            # and is recorded, instead of aborting the whole pass and leaving
+            # every later auction stuck in its phase.
+            with conn.begin_nested():
+                _advance_one_auction(
+                    conn, a, auc, offers, current_week, league_year_id, summary,
                 )
-                continue
+        except Exception as e:
+            log.exception("auction %d: phase advance failed", auction_id)
+            summary["errors"].append({"auction_id": auction_id, "error": str(e)})
 
+    return summary
+
+
+def _advance_one_auction(conn, a, auc, offers, current_week, league_year_id,
+                         summary) -> None:
+    """Advance a single auction one phase if its current phase has elapsed."""
+    auction_id = int(a["id"])
+    phase = a["phase"]
+    started = int(a["phase_started_week"])
+    auction_ly = int(a["league_year_id"])
+
+    # If the auction belongs to a previous league year (e.g., season
+    # was reset), the week numbers are stale.  Force-advance it.
+    stale_auction = (auction_ly != league_year_id)
+
+    # Phase must have lasted at least 1 week (unless stale)
+    if not stale_auction and current_week <= started:
+        if phase == "open":
+            summary["still_open"] += 1
+        return
+
+    if phase == "open":
+        # Need at least 1 offer to transition
+        offer_count = conn.execute(
+            select(func.count()).where(and_(
+                offers.c.auction_id == auction_id,
+                offers.c.status == "active",
+            ))
+        ).scalar_one()
+
+        if offer_count == 0:
+            summary["still_open"] += 1
+            return
+
+        conn.execute(
+            update(auc)
+            .where(auc.c.id == auction_id)
+            .values(phase="listening", phase_started_week=current_week)
+        )
+        summary["open_to_listening"] += 1
+        log.info("auction %d: open -> listening (week %d)", auction_id, current_week)
+
+    elif phase == "listening":
+        # Eliminate non-top-3 offers using age-weighted scoring
+        active_offers = conn.execute(
+            select(offers.c.id, offers.c.total_value, offers.c.aav, offers.c.bonus)
+            .where(and_(
+                offers.c.auction_id == auction_id,
+                offers.c.status == "active",
+            ))
+        ).all()
+
+        if len(active_offers) > 3:
             offer_dicts = [
                 {"id": int(r._mapping["id"]),
                  "aav": r._mapping["aav"],
                  "total_value": r._mapping["total_value"],
                  "bonus": r._mapping["bonus"]}
-                for r in final_offers
+                for r in active_offers
             ]
             scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
-            winning_id = scored[0]["id"]
+            keep_ids = {o["id"] for o in scored[:3]}
+            for o in scored[3:]:
+                conn.execute(
+                    update(offers)
+                    .where(offers.c.id == o["id"])
+                    .values(status="outbid")
+                )
 
-            log.info(
-                "auction %d: winner=%d score=%.3f (age=%d)",
-                auction_id, winning_id, scored[0]["_score"],
-                int(a["age_at_entry"]),
+        conn.execute(
+            update(auc)
+            .where(auc.c.id == auction_id)
+            .values(phase="finalize", phase_started_week=current_week)
+        )
+        summary["listening_to_finalize"] += 1
+        log.info("auction %d: listening -> finalize (week %d)", auction_id, current_week)
+
+    elif phase == "finalize":
+        # Winner = highest age-weighted attractiveness score
+        final_offers = conn.execute(
+            select(offers)
+            .where(and_(
+                offers.c.auction_id == auction_id,
+                offers.c.status == "active",
+            ))
+        ).all()
+
+        if not final_offers:
+            log.warning("auction %d: finalize with no active offers", auction_id)
+            conn.execute(
+                update(auc)
+                .where(auc.c.id == auction_id)
+                .values(phase="withdrawn")
             )
+            return
 
-            _execute_auction_signing(
-                conn, auction_id, winning_id,
-                league_year_id, current_week,
-            )
-            summary["finalize_to_completed"] += 1
-            log.info("auction %d: finalize -> completed (week %d)", auction_id, current_week)
+        offer_dicts = [
+            {"id": int(r._mapping["id"]),
+             "aav": r._mapping["aav"],
+             "total_value": r._mapping["total_value"],
+             "bonus": r._mapping["bonus"]}
+            for r in final_offers
+        ]
+        scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
+        winning_id = scored[0]["id"]
 
-    return summary
+        log.info(
+            "auction %d: winner=%d score=%.3f (age=%d)",
+            auction_id, winning_id, scored[0]["_score"],
+            int(a["age_at_entry"]),
+        )
+
+        _execute_auction_signing(
+            conn, auction_id, winning_id,
+            league_year_id, current_week,
+        )
+        summary["finalize_to_completed"] += 1
+        log.info("auction %d: finalize -> completed (week %d)", auction_id, current_week)
 
 
 # ── Execute auction signing ─────────────────────────────────────────
@@ -633,6 +671,15 @@ def _execute_auction_signing(
         league_year_id=league_year_id,
         game_week_id=game_week_id,
         executed_by="fa_auction",
+        allow_auction=True,
+    )
+
+    # sign_free_agent records the market row as a direct signing; tag it as
+    # an auction result so pricing/calibration can tell the two apart.
+    conn.execute(
+        sa_text("UPDATE fa_market_history SET source = 'fa_auction' "
+                "WHERE contract_id = :cid"),
+        {"cid": signing_result["contract_id"]},
     )
 
     # Mark auction completed
@@ -686,6 +733,170 @@ def _execute_auction_signing(
         signing_result["contract_id"],
     )
     return signing_result
+
+
+# ── End of the free-agency window ───────────────────────────────────
+
+def close_free_agency_auctions(conn, league_year_id: int,
+                               current_week: int) -> Dict[str, Any]:
+    """
+    Resolve every auction still active when the FA window closes.
+
+    * Auctions with at least one active offer are run through their
+      remaining phases immediately (listening -> finalize -> signed).
+    * Auctions that never drew an offer are marked ``expired`` and the
+      player is parked on a 1-year fallback deal (``contracts.fa_fallback``)
+      at AAA (level 8) for players coming off an MLB contract, otherwise at
+      level 4, with the MLB org that has the fewest players at that level.
+      The org can release him at no cost before week 1.
+
+    Each auction is isolated in a SAVEPOINT so one failure cannot block the
+    close. Returns a summary.
+    """
+    from services.league_config import get_fa_config, cfg_int
+
+    t = _t(conn)
+    auc = t["auction"]
+    offers = t["offers"]
+    cfg = get_fa_config(conn)
+    mlb_level = cfg_int(cfg, "fa_fallback_mlb_level", 8)
+    minor_level = cfg_int(cfg, "fa_fallback_minor_level", 4)
+
+    summary: Dict[str, Any] = {
+        "signed_with_offers": 0, "expired_no_offers": 0, "fallback_deals": 0,
+        "errors": [], "fallback": [],
+    }
+
+    active = conn.execute(
+        select(auc).where(and_(
+            auc.c.phase.in_(["open", "listening", "finalize"]),
+            auc.c.league_year_id == league_year_id,
+        ))
+    ).all()
+
+    for row in active:
+        a = dict(row._mapping)
+        auction_id = int(a["id"])
+        try:
+            with conn.begin_nested():
+                n_offers = conn.execute(
+                    select(func.count()).where(and_(
+                        offers.c.auction_id == auction_id,
+                        offers.c.status == "active",
+                    ))
+                ).scalar_one()
+                if n_offers > 0:
+                    # Force the remaining phases: each pass advances one phase.
+                    for _ in range(3):
+                        cur = conn.execute(
+                            select(auc).where(auc.c.id == auction_id)
+                        ).first()._mapping
+                        if cur["phase"] not in ("open", "listening", "finalize"):
+                            break
+                        week = int(cur["phase_started_week"]) + 1
+                        _advance_one_auction(
+                            conn, cur, auc, offers, week, league_year_id,
+                            {"still_open": 0, "open_to_listening": 0,
+                             "listening_to_finalize": 0, "finalize_to_completed": 0},
+                        )
+                    summary["signed_with_offers"] += 1
+                    continue
+
+                # No offers: expire + fallback deal
+                conn.execute(
+                    update(auc).where(auc.c.id == auction_id)
+                    .values(phase="expired", phase_started_week=current_week)
+                )
+                summary["expired_no_offers"] += 1
+                deal = _fallback_sign(conn, int(a["player_id"]), league_year_id,
+                                      mlb_level, minor_level)
+                if deal:
+                    summary["fallback_deals"] += 1
+                    summary["fallback"].append(deal)
+        except Exception as e:
+            log.exception("auction %d: close failed", auction_id)
+            summary["errors"].append({"auction_id": auction_id, "error": str(e)})
+
+    log.info("fa close: %s", {k: v for k, v in summary.items() if k != "fallback"})
+    return summary
+
+
+def _fallback_sign(conn, player_id: int, league_year_id: int,
+                   mlb_level: int, minor_level: int) -> Optional[Dict[str, Any]]:
+    """1-year minor-salary fallback deal for an unsigned free agent."""
+    from services.contract_ops import MINOR_SALARY
+
+    if conn.execute(sa_text(
+        "SELECT 1 FROM player_retirements WHERE player_id = :pid"
+    ), {"pid": player_id}).first():
+        return None
+    if conn.execute(sa_text("""
+        SELECT 1 FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        WHERE c.playerID = :pid AND c.isFinished = 0 LIMIT 1
+    """), {"pid": player_id}).first():
+        return None   # signed elsewhere meanwhile
+
+    last_level = conn.execute(sa_text("""
+        SELECT current_level FROM contracts
+        WHERE playerID = :pid ORDER BY id DESC LIMIT 1
+    """), {"pid": player_id}).scalar()
+    level = mlb_level if (last_level is not None and int(last_level) >= 9) else minor_level
+
+    # MLB org with the fewest players held at that level
+    org_row = conn.execute(sa_text("""
+        SELECT o.id, COUNT(c.id) AS n
+        FROM organizations o
+        LEFT JOIN contractTeamShare cts ON cts.orgID = o.id AND cts.isHolder = 1
+        LEFT JOIN contractDetails cd ON cd.id = cts.contractDetailsID
+        LEFT JOIN contracts c ON c.id = cd.contractID AND c.isFinished = 0
+             AND c.current_level = :lvl AND cd.year = c.current_year
+        WHERE o.id BETWEEN 1 AND 30
+        GROUP BY o.id
+        ORDER BY n ASC, o.id ASC
+        LIMIT 1
+    """), {"lvl": level}).first()
+    if not org_row:
+        return None
+    org_id = int(org_row[0])
+
+    ly_val = conn.execute(sa_text(
+        "SELECT league_year FROM league_years WHERE id = :id"), {"id": league_year_id}
+    ).scalar()
+    res = conn.execute(sa_text("""
+        INSERT INTO contracts
+            (playerID, years, current_year, isExtension, isBuyout, isActive, bonus,
+             signingOrg, current_level, leagueYearSigned, isFinished, onIR, fa_fallback)
+        VALUES (:pid, 1, 1, 0, 0, 1, 0.00, :org, :lvl, :ly, 0, 0, 1)
+    """), {"pid": player_id, "org": org_id, "lvl": level, "ly": ly_val})
+    contract_id = res.lastrowid
+    det = conn.execute(sa_text(
+        "INSERT INTO contractDetails (contractID, year, salary) VALUES (:cid, 1, :sal)"
+    ), {"cid": contract_id, "sal": MINOR_SALARY})
+    conn.execute(sa_text("""
+        INSERT INTO contractTeamShare (contractDetailsID, orgID, isHolder, salary_share)
+        VALUES (:did, :org, 1, 1.00)
+    """), {"did": det.lastrowid, "org": org_id})
+
+    try:
+        with conn.begin_nested():
+            conn.execute(t["tx_log"].insert().values(
+                transaction_type="fa_fallback",
+                league_year_id=league_year_id,
+                primary_org_id=org_id,
+                contract_id=contract_id,
+                player_id=player_id,
+                details=json.dumps({"level": level, "salary": float(MINOR_SALARY),
+                                    "reason": "no offers at FA close"}),
+                executed_by="system",
+                notes="Unsigned free agent parked on a 1-year fallback deal",
+            ))
+    except Exception as e:  # enum not migrated yet
+        log.debug("fa_fallback tx log skipped: %s", e)
+
+    return {"player_id": player_id, "org_id": org_id, "level": level,
+            "contract_id": contract_id}
 
 
 # ── Auction board (fuzzied view) ────────────────────────────────────
@@ -992,6 +1203,12 @@ def get_free_agent_pool(
     if filters.get("search") and len(filters["search"]) >= 2:
         filter_clauses.append("AND (p.firstname LIKE :search OR p.lastname LIKE :search)")
         params["search"] = f"%{filters['search']}%"
+    if filters.get("has_auction"):
+        # In the query (not post-pagination) so total/pages stay correct.
+        filter_clauses.append(
+            "AND EXISTS (SELECT 1 FROM fa_auction fa_f WHERE fa_f.player_id = p.id "
+            "AND fa_f.phase IN ('open', 'listening', 'finalize'))"
+        )
 
     filter_sql = "\n        ".join(filter_clauses)
 
@@ -1032,7 +1249,10 @@ def get_free_agent_pool(
             SELECT 1 FROM waiver_claims wc
             WHERE wc.player_id = p.id AND wc.status = 'active'
           )
-          AND c_last.current_level >= 3
+          AND NOT EXISTS (
+            SELECT 1 FROM player_retirements pr WHERE pr.player_id = p.id
+          )
+          AND c_last.current_level >= 2
           {filter_sql}
     """)
 
@@ -1063,7 +1283,10 @@ def get_free_agent_pool(
             SELECT 1 FROM waiver_claims wc
             WHERE wc.player_id = p.id AND wc.status = 'active'
           )
-          AND c_last.current_level >= 3
+          AND NOT EXISTS (
+            SELECT 1 FROM player_retirements pr WHERE pr.player_id = p.id
+          )
+          AND c_last.current_level >= 2
           {filter_sql}
         ORDER BY {order_sql}
         LIMIT :limit OFFSET :offset
@@ -1268,10 +1491,6 @@ def get_free_agent_pool(
             "available_actions": ["pro_attrs_precise", "pro_potential_precise"],
         })
         result_players.append(p)
-
-    # Apply has_auction filter if requested (post-query since it depends on auction join)
-    if filters.get("has_auction"):
-        result_players = [p for p in result_players if p["auction"] is not None]
 
     pages = (total + per_page - 1) // per_page if total else 0
     return {

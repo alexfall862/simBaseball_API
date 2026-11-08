@@ -13,6 +13,7 @@ from services.game_payload import (
     build_synthetic_matchups,
     build_synthetic_matchups_with_progress,
 )
+from services.league_calendar import season_id_sql
 from services.timestamp import (
     set_run_games,
     set_subweek_completed,
@@ -584,7 +585,8 @@ def rollback_week():
             # Find all game_ids for this week
             game_rows = conn.execute(sa_text(
                 "SELECT game_id FROM game_results "
-                "WHERE season = :lyid AND season_week = :sw"
+                "WHERE season = " + season_id_sql("lyid") + " "
+                "AND season_week = :sw"
             ), {"lyid": league_year_id, "sw": season_week}).all()
             game_ids = [int(r[0]) for r in game_rows]
 
@@ -791,7 +793,8 @@ def rollback_to_week():
             # ── 1. Find all game_ids for weeks >= target_week ──
             game_rows = conn.execute(sa_text(
                 "SELECT game_id FROM game_results "
-                "WHERE season = :lyid AND season_week >= :tw"
+                "WHERE season = " + season_id_sql("lyid") + " "
+                "AND season_week >= :tw"
             ), {"lyid": league_year_id, "tw": target_week}).all()
             game_ids = [int(r[0]) for r in game_rows]
 
@@ -823,7 +826,8 @@ def rollback_to_week():
             # game_results rows).
             cutoff_row = conn.execute(sa_text(
                 "SELECT MIN(created_at) FROM game_results "
-                "WHERE season = :lyid AND season_week = :tw"
+                "WHERE season = " + season_id_sql("lyid") + " "
+                "AND season_week = :tw"
             ), base_params).first()
             rollback_cutoff = cutoff_row[0] if cutoff_row and cutoff_row[0] else None
 
@@ -1739,9 +1743,12 @@ def end_free_agency_endpoint():
     """
     try:
         from services.timestamp import end_free_agency, get_enhanced_timestamp
-        if end_free_agency():
-            return jsonify(get_enhanced_timestamp()), 200
-        return jsonify(error="update_failed", message="Failed to end free agency."), 500
+        fa_close = end_free_agency()
+        payload = get_enhanced_timestamp() or {}
+        # Resolution of the auctions still active at the close (signed
+        # winners, expired auctions, fallback deals) rides along.
+        payload["fa_close"] = fa_close
+        return jsonify(payload), 200
     except ValueError as e:
         return jsonify(error="validation", message=str(e)), 400
     except Exception as e:
@@ -1890,7 +1897,8 @@ def get_week_levels():
         with engine.connect() as conn:
             rows = conn.execute(sa_text(
                 "SELECT DISTINCT league_level FROM gamelist "
-                "WHERE season = :ly AND season_week = :sw "
+                "WHERE season = " + season_id_sql("ly") + " "
+                "AND season_week = :sw "
                 "ORDER BY league_level DESC"
             ), {"ly": league_year_id, "sw": season_week}).fetchall()
 
@@ -2353,7 +2361,7 @@ def get_game_results_list():
     params = {}
 
     if league_year_id:
-        where_clauses.append("gr.season = :season")
+        where_clauses.append("gr.season = " + season_id_sql("season"))
         params["season"] = league_year_id
     if season_week:
         where_clauses.append("gr.season_week = :sw")
@@ -2511,7 +2519,7 @@ def export_game_results():
     where = ["gr.game_id > :since"]
     params = {"since": since or 0}
     if league_year_id:
-        where.append("gr.season = :season")
+        where.append("gr.season = " + season_id_sql("season"))
         params["season"] = league_year_id
     if season_week:
         where.append("gr.season_week = :sw")
@@ -2821,7 +2829,7 @@ def export_play_by_play_endpoint():
     where = ["gr.league_level = 9", "gr.play_by_play_json IS NOT NULL", "gr.game_id > :since"]
     params = {"since": since or 0}
     if season:
-        where.append("gr.season = :season"); params["season"] = season
+        where.append("gr.season = " + season_id_sql("season")); params["season"] = season
     if season_week:
         where.append("gr.season_week = :sw"); params["sw"] = season_week
     if team_id:
@@ -3285,78 +3293,22 @@ def _run_all_levels_task(task_id: str, league_year_id: int,
             set_run_games(False, broadcast=False)
 
             # --- Weekly processing (once per week, after all levels) ---
+            # Same code path as POST /games/run-week: advance_week() runs the
+            # injury tick and books (claim-guarded), waivers, FA auction
+            # phases, listed positions, postseason game_weeks rows and the
+            # league_state sync, then increments the week.
             _wp_t0 = _time.monotonic()
-
-            try:
-                from bootstrap import invalidate_season_context
-                invalidate_season_context()
-            except Exception:
-                pass
-
-            with timed_stage("weekly_tick_injuries", week=week):
+            with timed_stage("weekly_processing", week=week):
                 try:
-                    # Claim the week's injury tick so it can't be double-applied
-                    # if advance_week also runs for this week (MLB-18/19/29).
-                    gw_id_for_tick = None
-                    if league_year_id is not None:
-                        with engine.connect() as _gwconn:
-                            _gwrow = _gwconn.execute(_sa_text(
-                                "SELECT id FROM game_weeks "
-                                "WHERE league_year_id = :lyid AND week_index = :w"
-                            ), {"lyid": int(league_year_id), "w": week}).first()
-                            if _gwrow:
-                                gw_id_for_tick = int(_gwrow[0])
-                    healed = _tick_injuries(engine, gw_id_for_tick)
-                except Exception as inj_err:
-                    logger.warning(
-                        "run_all_levels: injury tick failed at week %d: %s",
-                        week, inj_err,
-                    )
-
-            if league_year is not None:
-                with timed_stage("weekly_books", week=week):
-                    try:
-                        from financials.books import run_week_books
-                        run_week_books(engine, league_year, week)
-                    except Exception as books_err:
+                    if not advance_week(broadcast=False):
                         logger.warning(
-                            "run_all_levels: week books failed at week %d: %s",
-                            week, books_err,
+                            "run_all_levels: advance_week reported failure at week %d",
+                            week,
                         )
-
-            with timed_stage("weekly_waivers", week=week):
-                try:
-                    from services.waivers import process_expired_waivers
-                    with engine.begin() as conn:
-                        process_expired_waivers(conn, week, league_year_id)
-                except Exception as waiver_err:
-                    logger.warning(
-                        "run_all_levels: waiver processing failed at week %d: %s",
-                        week, waiver_err,
-                    )
-
-            with timed_stage("weekly_fa_auction", week=week):
-                try:
-                    from services.fa_auction import advance_auction_phases
-                    with engine.begin() as conn:
-                        advance_auction_phases(conn, week, league_year_id)
-                except Exception as auc_err:
-                    logger.warning(
-                        "run_all_levels: FA auction failed at week %d: %s",
-                        week, auc_err,
-                    )
-
-            with timed_stage("weekly_listed_positions", week=week):
-                try:
-                    from services.listed_position import refresh_all_teams
-                    with engine.begin() as conn:
-                        refresh_all_teams(conn, league_year_id)
                 except Exception:
                     logger.exception(
-                        "run_all_levels: listed position refresh failed at week %d",
-                        week,
+                        "run_all_levels: weekly processing failed at week %d", week,
                     )
-
             log_timing("weekly_processing_total",
                        _time.monotonic() - _wp_t0, week=week)
 

@@ -559,6 +559,34 @@ def _load_all_active_players_as_display(conn, level: Optional[int] = None):
         JOIN contracts c ON c.playerID = p.id AND c.isActive = 1
         WHERE 1=1 {level_filter}
     """), params).mappings().all()
+    return _rows_to_display(conn, rows)
+
+
+def _load_free_agents_as_display(conn):
+    """
+    Players without an active contract (free agents, undrafted graduates),
+    rated against the cohort of their LAST contract's level so their stored
+    displayovr keeps meaning after they leave a roster. Retirees excluded.
+    Returns the same tuples as _load_all_active_players_as_display.
+    """
+    try:
+        rows = conn.execute(sa_text("""
+            SELECT p.*, c_last.current_level
+            FROM simbbPlayers p
+            JOIN (SELECT playerID, MAX(id) AS max_cid FROM contracts GROUP BY playerID) latest
+                 ON latest.playerID = p.id
+            JOIN contracts c_last ON c_last.id = latest.max_cid
+            WHERE NOT EXISTS (SELECT 1 FROM contracts c WHERE c.playerID = p.id AND c.isActive = 1)
+              AND NOT EXISTS (SELECT 1 FROM player_retirements r WHERE r.player_id = p.id)
+        """)).mappings().all()
+    except Exception:
+        log.exception("ovr_core: free-agent load failed (player_retirements missing?)")
+        return []
+    return _rows_to_display(conn, rows)
+
+
+def _rows_to_display(conn, rows):
+    from services.player_display import load_display_context, build_player_display
 
     if not rows:
         return []
@@ -713,9 +741,11 @@ def recompute_stored_displayovr(conn, level: Optional[int] = None) -> Dict[str, 
     # Re-load weights post-cache-invalidation (and to keep API symmetric)
     weights = load_weights(conn)
 
-    players = _load_all_active_players_as_display(conn, level=level)
-    if not players:
+    players = list(_load_all_active_players_as_display(conn, level=level))
+    free_agents = [] if level else _load_free_agents_as_display(conn)
+    if not players and not free_agents:
         return {"updated": 0, "by_level": {}}
+    players.extend(free_agents)
 
     updates: List[Tuple[int, str]] = []
     by_level: Dict[int, int] = {}
@@ -741,4 +771,4 @@ def recompute_stored_displayovr(conn, level: Optional[int] = None) -> Dict[str, 
             f"WHERE id IN ({ids})"
         ))
 
-    return {"updated": len(updates), "by_level": by_level}
+    return {"updated": len(updates), "by_level": by_level, "free_agents": len(free_agents)}

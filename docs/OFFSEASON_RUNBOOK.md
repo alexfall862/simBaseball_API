@@ -84,7 +84,7 @@ curl -X POST "$HOST/admin/run-year-end-interest" \
   -d '{"league_year": 2026}'
 ```
 
-The endpoints under `/admin/` defined in `admin/__init__.py` (checklist, schedule, archive) and everything under `/api/v1/` use the admin session cookie instead.
+The endpoints under `/admin/` defined in `admin/__init__.py` (checklist, schedule, archive) and the `/api/v1/draft/admin/*` routes use the admin session cookie instead. Most other `/api/v1/` routes, including the phase transitions, currently have no authentication at all (tracked in `docs/MASTER_PLAN_SEASON_2.md`, workstream E2).
 
 ---
 
@@ -137,9 +137,30 @@ MVP, Cy Young, Silver Slugger and Gold Glove are **admin-entered** (see `docs/aw
 | **Where** | Timestamp section → *End Regular Season* card (`#btn-end-season`), which POSTs `/api/v1/games/end-season` with `{"league_year_id": L}` (optional `"force": true`). |
 | **Done when** | `league_years.season_ended_at IS NOT NULL` for `id = L`. The column is added lazily on the first end-season call (`migrations/add_league_years_season_ended_at.sql` is the same DDL if you prefer to apply it by hand). Until it exists the checklist treats the step as not done. |
 | **Precondition** | Step 1 — end-season refuses to run while the World Series is incomplete unless `force: true` is sent. The timestamp must be in `REGULAR_SEASON`, and `L` must be the year the timestamp is on. |
-| **Irreversible?** | **Yes.** It resolves outstanding waivers, runs end-of-season contract processing (service time, expirations, FA eligibility), ages and progresses every player, applies a **16-week offseason injury tick** (injuries heal as if 16 weeks passed), and flips the timestamp to `OFFSEASON`. It is one-shot: a second call is refused because `season_ended_at` is already set. |
+| **Irreversible?** | **Yes.** It creates the Y+1 `league_years` row and its `game_weeks` if they do not exist yet (same as step 11), resolves outstanding waivers, runs end-of-season contract processing (service time, expirations, FA eligibility), ages and progresses every player, applies a **16-week offseason injury tick** (injuries heal as if 16 weeks passed), and then **moves the calendar to Y+1**: `timestamp_state.season = Y+1`, `week = 0`, `OFFSEASON` flags, `league_state.current_league_year_id` = the new id. It is one-shot: a second call is refused because `season_ended_at` is already set. |
 
 Do **not** use `force: true` for a normal rollover; it exists for leagues that deliberately skip the postseason.
+
+**The new league year begins the moment the season ends.** Free agency, the draft and recruiting all run with the calendar already on Y+1, so every contract they create is for the season it will be played in, and auctions, demands and draft state are keyed by the new `league_year_id`. The landing page's standings, schedule and leaders keep showing the last season that was actually played (`SeasonContext.display_league_year_id`) until week 1 of Y+1 is simmed; `SeasonContext.current_league_year_id` is already Y+1.
+
+Contract processing expires only contracts whose **completed** season was their final year (`current_year == years`) and then advances every other started contract by one year. (Until 2026-11-07 it advanced first and expired second, which ended every multi-year deal, HS class year and college class year one season early.) Players whose contracts expire with 6+ years of MLB service are entered into the FA auction pool with `phase_started_week = 0`; they wait there until step 7.
+
+**Graduation, retirements and the new amateur class** (added 2026-11-08, `services/graduation.py`) run inside the same call, so the response's `end_of_season` block now also carries `graduation`, `retirements` and `draft_pool`, and the top level carries `amateur_classes`, `year_tables` and `listed_positions`:
+
+| Who | What end-season does |
+|---|---|
+| HS senior (`current_year = 4`) | HS contract finishes. With a `recruiting_commitments` row (any year) he gets a 4-year college contract at that program for Y+1; either way he enters the Y+1 draft pool as `hs` / `hs_senior`. |
+| College senior (`current_year = years`) | College contract finishes; enters the draft pool as `college` / `senior`. Undrafted or unsigned seniors are then plain free agents (level-4 pool). |
+| INTAM player at contract end | Re-upped at org 339 until the `intam_age_out` age (23), then leaves the pool as a free agent. |
+| Everyone 40+, 36+ without a pro contract, 33+ unsigned and below `retire_marginal_ovr` | Retired: open contracts finished, active auction withdrawn, row in `player_retirements`. Retirees never enter FA or the draft pool. |
+| Draft pool | `draft_eligible_players` for Y+1 = HS graduates + **every** college player (nobody declares), with `class_year` and a consensus `draft_rank` from the ratings/potentials composite. The archive no longer deletes it. |
+| Progression (2026-11-08) | Bracketed by true-value **rating snapshots** (`player_rating_snapshots`, stages `pre_progression` / `post_progression`); **training camp** focus skills (`training_camp_focus`) are rolled and applied as potential-grade overrides for this pass only (results in `training_camp_results`); every player ages, those inside the growth table (16–50) progress (independent triangular draw per attribute); then `displayovr` and its breakpoints are **refreshed** (also for players without a contract, against their last level), and `progression_curve_stats` is rebuilt for the admin *Progression → Diagnostics* page. Response keys: `snapshot_pre`, `training_camp`, `progression`, `displayovr_refresh`, `snapshot_post`, `curve_stats`. |
+| New classes (after progression) | HS freshmen (US, age `hs_entry_age`) and INTAM entrants (international, `intam_entry_age`) are generated to refill both pools to `hs_pool_target` / `intam_pool_target`. |
+| Year tables | `scouting_budgets` for every org, `ifa_state` + `ifa_bonus_pools` (from Y's standings), `recruiting_state`, `player_listed_position` for Y+1. |
+
+All sizes and thresholds live in `league_config` (defaults in `services/league_config.py`). Schema: `migrations/season2_amateur_pipeline.sql` (apply before the real end-season).
+
+The old `POST /api/v1/transactions/end-of-season` route, which ran the same contract processing without the one-shot guard, now returns `410 Gone`. The *Run End of Season* button in the Contracts section calls `/games/end-season` like this card does.
 
 ### 6. Archive Season
 
@@ -158,7 +179,15 @@ Run it **once**, with **Dry Run unchecked**. Do a dry run first if you want to s
 |---|---|
 | **Where** | Timestamp section dynamic actions: `POST /api/v1/games/start-free-agency`, `POST /api/v1/games/advance-fa-round` (repeat), `POST /api/v1/games/end-free-agency`. Auction detail: `docs/free_agency_frontend_guide.md`, `docs/fa-auction-phases-frontend-guide.md`. |
 | **Done when** | No completion signal exists. The card shows the phase and `is_free_agency_locked` / `free_agency_round` flags; when the phase is `FREE_AGENCY` it says "in progress". A locked window only means FA is not open now — it does not prove FA ran. |
-| **Precondition** | Step 5 (players only become free agents through end-season contract processing). |
+| **Precondition** | Step 5 (players only become free agents through end-season contract processing; it also moves the calendar to Y+1, which is the year the auctions and signings belong to). |
+
+**The FA rounds are the auction clock.** The offseason has no game weeks, so each `advance-fa-round` call moves every active auction one phase: an auction with at least one offer goes `open → listening` on the first advance after the offer, `listening → finalize` (top 3 offers kept) on the next, and is **signed on the one after that**. Starting from round 1 with bids placed, rounds 2, 3 and 4 complete the first wave; later bids need three more advances. Auctions with no offers stay `open` indefinitely. The response of `advance-fa-round` includes `auction_phases` with the counts per transition and an `errors` list (an auction whose signing failed — player signed elsewhere, bonus over budget — is reported there and does not block the others).
+
+Offseason contracts (FA, buyout, draft, IFA) are stamped with `leagueYearSigned = Y+1` (the calendar year), their bonus ledger entry carries the Y+1 `league_year_id` with no game week, and the signing budget is checked against Y+1. Demands and market WAR are priced on the last season with stats (Y) until week 1 of Y+1 is played. Year-start books for Y+1 skip any contract whose bonus already has a ledger entry, so nothing is charged twice.
+
+**`end-free-agency` resolves every auction still active.** Auctions with offers are run to a winner immediately; auctions that never drew an offer are marked `expired` and the player is parked on a **1-year fallback deal** (`contracts.fa_fallback = 1`, minor salary) at AAA (level 8) if he came off an MLB contract, otherwise at level 4, with the MLB org that has the fewest players at that level. The org can release him during the offseason at no cost (`POST /transactions/release` ends the contract outright, no waivers). The response carries `fa_close` with `signed_with_offers`, `expired_no_offers`, `fallback_deals` and the fallback list.
+
+Pricing (2026-11-08): the market rate is **AAV per WAR** over the last three seasons, arbitration renewals excluded and extensions at 0.9 weight; demand and arbitration WAR is a 50/30/20 blend of the last three seasons, each regressed toward 0 below 200 PA / 50 IP; arbitration also applies the age multiplier. Constants live in `fa_config`.
 
 ### 8. Draft — manual, confirm complete
 
@@ -168,6 +197,10 @@ Run it **once**, with **Dry Run unchecked**. Do a dry run first if you want to s
 | **Done when** | No completion signal exists. The card shows `is_draft_time`. |
 | **Precondition** | Step 7 closed (`is_free_agency_locked = true`). |
 
+`POST /games/start-draft` and `POST /games/end-draft` are idempotent: the Draft Admin's *Start* and *Complete* actions set and clear `is_draft_time` themselves, so calling the `/games` endpoints afterwards returns success instead of a 400.
+
+**Pool and ranking.** `initialize` reuses the Y+1 snapshot end-season built (HS graduates + every college player, ranked); it only rebuilds from the live rosters if no snapshot exists. **Clock.** A server-side ticker (one leader per database) auto-picks expired picks; orgs with no owner and no GM name pick immediately in live rounds. **Signing is a negotiation** (`docs/draft_frontend_guide.md` §9): each pick carries a bonus ask (slot × class × talent); the org gets up to three offers (`POST /draft/sign/{pick_id}` with `bonus`); an accepted offer creates a 3-year minor-salary rookie deal (HS → level 4, college → level 5) with the bonus debited at once, and ends the amateur contract; a third rejection is a **refusal** and the player returns to school on his amateur contract. *Complete* resolves every remaining pick (CPU orgs sign at the ask; others become `refused` or `passed`), then settles the leftovers: unsigned HS graduates are placed at random on programs with roster room (below `college_roster_target`, default 28) and the surplus retires (`hs_undrafted`); undrafted college seniors stay in the FA pool only at `displayovr` ≥ `undrafted_keep_ovr` (default 65) and otherwise retire (`college_undrafted`); programs still below `college_roster_floor` are topped up with generated walk-ons. Pick-for-pick trade proposals: `POST /draft/trade/propose`, `GET /draft/trade/proposals`, `POST /draft/trade/accept|reject`.
+
 ### 9. Recruiting — manual, confirm complete
 
 | | |
@@ -176,9 +209,9 @@ Run it **once**, with **Dry Run unchecked**. Do a dry run first if you want to s
 | **Done when** | No completion signal exists. The card shows `is_recruiting_locked`. |
 | **Precondition** | Step 8 ended (`is_draft_time = false`). |
 
-### 10. Retirements and new amateur class — NOT BUILT
+### 10. Retirements and new amateur class — automatic (inside step 5)
 
-There is **no retirement logic** and **no amateur-class generation** in the API. Nothing ages players out, and no new draft/IFA/college class is created for year Y+1. Until this is built, either accept a shrinking talent pool or handle it by hand (SQL inserts / external generator) before step 13. The card renders this row as a warning so it is not forgotten.
+Since 2026-11-08 retirements, graduation and the new HS / INTAM classes happen inside end-season (see step 5), and college walk-ons / undrafted-senior retirements are settled when the draft completes (step 8). Aged-out INTAM players (23) are kept as free agents only at `displayovr` ≥ `undrafted_keep_ovr`, else retired (`intam_aged_out`); any unsigned player who never held a pro contract retires at `never_signed_retire_age` (25). Retirement never deletes anything: the player row, his stats, awards and contract history stay; `player_retirements` is the only marker. Nothing to run here; check `player_retirements` for the year and the `amateur_classes` block of the end-season response if you want to confirm. Tune sizes and thresholds in `league_config`. Nobody retires on age alone (`retire_age_hard` = 0); the growth table runs to 50 and players beyond it only age.
 
 ### 11. Initialize next league year
 
@@ -186,7 +219,7 @@ There is **no retirement logic** and **no amateur-class generation** in the API.
 |---|---|
 | **Where** | `POST /admin/initialize-next-league-year` with `{"league_year": Y}` (the **current** year; it creates Y+1) and the `X-Admin-Password` header — the card's **Create Y+1** button, which asks for confirmation first. |
 | **Done when** | A `league_years` row with `league_year = Y+1` exists **and** `game_weeks` has at least `weeks_in_season` rows for it. |
-| **Precondition** | Step 4 (inflation is applied to the current year's `performance_budget` and `media_total`; do it after the Y books are final). Can technically run any time after step 1. |
+| **Precondition** | Step 4 (inflation is applied to the current year's `performance_budget` and `media_total`; do it after the Y books are final). Can technically run any time after step 1. **Step 5 runs it automatically** if the row does not exist yet, so this is now optional; run it by hand only if you want the inflated budgets fixed before ending the season. |
 | **Irreversible?** | The endpoint refuses to run once the Y+1 row exists, so it cannot be re-run. If the row exists but `game_weeks` is short, insert the missing weeks by hand (`league_year_id`, `week_index`, `label`). |
 
 When this step is done the card shows the new `league_years.id`, and the *Start New Season* card's **New League Year ID** input is pre-filled with it (unless you have already typed in that box).
@@ -208,8 +241,8 @@ Generate every level you intend to simulate; the checklist only requires at leas
 |---|---|
 | **Where** | Timestamp section → *Start New Season* card (`#btn-start-new-season`), `POST /api/v1/games/start-new-season` with `{"league_year_id": <new id from step 11>}`. |
 | **Done when** | `timestamp_state.season = Y+1` and `league_state.current_league_year_id` = the new id. |
-| **Precondition** | Steps 5, 11 and 12; the timestamp must be in `OFFSEASON` with FA, draft and recruiting all closed (the card is hidden otherwise). |
-| **Irreversible?** | It runs year-start books (media payouts, signing bonuses — each claims `media_run_at` / `bonuses_run_at` on the new row) and moves the timestamp to week 1 of Y+1. Going back means hand-editing `timestamp_state` and `league_state`. |
+| **Precondition** | Steps 5 and 12; the calendar is already on Y+1 (week 0) and must be in `OFFSEASON` with FA, draft and recruiting all closed (the card is hidden otherwise). The endpoint refuses if `gamelist` has no games for Y+1. |
+| **Irreversible?** | It runs year-start books (media payouts, signing bonuses — each claims `media_run_at` / `bonuses_run_at` on the new row) and sets week 1, regular season. Going back means hand-editing `timestamp_state` and `league_state`. |
 
 After this, the Offseason Checklist for the **old** year should read all `done` except rows 7-10, and selecting the new year should show a fresh, all-`pending` list.
 
@@ -261,13 +294,13 @@ Use the SQL console in the admin panel (write mode on) for the `UPDATE`/`DELETE`
  2. Postseason awards           auto; POST /api/v1/awards/sync-postseason {league_year_id: L}
  3. Playoff revenue             POST /admin/run-playoff-revenue {league_year: Y}      [X-Admin-Password]
  4. Year-end interest           POST /admin/run-year-end-interest {league_year: Y}    [X-Admin-Password]
- 5. End Season                  End Regular Season card -> POST /api/v1/games/end-season {league_year_id: L}   ONE-SHOT
+ 5. End Season                  End Regular Season card -> POST /api/v1/games/end-season {league_year_id: L}   ONE-SHOT; creates Y+1 and moves the calendar to it
  6. Archive Season              Season Archive card (Dry Run OFF) -> POST /admin/season/archive           IRREVERSIBLE
- 7. Free Agency                 start-free-agency / advance-fa-round* / end-free-agency   (confirm by hand)
+ 7. Free Agency                 start-free-agency / advance-fa-round* / end-free-agency   (confirm by hand; each round advances auctions one phase)
  8. Draft                       start-draft / Draft Admin / end-draft                     (confirm by hand)
  9. Recruiting                  start-recruiting / recruiting advance-week* / end-recruiting (confirm by hand)
 10. Retirements + amateur class NOT BUILT
-11. Initialize Y+1              POST /admin/initialize-next-league-year {league_year: Y}  [X-Admin-Password]  ONE-SHOT
+11. Initialize Y+1              done by step 5; POST /admin/initialize-next-league-year {league_year: Y} only to do it early
 12. Schedule for Y+1            Schedule Generator, one run per level, league_year = Y+1
 13. Start New Season            Start New Season card -> POST /api/v1/games/start-new-season {league_year_id: new id}
 ```

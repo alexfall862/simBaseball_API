@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SimBaseball Admin</title>
+  <link rel="stylesheet" href="{{ url_for('admin.static', filename='css/tokens.css') }}?v={{ asset_v }}">
+  <link rel="stylesheet" href="{{ url_for('admin.static', filename='css/shell.css') }}?v={{ asset_v }}">
+  <link rel="stylesheet" href="{{ url_for('admin.static', filename='css/components.css') }}?v={{ asset_v }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script>
+    window.ADMIN_FLAGS = {{ admin_flags | tojson }};
+    window.ADMIN_ASSET_V = "{{ asset_v }}";
+  </script>
+</head>
+<body>
+  <div id="login-gate" class="login-gate" hidden>
+    <form class="login-card" id="login-form">
+      <h1>SimBaseball Admin</h1>
+      <p>Sign in with the admin password.</p>
+      <input type="password" id="login-password" placeholder="Admin password" autocomplete="current-password" autofocus />
+      <button class="btn btn-primary" type="submit">Sign in</button>
+      <div class="login-err" id="login-err"></div>
+    </form>
+  </div>
+
+  <nav class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">SimBaseball<small>Admin</small></div>
+      <button class="sidebar-collapse" id="sidebar-collapse" title="Collapse sidebar">‹</button>
+    </div>
+    <div class="sidebar-nav" id="sidebar-nav"></div>
+    <div class="sidebar-footer">
+      <div class="row"><span class="label">Session</span><span><span class="status-dot" id="auth-dot"></span></span></div>
+      <div class="row"><span class="label">Live updates</span><span><span class="status-dot" id="ws-dot"></span></span></div>
+      <div class="row"><a href="#/system/settings" class="label">Settings</a><a href="#" id="btn-logout" class="label">Sign out</a></div>
+      <div class="row"><a href="/admin/legacy" class="label text-muted" title="The previous admin UI">Legacy UI</a><span class="text-muted label">v{{ asset_v[:7] }}</span></div>
+    </div>
+  </nav>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="menu-toggle" id="menu-toggle" aria-label="Menu">☰</button>
+      <div class="topbar-title" id="page-title">Command Center</div>
+      <div class="topbar-status" id="topbar-status"></div>
+      <div class="topbar-spacer"></div>
+      <div class="topbar-actions">
+        <button class="sched-pill off" id="sched-pill" title="Scheduler status (click to open Jobs)"><span class="status-dot"></span><span class="label">Scheduler</span></button>
+        <select id="global-ly" title="League year context"></select>
+        <button class="btn btn-ghost btn-sm" id="btn-palette" title="Command palette (Ctrl+K)">⌘K</button>
+      </div>
+    </header>
+    <nav class="tabsbar" id="tabsbar"></nav>
+    <main class="content" id="view"></main>
+  </div>
+
+  <div id="toast-root"></div>
+  <div id="modal-root"></div>
+
+  <script type="module" src="{{ url_for('admin.static', filename='js/main.js') }}?v={{ asset_v }}"></script>
+</body>
+</html>
