@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify, g, session
 from flask_cors import CORS
 from flask_compress import Compress
 from flask_sock import Sock
+from simple_websocket import ConnectionClosed
 from werkzeug.exceptions import HTTPException, BadRequest
 from seeding.contracts_seed import seed_initial_contracts
 from seeding.amateur_contracts_seed import seed_amateur_contracts, preview_amateur_need
@@ -347,7 +348,9 @@ def create_app(config_object=Config):
     Compress(app)
     log.info("stage: compress_ok")
 
-    # WebSocket support
+    # WebSocket support. Real WS pings keep proxies from idling the socket
+    # out and detect dead clients (no pong within one interval -> close).
+    app.config.setdefault("SOCK_SERVER_OPTIONS", {"ping_interval": 25})
     sock = Sock(app)
     log.info("stage: websocket_ok")
 
@@ -379,22 +382,17 @@ def create_app(config_object=Config):
             else:
                 log.warning("No timestamp data available for new WebSocket client")
 
-            # Keep connection alive - listen for any messages (we ignore them)
-            while True:
-                try:
-                    # This blocks until a message is received or connection closes
-                    # We don't process client messages, just keep the connection alive
-                    message = ws.receive(timeout=30)
-                    if message is None:
-                        # Connection closed by client
-                        break
-                except Exception:
-                    # Timeout or error - check if connection is still alive
-                    try:
-                        ws.send("")  # Empty ping to check connection
-                    except Exception:
-                        break  # Connection is dead
+            # Hold the connection open; client messages are ignored.
+            # receive(timeout=...) returns None on timeout (NOT a disconnect)
+            # and raises ConnectionClosed when the client actually leaves.
+            # Liveness is handled by protocol-level pings (SOCK_SERVER_OPTIONS);
+            # a missed pong flips ws.connected to False without waking a
+            # blocked receive(), so keep a timeout and re-check the flag.
+            while ws.connected:
+                ws.receive(timeout=30)
 
+        except ConnectionClosed:
+            pass
         except Exception as e:
             log.warning(f"WebSocket error: {e}")
 
