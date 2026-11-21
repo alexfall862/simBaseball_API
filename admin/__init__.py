@@ -2722,6 +2722,49 @@ def admin_progression_camp():
     return _prog_call(_both)
 
 
+@admin_bp.get("/analytics/fa-outcomes")
+def admin_fa_outcomes():
+    """Free agency outcomes: by outcome, price vs ask, falling asks, failed
+    signings, unsigned players, active auctions by year, market rate."""
+    from services.fa_auction import fa_outcomes
+    return _prog_call(fa_outcomes, request.args.get("league_year_id", type=int))
+
+
+@admin_bp.get("/org-tokens")
+def admin_org_tokens_list():
+    """Which MLB orgs have an API token (hint and last use only)."""
+    from services import org_auth
+    return _prog_call(lambda conn: {"mode": org_auth.mode(), "header": org_auth.HEADER,
+                                    "orgs": org_auth.list_tokens(conn)})
+
+
+@admin_bp.post("/org-tokens/<int:org_id>/rotate")
+def admin_org_token_rotate(org_id: int):
+    """Issue or rotate an org's API token. The token is shown only in this response."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if not 1 <= org_id <= 30:
+        return jsonify(ok=False, error="org_id must be an MLB org (1-30)"), 400
+    from db import get_engine
+    from services import org_auth
+    with get_engine().begin() as conn:
+        out = org_auth.issue_token(conn, org_id)
+    return jsonify(ok=True, **out)
+
+
+@admin_bp.delete("/org-tokens/<int:org_id>")
+def admin_org_token_revoke(org_id: int):
+    guard = _require_admin()
+    if guard:
+        return guard
+    from db import get_engine
+    from services import org_auth
+    with get_engine().begin() as conn:
+        removed = org_auth.revoke_token(conn, org_id)
+    return jsonify(ok=True, removed=removed)
+
+
 @admin_bp.post("/training-camp/apply")
 def admin_training_camp_apply():
     """Preseason training camp for a season (default: the current one).

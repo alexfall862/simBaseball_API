@@ -57,6 +57,11 @@ def submit_offer_endpoint(auction_id):
         if field not in data:
             return jsonify({"error": f"Missing field: {field}"}), 400
 
+    from services.org_auth import check_org_request
+    denied = check_org_request(data.get("org_id"))
+    if denied:
+        return denied
+
     engine = get_engine()
     from services.fa_auction import submit_offer
 
@@ -87,6 +92,10 @@ def submit_offer_endpoint(auction_id):
 )
 def withdraw_offer_endpoint(auction_id, org_id):
     """DELETE /fa-auction/<id>/offer/<org_id>"""
+    from services.org_auth import check_org_request
+    denied = check_org_request(org_id)
+    if denied:
+        return denied
     engine = get_engine()
     from services.fa_auction import withdraw_offer
 
@@ -298,10 +307,18 @@ def market_rate():
         return jsonify({"error": "league_year_id required"}), 400
 
     engine = get_engine()
-    from services.market_pricing import get_current_dollar_per_war
+    from services.market_pricing import market_rate_breakdown
     with engine.connect() as conn:
-        dpw = get_current_dollar_per_war(conn, league_year_id)
-    return jsonify({"dollar_per_war": str(dpw)})
+        b = market_rate_breakdown(conn, league_year_id)
+    return jsonify({
+        "dollar_per_war": str(b["rate"]),
+        "raw_rate": None if b.get("raw_rate") is None else str(b["raw_rate"]),
+        "previous_rate": None if b.get("anchor") is None else str(b["anchor"]),
+        "signings_in_sample": b.get("signings", 0),
+        "method": b.get("method"),
+        "max_change": None if b.get("max_change") is None else str(b["max_change"]),
+        "limited_by_max_change": bool(b.get("limited")),
+    })
 
 
 # ── Free agent pool (paginated, fuzzed) ─────────────────────────────

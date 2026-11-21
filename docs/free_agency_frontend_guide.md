@@ -6,8 +6,101 @@ All endpoints are under `/api/v1`. All monetary values from the API are strings 
 
 ---
 
+## Season 2 changes (2026-11-21)
+
+These change what the interface sees or must send. Everything else in this guide still holds.
+
+### 1. Club token on offers (`X-Org-Token`)
+
+`POST /fa-auction/{auction_id}/offer` and `DELETE /fa-auction/{auction_id}/offer/{org_id}` act for a club. Send that club's token:
+
+```
+X-Org-Token: <the club's token>
+```
+
+- The league admin issues each MLB club one token (`POST /admin/org-tokens/{org_id}/rotate`, shown once). Store it with the club's account, never in client code shared between clubs.
+- The server runs in one of three modes (`ORG_TOKEN_MODE`): `off`, `warn` (default: a missing or wrong token is logged and allowed) or `enforce` (rejected).
+- In `enforce`, a missing token, a wrong token, or another club's token returns:
+
+```json
+401 { "error": "unauthorized", "message": "This action needs the X-Org-Token header for org 7." }
+```
+
+Start sending the header now; the league will switch to `enforce` once the interface does.
+
+### 2. Offers reserve money
+
+An active offer reserves its **signing bonus plus its first season's salary** against the club's cash until it wins, loses or is withdrawn. A new offer is refused when it does not fit in what is left:
+
+```json
+400 { "error": "Offer commits 18,500,000.00 (bonus plus first-season salary) but only 12,040,000.00 is available: cash 60,040,000.00 minus 48,000,000.00 reserved by the club's other active offers" }
+```
+
+Show the message as is; the club can withdraw another open-phase offer or lower this one. Updating an offer on the same auction replaces its reservation, it does not add to it.
+
+### 3. Falling asks
+
+A player with no offers lowers his ask by 10 % per round once he has gone two rounds without an offer, never below $1.6M. The board and pool always show the live ask.
+
+Board entries (`GET /fa-auction/board`) gain:
+
+| Field | Meaning |
+|---|---|
+| `initial_min_aav` | The ask when he entered free agency |
+| `min_aav` / `min_total_value` | The ask now (may be lower than `initial_min_aav`) |
+| `ask_decay_steps` | How many times the ask has dropped |
+| `rounds_without_offer` | Rounds in a row without an offer |
+| `auction_league_year_id` | The season the auction was opened in (a player released in season keeps that season's id) |
+
+In the pool (`GET /fa-auction/free-agent-pool`), `auction.min_aav` and `demand.min_aav` are the live ask. Suggested UI: show the starting ask struck through next to the current one when `ask_decay_steps > 0`.
+
+### 4. Withdraw and re-offer
+
+A club that withdraws during the open phase and offers again is back in the auction (`my_offer.status` is `active`). Before this fix the re-offer was silently ignored.
+
+### 5. Offer statuses
+
+`my_offer.status` can now also be `failed`: the club's offer won but could not be completed (for example the club no longer had the cash for the bonus). The next-best offer signs instead. If no offer can be completed the auction reopens to every club, and at the close of free agency the player gets a fallback deal.
+
+| Status | Meaning |
+|---|---|
+| `active` | In the running |
+| `outbid` | Not in the final three |
+| `withdrawn` | Withdrawn by the club (open phase only) |
+| `won` | Signed |
+| `lost` | Another club signed him |
+| `failed` | Won but could not be completed; skipped |
+
+### 6. Notifications
+
+Clubs now receive notifications on their MLB team (the existing `Notifications` list in the bootstrap payload; mark read with `PUT /notifications/{id}/read`). Messages start with `Free agency:` or `Free agency closed:`:
+
+- your offer did not make the final three;
+- you signed a player;
+- a player you bid on signed with another club;
+- your winning offer could not be completed and was skipped;
+- at the close: a player was placed on your roster on a one-year fallback deal (release him at no cost before the season starts).
+
+### 7. Board covers every season
+
+The board and pool list every active auction, including players released during an earlier season. Do not filter the board by `league_year_id` on the client.
+
+### 8. Market rate
+
+`GET /fa-auction/market-rate?league_year_id=` now also returns how the rate was set:
+
+```json
+{ "dollar_per_war": "9200000.00", "raw_rate": "8650000.00", "previous_rate": "8000000",
+  "signings_in_sample": 6, "method": "median", "max_change": "0.15", "limited_by_max_change": false }
+```
+
+The rate is the median price per WAR of recent signings and moves at most 15 % per season.
+
+---
+
 ## Table of Contents
 
+0. [Season 2 changes (2026-11-21)](#season-2-changes-2026-11-21)
 1. [Concepts](#concepts)
 2. [Free Agent Pool Page](#free-agent-pool-page)
 3. [Auction Board](#auction-board)

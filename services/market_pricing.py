@@ -53,18 +53,49 @@ def _t(conn) -> Dict[str, Table]:
 _EXCLUDED_SOURCES = ("arb_renewal",)
 
 
-def get_current_dollar_per_war(conn, league_year_id: int) -> Decimal:
+def weighted_median(pairs) -> Optional[Decimal]:
+    """Weighted median of (value, weight) pairs; None when empty."""
+    pts = sorted((Decimal(str(v)), Decimal(str(w))) for v, w in pairs if Decimal(str(w)) > 0)
+    if not pts:
+        return None
+    half = sum(w for _, w in pts) / 2
+    acc = Decimal("0")
+    for v, w in pts:
+        acc += w
+        if acc >= half:
+            return v
+    return pts[-1][0]
+
+
+def guard_rate(raw: Decimal, anchor: Optional[Decimal], max_change: Decimal,
+               lo: Decimal, hi: Decimal) -> Decimal:
+    """Limit a raw rate to +/- max_change around the anchor (the previous
+    season's rate), then to the absolute [lo, hi] band."""
+    rate = Decimal(str(raw))
+    if anchor is not None and max_change > 0:
+        rate = max(anchor * (1 - max_change), min(anchor * (1 + max_change), rate))
+    return max(lo, min(hi, rate)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+_RATE_MEMO: Dict[tuple, Dict[str, Any]] = {}
+
+
+def market_rate_breakdown(conn, league_year_id: int, _depth: int = 0) -> Dict[str, Any]:
     """
-    Compute $/WAR (AAV per WAR) from fa_market_history over a rolling
-    weighted window of league years.
+    The $ per WAR rate for a league year, with how it was reached.
 
-    - rate = sum(aav * w) / sum(war * w) over signings with WAR >= 0.5
-    - arbitration renewals excluded; extensions weighted by
-      ``market_extension_weight``; year weights 1.0 / 0.7 / 0.4
-    - fewer than ``market_min_history`` signings: blended with the default
-    - clamped to [dollar_per_war_min, dollar_per_war_max]
+    - sample: signings of the last ``market_lookback_years`` seasons with
+      WAR >= 0.5; arbitration renewals excluded; extensions weighted by
+      ``market_extension_weight``; seasons weighted 1.0 / 0.7 / 0.4
+    - raw rate: weighted **median** of each signing's AAV / WAR
+      (``market_rate_method = median``) or the ratio of sums (``ratio``)
+    - thin sample (< ``market_min_history``): blended toward the anchor
+    - anchor: the previous season's rate, or ``dollar_per_war_default`` for
+      the first season; the rate moves at most ``market_rate_max_change``
+      from it, so a handful of outlier signings cannot reprice the league
+    - finally clamped to [dollar_per_war_min, dollar_per_war_max]
 
-    All constants come from ``fa_config`` with the module defaults as fallback.
+    Memoised per (league year, market history contents, config).
     """
     from services.league_config import get_fa_config, cfg_dec, cfg_int
 
@@ -75,17 +106,29 @@ def get_current_dollar_per_war(conn, league_year_id: int) -> Decimal:
     min_history = cfg_int(cfg, "market_min_history", MIN_HISTORY_FOR_MARKET)
     lookback = cfg_int(cfg, "market_lookback_years", MARKET_LOOKBACK_YEARS)
     ext_weight = cfg_dec(cfg, "market_extension_weight", "0.9")
+    max_change = cfg_dec(cfg, "market_rate_max_change", "0.15")
+    method = str(cfg.get("market_rate_method") or "median").lower()
+
+    sig = conn.execute(sa_text(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM fa_market_history"
+    )).first()
+    key = (id(conn.engine), int(league_year_id), int(sig[0]), int(sig[1]),
+           tuple(sorted((k, str(v)) for k, v in cfg.items())))
+    if key in _RATE_MEMO:
+        return _RATE_MEMO[key]
 
     t = _t(conn)
     ly = t["league_years"]
-
-    # Resolve current league_year value
-    row = conn.execute(
-        select(ly.c.league_year).where(ly.c.id == league_year_id)
-    ).first()
+    row = conn.execute(select(ly.c.league_year).where(ly.c.id == league_year_id)).first()
     if not row:
-        return default_rate
-    current_year = row._mapping["league_year"]
+        return {"league_year_id": int(league_year_id), "rate": default_rate, "raw_rate": None,
+                "anchor": None, "signings": 0, "method": method, "limited": False}
+    current_year = int(row._mapping["league_year"])
+
+    anchor = default_rate
+    prev = conn.execute(select(ly.c.id).where(ly.c.league_year == current_year - 1)).first()
+    if prev and _depth < 50:
+        anchor = Decimal(str(market_rate_breakdown(conn, int(prev[0]), _depth + 1)["rate"]))
 
     signings = conn.execute(sa_text("""
         SELECT mh.war_at_signing, mh.aav, mh.total_value, mh.years, mh.source,
@@ -94,47 +137,52 @@ def get_current_dollar_per_war(conn, league_year_id: int) -> Decimal:
         JOIN league_years ly ON ly.id = mh.league_year_id
         WHERE ly.league_year BETWEEN :start_year AND :end_year
           AND mh.war_at_signing >= 0.5
-    """), {
-        "start_year": current_year - lookback + 1,
-        "end_year":   current_year,
-    }).mappings().all()
+    """), {"start_year": current_year - lookback + 1, "end_year": current_year}).mappings().all()
 
-    weighted_value = Decimal("0")
-    weighted_war   = Decimal("0")
-    count = 0
+    samples = []
     for s in signings:
         source = (s["source"] or "").lower()
         if source in _EXCLUDED_SOURCES:
             continue
-        years_ago = current_year - s["league_year"]
-        w = _YEAR_WEIGHTS.get(years_ago, Decimal("0.3"))
+        w = _YEAR_WEIGHTS.get(current_year - int(s["league_year"]), Decimal("0.3"))
         if source == "extension":
             w = w * ext_weight
         aav = s["aav"]
         if aav is None:
-            yrs = int(s["years"] or 1) or 1
-            aav = Decimal(str(s["total_value"])) / yrs
-        weighted_value += Decimal(str(aav)) * w
-        weighted_war   += Decimal(str(s["war_at_signing"])) * w
-        count += 1
+            aav = Decimal(str(s["total_value"])) / (int(s["years"] or 1) or 1)
+        war = Decimal(str(s["war_at_signing"]))
+        samples.append((Decimal(str(aav)), war, w))
 
-    if count == 0 or weighted_war <= 0:
-        return default_rate
+    target = anchor
+    count = len(samples)
+    if count == 0:
+        raw = target
+    else:
+        if method == "ratio":
+            raw = sum(a * w for a, _, w in samples) / sum(v * w for _, v, w in samples)
+        else:
+            raw = weighted_median([(a / v, w) for a, v, w in samples])
+        if count < min_history:
+            blend = Decimal(count) / Decimal(min_history)
+            raw = raw * blend + target * (1 - blend)
+    raw = Decimal(str(raw)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    rate = guard_rate(raw, anchor, max_change, min_rate, max_rate)
+    unlimited = max(min_rate, min(max_rate, raw))
+    out = {
+        "league_year_id": int(league_year_id), "league_year": current_year,
+        "rate": rate, "raw_rate": raw, "anchor": anchor, "signings": count,
+        "method": method, "max_change": max_change,
+        "limited": rate != unlimited.quantize(Decimal("0.01")),
+    }
+    if len(_RATE_MEMO) > 500:
+        _RATE_MEMO.clear()
+    _RATE_MEMO[key] = out
+    return out
 
-    market_rate = (weighted_value / weighted_war).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    )
 
-    # Blend with default if insufficient history
-    if count < min_history:
-        blend = Decimal(str(count)) / Decimal(str(min_history))
-        market_rate = (
-            market_rate * blend + default_rate * (Decimal("1") - blend)
-        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-    # Clamp
-    market_rate = max(min_rate, min(max_rate, market_rate))
-    return market_rate
+def get_current_dollar_per_war(conn, league_year_id: int) -> Decimal:
+    """$ per WAR for a league year (see ``market_rate_breakdown``)."""
+    return Decimal(str(market_rate_breakdown(conn, league_year_id)["rate"]))
 
 
 def age_service_multiplier(age: int, service_years: int = 99) -> Decimal:

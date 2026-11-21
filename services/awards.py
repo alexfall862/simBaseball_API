@@ -711,3 +711,251 @@ def get_season_awards(conn, league_year_id: int,
         "league_level": int(league_level),
         "awards": list(by_award.values()),
     }
+
+
+# =====================================================================
+# Cross-season history (year-over-year awards page)
+# =====================================================================
+
+def _team_brief(r) -> Optional[Dict[str, Any]]:
+    if r["team_id"] is None:
+        return None
+    return {
+        "team_id": int(r["team_id"]),
+        "team_abbrev": r["team_abbrev"],
+        "team_city": r["team_city"],
+        "team_name": r["team_name"],
+        "color_one": r["color_one"],
+        "color_two": r["color_two"],
+    }
+
+
+def _award_kind(t: Dict[str, Any]) -> str:
+    """individual (one winner per slot) / championship (team) / selection (many)."""
+    if not t["allows_multiple"]:
+        return "individual"
+    if t["category"] == "championship":
+        return "championship"
+    return "selection"
+
+
+def get_awards_history(
+    conn,
+    league_level: int = DEFAULT_AWARD_LEVEL,
+    award_codes: Optional[List[str]] = None,
+    from_year: Optional[int] = None,
+    to_year: Optional[int] = None,
+    include_finalists: bool = False,
+    include_rosters: bool = False,
+    include_selections: bool = False,
+    leaders_limit: Optional[int] = 25,
+) -> Dict[str, Any]:
+    """
+    Every season's award results in one payload, for a year-over-year page.
+
+    Award types are bucketed from their catalog flags (data-driven, so a new
+    trophy needs no code change):
+      - individual   allows_multiple = 0          (MVP, Cy Young, SS, GG, ...)
+                     -> one entry per winner (plus finalists if asked)
+      - championship category = 'championship'    (pennant, world_series)
+                     -> one entry per TEAM, roster collapsed to a count
+      - selection    any other multi-recipient type (all_star)
+                     -> per-league counts (player lists if include_selections)
+
+    Also returns `leaders`: career award counts per player and title counts per
+    team over the same filtered window. Seasons are newest first; seasons with
+    no matching awards are omitted.
+    """
+    ensure_awards_schema(conn)
+
+    catalog = list_award_types(conn)
+    if award_codes:
+        wanted = {c.strip().lower() for c in award_codes if c and c.strip()}
+        unknown = wanted - {t["code"] for t in catalog}
+        if unknown:
+            raise ValueError(f"unknown award_code(s): {sorted(unknown)}")
+        catalog = [t for t in catalog if t["code"] in wanted]
+
+    kind_by_code = {t["code"]: _award_kind(t) for t in catalog}
+    order_by_code = {t["code"]: t["sort_order"] for t in catalog}
+
+    codes = list(kind_by_code)
+    if not codes:
+        return {"league_level": int(league_level), "award_types": [],
+                "seasons": [], "leaders": {"players": [], "teams": []}}
+
+    where = ["pa.league_level = :lvl"]
+    params: Dict[str, Any] = {"lvl": int(league_level)}
+    where.append("pa.award_code IN (" + ",".join(f":c{i}" for i in range(len(codes))) + ")")
+    params.update({f"c{i}": c for i, c in enumerate(codes)})
+    if from_year is not None:
+        where.append("ly.league_year >= :from_year")
+        params["from_year"] = int(from_year)
+    if to_year is not None:
+        where.append("ly.league_year <= :to_year")
+        params["to_year"] = int(to_year)
+
+    rows = conn.execute(sa_text(f"""
+        SELECT pa.id, pa.player_id, pa.league_year_id, ly.league_year,
+               pa.award_code, pa.sub_league, pa.position_code, pa.`rank`,
+               pa.is_winner, pa.vote_points, pa.vote_share, pa.metadata_json,
+               p.firstName, p.lastName, p.ptype,
+               pa.team_id, tm.team_abbrev, tm.team_city, tm.team_name,
+               tm.color_one, tm.color_two
+        FROM player_awards pa
+        JOIN league_years ly ON ly.id = pa.league_year_id
+        JOIN simbbPlayers p ON p.id = pa.player_id
+        LEFT JOIN teams tm ON tm.id = pa.team_id
+        WHERE {' AND '.join(where)}
+        ORDER BY ly.league_year DESC, pa.sub_league, pa.position_code,
+                 pa.`rank`, p.lastName, p.firstName
+    """), params).mappings().all()
+
+    seasons: Dict[int, Dict[str, Any]] = {}
+    champ_groups: Dict[tuple, Dict[str, Any]] = {}
+    opponent_ids = set()
+    player_leaders: Dict[int, Dict[str, Any]] = {}
+    team_leaders: Dict[int, Dict[str, Any]] = {}
+
+    for r in rows:
+        code = r["award_code"]
+        kind = kind_by_code[code]
+        ly_id = int(r["league_year_id"])
+        year = int(r["league_year"])
+        sub = r["sub_league"] or None
+        is_winner = bool(r["is_winner"])
+        season = seasons.setdefault(ly_id, {
+            "league_year_id": ly_id,
+            "league_year": year,
+            "individual": {},
+            "championships": {},
+            "selections": {},
+        })
+        player = {
+            "player_id": int(r["player_id"]),
+            "name": f"{r['firstName']} {r['lastName']}".strip(),
+            "first_name": r["firstName"],
+            "last_name": r["lastName"],
+            "ptype": r["ptype"],
+        }
+        team = _team_brief(r)
+
+        if kind == "individual":
+            if is_winner or include_finalists:
+                season["individual"].setdefault(code, []).append({
+                    "award_id": int(r["id"]),
+                    **player,
+                    "sub_league": sub,
+                    "position_code": r["position_code"] or None,
+                    "rank": int(r["rank"]),
+                    "is_winner": is_winner,
+                    "vote_points": float(r["vote_points"]) if r["vote_points"] is not None else None,
+                    "vote_share": float(r["vote_share"]) if r["vote_share"] is not None else None,
+                    "team": team,
+                })
+
+        elif kind == "championship":
+            key = (ly_id, code, sub, team["team_id"] if team else None)
+            grp = champ_groups.get(key)
+            if grp is None:
+                grp = {
+                    "sub_league": sub,
+                    "team": team,
+                    "series_result": None,
+                    "opponent": None,
+                    "_opponent_id": None,
+                    "roster_size": 0,
+                }
+                if include_rosters:
+                    grp["players"] = []
+                champ_groups[key] = grp
+                season["championships"].setdefault(code, []).append(grp)
+            if grp["_opponent_id"] is None and r["metadata_json"]:
+                meta = r["metadata_json"]
+                if isinstance(meta, (str, bytes)):
+                    try:
+                        meta = json.loads(meta)
+                    except ValueError:
+                        meta = None
+                if isinstance(meta, dict):
+                    grp["series_result"] = meta.get("series_result")
+                    if meta.get("opponent_team_id") is not None:
+                        grp["_opponent_id"] = int(meta["opponent_team_id"])
+                        opponent_ids.add(grp["_opponent_id"])
+            grp["roster_size"] += 1
+            if include_rosters:
+                grp["players"].append(player)
+
+        else:  # selection
+            bucket = season["selections"].setdefault(code, {}).setdefault(
+                sub or "ALL", {"count": 0})
+            bucket["count"] += 1
+            if include_selections:
+                bucket.setdefault("players", []).append({**player, "team": team})
+
+        # ---- leaders (winners only) ----
+        if not is_winner:
+            continue
+        if kind in ("individual", "selection"):
+            pl = player_leaders.setdefault(player["player_id"], {
+                **player, "trophies": 0, "selections": 0, "awards": {},
+            })
+            a = pl["awards"].setdefault(code, {"wins": 0, "years": []})
+            a["wins"] += 1
+            if year not in a["years"]:
+                a["years"].append(year)
+            pl["trophies" if kind == "individual" else "selections"] += 1
+        elif kind == "championship" and team:
+            tl = team_leaders.setdefault(team["team_id"], {**team, "titles": {}})
+            t = tl["titles"].setdefault(code, {"count": 0, "years": []})
+            if year not in t["years"]:  # one title per season, not one per player
+                t["years"].append(year)
+                t["count"] += 1
+
+    # Resolve championship opponents in one lookup.
+    if opponent_ids:
+        ids_csv = ",".join(str(i) for i in sorted(opponent_ids))
+        opp_rows = conn.execute(sa_text(f"""
+            SELECT id AS team_id, team_abbrev, team_city, team_name, color_one, color_two
+            FROM teams WHERE id IN ({ids_csv})
+        """)).mappings().all()
+        opp_by_id = {int(o["team_id"]): _team_brief(o) for o in opp_rows}
+        for grp in champ_groups.values():
+            if grp["_opponent_id"] is not None:
+                grp["opponent"] = opp_by_id.get(grp["_opponent_id"])
+    for grp in champ_groups.values():
+        del grp["_opponent_id"]
+
+    # Display order inside each season follows the catalog sort_order.
+    season_list = sorted(seasons.values(), key=lambda s: -s["league_year"])
+    for s in season_list:
+        for k in ("individual", "championships", "selections"):
+            s[k] = dict(sorted(s[k].items(), key=lambda kv: order_by_code.get(kv[0], 999)))
+
+    for pl in player_leaders.values():
+        for a in pl["awards"].values():
+            a["years"].sort()
+    players_ranked = sorted(
+        player_leaders.values(),
+        key=lambda p: (-p["trophies"], -p["selections"],
+                       p["last_name"] or "", p["first_name"] or ""),
+    )
+    if leaders_limit:
+        players_ranked = players_ranked[:int(leaders_limit)]
+
+    for tl in team_leaders.values():
+        for t in tl["titles"].values():
+            t["years"].sort()
+    teams_ranked = sorted(
+        team_leaders.values(),
+        key=lambda t: (-t["titles"].get("world_series", {}).get("count", 0),
+                       -sum(x["count"] for x in t["titles"].values()),
+                       t["team_abbrev"] or ""),
+    )
+
+    return {
+        "league_level": int(league_level),
+        "award_types": [{**t, "kind": kind_by_code[t["code"]]} for t in catalog],
+        "seasons": season_list,
+        "leaders": {"players": players_ranked, "teams": teams_ranked},
+    }

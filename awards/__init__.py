@@ -7,6 +7,7 @@ Endpoints (all under /api/v1):
     GET    /awards/types                  — award catalog (labels/config for UI)
     GET    /awards/player/<player_id>     — one player's career awards
     GET    /awards/season/<league_year_id>— a season's full award slate
+    GET    /awards/history                — every season's results + career leaders
     POST   /awards                        — record/update one award (admin)
     POST   /awards/team                   — give a whole roster one award (pennant/ring)
     POST   /awards/sync-postseason        — backfill pennant/world_series from playoff_series
@@ -25,6 +26,7 @@ from services.awards import (
     revoke_award,
     get_player_awards,
     get_season_awards,
+    get_awards_history,
 )
 
 awards_bp = Blueprint("awards", __name__)
@@ -48,6 +50,53 @@ def get_awards_for_player(player_id: int):
     try:
         with engine.begin() as conn:
             return jsonify(get_player_awards(conn, player_id)), 200
+    except SQLAlchemyError as e:
+        return jsonify(error="database_error", message=str(e)), 500
+
+
+def _flag(name: str) -> bool:
+    return (request.args.get(name, "") or "").strip().lower() in ("1", "true", "yes")
+
+
+@awards_bp.get("/awards/history")
+def get_awards_history_route():
+    """
+    Year-over-year award results across every season, plus career leaders.
+
+    Query params (all optional):
+      league_level        default 9
+      award_code          comma list to restrict, e.g. mvp,cy_young
+      from_year, to_year  inclusive bounds on league_years.league_year
+      include_finalists   1 -> individual awards also list rank>1 rows
+      include_rosters     1 -> championship teams carry their player list
+      include_selections  1 -> all-star buckets carry their player list
+      leaders_limit       cap on leaders.players (default 25, 0 = no cap)
+    """
+    codes = request.args.get("award_code")
+    # type=int falls back to the default on a malformed value (no 400), like
+    # the other awards/stats endpoints.
+    league_level = request.args.get("league_level", default=9, type=int)
+    from_year = request.args.get("from_year", type=int)
+    to_year = request.args.get("to_year", type=int)
+    leaders_limit = request.args.get("leaders_limit", default=25, type=int)
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            result = get_awards_history(
+                conn,
+                league_level=league_level,
+                award_codes=codes.split(",") if codes else None,
+                from_year=from_year,
+                to_year=to_year,
+                include_finalists=_flag("include_finalists"),
+                include_rosters=_flag("include_rosters"),
+                include_selections=_flag("include_selections"),
+                leaders_limit=leaders_limit,
+            )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify(error="validation_error", message=str(e)), 400
     except SQLAlchemyError as e:
         return jsonify(error="database_error", message=str(e)), 500
 

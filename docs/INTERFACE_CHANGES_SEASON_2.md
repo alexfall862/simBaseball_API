@@ -56,6 +56,18 @@ The league year now begins the moment `POST /games/end-season` runs: `timestamp`
 |---|---|
 | `POST /transactions/extend` now enforces: MLB contract in its final season, FA-eligible player (6+ service years), offered by the holding org, no extension yet. Ineligible requests return 400 with a `code` (`not_holder`, `not_mlb`, `not_final_year`, `not_fa_eligible`, `already_extended`, `not_in_force`). `game_week_id` is optional. Offers below the demand are still rejected with 400; unlimited attempts. Contract overview and contract status gain `extension_eligible` (overview also `has_extension`); the extension demand is attached only for eligible players. A signed extension no longer shows as a second roster row. | Show Extend only where `extension_eligible` (arbitration players lose the button). Keep the modal open on a rejection so the user can raise the offer. Badge players with `has_extension`. Available any time of year. |
 
+## 4e. Free agency durability (`free_agency_frontend_guide.md` → "Season 2 changes (2026-11-21)")
+
+| API | Interface change |
+|---|---|
+| Offer and withdraw take an `X-Org-Token` header (club token issued by the admin); `401` when the server enforces it and the token is missing or not this club's. | Send the club's token on both calls; show the 401 message. |
+| An active offer reserves bonus + first-season salary; an offer that does not fit is refused with a 400 message naming cash and reserved amounts. | Show the message; let the user withdraw another open-phase offer or lower this one. |
+| Falling asks: board entries gain `initial_min_aav`, `ask_decay_steps`, `rounds_without_offer`, `auction_league_year_id`; `min_aav` is the live ask. | Show the starting ask struck through when it has fallen. |
+| New offer status `failed` (won but could not be completed; next offer signed). A re-offer after withdrawing is active again. | Status badge for `failed`. |
+| FA notifications on the club's MLB team (bootstrap `Notifications`), prefixed `Free agency:` / `Free agency closed:`. | None needed beyond the existing list; optionally highlight the prefix. |
+| Board and pool include auctions opened in earlier seasons. | Do not filter the board by `league_year_id` client-side. |
+| `GET /fa-auction/market-rate` also returns `raw_rate`, `previous_rate`, `signings_in_sample`, `method`, `max_change`, `limited_by_max_change`. | Optional: show on the market dashboard. |
+
 ## 5. Scouting
 
 | API | Interface change |

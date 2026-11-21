@@ -11,6 +11,7 @@ Chain (docs/OFFSEASON_RUNBOOK.md / MASTER_PLAN_SEASON_2 §12), applied strictly 
   4. normalize_finished_contracts_inactive.sql
   5. season2_amateur_pipeline.sql      (contains ALTERs that fail if re-run)
   6. season2_progression_camp.sql
+  7. season2_fa_durability.sql
 
 Every statement is classified before it runs:
   * ALTER TABLE .. ADD COLUMN ..     skipped when all columns exist; REFUSES if only some exist
@@ -37,6 +38,7 @@ CHAIN = [
     "normalize_finished_contracts_inactive.sql",
     "season2_amateur_pipeline.sql",
     "season2_progression_camp.sql",
+    "season2_fa_durability.sql",
 ]
 
 

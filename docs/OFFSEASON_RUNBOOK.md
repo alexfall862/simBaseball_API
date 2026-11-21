@@ -187,7 +187,16 @@ Offseason contracts (FA, buyout, draft, IFA) are stamped with `leagueYearSigned 
 
 **`end-free-agency` resolves every auction still active.** Auctions with offers are run to a winner immediately; auctions that never drew an offer are marked `expired` and the player is parked on a **1-year fallback deal** (`contracts.fa_fallback = 1`, minor salary) at AAA (level 8) if he came off an MLB contract, otherwise at level 4, with the MLB org that has the fewest players at that level. The org can release him during the offseason at no cost (`POST /transactions/release` ends the contract outright, no waivers). The response carries `fa_close` with `signed_with_offers`, `expired_no_offers`, `fallback_deals` and the fallback list.
 
-Pricing (2026-11-08): the market rate is **AAV per WAR** over the last three seasons, arbitration renewals excluded and extensions at 0.9 weight; demand and arbitration WAR is a 50/30/20 blend of the last three seasons, each regressed toward 0 below 200 PA / 50 IP; arbitration also applies the age multiplier. Constants live in `fa_config`.
+**Durability rules (2026-11-21, `docs/FREE_AGENCY_DIAGNOSTIC.md`).** Before FA opens: apply `migrations/season2_fa_durability.sql`, and issue each MLB club its token (`POST /admin/org-tokens/{org_id}/rotate`; list with `GET /admin/org-tokens`). `ORG_TOKEN_MODE` (env) is `warn` by default: offers without a valid `X-Org-Token` are logged and allowed; set `enforce` once the interface sends tokens. While FA runs:
+- An active offer reserves its bonus plus first-season salary against the club's cash; offers that do not fit are refused.
+- A winning offer that cannot be completed is marked `failed` and the next-best offer signs; if none can, the auction reopens, and the close gives the player a fallback deal. `advance-fa-round` reports `signings_failed` and `reopened`.
+- A player with no offer lowers his ask 10 % per round from his third round without one (floor $1.6M); `advance-fa-round` reports `asks_lowered`. Settings: `fa_config.fa_ask_decay_pct`, `fa_ask_decay_after_rounds`.
+- `end-free-agency` closes every active auction whatever season it was opened in (players released in season included) and never leaves one active.
+- Bidders and fallback clubs get notifications on their MLB team.
+- `GET /admin/analytics/fa-outcomes?league_year_id=` reports outcomes, price paid vs ask by WAR band, falling asks, failed signings, the unsigned list, auctions still active by year and the market rate.
+- Rounds stay manual (`advance-fa-round`); the `fa_advance_round` job exists if a schedule is wanted later.
+
+Pricing (2026-11-21): the market rate is the **median price per WAR** (AAV ÷ blended WAR) of the last three seasons' signings, and it moves at most 15 % from the previous season's rate ($8M for the first season), then is clamped to $4M–$15M (`fa_config.market_rate_method`, `market_rate_max_change`). Signings and extensions now record the same blended WAR that demands use. Previously (2026-11-08): the market rate is **AAV per WAR** over the last three seasons, arbitration renewals excluded and extensions at 0.9 weight; demand and arbitration WAR is a 50/30/20 blend of the last three seasons, each regressed toward 0 below 200 PA / 50 IP; arbitration also applies the age multiplier. Constants live in `fa_config`.
 
 ### 8. Draft — manual, confirm complete
 

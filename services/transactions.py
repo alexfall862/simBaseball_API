@@ -1062,13 +1062,13 @@ def sign_free_agent(conn, player_id: int, org_id: int, years: int,
         executed_by=executed_by,
     )
 
-    # Record to market history for pricing engine. WAR comes from the season
-    # the caller was in (the one just played, during the offseason); the new
-    # year has no stats yet and would record every offseason signing at 0 WAR.
+    # Record to market history for pricing engine. WAR is the same blended
+    # three-season MLB WAR demands are priced on (both sides of the $/WAR
+    # rate must measure the same thing), from the season the caller was in.
     try:
         from services.market_pricing import record_signing_to_market
-        from services.player_demands import get_player_war
-        war = get_player_war(conn, player_id, stats_league_year_id, level_id)
+        from services.player_demands import get_blended_war
+        war = get_blended_war(conn, player_id, stats_league_year_id, 9)
         total_value = sum(salaries) + bonus
         aav = total_value / years if years else total_value
         players_tbl = t["players"]
@@ -1334,8 +1334,8 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
     # Record to market history for pricing engine
     try:
         from services.market_pricing import record_signing_to_market
-        from services.player_demands import get_player_war
-        war = get_player_war(conn, c["playerID"], league_year_id, c["current_level"])
+        from services.player_demands import get_blended_war
+        war = get_blended_war(conn, c["playerID"], league_year_id, 9)
         total_value = sum(salaries) + bonus
         aav = total_value / years if years else total_value
         players_tbl = t["players"]
