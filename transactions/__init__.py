@@ -325,18 +325,23 @@ def api_sign():
 
 @transactions_bp.post("/transactions/extend")
 def api_extend():
+    """Extend an FA-eligible MLB player's final-season contract (any time of
+    year). ``game_week_id`` is optional: it defaults to the current week and
+    is ignored in the offseason."""
     body, err = _require_json("contract_id", "org_id", "years", "salaries", "bonus")
     if err:
         return err
     lyid = _league_year_id_from_body(body)
     gwid = body.get("game_week_id") or request.args.get("game_week_id", type=int)
-    if not lyid or not gwid:
-        return jsonify(error="missing_fields",
-                       fields=["league_year_id", "game_week_id"]), 400
+    if not lyid:
+        return jsonify(error="missing_fields", fields=["league_year_id"]), 400
     try:
         salaries = [Decimal(str(s)) for s in body["salaries"]]
         engine = get_engine()
         with engine.begin() as conn:
+            if not gwid:
+                from sqlalchemy import text as sa_text
+                gwid = conn.execute(sa_text("SELECT week_id FROM timestamp_state WHERE id = 1")).scalar()
             result = extend_contract(
                 conn,
                 contract_id=int(body["contract_id"]),
@@ -345,12 +350,12 @@ def api_extend():
                 salaries=salaries,
                 bonus=Decimal(str(body["bonus"])),
                 league_year_id=int(lyid),
-                game_week_id=int(gwid),
+                game_week_id=int(gwid) if gwid else None,
                 executed_by=body.get("executed_by"),
             )
         return jsonify(result), 200
     except (ValueError, InvalidOperation) as e:
-        return jsonify(error="validation", message=str(e)), 400
+        return jsonify(error="validation", code=getattr(e, "code", None), message=str(e)), 400
     except SQLAlchemyError:
         return jsonify(error="db_error", message="Database error"), 500
 

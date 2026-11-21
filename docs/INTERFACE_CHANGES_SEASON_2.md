@@ -50,6 +50,12 @@ The league year now begins the moment `POST /games/end-season` runs: `timestamp`
 
 `displayovr` is a percentile inside the player's level/position cohort mapped to 20–80, not an absolute rating. It is now refreshed at end-season and when the draft completes; between those points it is stable. Progression trends should not be read from it.
 
+## 4d. Contract extensions (`docs/contract_extensions_frontend_guide.md`)
+
+| API | Interface change |
+|---|---|
+| `POST /transactions/extend` now enforces: MLB contract in its final season, FA-eligible player (6+ service years), offered by the holding org, no extension yet. Ineligible requests return 400 with a `code` (`not_holder`, `not_mlb`, `not_final_year`, `not_fa_eligible`, `already_extended`, `not_in_force`). `game_week_id` is optional. Offers below the demand are still rejected with 400; unlimited attempts. Contract overview and contract status gain `extension_eligible` (overview also `has_extension`); the extension demand is attached only for eligible players. A signed extension no longer shows as a second roster row. | Show Extend only where `extension_eligible` (arbitration players lose the button). Keep the modal open on a rejection so the user can raise the offer. Badge players with `has_extension`. Available any time of year. |
+
 ## 5. Scouting
 
 | API | Interface change |

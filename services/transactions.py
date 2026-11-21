@@ -1102,13 +1102,104 @@ def sign_free_agent(conn, player_id: int, org_id: int, years: int,
 # 2f. Contract Extension
 # ---------------------------------------------------------------------------
 
+class ExtensionIneligible(ValueError):
+    """Raised when a contract cannot be extended; ``code`` is for the UI."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def extension_eligibility(conn, contract_id: int,
+                          org_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Can this contract be extended now (and by ``org_id``)?
+
+    Rule (2026-11-21): an MLB (level 9) contract in force and in its final
+    season, whose player is FA-eligible (>= FA_THRESHOLD service years, i.e.
+    not a minor-league renewal, pre-arb or arbitration player), with no
+    extension already signed for it. Only the org holding the contract may
+    extend it. Allowed at any time of year.
+
+    Returns {"eligible", "code", "message", "holder_org_id", "service_years",
+    "end_league_year"}; ``code`` is None when eligible.
+    """
+    from services.contract_ops import FA_THRESHOLD
+
+    out: Dict[str, Any] = {"eligible": False, "code": None, "message": None,
+                           "holder_org_id": None, "service_years": None,
+                           "end_league_year": None}
+
+    def no(code: str, message: str) -> Dict[str, Any]:
+        out.update(code=code, message=message)
+        return out
+
+    c = conn.execute(text("""
+        SELECT id, playerID, years, current_year, current_level, leagueYearSigned,
+               isFinished, isActive, isBuyout
+        FROM contracts WHERE id = :cid
+    """), {"cid": int(contract_id)}).mappings().first()
+    if not c:
+        return no("not_found", f"Contract {contract_id} not found")
+    if c["isFinished"] or not c["isActive"] or int(c["current_year"] or 0) < 1:
+        return no("not_in_force", "Only a contract currently in force can be extended")
+    if c["isBuyout"]:
+        return no("not_eligible", "A buyout contract cannot be extended")
+    if int(c["current_level"] or 0) != 9:
+        return no("not_mlb", "Only MLB (level 9) contracts can be extended")
+    if int(c["current_year"]) != int(c["years"]):
+        return no("not_final_year", "Only a contract in its final season can be extended")
+
+    holder = conn.execute(text("""
+        SELECT cts.orgID FROM contractDetails cd
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        WHERE cd.contractID = :cid AND cd.year = :yr
+        LIMIT 1
+    """), {"cid": int(contract_id), "yr": int(c["current_year"])}).scalar()
+    out["holder_org_id"] = int(holder) if holder is not None else None
+    if holder is None:
+        return no("not_holder", "The contract has no holding org (released players cannot be extended)")
+    if org_id is not None and int(holder) != int(org_id):
+        return no("not_holder", "Only the org holding this contract can extend it")
+
+    svc = conn.execute(text(
+        "SELECT mlb_service_years FROM player_service_time WHERE player_id = :p"
+    ), {"p": int(c["playerID"])}).scalar()
+    svc = int(svc or 0)
+    out["service_years"] = svc
+    if svc < FA_THRESHOLD:
+        return no("not_fa_eligible",
+                  f"Only free-agent-eligible players ({FA_THRESHOLD}+ service years) can be "
+                  f"extended; this player has {svc}")
+
+    end_year = int(c["leagueYearSigned"]) + int(c["years"])
+    out["end_league_year"] = end_year
+    pending = conn.execute(text("""
+        SELECT 1 FROM contracts
+        WHERE playerID = :p AND isExtension = 1 AND isFinished = 0
+          AND leagueYearSigned = :ey AND id <> :cid
+        LIMIT 1
+    """), {"p": int(c["playerID"]), "ey": end_year, "cid": int(contract_id)}).first()
+    if pending:
+        return no("already_extended", "This contract already has a signed extension")
+
+    out["eligible"] = True
+    return out
+
+
 def extend_contract(conn, contract_id: int, org_id: int, years: int,
                     salaries: List[Decimal], bonus: Decimal,
-                    league_year_id: int, game_week_id: int,
+                    league_year_id: int, game_week_id: Optional[int] = None,
                     executed_by: str = None) -> Dict[str, Any]:
     """
     Extend an existing contract. Creates a new contract row (isExtension=1)
-    starting the year after the current contract ends.
+    starting the season after the current contract ends.
+
+    Eligibility and the holder check: ``extension_eligibility``. The new row
+    is stored *pending* (isActive=0, current_year=0) so roster, lineup and
+    contract views keep listing the player once; End Season activates it
+    (isActive=1, current_year=1) when the old contract expires. Salaries are
+    paid by contract season, so nothing is paid before it starts.
     """
     t = _tables_from_conn(conn)
     contracts = t["contracts"]
@@ -1119,8 +1210,9 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
 
     c = _get_contract_or_raise(conn, contract_id)
 
-    if c["isFinished"]:
-        raise ValueError("Cannot extend a finished contract")
+    elig = extension_eligibility(conn, contract_id, org_id)
+    if not elig["eligible"]:
+        raise ExtensionIneligible(elig["code"], elig["message"])
     if not 1 <= years <= 5:
         raise ValueError("Extension length must be 1-5 years")
     if len(salaries) != years:
@@ -1167,15 +1259,15 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
     if is_offseason(conn):
         game_week_id = None          # offseason: no game week to attach to
 
-    # Create extension contract
+    # Create extension contract, pending until End Season activates it
     result = conn.execute(
         contracts.insert().values(
             playerID=c["playerID"],
             years=years,
-            current_year=1,
+            current_year=0,
             isExtension=1,
             isBuyout=0,
-            isActive=1,
+            isActive=0,
             bonus=bonus,
             signingOrg=org_id,
             leagueYearSigned=end_year,
@@ -1756,6 +1848,8 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
 
     # Get all active contracts where this org is the holder.
     # Join to the first detail row (year=1) for salary display.
+    # isActive = 1 leaves out signed extensions that have not started yet
+    # (stored isActive = 0 until End Season), so the player is listed once.
     q = (
         select(
             c.c.id.label("contract_id"),
@@ -1777,6 +1871,7 @@ def get_org_roster(conn, org_id: int) -> List[Dict[str, Any]]:
                 s.c.orgID == org_id,
                 s.c.isHolder == 1,
                 c.c.isFinished == 0,
+                c.c.isActive == 1,
                 d.c.year == 1,
             )
         )

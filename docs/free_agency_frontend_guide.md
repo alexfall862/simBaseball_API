@@ -635,7 +635,13 @@ Response:
 
 ## Roster Table: Extension Modal
 
-On the user's roster page, players with expiring contracts (`is_expiring: true`) who are arb-eligible or FA-eligible should show an "Extend" button.
+> **Updated 2026-11-21:** eligibility, error codes and the "anytime" rule are in
+> `contract_extensions_frontend_guide.md`, which supersedes this section where
+> they differ. Short version: only FA-eligible MLB players in their final season
+> (`extension_eligible: true` on the contract overview), only by the holding org,
+> any time until End Season, unlimited offers; `game_week_id` is optional.
+
+On the user's roster page, show an "Extend" button where the contract overview row has `extension_eligible: true`.
 
 ### Loading Contract Overview with Demands
 
@@ -677,9 +683,9 @@ Each player in the response includes a `demand` object when `league_year_id` is 
 
 | Condition | Button |
 |-----------|--------|
-| `is_expiring == true` AND `contract_phase` in `["arb_eligible", "fa_eligible"]` | Show **Extend** button |
+| `extension_eligible == true` (MLB, `is_expiring`, `contract_phase == "fa_eligible"`, no extension yet) | Show **Extend** button |
 | Any player with an active contract | Show **Buyout** button |
-| `contract_phase == "minor"` or `"pre_arb"` | No extend button (auto-renewed) |
+| `contract_phase` is `minor`, `pre_arb` or `arb_eligible` | No extend button (renewed automatically) |
 
 ### Extension Modal
 

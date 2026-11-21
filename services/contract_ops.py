@@ -150,6 +150,9 @@ def get_player_contract_status(conn, player_id: int) -> Optional[Dict[str, Any]]
         "years_to_fa": max(0, FA_THRESHOLD - service_years) if phase != "fa_eligible" else None,
         "is_expiring": m["current_year"] == m["years"],
         "has_extension": ext_exists,
+        "extension_eligible": (int(m["current_level"] or 0) == 9
+                               and m["current_year"] == m["years"]
+                               and phase == "fa_eligible" and not ext_exists),
     }
 
 
@@ -180,6 +183,7 @@ def get_org_contract_overview(
             c.c.current_year,
             c.c.current_level,
             c.c.isExtension,
+            c.c.isBuyout,
             c.c.leagueYearSigned,
             c.c.onIR,
             p.c.firstname,
@@ -203,12 +207,28 @@ def get_org_contract_overview(
         .order_by(c.c.current_level.desc(), p.c.lastname, p.c.firstname)
     ).all()
 
+    # Signed-but-not-started extensions, keyed by (player, first season)
+    pending_ext = set()
+    pids_all = list({int(r._mapping["playerID"]) for r in rows})
+    for i in range(0, len(pids_all), 1000):
+        chunk = pids_all[i:i + 1000]
+        if not chunk:
+            continue
+        for pid_, lys in conn.execute(text(
+            "SELECT playerID, leagueYearSigned FROM contracts "
+            "WHERE isExtension = 1 AND isFinished = 0 AND playerID IN ("
+            + ",".join(str(x) for x in chunk) + ")"
+        )).all():
+            pending_ext.add((int(pid_), int(lys)))
+
     results = []
     for row in rows:
         m = row._mapping
         svc = m["mlb_service_years"]
         phase = _determine_phase(m["current_level"], svc)
         years_remaining = m["years"] - m["current_year"]
+        is_expiring = m["current_year"] == m["years"]
+        has_ext = (int(m["playerID"]), int(m["leagueYearSigned"]) + int(m["years"])) in pending_ext
 
         results.append({
             "player_id": m["playerID"],
@@ -226,7 +246,11 @@ def get_org_contract_overview(
             "contract_phase": phase,
             "years_to_arb": max(0, ARB_THRESHOLD - svc) if phase in ("minor", "pre_arb") else None,
             "years_to_fa": max(0, FA_THRESHOLD - svc) if phase != "fa_eligible" else None,
-            "is_expiring": m["current_year"] == m["years"],
+            "is_expiring": is_expiring,
+            "has_extension": has_ext,
+            "extension_eligible": (int(m["current_level"] or 0) == 9 and is_expiring
+                                   and phase == "fa_eligible" and not has_ext
+                                   and not m["isBuyout"]),
             "demand": None,
         })
 
@@ -270,8 +294,8 @@ def get_org_contract_overview(
                 phase = entry["contract_phase"]
                 demand = {}
 
-                # Extension demand (cached only)
-                if entry["is_expiring"] and phase in ("arb_eligible", "fa_eligible"):
+                # Extension demand (cached only), for extension-eligible players
+                if entry["extension_eligible"]:
                     ext = cached_ext.get(pid)
                     if ext:
                         demand["type"] = "extension"
@@ -455,9 +479,14 @@ def process_end_of_season(conn, league_year_id: int,
         ).first()
 
         if ext:
-            # Extension takes over — just finish the old contract
+            # Extension takes over: finish the old contract and put the
+            # pending extension in force (it was stored isActive=0,
+            # current_year=0 so the player was listed once meanwhile).
             conn.execute(
                 update(c).where(c.c.id == contract_id).values(isFinished=1, isActive=0)
+            )
+            conn.execute(
+                update(c).where(c.c.id == ext._mapping["id"]).values(isActive=1, current_year=1)
             )
             summary["extensions_activated"] += 1
             continue

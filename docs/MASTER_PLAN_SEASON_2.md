@@ -512,3 +512,40 @@ Mechanics: focus keyed by the season about to be played; open from end-season to
 | G6 | `maintain` mode for veterans | defer |
 
 Effort: 13b fixes + 13c ≈ 1 day; 13d ≈ 2–3 days; 13e backend ≈ 2 days, interface ≈ 2–3 days.
+
+## 14. MLB contract extensions (decided and built 2026-11-21)
+
+### 14a. Decision
+
+No window. The extension capability already existed and nothing gated it, so extensions stay open **any time of year**; End Season is the natural deadline because it expires final-season contracts. Rules (user, 2026-11-21):
+
+- **Eligible:** an MLB (level 9) contract in force and in its final season, whose player is free-agent eligible (6+ service years). Minor-league renewals, pre-arbitration and arbitration players are not eligible. Buyout contracts are not eligible.
+- **Who:** only the org holding the contract.
+- **Answer:** unlimited offers; an offer below the existing extension demand (AAV ≥ 90 % of FA value, bonus included; years ≥ the age minimum) is rejected, one that meets it is signed. Pricing unchanged.
+
+The window, negotiation, per-season pricing and contract-shape rules from the earlier proposal were **not** adopted.
+
+### 14b. What was wrong and what was built
+
+| Item | Before | Now |
+|---|---|---|
+| Duplicate roster row | A signed extension was a second active, held contract: the player appeared twice in roster views (rolled-back test: 1 → 2 rows). | The extension is stored **pending**: `isActive = 0`, `current_year = 0`. Views that pin the current contract year or filter on active contracts skip it; weekly salary and obligations work by contract season, so they still see it in its seasons. End Season sets it to `isActive = 1`, `current_year = 1` when the old deal expires. The transactions roster (`/transactions/roster/{org}`) joined every unfinished contract's first-year row, so it also needed `isActive = 1`. Differential scan of 43 org-, team- and player-scoped GET endpoints with the pending extension present vs hidden: only the payroll projection differs, by design (it lists the extension as its own future contract). |
+| Holder check | `org_id` was never checked. | `transactions.extension_eligibility` requires the org to hold the current season's share. |
+| Eligibility | Any unfinished contract, any level, any year; stackable. | Rules in 14a; a second extension for the same contract is refused. Refusals carry a `code` (`not_holder`, `not_mlb`, `not_final_year`, `not_fa_eligible`, `already_extended`, `not_in_force`, `not_found`). |
+| Any time | The route required `game_week_id`. | Optional; defaults to the current week, none in the offseason. |
+| Contract overview / status | Extension demand attached for arbitration players too; no eligibility flag. | `extension_eligible` on both, `has_extension` on the overview; demand attached only for eligible players. |
+
+Trades already move all of a player's live contracts, including a pending extension.
+
+### 14c. Open: release or buyout of a player with a signed, not-yet-started extension (not built)
+
+- **Release** drops the releasing org's holder share on the released contract only. The pending extension stays held by that org, and at End Season the released contract expires, the extension takes over, and the player is back with the org that released him.
+- **Buyout** finishes the old contract, so End Season never activates the extension (it only looks at expiring contracts). The extension stays pending forever, and weekly books would still pay its salary in its seasons.
+
+Options: (a) refuse release, waiver placement and buyout while an extension is pending; (b) make release and buyout cover the extension too (release: guaranteed money flows, no holder; buyout: finish it). Decision needed; until then avoid releasing or buying out a player in the gap between signing an extension and End Season.
+
+Found in passing, not fixed: `GET /stats/player/{id}/career` returns 500 for every player (its query reads `league_years.season`, which does not exist; the column is `league_year`).
+
+### 14d. Verification
+
+Docs: `docs/contract_extensions_frontend_guide.md` (interface), `INTERFACE_CHANGES_SEASON_2.md` §4d, the extension rules in `free_agency_frontend_guide.md` and the overview fields in `financial_endpoints_frontend_guide.md` updated. Tests: `tests/test_contract_extensions.py` (database-backed, rolled back; skipped without `SIMBB_TEST_DATABASE_URL`). Rehearsal (rehearse2.py on a fresh live copy, 2026-11-21): 149 steps, 0 failures. Three extensions signed in season 1 at three orgs; refusals for wrong org, not-final-season and below-demand offers (twice); second extension refused; pending rows isActive 0 / current_year 0; player listed once in roster, ratings, transactions roster and contract overview before and after End Season; End Season activated all three, old deals finished, none entered FA, year-1 salary as agreed; an offseason extension without a game week also lists the player once.

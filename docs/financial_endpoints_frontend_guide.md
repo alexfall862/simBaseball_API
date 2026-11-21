@@ -249,6 +249,7 @@ Enriched contract and service-time info for one player. Use this for player deta
 | `years_to_fa` | Seasons until free agency. `null` if already FA eligible. |
 | `is_expiring` | `true` if `current_year == years` (final year of deal) |
 | `has_extension` | `true` if an extension contract exists queued up for when this one ends |
+| `extension_eligible` | `true` if the org can extend this contract now: MLB, final season, FA-eligible player, no extension yet (see `contract_extensions_frontend_guide.md`) |
 
 ### Errors
 
@@ -328,7 +329,8 @@ Returns an array (not wrapped in an object):
 
 - `demand` is `null` for most players.
 - Only populated when `league_year_id` is provided AND cached demands exist in the `player_demands` table.
-- For expiring arb/FA-eligible players: `demand.type = "extension"` with `min_aav`, `min_years`, `war`.
+- For extension-eligible players (`extension_eligible: true`): `demand.type = "extension"` with `min_aav`, `min_years`, `war`.
+- Each overview row also carries `has_extension` and `extension_eligible`.
 - Buyout demands may also appear with `demand.type = "buyout"`.
 - These are **cached** values — fresh demands are computed on-demand when opening a specific player's contract detail.
 
