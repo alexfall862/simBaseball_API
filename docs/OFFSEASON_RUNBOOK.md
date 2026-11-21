@@ -35,7 +35,7 @@ Terminology used below:
 | `not built` | The step has no implementation in the API at all (see [What Is Not Automated](#what-is-not-automated)). |
 | `unknown` | The detector query failed (missing table/column, DB error); the detail column shows the error. |
 
-Steps 2, 3, 4, 11 and 13 have a **Run** button that POSTs to the step's endpoint and then refreshes the card. Steps 5, 6, 12 and 14 already have their own UI (named in the Action column); the card just tells you when to use them.
+Steps 2, 3, 4, 10, 12 and 14 have a **Run** button that POSTs to the step's endpoint and then refreshes the card (step 10's advances the international signing window one week per click). Steps 5, 6, 13 and 15 already have their own UI (named in the Action column); the card just tells you when to use them.
 
 **Endpoint (read-only):**
 
@@ -137,7 +137,7 @@ MVP, Cy Young, Silver Slugger and Gold Glove are **admin-entered** (see `docs/aw
 | **Where** | Timestamp section → *End Regular Season* card (`#btn-end-season`), which POSTs `/api/v1/games/end-season` with `{"league_year_id": L}` (optional `"force": true`). |
 | **Done when** | `league_years.season_ended_at IS NOT NULL` for `id = L`. The column is added lazily on the first end-season call (`migrations/add_league_years_season_ended_at.sql` is the same DDL if you prefer to apply it by hand). Until it exists the checklist treats the step as not done. |
 | **Precondition** | Step 1 — end-season refuses to run while the World Series is incomplete unless `force: true` is sent. The timestamp must be in `REGULAR_SEASON`, and `L` must be the year the timestamp is on. |
-| **Irreversible?** | **Yes.** It creates the Y+1 `league_years` row and its `game_weeks` if they do not exist yet (same as step 11), resolves outstanding waivers, runs end-of-season contract processing (service time, expirations, FA eligibility), ages and progresses every player, applies a **16-week offseason injury tick** (injuries heal as if 16 weeks passed), and then **moves the calendar to Y+1**: `timestamp_state.season = Y+1`, `week = 0`, `OFFSEASON` flags, `league_state.current_league_year_id` = the new id. It is one-shot: a second call is refused because `season_ended_at` is already set. |
+| **Irreversible?** | **Yes.** It creates the Y+1 `league_years` row and its `game_weeks` if they do not exist yet (same as step 12), resolves outstanding waivers, runs end-of-season contract processing (service time, expirations, FA eligibility), ages and progresses every player, applies a **16-week offseason injury tick** (injuries heal as if 16 weeks passed), and then **moves the calendar to Y+1**: `timestamp_state.season = Y+1`, `week = 0`, `OFFSEASON` flags, `league_state.current_league_year_id` = the new id. It is one-shot: a second call is refused because `season_ended_at` is already set. |
 
 Do **not** use `force: true` for a normal rollover; it exists for leagues that deliberately skip the postseason.
 
@@ -218,11 +218,22 @@ Pricing (2026-11-21): the market rate is the **median price per WAR** (AAV ÷ bl
 | **Done when** | No completion signal exists. The card shows `is_recruiting_locked`. |
 | **Precondition** | Step 8 ended (`is_draft_time = false`). |
 
-### 10. Retirements and new amateur class — automatic (inside step 5)
+### 10. International signing window (offseason)
+
+| | |
+|---|---|
+| **Where** | The checklist card's **Advance IFA week** button, `POST /api/v1/ifa/advance-week` with `{"league_year_id": <new id>}` and the admin credentials; the admin *Market → IFA* page; scheduler job `ifa_advance_week`. Club-facing rules: `docs/ifa_signing_frontend_guide.md`. |
+| **Done when** | `ifa_state.status = 'complete'` for the new league year. |
+| **Precondition** | Step 5: End Season creates the new year's `ifa_state` (pending) and `ifa_bonus_pools`, ranked by the season just played (worst record, largest pool). |
+| **How it runs** | The first advance opens the window (week 0 → 1): star rankings are computed and the End Season pools are **kept**. Each further advance is one window week; auction stages last 3 weeks each. At week 20 the last finalize-stage auctions are settled and everything else expires; unsigned players stay in the international pool. Run it during the offseason, alongside free agency, the draft and recruiting; nothing forces it to finish before Start New Season. |
+| **Money** | A signing debits the club's IFA bonus pool and charges the bonus to cash at once, like any other signing (offseason signings book against the new league year, with no game week). Year-start books do not charge it again. |
+| **Failures** | Each auction is isolated: a failure is recorded in the response's `phase_transitions.errors` and does not stop the week. A winning offer that cannot be completed is marked `failed` and the next-best offer signs; if none can, the auction reopens. A player who retired or signed elsewhere has his auction expired. |
+
+### 11. Retirements and new amateur class — automatic (inside step 5)
 
 Since 2026-11-08 retirements, graduation and the new HS / INTAM classes happen inside end-season (see step 5), and college walk-ons / undrafted-senior retirements are settled when the draft completes (step 8). Aged-out INTAM players (23) are kept as free agents only at `displayovr` ≥ `undrafted_keep_ovr`, else retired (`intam_aged_out`); any unsigned player who never held a pro contract retires at `never_signed_retire_age` (25). Retirement never deletes anything: the player row, his stats, awards and contract history stay; `player_retirements` is the only marker. Nothing to run here; check `player_retirements` for the year and the `amateur_classes` block of the end-season response if you want to confirm. Tune sizes and thresholds in `league_config`. Nobody retires on age alone (`retire_age_hard` = 0); the growth table runs to 50 and players beyond it only age.
 
-### 11. Initialize next league year
+### 12. Initialize next league year
 
 | | |
 |---|---|
@@ -233,18 +244,18 @@ Since 2026-11-08 retirements, graduation and the new HS / INTAM classes happen i
 
 When this step is done the card shows the new `league_years.id`, and the *Start New Season* card's **New League Year ID** input is pre-filled with it (unless you have already typed in that box).
 
-### 12. Generate schedule for the new year
+### 13. Generate schedule for the new year
 
 | | |
 |---|---|
 | **Where** | Schedule Generator section (`POST /admin/schedule/generate` with `{"league_year": Y+1, "league_level": <level>, "start_week": 1, "clear_existing": false}`), once per level you run (9, 8, 7, 6, 5, 3). |
 | **Done when** | `gamelist` has rows with `season = (SELECT id FROM seasons WHERE year = Y+1)`. The card shows the per-level game counts. |
-| **Precondition** | A `seasons` row for Y+1 must exist (the table is pre-seeded through 2044). Step 11 is not strictly required by the generator but do it first so the week ids line up. |
+| **Precondition** | A `seasons` row for Y+1 must exist (the table is pre-seeded through 2044). Step 12 is not strictly required by the generator but do it first so the week ids line up. |
 | **Irreversible?** | No — `clear_existing: true` or `POST /admin/schedule/clear` removes a level's schedule for the year. Do this only before step 14. |
 
 Generate every level you intend to simulate; the checklist only requires at least one game to exist, so look at the per-level breakdown.
 
-### 13. Preseason training camp
+### 14. Preseason training camp
 
 | | |
 |---|---|
@@ -254,16 +265,16 @@ Generate every level you intend to simulate; the checklist only requires at leas
 | **What it does** | For every focus skill set for the new season by an org that still holds the player (level ≥ 3): rolls the intensity, re-evaluates that skill's end-season die at the shifted potential grade, and adds the difference to the rating (pitch focus: all four components, then the pitch OVR). Focus rows left by an org that no longer holds the player are skipped and listed. Writes `training_camp_results`, a `post_camp` snapshot of the camp players, refreshes `displayovr`, and records the run. |
 | **Irreversible?** | One-shot: the run row locks focus for that season, and a second call returns the stored summary without changing anything. Undoing it means restoring the focus columns from the `post_progression` snapshot by hand. |
 
-### 14. Start New Season
+### 15. Start New Season
 
 | | |
 |---|---|
 | **Where** | Timestamp section → *Start New Season* card (`#btn-start-new-season`), `POST /api/v1/games/start-new-season` with `{"league_year_id": <new id from step 11>}`. |
 | **Done when** | `timestamp_state.season = Y+1` and `league_state.current_league_year_id` = the new id. |
-| **Precondition** | Steps 5, 12 and 13 (13 is not enforced by the endpoint; the checklist shows it); the calendar is already on Y+1 (week 0) and must be in `OFFSEASON` with FA, draft and recruiting all closed (the card is hidden otherwise). The endpoint refuses if `gamelist` has no games for Y+1. |
+| **Precondition** | Steps 5, 13 and 14 (14 is not enforced by the endpoint; the checklist shows it); the calendar is already on Y+1 (week 0) and must be in `OFFSEASON` with FA, draft and recruiting all closed (the card is hidden otherwise). The endpoint refuses if `gamelist` has no games for Y+1. |
 | **Irreversible?** | It runs year-start books (media payouts, signing bonuses — each claims `media_run_at` / `bonuses_run_at` on the new row) and sets week 1, regular season. Going back means hand-editing `timestamp_state` and `league_state`. |
 
-After this, the Offseason Checklist for the **old** year should read all `done` except rows 7-10, and selecting the new year should show a fresh, all-`pending` list.
+After this, the Offseason Checklist for the **old** year should read all `done` except rows 7-9 (confirmed by hand), and selecting the new year should show a fresh, all-`pending` list.
 
 ---
 
@@ -273,11 +284,8 @@ Nothing creates these for year Y+1; check each before the first simulated week:
 
 | Item | What to do |
 |------|------------|
-| **Retirements** | Not built. No player is retired automatically. |
-| **New amateur class** (draft, IFA, college freshmen) | Not built. No players are generated. |
-| `scouting_budgets` for Y+1 | Not created by `initialize-next-league-year`. Insert rows for every org for the new `league_year_id` (see `migrations/fix_scouting_budgets_2000.sql` for the shape). |
-| `ifa_bonus_pools` for Y+1 | Not created. Insert per-org pools for the new year before the IFA signing period (`docs/ifa_signing_frontend_guide.md`). |
-| `recruiting_state` for Y+1 | Not created. Reset/insert the recruiting state rows before `start-recruiting` in the next offseason. |
+| Retirements, the new HS / international classes, college freshmen and walk-ons | Automatic since 2026-11-08: End Season (step 5) and draft completion (step 8). See step 11. |
+| `scouting_budgets`, `ifa_state` + `ifa_bonus_pools`, `recruiting_state` for Y+1 | Created by End Season (the "Year tables" row of step 5). Check them only if End Season reported a `year_tables_error`. |
 | Admin-entered awards (MVP, Cy Young, Silver Slugger, Gold Glove) | Enter through `POST /api/v1/awards` (body per `docs/awards_frontend_guide.md`) for year L if wanted. |
 | Listed positions and default gameplans | Optional: the *Listed Positions* and *Default Gameplans* cards in the Timestamp section if rosters changed a lot. |
 
@@ -292,7 +300,7 @@ Every one-shot step protects itself with a **claim column**: it sets the column 
 | 3 Playoff revenue | `league_years.playoff_revenue_run_at` | `DELETE FROM org_ledger_entries WHERE league_year_id = L AND entry_type IN ('playoff_gate','playoff_media');` then `UPDATE league_years SET playoff_revenue_run_at = NULL WHERE id = L;` |
 | 4 Year-end interest | `league_years.interest_run_at` | `DELETE FROM org_ledger_entries WHERE league_year_id = L AND entry_type IN ('interest_income','interest_expense');` then `UPDATE league_years SET interest_run_at = NULL WHERE id = L;` |
 | 5 End Season | `league_years.season_ended_at` | `UPDATE league_years SET season_ended_at = NULL WHERE id = L;` — **only** if end-season genuinely did not finish. Its sub-steps (waivers, contracts, progression, injury tick) each log their own error into the response and are not individually re-runnable; running end-season twice ages every player twice and expires contracts twice. |
-| 13 Start New Season (year-start books) | `league_years.media_run_at`, `league_years.bonuses_run_at` on the **new** row | Delete the `media` / `bonus`,`buyout` rows with `game_week_id IS NULL` for the new `league_year_id`, then NULL the matching column and call `POST /admin/run-year-start-books` or start-new-season again. |
+| 15 Start New Season (year-start books) | `league_years.media_run_at`, `league_years.bonuses_run_at` on the **new** row | Delete the `media` / `bonus`,`buyout` rows with `game_week_id IS NULL` for the new `league_year_id`, then NULL the matching column and call `POST /admin/run-year-start-books` or start-new-season again. |
 | Weekly books (not a rollover step, same pattern) | `game_weeks.books_run_at` | NULL it for the week and re-run `POST /admin/run-week-books`. |
 
 For steps with no claim column:
@@ -318,9 +326,10 @@ Use the SQL console in the admin panel (write mode on) for the `UPDATE`/`DELETE`
  7. Free Agency                 start-free-agency / advance-fa-round* / end-free-agency   (confirm by hand; each round advances auctions one phase)
  8. Draft                       start-draft / Draft Admin / end-draft                     (confirm by hand)
  9. Recruiting                  start-recruiting / recruiting advance-week* / end-recruiting (confirm by hand)
-10. Retirements + amateur class NOT BUILT
-11. Initialize Y+1              done by step 5; POST /admin/initialize-next-league-year {league_year: Y} only to do it early
-12. Schedule for Y+1            Schedule Generator, one run per level, league_year = Y+1
-13. Preseason training camp     Checklist button -> POST /admin/training-camp/apply {league_year_id: new id}  [X-Admin-Password]  ONE-SHOT; before opening day
-14. Start New Season            Start New Season card -> POST /api/v1/games/start-new-season {league_year_id: new id}
+10. International signing      Checklist button -> POST /api/v1/ifa/advance-week {league_year_id: new id}, once per window week (20)
+11. Retirements + amateur class automatic inside step 5 (and draft completion)
+12. Initialize Y+1              done by step 5; POST /admin/initialize-next-league-year {league_year: Y} only to do it early
+13. Schedule for Y+1            Schedule Generator, one run per level, league_year = Y+1
+14. Preseason training camp     Checklist button -> POST /admin/training-camp/apply {league_year_id: new id}  [X-Admin-Password]  ONE-SHOT; before opening day
+15. Start New Season            Start New Season card -> POST /api/v1/games/start-new-season {league_year_id: new id}
 ```

@@ -67,7 +67,8 @@ PROTECTED: Tuple[Tuple[str, str], ...] = (
     ("POST", "/api/v1/recruiting/admin/"),
     ("POST", "/api/v1/ifa/advance-week"),
     ("POST", "/api/v1/ifa/reset"),
-    ("POST", "/api/v1/ifa/auction/start"),
+    # /ifa/auction/start is a club action (any MLB club opens an auction by
+    # showing interest); it is checked by the club token like FA offers.
     ("POST", "/api/v1/fa-auction/advance-phases"),
     ("POST", "/api/v1/fa-auction/admin/"),
     ("POST", "/api/v1/transactions/end-of-season"),

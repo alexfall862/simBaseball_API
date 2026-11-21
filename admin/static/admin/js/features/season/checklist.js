@@ -19,6 +19,7 @@ const STEP_LINKS = {
   free_agency: { href: '#/market/fa', label: 'Market → FA Auction' },
   draft: { href: '#/market/draft', label: 'Market → Draft' },
   recruiting: { href: '#/market/recruiting', label: 'Market → Recruiting' },
+  ifa_window: { href: '#/market/ifa', label: 'Market → IFA' },
 };
 
 function stepStatus(s) {

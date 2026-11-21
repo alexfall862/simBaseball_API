@@ -688,6 +688,10 @@ def offseason_checklist_step(ctx: JobContext) -> Dict[str, Any]:
         from services.training_camp import apply_camp
         with ctx.engine.begin() as conn:
             return apply_camp(conn, int((a.get("body") or {})["league_year_id"]))
+    if url == "/api/v1/ifa/advance-week":
+        from services.ifa_signing import advance_ifa_week
+        with ctx.engine.begin() as conn:
+            return advance_ifa_week(conn, int((a.get("body") or {})["league_year_id"]))
     target = mapping.get(url)
     if not target:
         raise ValueError(f"step action {url} has no job mapping")

@@ -4,6 +4,13 @@ This document covers every endpoint, response shape, and workflow the frontend n
 
 All endpoints are under `/api/v1`. All IFA endpoints are prefixed `/ifa/`.
 
+> **Updated 2026-11-21.**
+> - **When:** the signing window runs in the **offseason**, alongside free agency, the draft and recruiting (offseason checklist step 10). The window for season Y+1 is created at End Season with bonus pools ranked by season Y's standings; opening it keeps those pools.
+> - **Money:** a signing debits the club's bonus pool **and** charges the bonus to the club's cash at once, like any other signing. Show it in the club's ledger and cash right away.
+> - **New offer status `failed`:** the offer won but the signing could not be completed; the next-best offer signed instead. If no offer could be completed the auction reopens. A player who retired or signed elsewhere has his auction `expired`.
+> - **Club token:** starting an auction (`POST /ifa/auction/start`, send `org_id`), offering and withdrawing are club actions and take the club's `X-Org-Token` header, as free agency offers do (401 when the server enforces it). Starting an auction is no longer admin-only.
+> - Contracts are 5 years at $40,000 a year at level 4, as before.
+
 ---
 
 ## Table of Contents
@@ -412,7 +419,7 @@ GET /api/v1/ifa/auction/{auctionId}?org_id={orgId}
 
 **Visibility rules:**
 - `bonus` is only included on offers where `is_mine` is `true`. Competitor bonus amounts are hidden.
-- `status` for all offers is visible (active, outbid, withdrawn, won, lost).
+- `status` for all offers is visible (active, outbid, withdrawn, won, lost, failed).
 - `winning_offer_id` is populated only when the auction phase is `"completed"`.
 
 ### Suggested Modal Layout
@@ -665,6 +672,7 @@ GET /api/v1/ifa/offers/{orgId}?league_year_id={leagueYearId}
 function getOfferStatusColor(status) {
   if (status === 'active')    return 'green';
   if (status === 'won')       return 'blue';
+  if (status === 'failed')    return 'red';     // won but could not be completed
   if (status === 'outbid')    return 'orange';
   if (status === 'lost')      return 'red';
   if (status === 'withdrawn') return 'gray';

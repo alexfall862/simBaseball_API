@@ -275,6 +275,26 @@ def _compute_inverse_standings(conn, league_year_id: int) -> List[Dict[str, Any]
     return [dict(r) for r in rows]
 
 
+def _standings_year_for_pools(conn, league_year_id: int) -> int:
+    """The league year whose MLB results order the pools: this one when it
+    has regular-season results, otherwise the previous one."""
+    has_results = conn.execute(text("""
+        SELECT 1 FROM game_results gr
+        JOIN seasons s ON s.id = gr.season
+        JOIN league_years ly ON ly.league_year = s.year
+        WHERE ly.id = :ly AND gr.game_type = 'regular' AND gr.league_level = 9
+        LIMIT 1
+    """), {"ly": int(league_year_id)}).first()
+    if has_results:
+        return int(league_year_id)
+    prev = conn.execute(text("""
+        SELECT p.id FROM league_years c
+        JOIN league_years p ON p.league_year = c.league_year - 1
+        WHERE c.id = :ly
+    """), {"ly": int(league_year_id)}).scalar()
+    return int(prev) if prev else int(league_year_id)
+
+
 def allocate_bonus_pools(conn, league_year_id: int,
                          standings_league_year_id: Optional[int] = None
                          ) -> List[Dict[str, Any]]:
@@ -841,7 +861,19 @@ def advance_ifa_week(conn, league_year_id: int) -> Dict[str, Any]:
         # Initialization
         min_age = _cfg_int(config, "min_age", 16)
         ranked = compute_ifa_star_rankings(conn, league_year_id, min_age)
-        pools = allocate_bonus_pools(conn, league_year_id)
+        # End Season already allocates this year's pools from the season just
+        # played; keep them. Only allocate when none exist, from the last
+        # season with results (a window opened in the offseason has none of
+        # its own yet, and would otherwise rank every club 0-0).
+        existing = int(conn.execute(text(
+            "SELECT COUNT(*) FROM ifa_bonus_pools WHERE league_year_id = :ly"
+        ), {"ly": league_year_id}).scalar() or 0)
+        if existing:
+            pools = [None] * existing
+        else:
+            pools = allocate_bonus_pools(
+                conn, league_year_id,
+                standings_league_year_id=_standings_year_for_pools(conn, league_year_id))
 
         conn.execute(text("""
             UPDATE ifa_state
@@ -854,6 +886,7 @@ def advance_ifa_week(conn, league_year_id: int) -> Dict[str, Any]:
             "status": "active",
             "players_ranked": ranked,
             "pools_allocated": len(pools),
+            "pools_kept": bool(existing),
         })
 
     elif current_week < total_weeks:
@@ -1000,6 +1033,10 @@ def _advance_ifa_auction_phases(
         "listening_to_finalize": 0,
         "finalize_to_completed": 0,
         "still_open": 0,
+        "signings_failed": 0,
+        "reopened": 0,
+        "player_unavailable": 0,
+        "errors": [],
     }
 
     active_auctions = conn.execute(text("""
@@ -1010,80 +1047,132 @@ def _advance_ifa_auction_phases(
     for row in active_auctions:
         a = row._mapping
         auction_id = int(a["id"])
-        phase = a["phase"]
-        started = int(a["phase_started_week"])
-
-        # Phase must have lasted at least phase_duration weeks
-        if current_week - started < phase_duration:
-            if phase == "open":
-                summary["still_open"] += 1
-            continue
-
-        if phase == "open":
-            # Need at least 1 active offer to transition
-            offer_count = conn.execute(text("""
-                SELECT COUNT(*) FROM ifa_auction_offers
-                WHERE auction_id = :aid AND status = 'active'
-            """), {"aid": auction_id}).scalar()
-
-            if offer_count == 0:
-                summary["still_open"] += 1
-                continue
-
-            conn.execute(text("""
-                UPDATE ifa_auction
-                SET phase = 'listening', phase_started_week = :week
-                WHERE id = :aid
-            """), {"week": current_week, "aid": auction_id})
-            summary["open_to_listening"] += 1
-            log.info("IFA auction %d: open -> listening (week %d)", auction_id, current_week)
-
-        elif phase == "listening":
-            # Eliminate non-top-3 offers
-            active_offers = conn.execute(text("""
-                SELECT id, bonus FROM ifa_auction_offers
-                WHERE auction_id = :aid AND status = 'active'
-                ORDER BY bonus DESC
-            """), {"aid": auction_id}).all()
-
-            if len(active_offers) > 3:
-                for r in active_offers[3:]:
-                    conn.execute(text("""
-                        UPDATE ifa_auction_offers SET status = 'outbid' WHERE id = :oid
-                    """), {"oid": r._mapping["id"]})
-
-            conn.execute(text("""
-                UPDATE ifa_auction
-                SET phase = 'finalize', phase_started_week = :week
-                WHERE id = :aid
-            """), {"week": current_week, "aid": auction_id})
-            summary["listening_to_finalize"] += 1
-            log.info("IFA auction %d: listening -> finalize (week %d)", auction_id, current_week)
-
-        elif phase == "finalize":
-            # Winner = highest bonus among active offers
-            winner = conn.execute(text("""
-                SELECT * FROM ifa_auction_offers
-                WHERE auction_id = :aid AND status = 'active'
-                ORDER BY bonus DESC, submitted_week ASC, id ASC
-                LIMIT 1
-            """), {"aid": auction_id}).first()
-
-            if not winner:
-                log.warning("IFA auction %d: finalize with no active offers", auction_id)
-                conn.execute(text("""
-                    UPDATE ifa_auction SET phase = 'withdrawn' WHERE id = :aid
-                """), {"aid": auction_id})
-                continue
-
-            _execute_ifa_signing(
-                conn, auction_id, int(winner._mapping["id"]),
-                league_year_id, current_week,
-            )
-            summary["finalize_to_completed"] += 1
-            log.info("IFA auction %d: finalize -> completed (week %d)", auction_id, current_week)
+        # SAVEPOINT per auction: one failure is recorded and rolls back only
+        # this auction, instead of failing the whole week.
+        try:
+            with conn.begin_nested():
+                _advance_one_ifa_auction(conn, a, current_week, league_year_id,
+                                         phase_duration, summary)
+        except Exception as e:  # noqa: BLE001
+            log.exception("IFA auction %d: phase advance failed", auction_id)
+            summary["errors"].append({"auction_id": auction_id, "error": str(e)[:300]})
 
     return summary
+
+
+def _advance_one_ifa_auction(conn, a, current_week: int, league_year_id: int,
+                             phase_duration: int, summary: Dict[str, Any]) -> None:
+    auction_id = int(a["id"])
+    phase = a["phase"]
+    started = int(a["phase_started_week"])
+
+    # Phase must have lasted at least phase_duration weeks
+    if current_week - started < phase_duration:
+        if phase == "open":
+            summary["still_open"] += 1
+        return
+
+    if phase == "open":
+        # Need at least 1 active offer to transition
+        offer_count = conn.execute(text("""
+            SELECT COUNT(*) FROM ifa_auction_offers
+            WHERE auction_id = :aid AND status = 'active'
+        """), {"aid": auction_id}).scalar()
+
+        if offer_count == 0:
+            summary["still_open"] += 1
+            return
+
+        conn.execute(text("""
+            UPDATE ifa_auction
+            SET phase = 'listening', phase_started_week = :week
+            WHERE id = :aid
+        """), {"week": current_week, "aid": auction_id})
+        summary["open_to_listening"] += 1
+        log.info("IFA auction %d: open -> listening (week %d)", auction_id, current_week)
+
+    elif phase == "listening":
+        # Eliminate non-top-3 offers
+        active_offers = conn.execute(text("""
+            SELECT id, bonus FROM ifa_auction_offers
+            WHERE auction_id = :aid AND status = 'active'
+            ORDER BY bonus DESC
+        """), {"aid": auction_id}).all()
+
+        if len(active_offers) > 3:
+            for r in active_offers[3:]:
+                conn.execute(text("""
+                    UPDATE ifa_auction_offers SET status = 'outbid' WHERE id = :oid
+                """), {"oid": r._mapping["id"]})
+
+        conn.execute(text("""
+            UPDATE ifa_auction
+            SET phase = 'finalize', phase_started_week = :week
+            WHERE id = :aid
+        """), {"week": current_week, "aid": auction_id})
+        summary["listening_to_finalize"] += 1
+        log.info("IFA auction %d: listening -> finalize (week %d)", auction_id, current_week)
+
+    elif phase == "finalize":
+        outcome = _sign_best_ifa_offer(conn, auction_id, league_year_id, current_week, summary)
+        if outcome == "none":
+            log.warning("IFA auction %d: finalize with no active offers", auction_id)
+            conn.execute(text("""
+                UPDATE ifa_auction SET phase = 'withdrawn' WHERE id = :aid
+            """), {"aid": auction_id})
+        elif outcome == "signed":
+            summary["finalize_to_completed"] += 1
+            log.info("IFA auction %d: finalize -> completed (week %d)", auction_id, current_week)
+        elif outcome == "all_failed":
+            # No offer could be completed: back to open for every club.
+            conn.execute(text("""
+                UPDATE ifa_auction SET phase = 'open', phase_started_week = :week WHERE id = :aid
+            """), {"week": current_week, "aid": auction_id})
+            summary["reopened"] += 1
+
+
+class IFAPlayerUnavailable(ValueError):
+    """The player can no longer be signed (retired or signed elsewhere)."""
+
+
+def _sign_best_ifa_offer(conn, auction_id: int, league_year_id: int,
+                         current_week: int, summary: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Sign the best active offer (highest bonus, then earliest). An offer whose
+    signing fails is marked ``failed`` and the next one is tried. Returns
+    ``signed``, ``none`` (no active offers), ``all_failed`` or ``unavailable``
+    (the player cannot be signed; the auction is expired).
+    """
+    summary = summary if summary is not None else {}
+    offers = conn.execute(text("""
+        SELECT id, org_id FROM ifa_auction_offers
+        WHERE auction_id = :aid AND status = 'active'
+        ORDER BY bonus DESC, submitted_week ASC, id ASC
+    """), {"aid": auction_id}).all()
+    if not offers:
+        return "none"
+    for o in offers:
+        offer_id = int(o[0])
+        try:
+            with conn.begin_nested():
+                _execute_ifa_signing(conn, auction_id, offer_id, league_year_id, current_week)
+            return "signed"
+        except IFAPlayerUnavailable as e:
+            log.warning("IFA auction %d: %s; expiring", auction_id, e)
+            conn.execute(text("UPDATE ifa_auction SET phase = 'expired' WHERE id = :aid"),
+                         {"aid": auction_id})
+            conn.execute(text("""
+                UPDATE ifa_auction_offers SET status = 'lost'
+                WHERE auction_id = :aid AND status = 'active'
+            """), {"aid": auction_id})
+            summary["player_unavailable"] = summary.get("player_unavailable", 0) + 1
+            return "unavailable"
+        except Exception as e:  # noqa: BLE001
+            log.warning("IFA auction %d: offer %d could not sign: %s", auction_id, offer_id, e)
+            conn.execute(text("UPDATE ifa_auction_offers SET status = 'failed' WHERE id = :oid"),
+                         {"oid": offer_id})
+            summary["signings_failed"] = summary.get("signings_failed", 0) + 1
+    return "all_failed"
 
 
 def _expire_remaining_auctions(conn, league_year_id: int, current_week: int = 0) -> int:
@@ -1099,18 +1188,12 @@ def _expire_remaining_auctions(conn, league_year_id: int, current_week: int = 0)
 
     for row in finalize_auctions:
         aid = int(row._mapping["id"])
-        winner = conn.execute(text("""
-            SELECT * FROM ifa_auction_offers
-            WHERE auction_id = :aid AND status = 'active'
-            ORDER BY bonus DESC, submitted_week ASC, id ASC
-            LIMIT 1
-        """), {"aid": aid}).first()
-        if winner:
-            _execute_ifa_signing(
-                conn, aid, int(winner._mapping["id"]),
-                league_year_id, current_week=current_week,
-            )
-            log.info("IFA window close: force-completed finalize auction %d", aid)
+        try:
+            with conn.begin_nested():
+                if _sign_best_ifa_offer(conn, aid, league_year_id, current_week) == "signed":
+                    log.info("IFA window close: force-completed finalize auction %d", aid)
+        except Exception:  # noqa: BLE001
+            log.exception("IFA window close: auction %d could not be completed", aid)
 
     # Then expire remaining non-completed auctions (open/listening only now)
     result = conn.execute(text("""
@@ -1172,8 +1255,21 @@ def _execute_ifa_signing(
 
     # Year the contract is booked against (upcoming season if offseason).
     # league_year_id itself stays the IFA period's year for the pool debit.
-    from services.league_calendar import resolve_signing_year
-    _, ly_val = resolve_signing_year(conn, league_year_id)
+    from services.league_calendar import resolve_signing_year, is_offseason
+    sign_ly_id, ly_val = resolve_signing_year(conn, league_year_id)
+
+    # 0. The player must still be signable
+    if conn.execute(text("SELECT 1 FROM player_retirements WHERE player_id = :pid"),
+                    {"pid": player_id}).first():
+        raise IFAPlayerUnavailable(f"player {player_id} has retired")
+    if conn.execute(text("""
+        SELECT 1 FROM contracts c
+        JOIN contractDetails cd ON cd.contractID = c.id AND cd.year = c.current_year
+        JOIN contractTeamShare cts ON cts.contractDetailsID = cd.id AND cts.isHolder = 1
+        WHERE c.playerID = :pid AND c.isFinished = 0 AND cts.orgID <> :intam
+        LIMIT 1
+    """), {"pid": player_id, "intam": INTAM_ORG_ID}).first():
+        raise IFAPlayerUnavailable(f"player {player_id} is already under contract with another org")
 
     # 1. Terminate old INTAM contract
     conn.execute(text("""
@@ -1193,6 +1289,7 @@ def _execute_ifa_signing(
             current_year=1,
             isExtension=0,
             isBuyout=0,
+            isActive=1,
             bonus=bonus,
             signingOrg=org_id,
             leagueYearSigned=ly_val,
@@ -1220,12 +1317,28 @@ def _execute_ifa_signing(
             )
         )
 
-    # 3. Debit bonus pool
+    # 3. Debit bonus pool, and charge the bonus to the club's cash now, like
+    #    any other signing (year-start books skip contracts whose bonus is
+    #    already in the ledger, so it is never charged twice).
     conn.execute(text("""
         UPDATE ifa_bonus_pools
         SET spent = spent + :bonus
         WHERE league_year_id = :ly AND org_id = :org
     """), {"bonus": bonus, "ly": league_year_id, "org": org_id})
+    ledger_entry_id = None
+    if bonus > 0:
+        game_week_id = None
+        if not is_offseason(conn):
+            game_week_id = conn.execute(text(
+                "SELECT week_id FROM timestamp_state WHERE id = 1")).scalar()
+        ledger_entry_id = conn.execute(text("""
+            INSERT INTO org_ledger_entries
+                (org_id, league_year_id, game_week_id, entry_type, amount,
+                 contract_id, player_id, note)
+            VALUES (:org, :ly, :gw, 'bonus', :amt, :cid, :pid, :note)
+        """), {"org": org_id, "ly": sign_ly_id, "gw": game_week_id, "amt": -bonus,
+               "cid": contract_id, "pid": player_id,
+               "note": f"IFA signing bonus (auction {auction_id})"}).lastrowid
 
     # 4. Mark auction completed, offers won/lost
     conn.execute(text("""
@@ -1262,6 +1375,7 @@ def _execute_ifa_signing(
             "slot_value": float(a["slot_value"]),
             "contract_years": years,
             "target_level": target_level,
+            "ledger_entry_id": ledger_entry_id,
         },
         executed_by="ifa_signing",
     )

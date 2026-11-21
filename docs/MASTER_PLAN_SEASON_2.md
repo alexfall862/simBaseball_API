@@ -553,3 +553,12 @@ Docs: `docs/contract_extensions_frontend_guide.md` (interface), `INTERFACE_CHANG
 ## 15. Free agency diagnostic (2026-11-21)
 
 See `docs/FREE_AGENCY_DIAGNOSTIC.md`: how FA works today, ten durability findings (three verified by rolled-back probes: jammed auction on a failed signing, silently ignored re-offer, offers accepted while FA is locked), what to fix before FA opens on the live league, and options to extend it. **Built 2026-11-21** per the user's decisions (status table at the top of the diagnostic): jammed-auction fall-through, re-offer fix, commitment reservation, guarded median market rate, every-season auctions, notifications, club tokens, outcome data and report, falling asks. Offers stay open year-round; rounds stay manual; the other extension ideas are declined for now.
+
+## 16. International signing fixes (2026-11-21, user decisions)
+
+- **Bonus charged at signing**, like any other contract: the signing writes a `bonus` ledger entry (the contract's year; no game week in the offseason). Before, it only debited the IFA pool, so a signing during the season was never charged to cash. Year-start books skip it.
+- **One failure no longer stops the week:** each auction is advanced in its own savepoint with errors recorded; a winning offer that cannot be signed is marked `failed` and the next-best offer signs (if none can, the auction reopens); a retired or already-signed player's auction is expired.
+- **Offseason window:** offseason checklist step 10 (*Advance IFA week*), runbook step 10; later steps renumbered 11-15.
+- **Found and fixed while doing it:** (a) every IFA signing failed: the contract insert omitted `isActive` (NOT NULL, no default), so the first signing would have aborted the whole week; (b) opening the window re-allocated the pools from the new year's empty standings (club 1 went from 26th to 1st); it now keeps End Season's pools, and allocates from the last season with results only when none exist.
+- **Clubs could not start auctions:** `POST /ifa/auction/start` sat on the admin route guard, so with an admin password set (the live league) no club could open an IFA auction. Removed from the guard; start, offer and withdraw now take the club token (`ORG_TOKEN_MODE`, warn by default).
+- Migration: `ifa_auction_offers.status` gains `failed` (in `season2_fa_durability.sql`). Tests: `tests/test_ifa_durability.py`.

@@ -75,6 +75,7 @@ export const AREAS = [
     id: 'data', title: 'Data', icon: '▦',
     tabs: [
       { id: 'orgs', title: 'Organizations', load: () => import('./data/orgs.js') },
+      { id: 'assignments', title: 'Org Assignments', load: () => import('./data/assignments.js') },
       { id: 'teams', title: 'Teams', load: () => import('./data/teams.js') },
       { id: 'players', title: 'Players', load: () => import('./data/players.js') },
       { id: 'game', title: 'Game Viewer', load: () => import('./data/game-viewer.js') },

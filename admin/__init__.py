@@ -4580,7 +4580,36 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         return None, (f"No completion signal exists for recruiting. Confirm manually that "
                       f"recruiting was run for {Y}. {_flags_str()}"), None
 
-    # ---- 10. Retirements / amateur class ----
+    # ---- 10. International signing window (offseason) ----
+    def s_ifa():
+        if not next_ly_id:
+            return False, (f"league_years row for {next_year} does not exist yet; End Season creates it "
+                           "together with the international signing window and bonus pools."), None
+        row = conn.execute(sa_text(
+            "SELECT status, current_week, total_weeks FROM ifa_state WHERE league_year_id = :id"
+        ), {"id": next_ly_id}).mappings().first()
+        pools = int(conn.execute(sa_text(
+            "SELECT COUNT(*) FROM ifa_bonus_pools WHERE league_year_id = :id"
+        ), {"id": next_ly_id}).scalar() or 0)
+        extra = {"ifa_status": row["status"] if row else None,
+                 "ifa_week": int(row["current_week"]) if row else None,
+                 "ifa_total_weeks": int(row["total_weeks"]) if row else None,
+                 "ifa_pools": pools}
+        if not row:
+            return False, (f"No international signing window for {next_year} yet: End Season (step 5) "
+                           "creates it with the bonus pools."), extra
+        week, total = int(row["current_week"]), int(row["total_weeks"])
+        if row["status"] == "complete":
+            return True, (f"International signing window for {next_year} complete (week {week} of {total}). "
+                          "Unsigned players stay in the international pool for next year."), extra
+        if row["status"] == "pending":
+            return False, (f"Window for {next_year} not started ({pools} bonus pools ready, ranked by {Y} "
+                           f"standings). Advance once to open it; then advance it week by week to {total}. "
+                           "Auction stages last 3 weeks each; bonuses are charged when a player signs."), extra
+        return False, (f"Window for {next_year} open: week {week} of {total}. Advance it week by week; "
+                       f"at week {total} the last auctions are settled and the window closes."), extra
+
+    # ---- 11. Retirements / amateur class ----
     def s_retirements():
         # Automatic since 2026-11-08: graduation, retirements and the new HS/INTAM
         # classes run inside end-season; walk-ons are placed when the draft completes.
@@ -4602,7 +4631,7 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         return False, ("Runs automatically as part of End Season (step 5); nothing to do here. "
                        "Sizes/thresholds: league_config."), {"retired": retired}
 
-    # ---- 11. Next league year ----
+    # ---- 12. Next league year ----
     def s_next_year():
         if not next_ly:
             return False, (f"league_years row for {next_year} does not exist. End Season (step 5) "
@@ -4619,7 +4648,7 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
                        "row exists; insert the missing weeks by hand.")
         return done, detail, {"next_league_year_id": next_ly_id, "game_weeks": gw, "weeks_in_season": need}
 
-    # ---- 12. Schedule ----
+    # ---- 13. Schedule ----
     def s_schedule():
         season_id = conn.execute(sa_text(
             "SELECT id FROM seasons WHERE year = :y"), {"y": next_year}).scalar()
@@ -4640,11 +4669,11 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         return True, (f"{total:,} games scheduled for {next_year} (season id {season_id}). "
                       f"Per level - {lv}."), {"season_id": int(season_id), "games": total, "by_level": by_level}
 
-    # ---- 13. Preseason training camp ----
+    # ---- 14. Preseason training camp ----
     def s_camp():
         if not next_ly_id:
             return False, (f"league_years row for {next_year} does not exist yet; camp for {next_year} "
-                           "runs after it is created (step 11)."), None
+                           "runs after it is created (step 12)."), None
         from services.training_camp import camp_run
         run = camp_run(conn, next_ly_id)
         if run:
@@ -4663,7 +4692,7 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
                        "progression dice at the camp grade for each focus skill and locks focus for "
                        f"{next_year}."), {"pending_focus": pending}
 
-    # ---- 14. Start new season ----
+    # ---- 15. Start new season ----
     def s_start_new():
         if not ts_flags:
             return None, "Timestamp unavailable.", None
@@ -4682,7 +4711,7 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         if ts_ok and not ls_ok:
             return False, (f"Timestamp is on {next_year} but league_state.current_league_year_id={ls_id} "
                            f"(expected {next_ly_id})."), extra
-        target = next_ly_id if next_ly_id else "<create it in step 11>"
+        target = next_ly_id if next_ly_id else "<create it in step 12>"
         return False, (f"Timestamp is still on {ts_flags.get('Season')} (phase {phase}); "
                        f"league_state.current_league_year_id={ls_id}. Use the Start New Season card "
                        f"with league_year_id={target}."), extra
@@ -4706,19 +4735,23 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         _oc_step("free_agency", 7, "Free Agency", s_free_agency, manual=True),
         _oc_step("draft", 8, "Draft", s_draft, manual=True),
         _oc_step("recruiting", 9, "Recruiting", s_recruiting, manual=True),
-        _oc_step("retirements", 10, "Retirements and new amateur class", s_retirements),
-        _oc_step("next_league_year", 11, f"Initialize league year {next_year}", s_next_year,
+        _oc_step("ifa_window", 10, f"International signing window for {next_year}", s_ifa,
+                 action=None if not next_ly_id else {
+                     "method": "POST", "url": "/api/v1/ifa/advance-week",
+                     "body": {"league_year_id": next_ly_id}, "label": "Advance IFA week", **pw}),
+        _oc_step("retirements", 11, "Retirements and new amateur class", s_retirements),
+        _oc_step("next_league_year", 12, f"Initialize league year {next_year}", s_next_year,
                  action=None if next_ly else {
                      "method": "POST", "url": "/admin/initialize-next-league-year",
                      "body": {"league_year": Y}, "label": f"Create {next_year}",
                      "confirm": True, **pw}),
-        _oc_step("schedule", 12, f"Generate {next_year} schedule", s_schedule),
-        _oc_step("training_camp", 13, f"Training camp for {next_year}", s_camp,
+        _oc_step("schedule", 13, f"Generate {next_year} schedule", s_schedule),
+        _oc_step("training_camp", 14, f"Training camp for {next_year}", s_camp,
                  action=None if not next_ly_id else {
                      "method": "POST", "url": "/admin/training-camp/apply",
                      "body": {"league_year_id": next_ly_id}, "label": "Apply training camp",
                      "confirm": True, **pw}),
-        _oc_step("start_new_season", 14, "Start New Season", s_start_new),
+        _oc_step("start_new_season", 15, "Start New Season", s_start_new),
     ]
 
     # Enforce order in the card: hide/annotate Run buttons whose prerequisites
@@ -4728,9 +4761,9 @@ def _build_offseason_checklist(conn, league_year_id: int) -> dict:
         for k in ("postseason_awards", "playoff_revenue"):
             if by_key[k]["action"]:
                 by_key[k]["action"] = dict(by_key[k]["action"], blocked="World Series is not complete")
-    if by_key["end_season"]["done"] is not True and by_key["training_camp"]["action"]:
-        by_key["training_camp"]["action"] = dict(by_key["training_camp"]["action"],
-                                                 blocked="End Season has not run")
+    for k in ("training_camp", "ifa_window"):
+        if by_key["end_season"]["done"] is not True and by_key[k]["action"]:
+            by_key[k]["action"] = dict(by_key[k]["action"], blocked="End Season has not run")
     for s in steps:
         if s["done"] is True and s["action"]:
             s["action"] = None
@@ -4807,3 +4840,4 @@ def admin_offseason_checklist():
 from admin import routes_summary  # noqa: E402,F401
 from admin import routes_jobs  # noqa: E402,F401
 from admin import routes_timeline  # noqa: E402,F401
+from admin import routes_assignments  # noqa: E402,F401

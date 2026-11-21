@@ -68,6 +68,15 @@ The league year now begins the moment `POST /games/end-season` runs: `timestamp`
 | Board and pool include auctions opened in earlier seasons. | Do not filter the board by `league_year_id` client-side. |
 | `GET /fa-auction/market-rate` also returns `raw_rate`, `previous_rate`, `signings_in_sample`, `method`, `max_change`, `limited_by_max_change`. | Optional: show on the market dashboard. |
 
+## 4f. International signing (`ifa_signing_frontend_guide.md`, updated 2026-11-21)
+
+| API | Interface change |
+|---|---|
+| The signing window runs in the offseason (checklist step 10); pools are those End Season created from the last season's standings. | Show the IFA page as an offseason activity next to free agency, the draft and recruiting; show "Week X of 20". |
+| A signing charges the bonus to cash immediately (ledger entry type `bonus`), besides debiting the bonus pool. | Refresh cash / ledger after a signing. |
+| New offer status `failed`; an auction whose player retired or signed elsewhere is `expired`. | Status chip for `failed`. |
+| `POST /ifa/auction/start` is a club action again (it was blocked by the admin guard); start, offer and withdraw take `X-Org-Token`. | Send `org_id` and the club token when a club opens an auction. |
+
 ## 5. Scouting
 
 | API | Interface change |

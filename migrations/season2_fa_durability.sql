@@ -1,4 +1,4 @@
--- Season 2: free agency durability (docs/FREE_AGENCY_DIAGNOSTIC.md).
+-- Season 2: free agency and international signing durability (docs/FREE_AGENCY_DIAGNOSTIC.md).
 -- Apply after season2_progression_camp.sql. Idempotent: guarded ADD COLUMNs,
 -- MODIFY COLUMN to the same enum, CREATE IF NOT EXISTS, INSERT IGNORE. Works
 -- with the mysql client and with scripts/season2_camp_migration.py.
@@ -6,6 +6,10 @@
 -- ── Offers: a winning offer whose signing fails is marked 'failed' and the
 --    next-best offer is tried; score and failure reason are kept. ──
 ALTER TABLE fa_auction_offers
+  MODIFY COLUMN status ENUM('active','outbid','withdrawn','won','lost','failed') NOT NULL DEFAULT 'active';
+
+-- International signing offers get the same 'failed' status (winner could not be signed).
+ALTER TABLE ifa_auction_offers
   MODIFY COLUMN status ENUM('active','outbid','withdrawn','won','lost','failed') NOT NULL DEFAULT 'active';
 
 SET @sql := IF(

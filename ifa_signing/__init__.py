@@ -152,11 +152,18 @@ def ifa_eligible():
 
 @ifa_signing_bp.route("/ifa/auction/start", methods=["POST"])
 def ifa_start_auction():
-    """POST /ifa/auction/start {player_id, league_year_id}"""
+    """POST /ifa/auction/start {player_id, league_year_id, org_id}
+
+    A club action: the club showing interest opens the auction. Checked by
+    the club token (X-Org-Token, ORG_TOKEN_MODE) like free agency offers."""
     data = request.get_json(force=True)
     for field in ("player_id", "league_year_id"):
         if field not in data:
             return jsonify({"error": f"Missing field: {field}"}), 400
+    from services.org_auth import check_org_request
+    denied = check_org_request(data.get("org_id"))
+    if denied:
+        return denied
 
     engine = get_engine()
     from services.ifa_signing import start_ifa_auction, get_ifa_state
@@ -185,6 +192,10 @@ def ifa_submit_offer(auction_id):
     for field in ("org_id", "bonus", "league_year_id"):
         if field not in data:
             return jsonify({"error": f"Missing field: {field}"}), 400
+    from services.org_auth import check_org_request
+    denied = check_org_request(data.get("org_id"))
+    if denied:
+        return denied
 
     engine = get_engine()
     from services.ifa_signing import submit_ifa_offer, get_ifa_state
@@ -211,6 +222,10 @@ def ifa_submit_offer(auction_id):
 @ifa_signing_bp.route("/ifa/auction/<int:auction_id>/offer/<int:org_id>", methods=["DELETE"])
 def ifa_withdraw_offer(auction_id, org_id):
     """DELETE /ifa/auction/<id>/offer/<org_id>"""
+    from services.org_auth import check_org_request
+    denied = check_org_request(org_id)
+    if denied:
+        return denied
     engine = get_engine()
     from services.ifa_signing import withdraw_ifa_offer
 
