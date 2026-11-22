@@ -63,4 +63,7 @@ INSERT IGNORE INTO fa_config (config_key, config_value, description) VALUES
   ('fa_reserve_offer_commitments','1',    'Offers reserve their commitment against the club''s cash while active (1 on, 0 off)'),
   ('fa_commitment_includes_salary','1',   'The reserved commitment includes the first season''s salary, not only the bonus (1 on, 0 off)'),
   ('market_rate_method',          'median', 'Market rate: median of per-signing AAV/WAR (median) or ratio of sums (ratio)'),
-  ('market_rate_max_change',      '0.15', 'Market rate may move at most this share from the previous season''s rate');
+  ('market_rate_max_change',      '0.15', 'Market rate may move at most this share from the previous season''s rate'),
+  ('bonus_value_premium',         '0.15', 'Players value a signing-bonus dollar at 1 + this toward an ask (free agency and extensions)'),
+  ('veteran_min_salary',          '1000000', 'Per-season salary floor on new MLB contracts for veterans; the bonus does not count'),
+  ('veteran_service_years',       '6',    'MLB service years that make a player a veteran for the minimum salary');

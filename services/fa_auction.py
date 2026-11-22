@@ -29,7 +29,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import MetaData, Table, and_, func, select, text as sa_text, update
+from sqlalchemy import MetaData, Table, and_, bindparam, func, select, text as sa_text, update
 
 log = logging.getLogger(__name__)
 
@@ -44,23 +44,26 @@ _AGE_OFFER_WEIGHTS = [
     (999, 0.85, 0.15),   # late career — almost pure AAV chasing
 ]
 
-# Bonus premium: immediate cash is worth slightly more than future salary.
-# A $1M bonus counts as $1.05M in the attractiveness calculation.
-_BONUS_PREMIUM = 0.05
+# Bonus premium: immediate cash is worth more than future salary. The
+# player's valuation is the same everywhere (asks, extensions, choosing
+# between offers): fa_config bonus_value_premium, default 15%.
+_BONUS_PREMIUM = 0.15
 
 
 def _offer_attractiveness(
     age: int,
     offers: list[dict],
+    premium: Optional[float] = None,
 ) -> list[dict]:
     """
-    Score each offer using an age-weighted blend of normalised AAV and
-    normalised effective total value.  Returns the input dicts with an
-    added ``_score`` key, sorted best-first.
+    Score each offer using an age-weighted blend of normalised value per
+    year and normalised total value, with the bonus counted at
+    (1 + premium). Returns the input dicts with an added ``_score`` key,
+    sorted best-first.
 
     Each offer dict must contain ``aav``, ``total_value``, ``bonus``,
-    and ``id``.  Bonus receives a 5% premium — immediate cash is worth
-    more to the player than future salary payments.
+    and ``id``; ``years`` (when present) turns the bonus-weighted total
+    into the per-year value.
     """
     if len(offers) <= 1:
         for o in offers:
@@ -74,23 +77,33 @@ def _offer_attractiveness(
             aav_w, tv_w = aw, tw
             break
 
-    # Effective total value: bonus counts at a premium
-    def _effective_tv(o):
-        bonus = float(o.get("bonus", 0))
-        return float(o["total_value"]) + bonus * _BONUS_PREMIUM
+    p = _BONUS_PREMIUM if premium is None else float(premium)
 
-    aavs = [float(o["aav"]) for o in offers]
+    # Effective values: bonus counts at a premium
+    def _effective_tv(o):
+        bonus = float(o.get("bonus", 0) or 0)
+        return float(o["total_value"]) + bonus * p
+
+    def _effective_aav(o, etv):
+        yrs = int(o.get("years") or 0)
+        if yrs > 0:
+            return etv / yrs
+        bonus = float(o.get("bonus", 0) or 0)
+        tv = float(o["total_value"]) or 1.0
+        return float(o["aav"]) * (etv / tv) if bonus else float(o["aav"])
+
     etvs = [_effective_tv(o) for o in offers]
+    eaavs = [_effective_aav(o, etv) for o, etv in zip(offers, etvs)]
 
     # Ratio-to-best normalisation: an offer scores by how close it is to the
-    # best AAV and the best effective total on the table. (Min-max scaling
+    # best value per year and the best total on the table. (Min-max scaling
     # gave the worst offer 0 on both axes, so two near-identical offers could
     # be scored 1.0 and 0.0.) Ties break on the earliest offer id.
-    aav_max = max(aavs) or 1.0
+    aav_max = max(eaavs) or 1.0
     etv_max = max(etvs) or 1.0
 
-    for o, etv in zip(offers, etvs):
-        norm_aav = float(o["aav"]) / aav_max
+    for o, etv, eaav in zip(offers, etvs, eaavs):
+        norm_aav = eaav / aav_max
         norm_etv = etv / etv_max
         o["_score"] = aav_w * norm_aav + tv_w * norm_etv
 
@@ -125,6 +138,11 @@ def _player_name(conn, player_id: int) -> str:
 
 def _money(v) -> str:
     return f"${float(v):,.0f}"
+
+
+def _bonus_premium(conn) -> float:
+    from services.player_demands import offer_value_settings
+    return float(offer_value_settings(conn)["bonus_value_premium"])
 
 
 def _fa_settings(conn) -> Dict[str, Any]:
@@ -381,15 +399,30 @@ def submit_offer(
     total_value = sum(salaries) + bonus
     aav = total_value / years if years else total_value
 
-    # Check the player's demand: total, per-year AAV and contract length.
-    if total_value < a["min_total_value"]:
+    # The player values a bonus dollar at (1 + bonus_value_premium), the same
+    # as for an extension; the ask is checked against that value. Stored
+    # total_value / aav stay the cash amounts.
+    from services.player_demands import (
+        check_veteran_minimum, effective_offer_value, offer_value_settings,
+    )
+    value_rules = offer_value_settings(conn)
+    premium = value_rules["bonus_value_premium"]
+    value = effective_offer_value(sum(salaries), bonus, premium)
+    value_aav = value / years if years else value
+    bonus_x = f"bonus counted at {1 + premium}x"
+
+    # Check the player's demand: total, per-year value and contract length.
+    if value < a["min_total_value"]:
         raise ValueError(
-            f"Total value ({total_value}) below player minimum ({a['min_total_value']})"
+            f"Offer value ({value:,.2f}, {bonus_x}) below player minimum "
+            f"({Decimal(str(a['min_total_value'])):,.2f})"
         )
-    if a["min_aav"] is not None and aav < Decimal(str(a["min_aav"])):
+    if a["min_aav"] is not None and value_aav < Decimal(str(a["min_aav"])):
         raise ValueError(
-            f"AAV ({aav:.2f}) below player minimum AAV ({a['min_aav']})"
+            f"Value per year ({value_aav:,.2f}, {bonus_x}) below player minimum AAV "
+            f"({Decimal(str(a['min_aav'])):,.2f})"
         )
+    check_veteran_minimum(conn, int(a["player_id"]), int(level_id), salaries, value_rules)
     if a["min_years"] is not None and years < int(a["min_years"]):
         raise ValueError(
             f"Contract length ({years}) below player minimum ({a['min_years']} years)"
@@ -433,13 +466,21 @@ def submit_offer(
 
     is_update = existing_offer is not None
 
+    def _old_value_aav():
+        eo = existing_offer._mapping
+        old_years = int(eo["years"]) or 1
+        old_bonus = Decimal(str(eo["bonus"] or 0))
+        old_salaries = Decimal(str(eo["total_value"])) - old_bonus
+        return effective_offer_value(old_salaries, old_bonus, premium) / old_years
+
     if phase == "listening":
         if not is_update:
             raise ValueError("Listening phase: only existing bidders can update offers")
-        old_aav = existing_offer._mapping["aav"]
-        if aav < old_aav:
+        old_value_aav = _old_value_aav()
+        if value_aav < old_value_aav:
             raise ValueError(
-                f"Listening phase: new AAV ({aav}) must be >= old AAV ({old_aav})"
+                f"Listening phase: new value per year ({value_aav:,.2f}) must be >= "
+                f"the current offer's ({old_value_aav:,.2f}), {bonus_x}"
             )
 
     if phase == "finalize":
@@ -447,10 +488,11 @@ def submit_offer(
             raise ValueError("Finalize phase: only existing bidders can update offers")
         if existing_offer._mapping["status"] != "active":
             raise ValueError("Your offer was eliminated — cannot update")
-        old_aav = existing_offer._mapping["aav"]
-        if aav < old_aav:
+        old_value_aav = _old_value_aav()
+        if value_aav < old_value_aav:
             raise ValueError(
-                f"Finalize phase: new AAV ({aav}) must be >= old AAV ({old_aav})"
+                f"Finalize phase: new value per year ({value_aav:,.2f}) must be >= "
+                f"the current offer's ({old_value_aav:,.2f}), {bonus_x}"
             )
 
     if is_update:
@@ -672,7 +714,7 @@ def _advance_one_auction(conn, a, auc, offers, current_week, league_year_id,
     elif phase == "listening":
         # Eliminate non-top-3 offers using age-weighted scoring
         active_offers = conn.execute(
-            select(offers.c.id, offers.c.total_value, offers.c.aav, offers.c.bonus)
+            select(offers.c.id, offers.c.total_value, offers.c.aav, offers.c.bonus, offers.c.years)
             .where(and_(
                 offers.c.auction_id == auction_id,
                 offers.c.status == "active",
@@ -683,10 +725,12 @@ def _advance_one_auction(conn, a, auc, offers, current_week, league_year_id,
             {"id": int(r._mapping["id"]),
              "aav": r._mapping["aav"],
              "total_value": r._mapping["total_value"],
-             "bonus": r._mapping["bonus"]}
+             "bonus": r._mapping["bonus"],
+             "years": r._mapping["years"]}
             for r in active_offers
         ]
-        scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
+        scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts,
+                                       premium=_bonus_premium(conn))
         if "score" in offers.c:
             for o in scored:
                 conn.execute(update(offers).where(offers.c.id == o["id"])
@@ -733,10 +777,12 @@ def _advance_one_auction(conn, a, auc, offers, current_week, league_year_id,
              "org_id": int(r._mapping["org_id"]),
              "aav": r._mapping["aav"],
              "total_value": r._mapping["total_value"],
-             "bonus": r._mapping["bonus"]}
+             "bonus": r._mapping["bonus"],
+             "years": r._mapping["years"]}
             for r in final_offers
         ]
-        scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts)
+        scored = _offer_attractiveness(int(a["age_at_entry"]), offer_dicts,
+                                       premium=_bonus_premium(conn))
         name = _player_name(conn, int(a["player_id"]))
 
         # Best offer first; if its signing fails (e.g. the club can no longer
@@ -1265,6 +1311,15 @@ def get_auction_board(
         org_abbrev_map = {int(r._mapping["id"]): r._mapping["org_abbrev"]
                          for r in org_rows}
 
+    from services.player_demands import effective_offer_value, offer_value_settings
+    value_rules = offer_value_settings(conn)
+    board_pids = [int(r._mapping["player_id"]) for r in auctions]
+    board_svc = {}
+    if board_pids:
+        board_svc = {int(r[0]): int(r[1] or 0) for r in conn.execute(sa_text(
+            "SELECT player_id, mlb_service_years FROM player_service_time WHERE player_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)), {"ids": board_pids}).all()}
+
     result = []
     for row in auctions:
         a = row._mapping
@@ -1298,6 +1353,9 @@ def get_auction_board(
                         "salaries": salaries,
                         "level_id": int(o["level_id"]),
                         "status": o["status"],
+                        "offer_value": float(effective_offer_value(
+                            Decimal(str(o["total_value"])) - Decimal(str(o["bonus"] or 0)),
+                            o["bonus"] or 0, value_rules["bonus_value_premium"])),
                     }
                     break
 
@@ -1321,6 +1379,11 @@ def get_auction_board(
             "initial_min_aav": float(a["initial_min_aav"]) if a.get("initial_min_aav") is not None else float(a["min_aav"]),
             "ask_decay_steps": int(a.get("ask_decay_steps") or 0),
             "rounds_without_offer": int(a.get("rounds_without_offer") or 0),
+            # how the player values an offer (MLB-level contracts)
+            "bonus_value_premium": float(value_rules["bonus_value_premium"]),
+            "veteran_min_salary": (float(value_rules["veteran_min_salary"])
+                                   if board_svc.get(int(a["player_id"]), 0) >= value_rules["veteran_service_years"]
+                                   else None),
         }
         result.append(entry)
 
@@ -1729,6 +1792,8 @@ def get_free_agent_pool(
 
     # Assemble response
     result_players = []
+    from services.player_demands import offer_value_settings
+    pool_rules = offer_value_settings(conn)
     for p in filtered_list:
         pid = p["id"]
         svc = service_time_map.get(pid, 0)
@@ -1777,6 +1842,10 @@ def get_free_agent_pool(
             except Exception as e:
                 log.warning("Demand backfill failed for player %d: %s", pid, e)
 
+        if demand_info is not None:
+            demand_info["bonus_value_premium"] = float(pool_rules["bonus_value_premium"])
+            demand_info["veteran_min_salary"] = (float(pool_rules["veteran_min_salary"])
+                                                 if svc >= pool_rules["veteran_service_years"] else None)
         p["auction"] = auction_info
         p["demand"] = demand_info
         p["scouting"] = scouting_map.get(pid, {
@@ -1910,11 +1979,13 @@ def get_free_agent_detail(
         if not demand:
             demand = compute_fa_demand(conn, player_id, league_year_id)
         if demand:
+            from services.player_demands import offer_rules_for
             demand_info = {
                 "min_aav": demand.get("min_aav"),
                 "min_years": demand.get("min_years"),
                 "max_years": demand.get("max_years"),
                 "war": demand.get("war"),
+                **offer_rules_for(conn, player_id, 9),
             }
     except Exception as e:
         log.warning("Demand computation failed for player %d: %s", player_id, e)

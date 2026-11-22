@@ -77,6 +77,14 @@ The league year now begins the moment `POST /games/end-season` runs: `timestamp`
 | New offer status `failed`; an auction whose player retired or signed elsewhere is `expired`. | Status chip for `failed`. |
 | `POST /ifa/auction/start` is a club action again (it was blocked by the admin guard); start, offer and withdraw take `X-Org-Token`. | Send `org_id` and the club token when a club opens an auction. |
 
+## 4g. Offer value and veteran minimum (`free_agency_frontend_guide.md` → "Offer value and veteran minimum (2026-11-22)")
+
+| API | Interface change |
+|---|---|
+| Free-agent offers and extensions: value = salaries + bonus × 1.15 (`bonus_value_premium`); the ask, the choice between offers and the no-lowering rule in later phases use the value. `total_value` / `aav` stay cash. | Offer and extension forms: show cash total, value to the player and value per year; judge "meets the ask" on value per year. Show `my_offer.offer_value` on the board. |
+| Veteran minimum: 6+ service years, MLB-level contract: every season's salary ≥ `veteran_min_salary` ($1M), bonus excluded. Board, pool, player detail, demand endpoints and the contract overview's extension demand carry `bonus_value_premium` and `veteran_min_salary` (`null` = no floor). | Default salary inputs to the floor and block lower values (fixes the "salaries start at $0" finding). |
+| An extension bonus must fit in cash minus what the club's active FA offers reserve. | Show the 400 message; offer to withdraw an FA offer. |
+
 ## 5. Scouting
 
 | API | Interface change |

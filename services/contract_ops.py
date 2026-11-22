@@ -289,6 +289,8 @@ def get_org_contract_overview(
                     elif r["demand_type"] == "buyout":
                         cached_buyout[r["player_id"]] = data
 
+            from services.player_demands import offer_value_settings
+            value_rules = offer_value_settings(conn)
             for entry in results:
                 pid = entry["player_id"]
                 phase = entry["contract_phase"]
@@ -302,6 +304,9 @@ def get_org_contract_overview(
                         demand["min_aav"] = ext.get("min_aav")
                         demand["min_years"] = ext.get("min_years")
                         demand["war"] = ext.get("war")
+                        # extension-eligible players are MLB veterans
+                        demand["bonus_value_premium"] = float(value_rules["bonus_value_premium"])
+                        demand["veteran_min_salary"] = float(value_rules["veteran_min_salary"])
 
                 # Buyout demand (cached only)
                 buyout = cached_buyout.get(pid)

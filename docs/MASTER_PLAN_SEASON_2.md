@@ -562,3 +562,14 @@ See `docs/FREE_AGENCY_DIAGNOSTIC.md`: how FA works today, ten durability finding
 - **Found and fixed while doing it:** (a) every IFA signing failed: the contract insert omitted `isActive` (NOT NULL, no default), so the first signing would have aborted the whole week; (b) opening the window re-allocated the pools from the new year's empty standings (club 1 went from 26th to 1st); it now keeps End Season's pools, and allocates from the last season with results only when none exist.
 - **Clubs could not start auctions:** `POST /ifa/auction/start` sat on the admin route guard, so with an admin password set (the live league) no club could open an IFA auction. Removed from the guard; start, offer and withdraw now take the club token (`ORG_TOKEN_MODE`, warn by default).
 - Migration: `ifa_auction_offers.status` gains `failed` (in `season2_fa_durability.sql`). Tests: `tests/test_ifa_durability.py`.
+
+## 17. Offer value: bonus premium and veteran minimum (decided and built 2026-11-22)
+
+User decisions: the player's valuation of a bonus is the same for free-agent offers and extensions, 15 % extra; a veteran minimum salary for MLB, tied to service time.
+
+- **Value** = salaries + bonus x 1.15 (`fa_config.bonus_value_premium`). Used for the ask check (FA `min_total_value` / `min_aav`, extension `min_aav`), for choosing between FA offers (both the per-year and the total measure of `_offer_attractiveness`; was a 5 % premium on the total only), and for the listening / finalize "no lowering" rule (value per year, was cash AAV). Stored `total_value` / `aav` stay cash.
+- **Veteran minimum**: 6+ MLB service years (`veteran_service_years`), level-9 contract: each season's salary >= $1,000,000 (`veteran_min_salary`), bonus excluded. Enforced in `submit_offer`, `sign_free_agent` (direct signings and the auction winner) and `extend_contract`. Not applied to minor-league deals, non-veterans (released pre-arb / arb players still ask $800k), renewals, arbitration or existing contracts. Helpers in `services/player_demands.py`.
+- **Cash counterweight**: an extension bonus (paid at signing) must also fit in cash minus the club's active FA offer reservations.
+- **Exposed**: `bonus_value_premium`, `veteran_min_salary` on board entries (+ `my_offer.offer_value`), pool / player-detail / demand endpoints and the contract overview's extension demand. Settings seeded by `migrations/season2_fa_durability.sql`.
+- **Not changed (decision pending)**: `fa_market_history` still records the cash total / AAV. Heavy bonus use therefore lowers recorded $/WAR slightly over time; recording the bonus-weighted value instead would keep the rate neutral.
+- Tests: `tests/test_offer_value.py`; `tests/test_contract_extensions.py` updated for the floor.

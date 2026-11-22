@@ -6,6 +6,48 @@ All endpoints are under `/api/v1`. All monetary values from the API are strings 
 
 ---
 
+## Offer value and veteran minimum (2026-11-22)
+
+The same rules apply to free-agent offers and contract extensions.
+
+**Bonus counts 15 % extra.** The player values a signing-bonus dollar more than a salary dollar because it is paid now:
+
+```
+value          = sum(salaries) + bonus × (1 + bonus_value_premium)      bonus_value_premium = 0.15
+value per year = value / years
+```
+
+- The ask is checked against the value: `value ≥ min_total_value` and `value / years ≥ min_aav`.
+- Choosing between offers (the final three, the winner) also uses the value, in both the per-year and the total measures (the age weighting is unchanged). Before this change a bonus counted 5 % extra when choosing and nothing toward the ask.
+- In the listening and finalize phases an update must not lower the **value per year** (it was the cash AAV). A club can restructure salary into bonus as long as the value per year does not drop.
+- Stored and returned `total_value` and `aav` stay the cash amounts.
+
+**Veteran minimum salary.** For a player with 6+ MLB service years, every season of an MLB-level (level 9) contract must pay at least `veteran_min_salary` ($1,000,000) in salary; the bonus does not count toward it. Applies to auction offers, direct signings and extensions. Minor-league deals, non-veterans ($800k pre-arbitration level unchanged) and existing contracts are not affected.
+
+**The counterweight is cash.** The bonus is paid at signing; an active offer reserves bonus + first-season salary (section 2 below).
+
+Fields:
+
+| Where | New fields |
+|---|---|
+| `GET /fa-auction/board` entries | `bonus_value_premium`, `veteran_min_salary` (`null` for a non-veteran); `my_offer.offer_value` (the offer's value to the player) |
+| `GET /fa-auction/free-agent-pool` → `demand` | `bonus_value_premium`, `veteran_min_salary` |
+| `GET /fa-auction/player-detail/{id}` → `demand` | same |
+| `GET /fa-auction/player-demand/{id}`, `POST /fa-auction/compute-demands` (`fa`, `extension`) | same |
+
+New or changed 400 messages on `POST /fa-auction/{id}/offer`:
+
+```
+Offer value (20,885,636.00, bonus counted at 1.15x) below player minimum (23,868,480.00)
+Value per year (..., bonus counted at 1.15x) below player minimum AAV (...)
+Veteran minimum salary: every season of an MLB contract for a player with 6+ service years must pay at least 1,000,000 in salary (the bonus does not count); season(s) 1 are below it
+Listening phase: new value per year (...) must be >= the current offer's (...), bonus counted at 1.15x
+```
+
+Offer form: default each season's salary to `veteran_min_salary` (when not null) and block lower values; show cash total, value to the player and value per year live, and judge "meets the ask" on the value.
+
+---
+
 ## Season 2 changes (2026-11-21)
 
 These change what the interface sees or must send. Everything else in this guide still holds.
@@ -100,6 +142,7 @@ The rate is the median price per WAR of recent signings and moves at most 15 % p
 
 ## Table of Contents
 
+0. [Offer value and veteran minimum (2026-11-22)](#offer-value-and-veteran-minimum-2026-11-22)
 0. [Season 2 changes (2026-11-21)](#season-2-changes-2026-11-21)
 1. [Concepts](#concepts)
 2. [Free Agent Pool Page](#free-agent-pool-page)

@@ -953,6 +953,8 @@ def sign_free_agent(conn, player_id: int, org_id: int, years: int,
         raise ValueError("Contract length must be 1-5 years")
     if len(salaries) != years:
         raise ValueError(f"salaries list length ({len(salaries)}) must match years ({years})")
+    from services.player_demands import check_veteran_minimum
+    check_veteran_minimum(conn, player_id, level_id, salaries)
 
     # Validate player is a free agent
     held = conn.execute(
@@ -1218,7 +1220,14 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
     if len(salaries) != years:
         raise ValueError(f"salaries length ({len(salaries)}) must match years ({years})")
 
-    # Check player extension demand
+    from services.player_demands import (
+        check_veteran_minimum, effective_offer_value, offer_value_settings,
+    )
+    value_rules = offer_value_settings(conn)
+    check_veteran_minimum(conn, c["playerID"], c["current_level"], salaries, value_rules)
+
+    # Check player extension demand. The player values a bonus dollar at
+    # (1 + bonus_value_premium), the same as in free agency.
     try:
         from services.player_demands import get_player_demand, compute_extension_demand
         demand = get_player_demand(conn, c["playerID"], league_year_id, "extension")
@@ -1228,13 +1237,15 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
             )
         if demand:
             if demand.get("min_aav"):
-                total_value = sum(salaries) + bonus
-                offer_aav = total_value / years if years else total_value
+                value = effective_offer_value(sum(salaries), bonus,
+                                              value_rules["bonus_value_premium"])
+                offer_aav = value / years if years else value
                 min_aav = Decimal(demand["min_aav"])
                 if offer_aav < min_aav:
                     raise ValueError(
-                        f"Extension AAV ({offer_aav}) below player's minimum "
-                        f"demand ({min_aav})"
+                        f"Extension value per year ({offer_aav:,.2f}, bonus counted at "
+                        f"{1 + value_rules['bonus_value_premium']}x) below player's minimum "
+                        f"demand ({min_aav:,.2f})"
                     )
             if demand.get("min_years") and years < int(demand["min_years"]):
                 raise ValueError(
@@ -1246,12 +1257,24 @@ def extend_contract(conn, contract_id: int, org_id: int, years: int,
     except Exception as e:
         logger.warning("Extension demand check skipped: %s", e)
 
-    # Validate bonus budget
+    # Validate bonus budget: paid today, out of cash not already promised to
+    # the club's active free-agent offers.
     budget = _get_signing_budget(conn, org_id, league_year_id)
     if Decimal(str(bonus)) > budget:
         raise ValueError(
             f"Signing bonus ({bonus}) exceeds available budget ({budget})"
         )
+    if Decimal(str(bonus)) > 0:
+        from services.fa_auction import _fa_settings, reserved_commitments
+        fa_st = _fa_settings(conn)
+        if fa_st["reserve"]:
+            reserved = reserved_commitments(conn, org_id, include_salary=fa_st["include_salary"])
+            if Decimal(str(bonus)) > budget - reserved:
+                raise ValueError(
+                    f"Signing bonus ({Decimal(str(bonus)):,.2f}) is paid now but only "
+                    f"{budget - reserved:,.2f} is available: cash {budget:,.2f} minus "
+                    f"{reserved:,.2f} reserved by the club's active free-agent offers"
+                )
 
     # Extension starts the year after original contract ends
     end_year = c["leagueYearSigned"] + c["years"]

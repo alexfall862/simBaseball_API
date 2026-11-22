@@ -91,7 +91,11 @@ def test_only_the_holder_can_extend(conn):
 
 def test_low_offer_rejected_and_can_be_retried(conn):
     row = _row(conn, FA_FINAL)
-    for aav in ("900000", "1000000"):
+    # below the veteran minimum salary ($1M a season)
+    with pytest.raises(ValueError, match="Veteran minimum salary"):
+        _extend(conn, row, row["orgID"], aav="900000")
+    # above the floor but below the ask (the lowest extension ask is $1.44M)
+    for aav in ("1000000", "1200000"):
         with pytest.raises(ValueError, match="below player's minimum demand"):
             _extend(conn, row, row["orgID"], aav=aav)
     assert _extend(conn, row, row["orgID"])["extension_contract_id"]

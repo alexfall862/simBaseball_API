@@ -31,9 +31,23 @@ The player's demand comes from public stats (WAR) and the market rate:
 - **minimum AAV** = 90 % of his free-agent value (a discount for security);
 - **minimum years** by age (at least 2).
 
-AAV is `(sum of salaries + bonus) / years`, so the signing bonus counts.
-An offer is accepted when **AAV ≥ `min_aav` and years ≥ `min_years`**; there is
-no chance involved and no limit on attempts. Years are 1–5.
+The player values a signing-bonus dollar more than a salary dollar (it is
+paid now): **value = sum of salaries + bonus × (1 + `bonus_value_premium`)**,
+with `bonus_value_premium` = 0.15. An offer is accepted when **value / years ≥
+`min_aav` and years ≥ `min_years`**; there is no chance involved and no limit
+on attempts. Years are 1–5. Free agency uses the same valuation.
+
+**Veteran minimum salary:** every season's salary must be at least
+`veteran_min_salary` ($1,000,000); the bonus does not count toward it. Every
+extension-eligible player is a veteran (6+ service years), so it always applies.
+
+The counterweight is cash: the bonus is charged the day the extension is
+signed, out of cash not already reserved by the club's active free-agent
+offers, while the salaries start after the current contract ends.
+
+Example, 4-year ask at $10M a year ($40M): $40M all salary; or $20M salary +
+$17.4M bonus ($37.4M cash); or $4M salary (the $1M floor) + $31.3M bonus
+($35.3M cash, of which $31.3M paid today).
 
 Where to get it:
 
@@ -49,8 +63,13 @@ The server also computes the demand itself on the first offer if none is cached.
 ```json
 { "player_id": 12345, "demand_type": "extension", "war": 4.2, "dollar_per_war": "2387000.00",
   "min_aav": "10800000.00", "min_years": 2, "max_years": 4, "min_total_value": "21600000.00",
-  "age": 31, "service_years": 8 }
+  "age": 31, "service_years": 8,
+  "bonus_value_premium": 0.15, "veteran_min_salary": 1000000.0 }
 ```
+
+`bonus_value_premium` and `veteran_min_salary` are on the GET and compute
+responses for `fa` and `extension` demands (`veteran_min_salary` is `null` for
+a non-veteran).
 
 ## 3. Contract overview fields
 
@@ -70,7 +89,8 @@ Each row now carries:
   "is_expiring": true,
   "has_extension": false,
   "extension_eligible": true,
-  "demand": { "type": "extension", "min_aav": "10800000.00", "min_years": 2, "war": 4.2 }
+  "demand": { "type": "extension", "min_aav": "10800000.00", "min_years": 2, "war": 4.2,
+              "bonus_value_premium": 0.15, "veteran_min_salary": 1000000.0 }
 }
 ```
 
@@ -119,9 +139,11 @@ Rejected or not allowed (400): `{ "error": "validation", "code": ..., "message":
 
 | `code` | Meaning | UI |
 |---|---|---|
-| `null` with message `Extension AAV (...) below player's minimum demand (...)` | Offer too low | Show "Offer rejected", keep the form open; the user can raise it and resend |
+| `null` with message `Extension value per year (..., bonus counted at 1.15x) below player's minimum demand (...)` | Offer too low | Show "Offer rejected", keep the form open; the user can raise it and resend |
+| `null` with message `Veteran minimum salary: every season ... must pay at least 1,000,000 in salary ...; season(s) N are below it` | A season's salary under $1M | Highlight those seasons |
 | `null` with message `Extension years (...) below player's minimum demand (...)` | Too short | Same |
 | `null` with message `Signing bonus (...) exceeds available budget (...)` | Bonus over budget | Lower the bonus |
+| `null` with message `Signing bonus (...) is paid now but only ... is available: cash ... minus ... reserved by the club's active free-agent offers` | Cash promised to open FA offers | Lower the bonus or withdraw an FA offer |
 | `null` with message `Extension length must be 1-5 years` / `salaries length ... must match years` | Bad input | Form validation |
 | `not_holder` | The org does not hold the contract | Hide the action |
 | `not_mlb` | Not an MLB contract | Hide the action |
@@ -147,9 +169,11 @@ Rejected or not allowed (400): `{ "error": "validation", "code": ..., "message":
 
 - Extend button on roster / contract rows where `extension_eligible`.
 - Modal: demand line (min AAV, min years, WAR); years selector 1–5 starting at
-  `min_years`; per-year salary inputs and a bonus field; live total and AAV
-  with a "meets the player's demand" indicator (AAV ≥ `min_aav` and years ≥
-  `min_years`).
+  `min_years`; per-year salary inputs (default and minimum `veteran_min_salary`)
+  and a bonus field; live cash total, **value to the player** (bonus × 1.15)
+  and value per year, with a "meets the player's demand" indicator (value /
+  years ≥ `min_aav` and years ≥ `min_years`); show "paid today: bonus" next to
+  the club's available cash.
 - On a rejection keep the modal open with the message; the user can adjust and
   resend as often as they want.
 - After signing: badge "Extended through {starts_league_year + years − 1}"

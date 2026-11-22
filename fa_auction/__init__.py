@@ -253,6 +253,9 @@ def player_demand(player_id):
     from services.player_demands import get_player_demand
     with engine.connect() as conn:
         demand = get_player_demand(conn, player_id, league_year_id, demand_type)
+        if demand and demand_type in ("fa", "extension"):
+            from services.player_demands import offer_rules_for
+            demand.update(offer_rules_for(conn, player_id, 9))
     if not demand:
         return jsonify({"error": "No demand computed for this player"}), 404
     return jsonify(demand)
@@ -294,6 +297,9 @@ def compute_demands():
                 )
             else:
                 return jsonify({"error": "demand_type must be fa, extension, or buyout"}), 400
+            if demand_type in ("fa", "extension") and isinstance(result, dict):
+                from services.player_demands import offer_rules_for
+                result.update(offer_rules_for(conn, int(player_id), 9))
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 400

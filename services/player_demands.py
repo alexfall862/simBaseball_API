@@ -30,6 +30,69 @@ RUNS_PER_WIN     = Decimal("10.0")
 # Extension discount (security premium for the player)
 EXTENSION_DISCOUNT = Decimal("0.90")
 
+# How players value an offer (free agency and extensions alike):
+# a signing-bonus dollar counts (1 + premium) dollars toward the ask; every
+# season of a new MLB contract for a veteran must pay at least the veteran
+# minimum in salary (the bonus does not count toward it). Overridable in
+# fa_config: bonus_value_premium, veteran_min_salary, veteran_service_years.
+BONUS_VALUE_PREMIUM   = Decimal("0.15")
+VETERAN_MIN_SALARY    = Decimal("1000000.00")
+VETERAN_SERVICE_YEARS = 6
+MLB_LEVEL             = 9
+
+
+def offer_value_settings(conn) -> Dict[str, Any]:
+    from services.league_config import cfg_dec, cfg_int, get_fa_config
+    cfg = get_fa_config(conn)
+    return {
+        "bonus_value_premium": cfg_dec(cfg, "bonus_value_premium", BONUS_VALUE_PREMIUM),
+        "veteran_min_salary": cfg_dec(cfg, "veteran_min_salary", VETERAN_MIN_SALARY),
+        "veteran_service_years": cfg_int(cfg, "veteran_service_years", VETERAN_SERVICE_YEARS),
+    }
+
+
+def effective_offer_value(salaries_total, bonus, premium) -> Decimal:
+    """What the offer is worth to the player: salaries + bonus x (1 + premium)."""
+    return (Decimal(str(salaries_total)) + Decimal(str(bonus)) * (1 + Decimal(str(premium)))
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def veteran_min_salary_for(conn, player_id: int, level: int,
+                           settings: Optional[Dict[str, Any]] = None) -> Optional[Decimal]:
+    """The per-season salary floor that applies to a new contract for this
+    player at this level, or None (not MLB level, or not a veteran)."""
+    if int(level) != MLB_LEVEL:
+        return None
+    st = settings or offer_value_settings(conn)
+    if _get_player_info(conn, player_id)["service_years"] < st["veteran_service_years"]:
+        return None
+    return st["veteran_min_salary"]
+
+
+def check_veteran_minimum(conn, player_id: int, level: int, salaries,
+                          settings: Optional[Dict[str, Any]] = None) -> None:
+    floor = veteran_min_salary_for(conn, player_id, level, settings)
+    if floor is None:
+        return
+    low = [i + 1 for i, s in enumerate(salaries) if Decimal(str(s)) < floor]
+    if low:
+        raise ValueError(
+            f"Veteran minimum salary: every season of an MLB contract for a player with "
+            f"{(settings or offer_value_settings(conn))['veteran_service_years']}+ service years "
+            f"must pay at least {floor:,.0f} in salary (the bonus does not count); "
+            f"season(s) {', '.join(map(str, low))} are below it"
+        )
+
+
+def offer_rules_for(conn, player_id: int, level: int = MLB_LEVEL) -> Dict[str, Any]:
+    """API shape: how this player values an offer."""
+    st = offer_value_settings(conn)
+    floor = veteran_min_salary_for(conn, player_id, level, st)
+    return {
+        "bonus_value_premium": float(st["bonus_value_premium"]),
+        "veteran_min_salary": float(floor) if floor is not None else None,
+    }
+
 # ── Table reflection cache ───────────────────────────────────────────
 
 _table_cache: Dict[int, Dict[str, Table]] = {}

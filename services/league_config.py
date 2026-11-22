@@ -52,6 +52,9 @@ FA_CONFIG_DEFAULTS: Dict[str, str] = {
     "war_regress_ip": "50",
     "fa_fallback_mlb_level": "8",
     "fa_fallback_minor_level": "4",
+    "bonus_value_premium": "0.15",      # bonus $ counts 1.15x toward an ask (FA + extensions)
+    "veteran_min_salary": "1000000",    # per-season salary floor, MLB contracts, veterans
+    "veteran_service_years": "6",
 }
 
 
